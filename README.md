@@ -24,8 +24,8 @@ pip install -r requirements.txt
 
 Before running the script, open `mp_api.py` and modify the following constants at the top of the file to suit your needs:
 
-* **Coordinates (`EAST, SOUTH, WEST, NORTH`):** These define the geographic bounding box (in longitude and latitude) that the script will scan. 
-* **`REGION_NAME`:** A string used to name your output files and directories (e.g., `'valdivia'`).
+* **Coordinates (`WEST, SOUTH, EAST, NORTH`):** These define the geographic bounding box (in longitude and latitude) that the script will scan. 
+* **`REGION_NAME`:** A string used to name your output files and directories (e.g., `'valdivia', 'south_america', etc.`).
 * **`MAX_WORKERS`:** This dictates the number of concurrent threads used for making API requests and downloading images. 
     * *Default is 50.* * Increase this for faster downloads if you have a strong network connection. 
     * Decrease this (e.g., to 10 or 20) if you are encountering `429 Too Many Requests` errors or if your network is struggling.
