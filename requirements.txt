@@ -1,0 +1,6 @@
+mercantile
+pandas
+requests
+python-dotenv
+tqdm
+urllib3
