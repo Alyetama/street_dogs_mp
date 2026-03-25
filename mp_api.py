@@ -15,7 +15,7 @@ from urllib3.util.retry import Retry
 load_dotenv()
 
 # --- HARDCODED CONSTANTS ---
-EAST, SOUTH, WEST, NORTH = [
+WEST, SOUTH, EAST, NORTH = [
     -73.30618501253828, -39.872011050803245, -73.17619937533453,
     -39.77387065582631
 ]
@@ -73,7 +73,7 @@ def get_image_topology():
 
     print("\n--- Phase 1: Generating bounding box tiles... ---")
     # Using the exact order that works perfectly for the 49 tiles
-    tiles = list(mercantile.tiles(EAST, SOUTH, WEST, NORTH, 14))
+    tiles = list(mercantile.tiles(WEST, SOUTH, EAST, NORTH, 14))
     bbox_list = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
 
     unique_sequences = set()
