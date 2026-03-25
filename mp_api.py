@@ -3,9 +3,11 @@ import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import mercantile
 import pandas as pd
+import piexif
 import requests
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
@@ -277,8 +279,10 @@ def download_mapillary_images(df):
     download_tasks = []
     for index, row in df.iterrows():
         url = row.get('thumb_original_url')
+        captured_at = row.get('captured_at')
+
         if pd.notna(url) and isinstance(url, str):
-            download_tasks.append((row['image_id'], url))
+            download_tasks.append((row['image_id'], url, captured_at))
 
     if not download_tasks:
         print("No images to download.")
@@ -286,7 +290,7 @@ def download_mapillary_images(df):
 
     print(f"\nFound {len(download_tasks)} images to download.")
 
-    def download_single_image(image_id, url):
+    def download_single_image(image_id, url, captured_at):
         filepath = os.path.join(OUTPUT_FOLDER_NAME, f"{image_id}.jpg")
         temp_filepath = filepath + ".tmp"
 
@@ -302,6 +306,41 @@ def download_mapillary_images(df):
                     f.write(chunk)
 
             os.rename(temp_filepath, filepath)
+
+            # --- Inject EXIF & OS Timestamps ---
+            if pd.notna(captured_at):
+                try:
+                    dt = datetime.utcfromtimestamp(float(captured_at) / 1000.0)
+                    exif_time = dt.strftime("%Y:%m:%d %H:%M:%S")
+
+                    try:
+                        exif_dict = piexif.load(filepath)
+                    except Exception:
+                        exif_dict = {
+                            "0th": {},
+                            "Exif": {},
+                            "GPS": {},
+                            "1st": {},
+                            "Interop": {}
+                        }
+
+                    exif_dict["0th"][
+                        piexif.ImageIFD.DateTime] = exif_time.encode('utf-8')
+                    exif_dict["Exif"][
+                        piexif.ExifIFD.DateTimeOriginal] = exif_time.encode(
+                            'utf-8')
+                    exif_dict["Exif"][
+                        piexif.ExifIFD.DateTimeDigitized] = exif_time.encode(
+                            'utf-8')
+
+                    exif_bytes = piexif.dump(exif_dict)
+                    piexif.insert(exif_bytes, filepath)
+
+                    os.utime(filepath, (dt.timestamp(), dt.timestamp()))
+                except Exception as e:
+                    pass
+            # -----------------------------------
+
             return image_id, True
         except Exception:
             if os.path.exists(temp_filepath):
@@ -311,8 +350,8 @@ def download_mapillary_images(df):
     success_count = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(download_single_image, img_id, url): img_id
-            for img_id, url in download_tasks
+            executor.submit(download_single_image, img_id, url, cap_at): img_id
+            for img_id, url, cap_at in download_tasks
         }
 
         for future in tqdm(as_completed(futures),

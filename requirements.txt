@@ -1,5 +1,6 @@
 mercantile
 pandas
+piexif
 requests
 python-dotenv
 tqdm
