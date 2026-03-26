@@ -18,10 +18,10 @@ load_dotenv()
 
 # --- HARDCODED CONSTANTS ---
 WEST, SOUTH, EAST, NORTH = [
-    -73.30618501253828, -39.872011050803245, -73.17619937533453,
-    -39.77387065582631
+    13.255110187299747, 52.4049441007197, 13.565858959510825,
+    52.47387011919958
 ]
-REGION_NAME = 'valdivia'
+REGION_NAME = 'berlin'
 OUTPUT_FOLDER_NAME = os.path.join(REGION_NAME, 'ground_animal_images')
 
 MLY_KEY = os.environ['MLY_KEY']
@@ -232,8 +232,8 @@ def get_all_animal_detections_fast(image_to_seq_map):
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id]):
-            img_id
+            executor.submit(fetch_animal_detections, img_id,
+                            image_to_seq_map[img_id]): img_id
             for img_id in missing_ids
         }
 
@@ -310,7 +310,8 @@ def download_mapillary_images(df):
             # --- Inject EXIF & OS Timestamps ---
             if pd.notna(captured_at):
                 try:
-                    dt = datetime.utcfromtimestamp(float(captured_at) / 1000.0)
+                    dt = datetime.strptime(str(captured_at),
+                                           "%Y-%m-%d %H:%M:%S")
                     exif_time = dt.strftime("%Y:%m:%d %H:%M:%S")
 
                     try:
@@ -413,6 +414,12 @@ if __name__ == "__main__":
     # --- Phase 5: DataFrames ---
     print("\n--- Phase 5: Building CSVs ---")
     all_results_df = build_mapillary_dataframe(detections_data)
+
+    # Convert 'captured_at' from Unix milliseconds to a standard datetime string
+    if 'captured_at' in all_results_df.columns:
+        all_results_df['captured_at'] = pd.to_datetime(
+            all_results_df['captured_at'], unit='ms',
+            errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
 
     all_results_df.to_csv(f'all_data_{REGION_NAME}.csv', index=False)
     print(
