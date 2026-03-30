@@ -3,5 +3,8 @@ pandas
 piexif
 requests
 python-dotenv
+global-land-mask
 tqdm
+contextily
+matplotlib
 urllib3

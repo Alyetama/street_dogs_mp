@@ -17,10 +17,13 @@ from global_land_mask import globe
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+from visualize_region_tiles import visualize_region_tiles
 
 load_dotenv()
 
 MLY_KEY = os.environ.get('MLY_KEY')
+ZOOM_LEVEL = 14
+GRID_CSV_FILE = 'global_grid_5deg.csv'
 
 # --- TUNED CONCURRENCY SETTINGS ---
 OUTER_MAX_WORKERS = 5
@@ -189,7 +192,7 @@ def get_image_topology(west, south, east, north, region_dir, region_id,
         with open(checkpoint_file, 'r') as f:
             return json.load(f)
 
-    tiles = list(mercantile.tiles(west, south, east, north, 14))
+    tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
     all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
 
     land_bboxes = []
@@ -302,8 +305,8 @@ def get_all_animal_detections_fast(image_to_seq_map, region_dir, region_id,
     write_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         futures = {
-            executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
-            img_id
+            executor.submit(fetch_animal_detections, img_id,
+                            image_to_seq_map[img_id], session): img_id
             for img_id in missing_ids
         }
         with open(checkpoint_file, 'a') as f:
@@ -334,8 +337,8 @@ def download_mapillary_images(df, output_folder_name, pos, short_name):
 
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         futures = {
-            executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
-            img_id
+            executor.submit(download_single_image, img_id, url, cap_at,
+                            output_folder_name): img_id
             for img_id, url, cap_at in download_tasks
         }
         for future in tqdm(as_completed(futures),
@@ -358,6 +361,13 @@ def process_region(west, south, east, north, unique_region_id, run_name):
     region_dir = os.path.join(PARENT_DIR, safe_region_id)
     os.makedirs(region_dir, exist_ok=True)
     output_folder_name = os.path.join(region_dir, 'ground_animal_images')
+
+    try:
+        visualize_region_tiles(safe_region_id,
+                               zoom=ZOOM_LEVEL,
+                               parent_dir=PARENT_DIR)
+    except Exception as e:
+        tqdm.write(f"[{short_name}] Note: Map visualization failed: {e}")
 
     session = requests.Session()
     retries = Retry(total=5,
@@ -432,7 +442,7 @@ if __name__ == "__main__":
 
     os.makedirs(PARENT_DIR, exist_ok=True)
 
-    df_grid = pd.read_csv('__global_grid_5deg.csv')
+    df_grid = pd.read_csv(GRID_CSV_FILE)
 
     GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -491,3 +501,4 @@ if __name__ == "__main__":
                         tqdm.write(f"[X] Region '{region_id}' failed: {exc}")
         finally:
             print('\033[?25h', end="")
+
