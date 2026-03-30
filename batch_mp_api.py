@@ -58,8 +58,9 @@ def append_to_sqlite(df, table_name, run_name, region_id):
 
     df_sql = df.copy()
 
-    for col in df_sql.columns:
-        if df_sql[col].apply(lambda x: isinstance(x, (dict, list))).any():
+    complex_cols = ['computed_geometry', 'creator', 'detections']
+    for col in complex_cols:
+        if col in df_sql.columns:
             df_sql[col] = df_sql[col].apply(
                 lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
 
@@ -68,6 +69,7 @@ def append_to_sqlite(df, table_name, run_name, region_id):
 
     with db_lock:
         with sqlite3.connect(DB_NAME, timeout=60) as conn:
+            # This will now safely append because the schema is heavily controlled
             df_sql.to_sql(table_name, conn, if_exists='append', index=False)
 
 
@@ -174,14 +176,29 @@ def build_mapillary_dataframe(detections_dict):
         if metadata is not None:
             row = metadata.copy()
             row['image_id'] = image_id
+
             if 'detections' in row and isinstance(row['detections'], dict):
-                row['detections'] = json.dumps(row['detections'].get(
-                    'data', []))
+                row['detections'] = row['detections'].get('data', [])
             records.append(row)
-    df = pd.json_normalize(records)
-    if not df.empty:
-        cols = ['image_id'] + [c for c in df.columns if c != 'image_id']
-        df = df[cols]
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+
+    expected_columns = [
+        'image_id', 'computed_geometry', 'captured_at', 'sequence', 'is_pano',
+        'camera_type', 'computed_compass_angle', 'creator', 'height', 'width',
+        'detections', 'make', 'model', 'thumb_256_url', 'thumb_1024_url',
+        'thumb_2048_url', 'thumb_original_url'
+    ]
+
+    for col in expected_columns:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[expected_columns]
+
     return df
 
 
