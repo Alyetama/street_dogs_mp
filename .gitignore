@@ -187,3 +187,4 @@ archived/
 mapillary_api_testing.ipynb
 *.jsonl
 */
+*.tar
