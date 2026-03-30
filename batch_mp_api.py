@@ -17,6 +17,7 @@ from global_land_mask import globe
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+
 from visualize_region_tiles import visualize_region_tiles
 
 load_dotenv()
@@ -24,6 +25,7 @@ load_dotenv()
 MLY_KEY = os.environ.get('MLY_KEY')
 ZOOM_LEVEL = 14
 GRID_CSV_FILE = 'global_grid_5deg.csv'
+VISUALIZE = False
 
 # --- TUNED CONCURRENCY SETTINGS ---
 OUTER_MAX_WORKERS = 5
@@ -185,7 +187,7 @@ def build_mapillary_dataframe(detections_dict):
 
 # --- Phase Handlers with Verbose TQDM ---
 def get_image_topology(west, south, east, north, region_dir, region_id,
-                       session, pos, short_name):
+                       session, pos, region_run_id):
     checkpoint_file = os.path.join(region_dir,
                                    f'topology_checkpoint_{region_id}.json')
     if os.path.exists(checkpoint_file):
@@ -204,7 +206,7 @@ def get_image_topology(west, south, east, north, region_dir, region_id,
 
     if len(land_bboxes) < len(all_bboxes):
         tqdm.write(
-            f"[{short_name}] Filtered out {len(all_bboxes) - len(land_bboxes)} water tiles. Kept {len(land_bboxes)} land tiles."
+            f"[{region_run_id}] Filtered out {len(all_bboxes) - len(land_bboxes)} water tiles. Kept {len(land_bboxes)} land tiles."
         )
 
     unique_sequences = set()
@@ -216,7 +218,7 @@ def get_image_topology(west, south, east, north, region_dir, region_id,
         }
         for future in tqdm(as_completed(futures),
                            total=len(futures),
-                           desc=f"[{short_name}] 1/5 BBoxes",
+                           desc=f"[{region_run_id}] 1/5 BBoxes",
                            position=pos,
                            leave=False):
             unique_sequences.update(future.result())
@@ -229,7 +231,7 @@ def get_image_topology(west, south, east, north, region_dir, region_id,
         }
         for future in tqdm(as_completed(futures),
                            total=len(futures),
-                           desc=f"[{short_name}] 2/5 Sequences",
+                           desc=f"[{region_run_id}] 2/5 Sequences",
                            position=pos,
                            leave=False):
             seq_id = futures[future]
@@ -242,7 +244,7 @@ def get_image_topology(west, south, east, north, region_dir, region_id,
 
 
 def get_all_image_data_fast(image_ids, fields_str, region_dir, region_id,
-                            session, pos, short_name):
+                            session, pos, region_run_id):
     checkpoint_file = os.path.join(region_dir,
                                    f'metadata_checkpoint_{region_id}.jsonl')
     results_dict = {}
@@ -268,7 +270,7 @@ def get_all_image_data_fast(image_ids, fields_str, region_dir, region_id,
         with open(checkpoint_file, 'a') as f:
             for future in tqdm(as_completed(futures),
                                total=len(futures),
-                               desc=f"[{short_name}] 3/5 Metadata",
+                               desc=f"[{region_run_id}] 3/5 Metadata",
                                position=pos,
                                leave=False):
                 image_id, data = future.result()
@@ -285,7 +287,7 @@ def get_all_image_data_fast(image_ids, fields_str, region_dir, region_id,
 
 
 def get_all_animal_detections_fast(image_to_seq_map, region_dir, region_id,
-                                   session, pos, short_name):
+                                   session, pos, region_run_id):
     checkpoint_file = os.path.join(
         region_dir, f'animal_detections_checkpoint_{region_id}.jsonl')
     results_dict = {}
@@ -305,14 +307,14 @@ def get_all_animal_detections_fast(image_to_seq_map, region_dir, region_id,
     write_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         futures = {
-            executor.submit(fetch_animal_detections, img_id,
-                            image_to_seq_map[img_id], session): img_id
+            executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
+            img_id
             for img_id in missing_ids
         }
         with open(checkpoint_file, 'a') as f:
             for future in tqdm(as_completed(futures),
                                total=len(futures),
-                               desc=f"[{short_name}] 4/5 Detections",
+                               desc=f"[{region_run_id}] 4/5 Detections",
                                position=pos,
                                leave=False):
                 image_id, features = future.result()
@@ -327,7 +329,7 @@ def get_all_animal_detections_fast(image_to_seq_map, region_dir, region_id,
     return results_dict
 
 
-def download_mapillary_images(df, output_folder_name, pos, short_name):
+def download_mapillary_images(df, output_folder_name, pos, region_run_id):
     os.makedirs(output_folder_name, exist_ok=True)
     download_tasks = [(row['image_id'], row.get('thumb_original_url'),
                        row.get('captured_at')) for _, row in df.iterrows()
@@ -337,13 +339,13 @@ def download_mapillary_images(df, output_folder_name, pos, short_name):
 
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         futures = {
-            executor.submit(download_single_image, img_id, url, cap_at,
-                            output_folder_name): img_id
+            executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
+            img_id
             for img_id, url, cap_at in download_tasks
         }
         for future in tqdm(as_completed(futures),
                            total=len(futures),
-                           desc=f"[{short_name}] 5/5 Downloads",
+                           desc=f"[{region_run_id}] 5/5 Downloads",
                            position=pos,
                            leave=False):
             pass
@@ -356,18 +358,20 @@ def process_region(west, south, east, north, unique_region_id, run_name):
     pos = int(match.group()) if match else 1
 
     safe_region_id = sanitize_folder_name(unique_region_id)
-    short_name = unique_region_id.replace('_', ' ')
+    region_run_id = unique_region_id.replace('_', ' ')
 
     region_dir = os.path.join(PARENT_DIR, safe_region_id)
     os.makedirs(region_dir, exist_ok=True)
     output_folder_name = os.path.join(region_dir, 'ground_animal_images')
 
-    try:
-        visualize_region_tiles(safe_region_id,
-                               zoom=ZOOM_LEVEL,
-                               parent_dir=PARENT_DIR)
-    except Exception as e:
-        tqdm.write(f"[{short_name}] Note: Map visualization failed: {e}")
+    if VISUALIZE:
+        try:
+            visualize_region_tiles(safe_region_id,
+                                   zoom=ZOOM_LEVEL,
+                                   parent_dir=PARENT_DIR)
+        except Exception as e:
+            tqdm.write(
+                f"[{region_run_id}] Note: Map visualization failed: {e}")
 
     session = requests.Session()
     retries = Retry(total=5,
@@ -381,16 +385,17 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
     image_to_seq_map = get_image_topology(west, south, east, north, region_dir,
                                           safe_region_id, session, pos,
-                                          short_name)
+                                          region_run_id)
 
     fields_str = 'id,computed_geometry,captured_at,sequence,is_pano,camera_type,computed_compass_angle,creator,height,width,detections,make,model,thumb_256_url,thumb_1024_url,thumb_2048_url,thumb_original_url'
     detections_data = get_all_image_data_fast(list(image_to_seq_map.keys()),
                                               fields_str, region_dir,
                                               safe_region_id, session, pos,
-                                              short_name)
+                                              region_run_id)
 
     animal_detections_dict = get_all_animal_detections_fast(
-        image_to_seq_map, region_dir, safe_region_id, session, pos, short_name)
+        image_to_seq_map, region_dir, safe_region_id, session, pos,
+        region_run_id)
 
     ground_animal_features = []
     extracted_image_ids = set()
@@ -429,7 +434,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                      unique_region_id)
 
     download_mapillary_images(ground_animals_df, output_folder_name, pos,
-                              short_name)
+                              region_run_id)
 
     return f"Completed '{unique_region_id}' ({len(extracted_image_ids)} images)."
 
@@ -501,4 +506,3 @@ if __name__ == "__main__":
                         tqdm.write(f"[X] Region '{region_id}' failed: {exc}")
         finally:
             print('\033[?25h', end="")
-
