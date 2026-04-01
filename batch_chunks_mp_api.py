@@ -23,10 +23,11 @@ load_dotenv()
 
 MLY_KEY = os.environ.get('MLY_KEY')
 ZOOM_LEVEL = 14
-GRID_CSV_FILE = 'global_grid_5deg_europe.csv'
+GRID_CSV_FILE = 'Indian_Ocean.csv'
 VISUALIZE = False
+DOWNLOAD_IMAGES = True
 
-OUTER_MAX_WORKERS = 3
+OUTER_MAX_WORKERS = 10
 INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 
@@ -456,7 +457,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                 records.clear()
 
         # Step E: Download
-        if download_tasks:
+        if DOWNLOAD_IMAGES and download_tasks:
             with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
                 futures = {
                     executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
