@@ -48,6 +48,27 @@ def sanitize_folder_name(name):
     return re.sub(r'[^\w\-_\.]', '_', safe_name).strip('_')
 
 
+def clean_jsonl_file(filepath):
+    """Removes corrupt lines from an interrupted .jsonl file."""
+    if not os.path.exists(filepath):
+        return
+    valid_lines = []
+    is_corrupt = False
+    with open(filepath, 'r') as f:
+        for line in f:
+            if not line.strip(): continue
+            try:
+                json.loads(line)
+                valid_lines.append(line)
+            except json.JSONDecodeError:
+                is_corrupt = True
+
+    if is_corrupt:
+        with open(filepath, 'w') as f:
+            for line in valid_lines:
+                f.write(line.strip() + '\n')
+
+
 # --- SQLite Helper ---
 def append_to_sqlite(df, table_name, run_name, region_id):
     if df.empty: return
@@ -182,8 +203,11 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
     checkpoint_file = os.path.join(region_dir,
                                    f'topology_checkpoint_{sub_id}.json')
     if os.path.exists(checkpoint_file):
-        with open(checkpoint_file, 'r') as f:
-            return json.load(f)
+        try:
+            with open(checkpoint_file, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            pass
 
     tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
     all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
@@ -225,8 +249,12 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
             for img_id in future.result():
                 image_to_sequence_map[img_id] = seq_id
 
-    with open(checkpoint_file, 'w') as f:
+    temp_checkpoint = checkpoint_file + '.tmp'
+    with open(temp_checkpoint, 'w') as f:
         json.dump(image_to_sequence_map, f)
+
+    os.replace(temp_checkpoint, checkpoint_file)
+
     return image_to_sequence_map
 
 
@@ -234,6 +262,9 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                             pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
                                    f'metadata_checkpoint_{sub_id}.jsonl')
+
+    clean_jsonl_file(checkpoint_file)
+
     completed_ids = set()
     if os.path.exists(checkpoint_file):
         with open(checkpoint_file, 'r') as f:
@@ -274,6 +305,9 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                               pos, desc_prefix):
     checkpoint_file = os.path.join(
         region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl')
+
+    clean_jsonl_file(checkpoint_file)
+
     completed_ids = set()
     if os.path.exists(checkpoint_file):
         with open(checkpoint_file, 'r') as f:
@@ -312,7 +346,6 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
 # --- The Master Process Worker ---
 def process_region(west, south, east, north, unique_region_id, run_name):
-    # Determine the worker's position for neat tqdm layout
     worker_name = multiprocessing.current_process().name
     match = re.search(r'\d+', worker_name)
     pos = int(match.group()) if match else 1
@@ -387,10 +420,14 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                         ground_animal_features.extend(features)
 
         if ground_animal_features:
-            with open(
-                    os.path.join(region_dir, f'ground_animals_{sub_id}.json'),
-                    'w') as f:
-                json.dump(ground_animal_features, f, indent=4)
+            final_json_path = os.path.join(region_dir,
+                                           f'ground_animals_{sub_id}.json')
+            temp_json_path = final_json_path + '.tmp'
+
+            with open(temp_json_path, 'w') as f:
+                json.dump(ground_animal_features, f)
+
+            os.replace(temp_json_path, final_json_path)
 
         del ground_animal_features
         total_animals_found += len(extracted_image_ids)
