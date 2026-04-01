@@ -1,6 +1,7 @@
+import argparse
 import gc
+import gzip
 import json
-import multiprocessing
 import os
 import re
 import threading
@@ -19,16 +20,16 @@ from urllib3.util.retry import Retry
 
 load_dotenv()
 
+# --- Global defaults (Overridden by argparse in __main__) ---
 MLY_KEY = os.environ.get('MLY_KEY')
 ZOOM_LEVEL = 14
+GRID_CSV_FILE = None
 VISUALIZE = False
 DOWNLOAD_IMAGES = False
-
 INNER_MAX_WORKERS = 10
 SUB_GRID_STEP = 1.0
-
 PARENT_DIR = 'grid_runs'
-TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
+TRACKER_FILE = None
 
 
 def sanitize_folder_name(name):
@@ -37,12 +38,12 @@ def sanitize_folder_name(name):
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines from an interrupted .jsonl file."""
+    """Removes corrupt lines from an interrupted .jsonl.gz file."""
     if not os.path.exists(filepath):
         return
     valid_lines = []
     is_corrupt = False
-    with open(filepath, 'r') as f:
+    with gzip.open(filepath, 'rt', encoding='utf-8') as f:
         for line in f:
             if not line.strip(): continue
             try:
@@ -52,7 +53,7 @@ def clean_jsonl_file(filepath):
                 is_corrupt = True
 
     if is_corrupt:
-        with open(filepath, 'w') as f:
+        with gzip.open(filepath, 'wt', encoding='utf-8') as f:
             for line in valid_lines:
                 f.write(line.strip() + '\n')
 
@@ -172,10 +173,10 @@ def build_mapillary_dataframe_from_records(records):
 def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                        pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
-                                   f'topology_checkpoint_{sub_id}.json')
+                                   f'topology_checkpoint_{sub_id}.json.gz')
     if os.path.exists(checkpoint_file):
         try:
-            with open(checkpoint_file, 'r') as f:
+            with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
                 return json.load(f)
         except json.JSONDecodeError:
             pass
@@ -221,7 +222,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                 image_to_sequence_map[img_id] = seq_id
 
     temp_checkpoint = checkpoint_file + '.tmp'
-    with open(temp_checkpoint, 'w') as f:
+    with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
         json.dump(image_to_sequence_map, f)
     os.replace(temp_checkpoint, checkpoint_file)
 
@@ -231,13 +232,13 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
 def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                             pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
-                                   f'metadata_checkpoint_{sub_id}.jsonl')
+                                   f'metadata_checkpoint_{sub_id}.jsonl.gz')
 
     clean_jsonl_file(checkpoint_file)
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with open(checkpoint_file, 'r') as f:
+        with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     completed_ids.add(json.loads(line)['image_id'])
@@ -254,7 +255,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
             img_id
             for img_id in missing_ids
         }
-        with open(checkpoint_file, 'a') as f:
+        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
             for future in tqdm(as_completed(futures),
                                total=len(futures),
                                desc=f"{desc_prefix} 3/5 Metadata",
@@ -274,13 +275,13 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
 def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                               pos, desc_prefix):
     checkpoint_file = os.path.join(
-        region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl')
+        region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.gz')
 
     clean_jsonl_file(checkpoint_file)
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with open(checkpoint_file, 'r') as f:
+        with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     completed_ids.add(json.loads(line)['image_id'])
@@ -298,7 +299,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
             img_id
             for img_id in missing_ids
         }
-        with open(checkpoint_file, 'a') as f:
+        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
             for future in tqdm(as_completed(futures),
                                total=len(futures),
                                desc=f"{desc_prefix} 4/5 Detections",
@@ -316,9 +317,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
 # --- The Master Process Worker ---
 def process_region(west, south, east, north, unique_region_id, run_name):
-    worker_name = multiprocessing.current_process().name
-    match = re.search(r'\d+', worker_name)
-    pos = int(match.group()) if match else 1
+    pos = 1  # Force progress bars to position 1 since SLURM runs regions individually
 
     safe_region_id = sanitize_folder_name(unique_region_id)
     region_run_id = unique_region_id.replace('_', ' ')
@@ -372,15 +371,15 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         # Step C: Parse Data & Clear Memory
         animal_checkpoint = os.path.join(
-            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl')
+            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.gz')
         metadata_checkpoint = os.path.join(
-            region_dir, f'metadata_checkpoint_{sub_id}.jsonl')
+            region_dir, f'metadata_checkpoint_{sub_id}.jsonl.gz')
 
         extracted_image_ids = set()
         ground_animal_features = []
 
         if os.path.exists(animal_checkpoint):
-            with open(animal_checkpoint, 'r') as f:
+            with gzip.open(animal_checkpoint, 'rt', encoding='utf-8') as f:
                 for line in f:
                     if not line.strip(): continue
                     record = json.loads(line)
@@ -391,12 +390,12 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         if ground_animal_features:
             final_json_path = os.path.join(region_dir,
-                                           f'ground_animals_{sub_id}.json')
+                                           f'ground_animals_{sub_id}.json.gz')
             temp_json_path = final_json_path + '.tmp'
 
-            # Atomic write to prevent corruption
-            with open(temp_json_path, 'w') as f:
-                json.dump(ground_animal_features, f, indent=4)
+            with gzip.open(temp_json_path, 'wt', encoding='utf-8') as f:
+                json.dump(ground_animal_features, f)
+
             os.replace(temp_json_path, final_json_path)
 
         del ground_animal_features
@@ -404,9 +403,9 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         # Step D: Process Metadata and Database Append
         all_csv_path = os.path.join(region_dir,
-                                    f'all_data_{safe_region_id}.csv')
+                                    f'all_data_{safe_region_id}.csv.gz')
         animals_csv_path = os.path.join(
-            region_dir, f'ground_animals_{safe_region_id}.csv')
+            region_dir, f'ground_animals_{safe_region_id}.csv.gz')
 
         records = []
         download_tasks = []
@@ -426,20 +425,28 @@ def process_region(west, south, east, north, unique_region_id, run_name):
             df.to_csv(all_csv_path,
                       mode='a',
                       header=not os.path.exists(all_csv_path),
-                      index=False)
+                      index=False,
+                      compression='gzip')
+
             if not animals_df.empty:
                 animals_df.to_csv(animals_csv_path,
                                   mode='a',
                                   header=not os.path.exists(animals_csv_path),
-                                  index=False)
+                                  index=False,
+                                  compression='gzip')
                 for _, row in animals_df.iterrows():
                     if pd.notna(row.get('thumb_original_url')):
                         download_tasks.append(
                             (row['image_id'], row['thumb_original_url'],
                              row['captured_at']))
 
+            # Aggressive Memory Cleanup
+            del df
+            del animals_df
+            gc.collect()
+
         if os.path.exists(metadata_checkpoint):
-            with open(metadata_checkpoint, 'r') as f:
+            with gzip.open(metadata_checkpoint, 'rt', encoding='utf-8') as f:
                 for line in f:
                     if not line.strip(): continue
                     record = json.loads(line)
@@ -452,11 +459,11 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
                     if len(records) >= chunk_size:
                         process_metadata_chunk(records)
-                        records.clear()
+                        records = []
 
             if records:
                 process_metadata_chunk(records)
-                records.clear()
+                records = []
 
         # Step E: Download
         if DOWNLOAD_IMAGES and download_tasks:
@@ -485,10 +492,50 @@ if __name__ == "__main__":
     if not MLY_KEY:
         raise ValueError("MLY_KEY environment variable is missing.")
 
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Mapillary SLURM Downloader")
+    parser.add_argument(
+        'grid_csv_file',
+        type=str,
+        help="Path to the input CSV file (e.g., Indian_Ocean.csv)")
+    parser.add_argument('--zoom-level',
+                        type=int,
+                        default=14,
+                        help="Zoom level for bounding boxes (default: 14)")
+    parser.add_argument('--visualize',
+                        action='store_true',
+                        help="Enable visualizer flag (default: False)")
+    parser.add_argument('--no-download-images',
+                        dest='download_images',
+                        action='store_false',
+                        help="Disable downloading images (default: True)")
+    parser.add_argument('--inner-max-workers',
+                        type=int,
+                        default=10,
+                        help="Max threads per region (default: 10)")
+    parser.add_argument('--sub-grid-step',
+                        type=float,
+                        default=1.0,
+                        help="Step size for internal chunking (default: 1.0)")
+    parser.add_argument('--parent-dir',
+                        type=str,
+                        default='grid_runs',
+                        help="Output directory (default: grid_runs)")
+
+    args = parser.parse_args()
+
+    # Apply arguments to global scope
+    GRID_CSV_FILE = args.grid_csv_file
+    ZOOM_LEVEL = args.zoom_level
+    VISUALIZE = args.visualize
+    DOWNLOAD_IMAGES = args.download_images
+    INNER_MAX_WORKERS = args.inner_max_workers
+    SUB_GRID_STEP = args.sub_grid_step
+    PARENT_DIR = args.parent_dir
+    TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
+
     print('\033[?25l', end="")
     os.makedirs(PARENT_DIR, exist_ok=True)
-
-    GRID_CSV_FILE = 'South_Asia.csv'
     df_grid = pd.read_csv(GRID_CSV_FILE)
     GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -498,10 +545,8 @@ if __name__ == "__main__":
             completed_regions = {line.strip() for line in f if line.strip()}
 
     # --- SLURM ARRAY INTEGRATION ---
-    # Get the specific array ID for this job (defaults to 0 if running locally without SLURM)
     task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", 0))
 
-    # Ensure task_id is valid
     if task_id >= len(df_grid):
         print(
             f"Task ID {task_id} is out of bounds for grid with {len(df_grid)} regions."
@@ -521,15 +566,14 @@ if __name__ == "__main__":
     )
 
     try:
-        # We no longer need the ProcessPoolExecutor for outer workers since SLURM handles parallelization.
-        # Just run the process_region function directly on the main thread.
+        # Run directly on the main thread (SLURM handles the parallelism via Array Tasks)
         result_msg = process_region(row['sw_lon'], row['sw_lat'],
                                     row['ne_lon'], row['ne_lat'],
                                     unique_region_id, GLOBAL_RUN_NAME)
 
         tqdm.write(f"[\u2713] {result_msg}")
 
-        # Write to tracker file (use file lock if necessary, though append is generally safe)
+        # Safely append to tracker file
         with open(TRACKER_FILE, 'a') as f:
             f.write(f"{unique_region_id}\n")
 
