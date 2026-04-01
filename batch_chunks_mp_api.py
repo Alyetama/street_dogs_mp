@@ -85,6 +85,8 @@ def append_to_sqlite(df, table_name, run_name, region_id):
         with sqlite3.connect(DB_NAME, timeout=60) as conn:
             df_sql.to_sql(table_name, conn, if_exists='append', index=False)
 
+    del df_sql
+
 
 # --- API Fetcher Helpers ---
 def get_sequences_for_bbox(bbox, session):
@@ -472,6 +474,9 @@ def process_region(west, south, east, north, unique_region_id, run_name):
             if not animals_df.empty:
                 append_to_sqlite(animals_df, 'ground_animals', run_name,
                                  unique_region_id)
+            del df
+            del animals_df
+            gc.collect()
 
         if os.path.exists(metadata_checkpoint):
             with open(metadata_checkpoint, 'r') as f:
@@ -487,11 +492,11 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
                     if len(records) >= chunk_size:
                         process_metadata_chunk(records)
-                        records.clear()
+                        records = []
 
             if records:
                 process_metadata_chunk(records)
-                records.clear()
+                records = []
 
         # Step E: Download
         if DOWNLOAD_IMAGES and download_tasks:
