@@ -1,3 +1,4 @@
+import argparse
 import gc
 import gzip
 import json
@@ -22,26 +23,35 @@ from urllib3.util.retry import Retry
 
 load_dotenv()
 
+# --- Global defaults (Overridden by argparse in __main__) ---
 MLY_KEY = os.environ.get('MLY_KEY')
 ZOOM_LEVEL = 14
-GRID_CSV_FILE = 'Indian_Ocean.csv'
+GRID_CSV_FILE = None
 VISUALIZE = False
 DOWNLOAD_IMAGES = True
-
 OUTER_MAX_WORKERS = 10
 INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
-
 PARENT_DIR = 'grid_runs'
-DB_NAME = os.path.join(PARENT_DIR, 'mapillary_db.sqlite')
-TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
-
+DB_NAME = None
+TRACKER_FILE = None
 db_lock = None
 
 
-def init_worker(lock):
-    global db_lock
+def init_worker(lock, config):
+    """Initializes worker processes with the lock and the parsed CLI config."""
+    global db_lock, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
+    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, DB_NAME, TRACKER_FILE
+
     db_lock = lock
+    ZOOM_LEVEL = config['ZOOM_LEVEL']
+    VISUALIZE = config['VISUALIZE']
+    DOWNLOAD_IMAGES = config['DOWNLOAD_IMAGES']
+    INNER_MAX_WORKERS = config['INNER_MAX_WORKERS']
+    SUB_GRID_STEP = config['SUB_GRID_STEP']
+    PARENT_DIR = config['PARENT_DIR']
+    DB_NAME = config['DB_NAME']
+    TRACKER_FILE = config['TRACKER_FILE']
 
 
 def sanitize_folder_name(name):
@@ -529,6 +539,58 @@ if __name__ == "__main__":
     if not MLY_KEY:
         raise ValueError("MLY_KEY environment variable is missing.")
 
+    parser = argparse.ArgumentParser(
+        description="Mapillary Ground Animal API Downloader")
+    parser.add_argument(
+        'grid_csv_file',
+        type=str,
+        help="Path to the input CSV file (e.g., indian_ocean.csv)")
+    parser.add_argument('--zoom-level',
+                        type=int,
+                        default=14,
+                        help="Zoom level for bounding boxes (default: 14)")
+    parser.add_argument('--visualize',
+                        action='store_true',
+                        help="Enable visualizer flag (default: False)")
+    parser.add_argument('--no-download-images',
+                        dest='download_images',
+                        action='store_false',
+                        help="Disable downloading images (default: True)")
+    parser.add_argument('--outer-max-workers',
+                        type=int,
+                        default=5,
+                        help="Max parallel regions (default: 5)")
+    parser.add_argument('--inner-max-workers',
+                        type=int,
+                        default=10,
+                        help="Max threads per region (default: 10)")
+    parser.add_argument('--sub-grid-step',
+                        type=float,
+                        default=1.0,
+                        help="Step size for internal chunking (default: 1.0)")
+    parser.add_argument('--parent-dir',
+                        type=str,
+                        default='grid_runs',
+                        help="Output directory (default: grid_runs)")
+    parser.add_argument(
+        '--db-name',
+        type=str,
+        default='mapillary_db.sqlite',
+        help="Database file name (default: mapillary_db.sqlite)")
+
+    args = parser.parse_args()
+
+    GRID_CSV_FILE = args.grid_csv_file
+    ZOOM_LEVEL = args.zoom_level
+    VISUALIZE = args.visualize
+    DOWNLOAD_IMAGES = args.download_images
+    OUTER_MAX_WORKERS = args.outer_max_workers
+    INNER_MAX_WORKERS = args.inner_max_workers
+    SUB_GRID_STEP = args.sub_grid_step
+    PARENT_DIR = args.parent_dir
+    DB_NAME = os.path.join(PARENT_DIR, args.db_name)
+    TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
+
     print('\033[?25l', end="")
     os.makedirs(PARENT_DIR, exist_ok=True)
     df_grid = pd.read_csv(GRID_CSV_FILE)
@@ -558,9 +620,21 @@ if __name__ == "__main__":
             m = multiprocessing.Manager()
             master_lock = m.Lock()
 
+            worker_config = {
+                'ZOOM_LEVEL': ZOOM_LEVEL,
+                'VISUALIZE': VISUALIZE,
+                'DOWNLOAD_IMAGES': DOWNLOAD_IMAGES,
+                'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
+                'SUB_GRID_STEP': SUB_GRID_STEP,
+                'PARENT_DIR': PARENT_DIR,
+                'DB_NAME': DB_NAME,
+                'TRACKER_FILE': TRACKER_FILE
+            }
+
             with ProcessPoolExecutor(max_workers=OUTER_MAX_WORKERS,
                                      initializer=init_worker,
-                                     initargs=(master_lock, )) as executor:
+                                     initargs=(master_lock,
+                                               worker_config)) as executor:
                 futures = {
                     executor.submit(process_region, sw_lon, sw_lat, ne_lon, ne_lat, region_id, GLOBAL_RUN_NAME):
                     region_id
