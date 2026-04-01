@@ -1,4 +1,5 @@
 import gc
+import gzip
 import json
 import multiprocessing
 import os
@@ -49,12 +50,12 @@ def sanitize_folder_name(name):
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines from an interrupted .jsonl file."""
+    """Removes corrupt lines from an interrupted .jsonl.gz file."""
     if not os.path.exists(filepath):
         return
     valid_lines = []
     is_corrupt = False
-    with open(filepath, 'r') as f:
+    with gzip.open(filepath, 'rt', encoding='utf-8') as f:
         for line in f:
             if not line.strip(): continue
             try:
@@ -64,7 +65,7 @@ def clean_jsonl_file(filepath):
                 is_corrupt = True
 
     if is_corrupt:
-        with open(filepath, 'w') as f:
+        with gzip.open(filepath, 'wt', encoding='utf-8') as f:
             for line in valid_lines:
                 f.write(line.strip() + '\n')
 
@@ -203,10 +204,10 @@ def build_mapillary_dataframe_from_records(records):
 def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                        pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
-                                   f'topology_checkpoint_{sub_id}.json')
+                                   f'topology_checkpoint_{sub_id}.json.gz')
     if os.path.exists(checkpoint_file):
         try:
-            with open(checkpoint_file, 'r') as f:
+            with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
                 return json.load(f)
         except json.JSONDecodeError:
             pass
@@ -252,7 +253,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                 image_to_sequence_map[img_id] = seq_id
 
     temp_checkpoint = checkpoint_file + '.tmp'
-    with open(temp_checkpoint, 'w') as f:
+    with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
         json.dump(image_to_sequence_map, f)
 
     os.replace(temp_checkpoint, checkpoint_file)
@@ -263,13 +264,13 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
 def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                             pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
-                                   f'metadata_checkpoint_{sub_id}.jsonl')
+                                   f'metadata_checkpoint_{sub_id}.jsonl.gz')
 
     clean_jsonl_file(checkpoint_file)
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with open(checkpoint_file, 'r') as f:
+        with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     completed_ids.add(json.loads(line)['image_id'])
@@ -286,7 +287,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
             img_id
             for img_id in missing_ids
         }
-        with open(checkpoint_file, 'a') as f:
+        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
             for future in tqdm(as_completed(futures),
                                total=len(futures),
                                desc=f"{desc_prefix} 3/5 Metadata",
@@ -306,13 +307,13 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
 def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                               pos, desc_prefix):
     checkpoint_file = os.path.join(
-        region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl')
+        region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.gz')
 
     clean_jsonl_file(checkpoint_file)
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with open(checkpoint_file, 'r') as f:
+        with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     completed_ids.add(json.loads(line)['image_id'])
@@ -330,7 +331,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
             img_id
             for img_id in missing_ids
         }
-        with open(checkpoint_file, 'a') as f:
+        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
             for future in tqdm(as_completed(futures),
                                total=len(futures),
                                desc=f"{desc_prefix} 4/5 Detections",
@@ -404,15 +405,15 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         # Step C: Parse Data & Clear Memory
         animal_checkpoint = os.path.join(
-            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl')
+            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.gz')
         metadata_checkpoint = os.path.join(
-            region_dir, f'metadata_checkpoint_{sub_id}.jsonl')
+            region_dir, f'metadata_checkpoint_{sub_id}.jsonl.gz')
 
         extracted_image_ids = set()
         ground_animal_features = []
 
         if os.path.exists(animal_checkpoint):
-            with open(animal_checkpoint, 'r') as f:
+            with gzip.open(animal_checkpoint, 'rt', encoding='utf-8') as f:
                 for line in f:
                     if not line.strip(): continue
                     record = json.loads(line)
@@ -423,10 +424,10 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         if ground_animal_features:
             final_json_path = os.path.join(region_dir,
-                                           f'ground_animals_{sub_id}.json')
+                                           f'ground_animals_{sub_id}.json.gz')
             temp_json_path = final_json_path + '.tmp'
 
-            with open(temp_json_path, 'w') as f:
+            with gzip.open(temp_json_path, 'wt', encoding='utf-8') as f:
                 json.dump(ground_animal_features, f)
 
             os.replace(temp_json_path, final_json_path)
@@ -436,9 +437,9 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         # Step D: Process Metadata and Database Append
         all_csv_path = os.path.join(region_dir,
-                                    f'all_data_{safe_region_id}.csv')
+                                    f'all_data_{safe_region_id}.csv.gz')
         animals_csv_path = os.path.join(
-            region_dir, f'ground_animals_{safe_region_id}.csv')
+            region_dir, f'ground_animals_{safe_region_id}.csv.gz')
 
         records = []
         download_tasks = []
@@ -458,12 +459,15 @@ def process_region(west, south, east, north, unique_region_id, run_name):
             df.to_csv(all_csv_path,
                       mode='a',
                       header=not os.path.exists(all_csv_path),
-                      index=False)
+                      index=False,
+                      compression='gzip')
+
             if not animals_df.empty:
                 animals_df.to_csv(animals_csv_path,
                                   mode='a',
                                   header=not os.path.exists(animals_csv_path),
-                                  index=False)
+                                  index=False,
+                                  compression='gzip')
                 for _, row in animals_df.iterrows():
                     if pd.notna(row.get('thumb_original_url')):
                         download_tasks.append(
@@ -479,7 +483,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
             gc.collect()
 
         if os.path.exists(metadata_checkpoint):
-            with open(metadata_checkpoint, 'r') as f:
+            with gzip.open(metadata_checkpoint, 'rt', encoding='utf-8') as f:
                 for line in f:
                     if not line.strip(): continue
                     record = json.loads(line)
