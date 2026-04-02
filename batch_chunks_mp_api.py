@@ -423,14 +423,19 @@ def process_region(west, south, east, north, unique_region_id, run_name):
         ground_animal_features = []
 
         if os.path.exists(animal_checkpoint):
-            with gzip.open(animal_checkpoint, 'rt', encoding='utf-8') as f:
-                for line in f:
-                    if not line.strip(): continue
-                    record = json.loads(line)
-                    features = record.get('features', [])
-                    if features:
-                        extracted_image_ids.add(record['image_id'])
-                        ground_animal_features.extend(features)
+            try:
+                with gzip.open(animal_checkpoint, 'rt', encoding='utf-8') as f:
+                    for line in f:
+                        if not line.strip(): continue
+                        record = json.loads(line)
+                        features = record.get('features', [])
+                        if features:
+                            extracted_image_ids.add(record['image_id'])
+                            ground_animal_features.extend(features)
+            except Exception as e:
+                raise RuntimeError(
+                    f"\n[!] CORRUPT FILE DETECTED: {animal_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
+                ) from e
 
         if ground_animal_features:
             final_json_path = os.path.join(region_dir,
@@ -493,20 +498,27 @@ def process_region(west, south, east, north, unique_region_id, run_name):
             gc.collect()
 
         if os.path.exists(metadata_checkpoint):
-            with gzip.open(metadata_checkpoint, 'rt', encoding='utf-8') as f:
-                for line in f:
-                    if not line.strip(): continue
-                    record = json.loads(line)
-                    row = record['data'].copy()
-                    row['image_id'] = record['image_id']
-                    if 'detections' in row and isinstance(
-                            row['detections'], dict):
-                        row['detections'] = row['detections'].get('data', [])
-                    records.append(row)
+            try:
+                with gzip.open(metadata_checkpoint, 'rt',
+                               encoding='utf-8') as f:
+                    for line in f:
+                        if not line.strip(): continue
+                        record = json.loads(line)
+                        row = record['data'].copy()
+                        row['image_id'] = record['image_id']
+                        if 'detections' in row and isinstance(
+                                row['detections'], dict):
+                            row['detections'] = row['detections'].get(
+                                'data', [])
+                        records.append(row)
 
-                    if len(records) >= chunk_size:
-                        process_metadata_chunk(records)
-                        records = []
+                        if len(records) >= chunk_size:
+                            process_metadata_chunk(records)
+                            records = []
+            except Exception as e:
+                raise RuntimeError(
+                    f"\n[!] CORRUPT FILE DETECTED: {metadata_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
+                ) from e
 
             if records:
                 process_metadata_chunk(records)
