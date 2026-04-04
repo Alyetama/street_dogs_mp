@@ -1,6 +1,7 @@
 import argparse
 import gc
 import gzip
+import itertools
 import json
 import os
 import re
@@ -32,25 +33,42 @@ PARENT_DIR = 'grid_runs'
 TRACKER_FILE = None
 
 
+def chunked_iterable(iterable, size):
+    """Yields chunks of a specified size from an iterable."""
+    it = iter(iterable)
+    while True:
+        chunk = tuple(itertools.islice(it, size))
+        if not chunk:
+            break
+        yield chunk
+
+
 def sanitize_folder_name(name):
     safe_name = name.replace('&', 'and')
     return re.sub(r'[^\w\-_\.]', '_', safe_name).strip('_')
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines from an interrupted .jsonl.gz file."""
+    """Removes corrupt lines and missing EOF markers from an interrupted .jsonl.gz file."""
     if not os.path.exists(filepath):
         return
     valid_lines = []
     is_corrupt = False
-    with gzip.open(filepath, 'rt', encoding='utf-8') as f:
-        for line in f:
-            if not line.strip(): continue
+
+    try:
+        with gzip.open(filepath, 'rt', encoding='utf-8') as f:
             try:
-                json.loads(line)
-                valid_lines.append(line)
-            except json.JSONDecodeError:
+                for line in f:
+                    if not line.strip(): continue
+                    try:
+                        json.loads(line)
+                        valid_lines.append(line)
+                    except json.JSONDecodeError:
+                        is_corrupt = True
+            except (EOFError, OSError):
                 is_corrupt = True
+    except Exception:
+        is_corrupt = True
 
     if is_corrupt:
         with gzip.open(filepath, 'wt', encoding='utf-8') as f:
@@ -181,49 +199,62 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
         except json.JSONDecodeError:
             pass
 
-    tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
-    all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
-    land_bboxes = [
-        bbox for bbox in all_bboxes
-        if globe.is_land((bbox.south + bbox.north) /
-                         2.0, (bbox.west + bbox.east) / 2.0)
-    ]
+    # 1. LAZY EVALUATION: Generator instead of list()
+    tiles_gen = mercantile.tiles(west, south, east, north, ZOOM_LEVEL)
+    land_bboxes = []
+    for t in tiles_gen:
+        bbox = mercantile.bounds(t.x, t.y, t.z)
+        if globe.is_land((bbox.south + bbox.north) / 2.0,
+                         (bbox.west + bbox.east) / 2.0):
+            land_bboxes.append(bbox)
 
     if not land_bboxes: return {}
 
     unique_sequences = set()
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(get_sequences_for_bbox, bbox, session): bbox
-            for bbox in land_bboxes
-        }
-        for future in tqdm(as_completed(futures),
-                           total=len(futures),
-                           desc=f"{desc_prefix} 1/5 BBoxes",
-                           position=pos,
-                           leave=False,
-                           mininterval=2.0):
-            unique_sequences.update(future.result())
+
+    # 2. CHUNKED QUEUEING
+    with tqdm(total=len(land_bboxes),
+              desc=f"{desc_prefix} 1/5 BBoxes",
+              position=pos,
+              leave=False,
+              mininterval=2.0) as pbar:
+        for chunk in chunked_iterable(land_bboxes, 25000):
+            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(get_sequences_for_bbox, bbox, session):
+                    bbox
+                    for bbox in chunk
+                }
+                for future in as_completed(futures):
+                    unique_sequences.update(future.result())
+                    pbar.update(1)
+            del futures
+            gc.collect()
 
     image_to_sequence_map = {}
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(get_images_for_sequence, seq, session): seq
-            for seq in unique_sequences
-        }
-        for future in tqdm(as_completed(futures),
-                           total=len(futures),
-                           desc=f"{desc_prefix} 2/5 Sequences",
-                           position=pos,
-                           leave=False,
-                           mininterval=2.0):
-            seq_id = futures[future]
-            for img_id in future.result():
-                image_to_sequence_map[img_id] = seq_id
+    with tqdm(total=len(unique_sequences),
+              desc=f"{desc_prefix} 2/5 Sequences",
+              position=pos,
+              leave=False,
+              mininterval=2.0) as pbar:
+        for chunk in chunked_iterable(unique_sequences, 25000):
+            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(get_images_for_sequence, seq, session): seq
+                    for seq in chunk
+                }
+                for future in as_completed(futures):
+                    seq_id = futures[future]
+                    for img_id in future.result():
+                        image_to_sequence_map[img_id] = seq_id
+                    pbar.update(1)
+            del futures
+            gc.collect()
 
     temp_checkpoint = checkpoint_file + '.tmp'
     with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
         json.dump(image_to_sequence_map, f)
+
     os.replace(temp_checkpoint, checkpoint_file)
 
     return image_to_sequence_map
@@ -249,27 +280,32 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(fetch_image_data, img_id, fields_str, session):
-            img_id
-            for img_id in missing_ids
-        }
-        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
-            for future in tqdm(as_completed(futures),
-                               total=len(futures),
-                               desc=f"{desc_prefix} 3/5 Metadata",
-                               position=pos,
-                               leave=False,
-                               mininterval=2.0):
-                image_id, data = future.result()
-                if data is not None:
-                    with write_lock:
-                        f.write(
-                            json.dumps({
-                                'image_id': image_id,
-                                'data': data
-                            }) + '\n')
+    with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
+        with tqdm(total=len(missing_ids),
+                  desc=f"{desc_prefix} 3/5 Metadata",
+                  position=pos,
+                  leave=False,
+                  mininterval=2.0) as pbar:
+            for chunk in chunked_iterable(missing_ids, 25000):
+                with ThreadPoolExecutor(
+                        max_workers=INNER_MAX_WORKERS) as executor:
+                    futures = {
+                        executor.submit(fetch_image_data, img_id, fields_str, session):
+                        img_id
+                        for img_id in chunk
+                    }
+                    for future in as_completed(futures):
+                        image_id, data = future.result()
+                        if data is not None:
+                            with write_lock:
+                                f.write(
+                                    json.dumps({
+                                        'image_id': image_id,
+                                        'data': data
+                                    }) + '\n')
+                        pbar.update(1)
+                del futures
+                gc.collect()
 
 
 def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
@@ -293,26 +329,31 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
-            img_id
-            for img_id in missing_ids
-        }
-        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
-            for future in tqdm(as_completed(futures),
-                               total=len(futures),
-                               desc=f"{desc_prefix} 4/5 Detections",
-                               position=pos,
-                               leave=False,
-                               mininterval=2.0):
-                image_id, features = future.result()
-                with write_lock:
-                    f.write(
-                        json.dumps({
-                            'image_id': image_id,
-                            'features': features
-                        }) + '\n')
+    with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
+        with tqdm(total=len(missing_ids),
+                  desc=f"{desc_prefix} 4/5 Detections",
+                  position=pos,
+                  leave=False,
+                  mininterval=2.0) as pbar:
+            for chunk in chunked_iterable(missing_ids, 25000):
+                with ThreadPoolExecutor(
+                        max_workers=INNER_MAX_WORKERS) as executor:
+                    futures = {
+                        executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
+                        img_id
+                        for img_id in chunk
+                    }
+                    for future in as_completed(futures):
+                        image_id, features = future.result()
+                        with write_lock:
+                            f.write(
+                                json.dumps({
+                                    'image_id': image_id,
+                                    'features': features
+                                }) + '\n')
+                        pbar.update(1)
+                del futures
+                gc.collect()
 
 
 # --- The Master Process Worker ---
@@ -325,6 +366,14 @@ def process_region(west, south, east, north, unique_region_id, run_name):
     os.makedirs(region_dir, exist_ok=True)
     output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
+
+    # Clean up previous aborted CSV files to prevent duplicate/corrupted lines
+    for csv_file in [
+            f'all_data_{safe_region_id}.csv.gz',
+            f'ground_animals_{safe_region_id}.csv.gz'
+    ]:
+        if os.path.exists(os.path.join(region_dir, csv_file)):
+            os.remove(os.path.join(region_dir, csv_file))
 
     session = requests.Session()
     retries = Retry(total=5,
@@ -406,7 +455,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
         del ground_animal_features
         total_animals_found += len(extracted_image_ids)
 
-        # Step D: Process Metadata and Database Append
+        # Step D: Process Metadata to CSV
         all_csv_path = os.path.join(region_dir,
                                     f'all_data_{safe_region_id}.csv.gz')
         animals_csv_path = os.path.join(
@@ -445,7 +494,6 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                             (row['image_id'], row['thumb_original_url'],
                              row['captured_at']))
 
-            # Aggressive Memory Cleanup
             del df
             del animals_df
             gc.collect()
@@ -479,19 +527,23 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         # Step E: Download
         if DOWNLOAD_IMAGES and download_tasks:
-            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-                futures = {
-                    executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
-                    img_id
-                    for img_id, url, cap_at in download_tasks
-                }
-                for _ in tqdm(as_completed(futures),
-                              total=len(futures),
-                              desc=f"{desc_prefix} 5/5 Downloads",
-                              position=pos,
-                              leave=False,
-                              mininterval=2.0):
-                    pass
+            with tqdm(total=len(download_tasks),
+                      desc=f"{desc_prefix} 5/5 Downloads",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                for chunk in chunked_iterable(download_tasks, 25000):
+                    with ThreadPoolExecutor(
+                            max_workers=INNER_MAX_WORKERS) as executor:
+                        futures = {
+                            executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
+                            img_id
+                            for img_id, url, cap_at in chunk
+                        }
+                        for _ in as_completed(futures):
+                            pbar.update(1)
+                    del futures
+                    gc.collect()
 
         del download_tasks
         del image_to_seq_map
@@ -504,12 +556,12 @@ if __name__ == "__main__":
     if not MLY_KEY:
         raise ValueError("MLY_KEY environment variable is missing.")
 
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Mapillary SLURM Downloader")
+    parser = argparse.ArgumentParser(
+        description="Mapillary Ground Animal API Downloader (SLURM Version)")
     parser.add_argument(
         'grid_csv_file',
         type=str,
-        help="Path to the input CSV file (e.g., Indian_Ocean.csv)")
+        help="Path to the input CSV file (e.g., indian_ocean.csv)")
     parser.add_argument('--zoom-level',
                         type=int,
                         default=14,
@@ -536,7 +588,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Apply arguments to global scope
     GRID_CSV_FILE = args.grid_csv_file
     ZOOM_LEVEL = args.zoom_level
     VISUALIZE = args.visualize
