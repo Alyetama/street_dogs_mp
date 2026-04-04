@@ -6,7 +6,6 @@ import json
 import multiprocessing
 import os
 import re
-import sqlite3
 import threading
 from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
@@ -34,24 +33,20 @@ OUTER_MAX_WORKERS = 5
 INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
-DB_NAME = None
 TRACKER_FILE = None
-db_lock = None
 
 
-def init_worker(lock, config):
-    """Initializes worker processes with the lock and the parsed CLI config."""
-    global db_lock, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
-    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, DB_NAME, TRACKER_FILE
+def init_worker(config):
+    """Initializes worker processes with the parsed CLI config."""
+    global ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
+    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
 
-    db_lock = lock
     ZOOM_LEVEL = config['ZOOM_LEVEL']
     VISUALIZE = config['VISUALIZE']
     DOWNLOAD_IMAGES = config['DOWNLOAD_IMAGES']
     INNER_MAX_WORKERS = config['INNER_MAX_WORKERS']
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
-    DB_NAME = config['DB_NAME']
     TRACKER_FILE = config['TRACKER_FILE']
 
 
@@ -96,25 +91,6 @@ def clean_jsonl_file(filepath):
         with gzip.open(filepath, 'wt', encoding='utf-8') as f:
             for line in valid_lines:
                 f.write(line.strip() + '\n')
-
-
-# --- SQLite Helper ---
-def append_to_sqlite(df, table_name, run_name, region_id):
-    if df.empty: return
-    df_sql = df.copy()
-    complex_cols = ['computed_geometry', 'creator', 'detections']
-    for col in complex_cols:
-        if col in df_sql.columns:
-            df_sql[col] = df_sql[col].apply(
-                lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
-    df_sql['run_name'] = run_name
-    df_sql['region_id'] = region_id
-
-    with db_lock:
-        with sqlite3.connect(DB_NAME, timeout=60) as conn:
-            df_sql.to_sql(table_name, conn, if_exists='append', index=False)
-
-    del df_sql
 
 
 # --- API Fetcher Helpers ---
@@ -240,61 +216,50 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
         except json.JSONDecodeError:
             pass
 
-    # 1. LAZY EVALUATION: Use the generator directly, no list() wrapping!
-    tiles_gen = mercantile.tiles(west, south, east, north, ZOOM_LEVEL)
-    land_bboxes = []
-    for t in tiles_gen:
-        bbox = mercantile.bounds(t.x, t.y, t.z)
-        if globe.is_land((bbox.south + bbox.north) / 2.0,
-                         (bbox.west + bbox.east) / 2.0):
-            land_bboxes.append(bbox)
+    tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
+    all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
+    land_bboxes = [
+        bbox for bbox in all_bboxes
+        if globe.is_land((bbox.south + bbox.north) /
+                         2.0, (bbox.west + bbox.east) / 2.0)
+    ]
 
     if not land_bboxes: return {}
 
     unique_sequences = set()
-
-    # 2. CHUNKED QUEUEING: Process in batches of 25,000 to prevent RAM explosion
-    with tqdm(total=len(land_bboxes),
-              desc=f"{desc_prefix} 1/5 BBoxes",
-              position=pos,
-              leave=False,
-              mininterval=2.0) as pbar:
-        for chunk in chunked_iterable(land_bboxes, 25000):
-            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-                futures = {
-                    executor.submit(get_sequences_for_bbox, bbox, session):
-                    bbox
-                    for bbox in chunk
-                }
-                for future in as_completed(futures):
-                    unique_sequences.update(future.result())
-                    pbar.update(1)
-            del futures
-            gc.collect()  # aggressively dump the chunk from memory
+    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(get_sequences_for_bbox, bbox, session): bbox
+            for bbox in land_bboxes
+        }
+        for future in tqdm(as_completed(futures),
+                           total=len(futures),
+                           desc=f"{desc_prefix} 1/5 BBoxes",
+                           position=pos,
+                           leave=False,
+                           mininterval=2.0):
+            unique_sequences.update(future.result())
 
     image_to_sequence_map = {}
-    with tqdm(total=len(unique_sequences),
-              desc=f"{desc_prefix} 2/5 Sequences",
-              position=pos,
-              leave=False,
-              mininterval=2.0) as pbar:
-        for chunk in chunked_iterable(unique_sequences, 25000):
-            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-                futures = {
-                    executor.submit(get_images_for_sequence, seq, session): seq
-                    for seq in chunk
-                }
-                for future in as_completed(futures):
-                    seq_id = futures[future]
-                    for img_id in future.result():
-                        image_to_sequence_map[img_id] = seq_id
-                    pbar.update(1)
-            del futures
-            gc.collect()
+    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(get_images_for_sequence, seq, session): seq
+            for seq in unique_sequences
+        }
+        for future in tqdm(as_completed(futures),
+                           total=len(futures),
+                           desc=f"{desc_prefix} 2/5 Sequences",
+                           position=pos,
+                           leave=False,
+                           mininterval=2.0):
+            seq_id = futures[future]
+            for img_id in future.result():
+                image_to_sequence_map[img_id] = seq_id
 
     temp_checkpoint = checkpoint_file + '.tmp'
     with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
         json.dump(image_to_sequence_map, f)
+
     os.replace(temp_checkpoint, checkpoint_file)
 
     return image_to_sequence_map
@@ -320,33 +285,27 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-
-    with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
-        with tqdm(total=len(missing_ids),
-                  desc=f"{desc_prefix} 3/5 Metadata",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(missing_ids, 25000):
-                with ThreadPoolExecutor(
-                        max_workers=INNER_MAX_WORKERS) as executor:
-                    futures = {
-                        executor.submit(fetch_image_data, img_id, fields_str, session):
-                        img_id
-                        for img_id in chunk
-                    }
-                    for future in as_completed(futures):
-                        image_id, data = future.result()
-                        if data is not None:
-                            with write_lock:
-                                f.write(
-                                    json.dumps({
-                                        'image_id': image_id,
-                                        'data': data
-                                    }) + '\n')
-                        pbar.update(1)
-                del futures
-                gc.collect()
+    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(fetch_image_data, img_id, fields_str, session):
+            img_id
+            for img_id in missing_ids
+        }
+        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
+            for future in tqdm(as_completed(futures),
+                               total=len(futures),
+                               desc=f"{desc_prefix} 3/5 Metadata",
+                               position=pos,
+                               leave=False,
+                               mininterval=2.0):
+                image_id, data = future.result()
+                if data is not None:
+                    with write_lock:
+                        f.write(
+                            json.dumps({
+                                'image_id': image_id,
+                                'data': data
+                            }) + '\n')
 
 
 def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
@@ -370,31 +329,26 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-    with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
-        with tqdm(total=len(missing_ids),
-                  desc=f"{desc_prefix} 4/5 Detections",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(missing_ids, 25000):
-                with ThreadPoolExecutor(
-                        max_workers=INNER_MAX_WORKERS) as executor:
-                    futures = {
-                        executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
-                        img_id
-                        for img_id in chunk
-                    }
-                    for future in as_completed(futures):
-                        image_id, features = future.result()
-                        with write_lock:
-                            f.write(
-                                json.dumps({
-                                    'image_id': image_id,
-                                    'features': features
-                                }) + '\n')
-                        pbar.update(1)
-                del futures
-                gc.collect()
+    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
+            img_id
+            for img_id in missing_ids
+        }
+        with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
+            for future in tqdm(as_completed(futures),
+                               total=len(futures),
+                               desc=f"{desc_prefix} 4/5 Detections",
+                               position=pos,
+                               leave=False,
+                               mininterval=2.0):
+                image_id, features = future.result()
+                with write_lock:
+                    f.write(
+                        json.dumps({
+                            'image_id': image_id,
+                            'features': features
+                        }) + '\n')
 
 
 # --- The Master Process Worker ---
@@ -409,13 +363,6 @@ def process_region(west, south, east, north, unique_region_id, run_name):
     os.makedirs(region_dir, exist_ok=True)
     output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
-
-    for csv_file in [
-            f'all_data_{safe_region_id}.csv.gz',
-            f'ground_animals_{safe_region_id}.csv.gz'
-    ]:
-        if os.path.exists(os.path.join(region_dir, csv_file)):
-            os.remove(os.path.join(region_dir, csv_file))
 
     session = requests.Session()
     retries = Retry(total=5,
@@ -536,10 +483,6 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                             (row['image_id'], row['thumb_original_url'],
                              row['captured_at']))
 
-            append_to_sqlite(df, 'all_data', run_name, unique_region_id)
-            if not animals_df.empty:
-                append_to_sqlite(animals_df, 'ground_animals', run_name,
-                                 unique_region_id)
             del df
             del animals_df
             gc.collect()
@@ -621,8 +564,8 @@ if __name__ == "__main__":
                         help="Max parallel regions (default: 5)")
     parser.add_argument('--inner-max-workers',
                         type=int,
-                        default=10,
-                        help="Max threads per region (default: 10)")
+                        default=20,
+                        help="Max threads per region (default: 20)")
     parser.add_argument('--sub-grid-step',
                         type=float,
                         default=1.0,
@@ -631,11 +574,6 @@ if __name__ == "__main__":
                         type=str,
                         default='grid_runs',
                         help="Output directory (default: grid_runs)")
-    parser.add_argument(
-        '--db-name',
-        type=str,
-        default='mapillary_db.sqlite',
-        help="Database file name (default: mapillary_db.sqlite)")
 
     args = parser.parse_args()
 
@@ -647,7 +585,6 @@ if __name__ == "__main__":
     INNER_MAX_WORKERS = args.inner_max_workers
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
-    DB_NAME = os.path.join(PARENT_DIR, args.db_name)
     TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
 
     print('\033[?25l', end="")
@@ -676,9 +613,6 @@ if __name__ == "__main__":
         )
 
         try:
-            m = multiprocessing.Manager()
-            master_lock = m.Lock()
-
             worker_config = {
                 'ZOOM_LEVEL': ZOOM_LEVEL,
                 'VISUALIZE': VISUALIZE,
@@ -686,14 +620,12 @@ if __name__ == "__main__":
                 'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
-                'DB_NAME': DB_NAME,
                 'TRACKER_FILE': TRACKER_FILE
             }
 
             with ProcessPoolExecutor(max_workers=OUTER_MAX_WORKERS,
                                      initializer=init_worker,
-                                     initargs=(master_lock,
-                                               worker_config)) as executor:
+                                     initargs=(worker_config, )) as executor:
                 futures = {
                     executor.submit(process_region, sw_lon, sw_lat, ne_lon, ne_lat, region_id, GLOBAL_RUN_NAME):
                     region_id
