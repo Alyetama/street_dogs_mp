@@ -66,31 +66,37 @@ def sanitize_folder_name(name):
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines and missing EOF markers from an interrupted .jsonl.gz file."""
+    """Removes corrupt lines from an interrupted .jsonl.gz file using streaming (Low RAM)."""
     if not os.path.exists(filepath):
         return
-    valid_lines = []
-    is_corrupt = False
 
+    is_corrupt = False
     try:
         with gzip.open(filepath, 'rt', encoding='utf-8') as f:
-            try:
-                for line in f:
-                    if not line.strip(): continue
-                    try:
-                        json.loads(line)
-                        valid_lines.append(line)
-                    except json.JSONDecodeError:
-                        is_corrupt = True
-            except (EOFError, OSError):
-                is_corrupt = True
-    except Exception:
+            for line in f:
+                pass
+    except (EOFError, OSError):
         is_corrupt = True
 
     if is_corrupt:
-        with gzip.open(filepath, 'wt', encoding='utf-8') as f:
-            for line in valid_lines:
-                f.write(line.strip() + '\n')
+        temp_filepath = filepath + ".tmp"
+        try:
+            with gzip.open(filepath, 'rt', encoding='utf-8') as f_in, \
+                 gzip.open(temp_filepath, 'wt', encoding='utf-8') as f_out:
+                try:
+                    for line in f_in:
+                        if not line.strip(): continue
+                        try:
+                            json.loads(line)
+                            f_out.write(line)
+                        except json.JSONDecodeError:
+                            pass
+                except (EOFError, OSError):
+                    pass
+            os.replace(temp_filepath, filepath)
+        except Exception:
+            if os.path.exists(temp_filepath):
+                os.remove(temp_filepath)
 
 
 # --- API Fetcher Helpers ---
@@ -277,7 +283,10 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
         with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    completed_ids.add(json.loads(line)['image_id'])
+                    # Instantly plucks the ID out of the string without parsing the heavy JSON block
+                    match = re.search(r'"image_id"\s*:\s*"([^"]+)"', line)
+                    if match:
+                        completed_ids.add(match.group(1))
 
     missing_ids = [
         img_id for img_id in image_ids if img_id not in completed_ids
@@ -320,7 +329,9 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
         with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    completed_ids.add(json.loads(line)['image_id'])
+                    match = re.search(r'"image_id"\s*:\s*"([^"]+)"', line)
+                    if match:
+                        completed_ids.add(match.group(1))
 
     missing_ids = [
         img_id for img_id in image_to_seq_map.keys()
