@@ -49,31 +49,37 @@ def sanitize_folder_name(name):
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines and missing EOF markers from an interrupted .jsonl.gz file."""
+    """Removes corrupt lines from an interrupted .jsonl.gz file using streaming (Low RAM)."""
     if not os.path.exists(filepath):
         return
-    valid_lines = []
-    is_corrupt = False
 
+    is_corrupt = False
     try:
         with gzip.open(filepath, 'rt', encoding='utf-8') as f:
-            try:
-                for line in f:
-                    if not line.strip(): continue
-                    try:
-                        json.loads(line)
-                        valid_lines.append(line)
-                    except json.JSONDecodeError:
-                        is_corrupt = True
-            except (EOFError, OSError):
-                is_corrupt = True
-    except Exception:
+            for line in f:
+                pass
+    except (EOFError, OSError):
         is_corrupt = True
 
     if is_corrupt:
-        with gzip.open(filepath, 'wt', encoding='utf-8') as f:
-            for line in valid_lines:
-                f.write(line.strip() + '\n')
+        temp_filepath = filepath + ".tmp"
+        try:
+            with gzip.open(filepath, 'rt', encoding='utf-8') as f_in, \
+                 gzip.open(temp_filepath, 'wt', encoding='utf-8') as f_out:
+                try:
+                    for line in f_in:
+                        if not line.strip(): continue
+                        try:
+                            json.loads(line)
+                            f_out.write(line)
+                        except json.JSONDecodeError:
+                            pass
+                except (EOFError, OSError):
+                    pass
+            os.replace(temp_filepath, filepath)
+        except Exception:
+            if os.path.exists(temp_filepath):
+                os.remove(temp_filepath)
 
 
 # --- API Fetcher Helpers ---
@@ -212,14 +218,13 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
 
     unique_sequences = set()
 
-    # 2. CHUNKED QUEUEING
-    with tqdm(total=len(land_bboxes),
-              desc=f"{desc_prefix} 1/5 BBoxes",
-              position=pos,
-              leave=False,
-              mininterval=2.0) as pbar:
-        for chunk in chunked_iterable(land_bboxes, 25000):
-            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        with tqdm(total=len(land_bboxes),
+                  desc=f"{desc_prefix} 1/5 BBoxes",
+                  position=pos,
+                  leave=False,
+                  mininterval=2.0) as pbar:
+            for chunk in chunked_iterable(land_bboxes, 2500):
                 futures = {
                     executor.submit(get_sequences_for_bbox, bbox, session):
                     bbox
@@ -228,17 +233,17 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                 for future in as_completed(futures):
                     unique_sequences.update(future.result())
                     pbar.update(1)
-            del futures
-            gc.collect()
+                    del futures[future]
+                gc.collect()
 
     image_to_sequence_map = {}
-    with tqdm(total=len(unique_sequences),
-              desc=f"{desc_prefix} 2/5 Sequences",
-              position=pos,
-              leave=False,
-              mininterval=2.0) as pbar:
-        for chunk in chunked_iterable(unique_sequences, 25000):
-            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        with tqdm(total=len(unique_sequences),
+                  desc=f"{desc_prefix} 2/5 Sequences",
+                  position=pos,
+                  leave=False,
+                  mininterval=2.0) as pbar:
+            for chunk in chunked_iterable(unique_sequences, 2500):
                 futures = {
                     executor.submit(get_images_for_sequence, seq, session): seq
                     for seq in chunk
@@ -248,8 +253,8 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                     for img_id in future.result():
                         image_to_sequence_map[img_id] = seq_id
                     pbar.update(1)
-            del futures
-            gc.collect()
+                    del futures[future]
+                gc.collect()
 
     temp_checkpoint = checkpoint_file + '.tmp'
     with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
@@ -272,7 +277,9 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
         with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    completed_ids.add(json.loads(line)['image_id'])
+                    match = re.search(r'"image_id"\s*:\s*"([^"]+)"', line)
+                    if match:
+                        completed_ids.add(match.group(1))
 
     missing_ids = [
         img_id for img_id in image_ids if img_id not in completed_ids
@@ -281,14 +288,14 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
 
     write_lock = threading.Lock()
     with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
-        with tqdm(total=len(missing_ids),
-                  desc=f"{desc_prefix} 3/5 Metadata",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(missing_ids, 25000):
-                with ThreadPoolExecutor(
-                        max_workers=INNER_MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+            with tqdm(total=len(missing_ids),
+                      desc=f"{desc_prefix} 3/5 Metadata",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                # chunk size: 2,500
+                for chunk in chunked_iterable(missing_ids, 2500):
                     futures = {
                         executor.submit(fetch_image_data, img_id, fields_str, session):
                         img_id
@@ -304,8 +311,13 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                                         'data': data
                                     }) + '\n')
                         pbar.update(1)
-                del futures
-                gc.collect()
+
+                        del futures[future]
+                        del data
+                        del future
+
+                    f.flush()
+                    gc.collect()
 
 
 def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
@@ -320,7 +332,9 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
         with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    completed_ids.add(json.loads(line)['image_id'])
+                    match = re.search(r'"image_id"\s*:\s*"([^"]+)"', line)
+                    if match:
+                        completed_ids.add(match.group(1))
 
     missing_ids = [
         img_id for img_id in image_to_seq_map.keys()
@@ -330,14 +344,13 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
     write_lock = threading.Lock()
     with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
-        with tqdm(total=len(missing_ids),
-                  desc=f"{desc_prefix} 4/5 Detections",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(missing_ids, 25000):
-                with ThreadPoolExecutor(
-                        max_workers=INNER_MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+            with tqdm(total=len(missing_ids),
+                      desc=f"{desc_prefix} 4/5 Detections",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                for chunk in chunked_iterable(missing_ids, 2500):
                     futures = {
                         executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
                         img_id
@@ -352,8 +365,12 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                                     'features': features
                                 }) + '\n')
                         pbar.update(1)
-                del futures
-                gc.collect()
+                        del futures[future]
+                        del features
+                        del future
+
+                    f.flush()
+                    gc.collect()
 
 
 # --- The Master Process Worker ---
@@ -366,14 +383,6 @@ def process_region(west, south, east, north, unique_region_id, run_name):
     os.makedirs(region_dir, exist_ok=True)
     output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
-
-    # Clean up previous aborted CSV files to prevent duplicate/corrupted lines
-    for csv_file in [
-            f'all_data_{safe_region_id}.csv.gz',
-            f'ground_animals_{safe_region_id}.csv.gz'
-    ]:
-        if os.path.exists(os.path.join(region_dir, csv_file)):
-            os.remove(os.path.join(region_dir, csv_file))
 
     session = requests.Session()
     retries = Retry(total=5,
@@ -463,7 +472,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         records = []
         download_tasks = []
-        chunk_size = 10000
+        chunk_size = 1000
 
         def process_metadata_chunk(chunk_records):
             df = build_mapillary_dataframe_from_records(chunk_records)
@@ -527,23 +536,22 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
         # Step E: Download
         if DOWNLOAD_IMAGES and download_tasks:
-            with tqdm(total=len(download_tasks),
-                      desc=f"{desc_prefix} 5/5 Downloads",
-                      position=pos,
-                      leave=False,
-                      mininterval=2.0) as pbar:
-                for chunk in chunked_iterable(download_tasks, 25000):
-                    with ThreadPoolExecutor(
-                            max_workers=INNER_MAX_WORKERS) as executor:
+            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+                with tqdm(total=len(download_tasks),
+                          desc=f"{desc_prefix} 5/5 Downloads",
+                          position=pos,
+                          leave=False,
+                          mininterval=2.0) as pbar:
+                    for chunk in chunked_iterable(download_tasks, 2500):
                         futures = {
                             executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
                             img_id
                             for img_id, url, cap_at in chunk
                         }
-                        for _ in as_completed(futures):
+                        for future in as_completed(futures):
                             pbar.update(1)
-                    del futures
-                    gc.collect()
+                            del futures[future]
+                        gc.collect()
 
         del download_tasks
         del image_to_seq_map
