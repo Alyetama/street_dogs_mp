@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import re
+import signal
 import threading
 from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
@@ -36,10 +37,15 @@ PARENT_DIR = 'grid_runs'
 TRACKER_FILE = None
 
 
-def init_worker(config):
-    """Initializes worker processes with the parsed CLI config."""
+def init_worker(config, event):
+    """Initializes worker processes with the parsed CLI config and shutdown event."""
     global ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
     global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
+    global shutdown_event
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    shutdown_event = event
 
     ZOOM_LEVEL = config['ZOOM_LEVEL']
     VISUALIZE = config['VISUALIZE']
@@ -240,7 +246,9 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                   position=pos,
                   leave=False,
                   mininterval=2.0) as pbar:
+            # chunk size: 2,500
             for chunk in chunked_iterable(land_bboxes, 2500):
+                if shutdown_event.is_set(): break
                 futures = {
                     executor.submit(get_sequences_for_bbox, bbox, session):
                     bbox
@@ -260,6 +268,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                   leave=False,
                   mininterval=2.0) as pbar:
             for chunk in chunked_iterable(unique_sequences, 2500):
+                if shutdown_event.is_set(): break
                 futures = {
                     executor.submit(get_images_for_sequence, seq, session): seq
                     for seq in chunk
@@ -310,8 +319,8 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                       position=pos,
                       leave=False,
                       mininterval=2.0) as pbar:
-                # chunk size: 2,500
                 for chunk in chunked_iterable(missing_ids, 2500):
+                    if shutdown_event.is_set(): break
                     futures = {
                         executor.submit(fetch_image_data, img_id, fields_str, session):
                         img_id
@@ -367,6 +376,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                       leave=False,
                       mininterval=2.0) as pbar:
                 for chunk in chunked_iterable(missing_ids, 2500):
+                    if shutdown_event.is_set(): break
                     futures = {
                         executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
                         img_id
@@ -391,6 +401,10 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
 # --- The Master Process Worker ---
 def process_region(west, south, east, north, unique_region_id, run_name):
+    # Exit early if a shutdown was requested before this region even started
+    if shutdown_event.is_set():
+        return f"Aborted '{unique_region_id}' safely."
+
     worker_name = multiprocessing.current_process().name
     match = re.search(r'\d+', worker_name)
     pos = int(match.group()) if match else 1
@@ -428,6 +442,9 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
     # 2. Iterate through sub-regions sequentially
     for i, (sw_lon, sw_lat, ne_lon, ne_lat) in enumerate(sub_bboxes):
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
+
         sub_id = f"{safe_region_id}_sub_{i}"
         desc_prefix = f"[{region_run_id} C{i+1}/{len(sub_bboxes)}]"
 
@@ -561,6 +578,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                           leave=False,
                           mininterval=2.0) as pbar:
                     for chunk in chunked_iterable(download_tasks, 2500):
+                        if shutdown_event.is_set(): break
                         futures = {
                             executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
                             img_id
@@ -654,6 +672,9 @@ if __name__ == "__main__":
         )
 
         try:
+            m = multiprocessing.Manager()
+            shutdown_event = m.Event()
+
             worker_config = {
                 'ZOOM_LEVEL': ZOOM_LEVEL,
                 'VISUALIZE': VISUALIZE,
@@ -666,7 +687,8 @@ if __name__ == "__main__":
 
             with ProcessPoolExecutor(max_workers=OUTER_MAX_WORKERS,
                                      initializer=init_worker,
-                                     initargs=(worker_config, )) as executor:
+                                     initargs=(worker_config,
+                                               shutdown_event)) as executor:
                 futures = {
                     executor.submit(process_region, sw_lon, sw_lat, ne_lon, ne_lat, region_id, GLOBAL_RUN_NAME):
                     region_id
@@ -674,18 +696,32 @@ if __name__ == "__main__":
                     tasks_to_run
                 }
 
-                for future in tqdm(as_completed(futures),
-                                   total=len(futures),
-                                   desc="Total Progress",
-                                   position=0,
-                                   leave=True):
-                    region_id = futures[future]
-                    try:
-                        result_msg = future.result()
-                        tqdm.write(f"[\u2713] {result_msg}")
-                        with open(TRACKER_FILE, 'a') as f:
-                            f.write(f"{region_id}\n")
-                    except Exception as exc:
-                        tqdm.write(f"[X] Region '{region_id}' failed: {exc}")
+                try:
+                    for future in tqdm(as_completed(futures),
+                                       total=len(futures),
+                                       desc="Total Progress",
+                                       position=0,
+                                       leave=True):
+                        region_id = futures[future]
+                        try:
+                            result_msg = future.result()
+                            if "Aborted" in result_msg:
+                                tqdm.write(f"[-] {result_msg}")
+                            else:
+                                tqdm.write(f"[\u2713] {result_msg}")
+                                with open(TRACKER_FILE, 'a') as f:
+                                    f.write(f"{region_id}\n")
+                        except Exception as exc:
+                            tqdm.write(
+                                f"[X] Region '{region_id}' failed: {exc}")
+                except KeyboardInterrupt:
+                    tqdm.write(
+                        "\n\n[!] Ctrl+C detected! Sending shutdown signal to all active workers..."
+                    )
+                    tqdm.write(
+                        "[!] Please wait a few seconds. The script is safely flushing data and sealing your .gz files to prevent corruption."
+                    )
+                    shutdown_event.set()
+
         finally:
             print('\033[?25h', end="")
