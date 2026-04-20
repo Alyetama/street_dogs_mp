@@ -255,6 +255,11 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                     for bbox in chunk
                 }
                 for future in as_completed(futures):
+                    if shutdown_event.is_set():
+                        for f in futures:
+                            f.cancel()
+                        break
+
                     unique_sequences.update(future.result())
                     pbar.update(1)
                     del futures[future]
@@ -274,6 +279,11 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                     for seq in chunk
                 }
                 for future in as_completed(futures):
+                    if shutdown_event.is_set():
+                        for f in futures:
+                            f.cancel()
+                        break
+
                     seq_id = futures[future]
                     for img_id in future.result():
                         image_to_sequence_map[img_id] = seq_id
@@ -281,11 +291,11 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                     del futures[future]
                 gc.collect()
 
-    temp_checkpoint = checkpoint_file + '.tmp'
-    with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
-        json.dump(image_to_sequence_map, f)
-
-    os.replace(temp_checkpoint, checkpoint_file)
+    if not shutdown_event.is_set():
+        temp_checkpoint = checkpoint_file + '.tmp'
+        with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
+            json.dump(image_to_sequence_map, f)
+        os.replace(temp_checkpoint, checkpoint_file)
 
     return image_to_sequence_map
 
@@ -327,6 +337,11 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                         for img_id in chunk
                     }
                     for future in as_completed(futures):
+                        if shutdown_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                            break
+
                         image_id, data = future.result()
                         if data is not None:
                             with write_lock:
@@ -383,6 +398,11 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                         for img_id in chunk
                     }
                     for future in as_completed(futures):
+                        if shutdown_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                            break
+
                         image_id, features = future.result()
                         with write_lock:
                             f.write(
@@ -401,7 +421,6 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
 # --- The Master Process Worker ---
 def process_region(west, south, east, north, unique_region_id, run_name):
-    # Exit early if a shutdown was requested before this region even started
     if shutdown_event.is_set():
         return f"Aborted '{unique_region_id}' safely."
 
@@ -452,15 +471,22 @@ def process_region(west, south, east, north, unique_region_id, run_name):
         image_to_seq_map = get_image_topology(sw_lon, sw_lat, ne_lon, ne_lat,
                                               region_dir, sub_id, session, pos,
                                               desc_prefix)
-        if not image_to_seq_map:
+        if not image_to_seq_map or shutdown_event.is_set():
+            if shutdown_event.is_set():
+                return f"Aborted '{unique_region_id}' safely."
             continue
 
         # Step B: Metadata & Detections
         fields_str = 'id,computed_geometry,captured_at,sequence,is_pano,camera_type,computed_compass_angle,creator,height,width,detections,make,model,thumb_256_url,thumb_1024_url,thumb_2048_url,thumb_original_url'
         fetch_metadata_to_jsonl(list(image_to_seq_map.keys()), fields_str,
                                 region_dir, sub_id, session, pos, desc_prefix)
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
+
         fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id,
                                   session, pos, desc_prefix)
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
 
         # Step C: Parse Data & Clear Memory
         animal_checkpoint = os.path.join(
@@ -475,6 +501,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
             try:
                 with gzip.open(animal_checkpoint, 'rt', encoding='utf-8') as f:
                     for line in f:
+                        if shutdown_event.is_set(): break
                         if not line.strip(): continue
                         record = json.loads(line)
                         features = record.get('features', [])
@@ -485,6 +512,9 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                 raise RuntimeError(
                     f"\n[!] CORRUPT FILE DETECTED: {animal_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
                 ) from e
+
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
 
         if ground_animal_features:
             final_json_path = os.path.join(region_dir,
@@ -547,6 +577,7 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                 with gzip.open(metadata_checkpoint, 'rt',
                                encoding='utf-8') as f:
                     for line in f:
+                        if shutdown_event.is_set(): break
                         if not line.strip(): continue
                         record = json.loads(line)
                         row = record['data'].copy()
@@ -569,6 +600,9 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                 process_metadata_chunk(records)
                 records = []
 
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
+
         # Step E: Download
         if DOWNLOAD_IMAGES and download_tasks:
             with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
@@ -585,6 +619,12 @@ def process_region(west, south, east, north, unique_region_id, run_name):
                             for img_id, url, cap_at in chunk
                         }
                         for future in as_completed(futures):
+                            # AGGRESSIVE CANCELLATION
+                            if shutdown_event.is_set():
+                                for f in futures:
+                                    f.cancel()
+                                break
+
                             pbar.update(1)
                             del futures[future]
                         gc.collect()
@@ -689,7 +729,7 @@ if __name__ == "__main__":
                                      initializer=init_worker,
                                      initargs=(worker_config,
                                                shutdown_event)) as executor:
-                futures = {
+                outer_futures = {
                     executor.submit(process_region, sw_lon, sw_lat, ne_lon, ne_lat, region_id, GLOBAL_RUN_NAME):
                     region_id
                     for sw_lon, sw_lat, ne_lon, ne_lat, region_id in
@@ -697,12 +737,12 @@ if __name__ == "__main__":
                 }
 
                 try:
-                    for future in tqdm(as_completed(futures),
-                                       total=len(futures),
+                    for future in tqdm(as_completed(outer_futures),
+                                       total=len(outer_futures),
                                        desc="Total Progress",
                                        position=0,
                                        leave=True):
-                        region_id = futures[future]
+                        region_id = outer_futures[future]
                         try:
                             result_msg = future.result()
                             if "Aborted" in result_msg:
@@ -716,12 +756,16 @@ if __name__ == "__main__":
                                 f"[X] Region '{region_id}' failed: {exc}")
                 except KeyboardInterrupt:
                     tqdm.write(
-                        "\n\n[!] Ctrl+C detected! Sending shutdown signal to all active workers..."
-                    )
-                    tqdm.write(
-                        "[!] Please wait a few seconds. The script is safely flushing data and sealing your .gz files to prevent corruption."
+                        "\n\n[!] Ctrl+C detected! Cancelling tasks and forcing clean shutdown..."
                     )
                     shutdown_event.set()
+
+                    for f in outer_futures:
+                        f.cancel()
+
+                    tqdm.write(
+                        "[!] Sealing .gz files. Script will exit in just a few seconds..."
+                    )
 
         finally:
             print('\033[?25h', end="")
