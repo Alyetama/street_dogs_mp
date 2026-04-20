@@ -1,6 +1,7 @@
 import argparse
 import os
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -41,6 +42,22 @@ def main():
         help=
         f"Number of concurrent workers (default: {default_workers} based on your CPU count)."
     )
+    parser.add_argument(
+        '-s',
+        '--substring',
+        type=str,
+        default="",
+        help=
+        "Only check files whose path contains this substring (e.g., 'Pacific_Ocean'). Default is all files."
+    )
+    parser.add_argument(
+        '-i',
+        '--ignore-recent',
+        type=float,
+        default=0.0,
+        help=
+        "Ignore files modified within the last X hours (e.g., 1.5 to ignore files changed in the last 1.5 hours)."
+    )
 
     args = parser.parse_args()
 
@@ -49,14 +66,27 @@ def main():
         print(f"Error: Directory '{TARGET_DIR}' not found in current path.")
         return
 
-    gz_files = list(target_path.rglob("*.gz"))
+    current_time = time.time()
+    cutoff_time = current_time - (args.ignore_recent * 3600)
+
+    gz_files = []
+
+    for f in target_path.rglob("*.gz"):
+        if args.substring and args.substring not in str(f):
+            continue
+
+        if args.ignore_recent > 0 and f.stat().st_mtime >= cutoff_time:
+            continue
+
+        gz_files.append(f)
+
     total_files = len(gz_files)
 
     if total_files == 0:
-        print(f"No .gz files found in '{TARGET_DIR}'.")
+        print(f"No .gz files found matching the criteria in '{TARGET_DIR}'.")
         return
 
-    print(f"Found {total_files} .gz files.")
+    print(f"Found {total_files} .gz files matching criteria.")
     print(f"Starting concurrent scan with {args.workers} workers...")
 
     corrupted_files = []
@@ -71,7 +101,6 @@ def main():
 
             if result:
                 corrupted_files.append(result)
-
                 print(f"\r\033[K[!] Corrupted file detected: {result}")
 
             print(f"Scanning: {processed}/{total_files} files...",
