@@ -58,6 +58,13 @@ def main():
         help=
         "Ignore files modified within the last X hours (e.g., 1.5 to ignore files changed in the last 1.5 hours)."
     )
+    parser.add_argument(
+        '-c',
+        '--clear-completed',
+        action='store_true',
+        help=
+        "Remove the region entry from completed_regions.txt if any corrupted file is found within it."
+    )
 
     args = parser.parse_args()
 
@@ -114,6 +121,46 @@ def main():
         return
 
     print("-" * 48)
+
+    if args.clear_completed:
+        corrupted_regions = set()
+        for file_path in corrupted_files:
+            try:
+                region_name = file_path.relative_to(target_path).parts[0]
+                corrupted_regions.add(region_name)
+            except ValueError:
+                pass
+
+        if corrupted_regions:
+            completed_txt = target_path / "completed_regions.txt"
+            if completed_txt.exists():
+                with open(completed_txt, 'r') as f:
+                    lines = f.readlines()
+
+                new_lines = []
+                removed_count = 0
+
+                for line in lines:
+                    region_entry = line.strip()
+
+                    normalized_entry = region_entry.replace(" ", "_")
+
+                    if normalized_entry in corrupted_regions:
+                        removed_count += 1
+                        print(
+                            f"[-] Removed from completed list: {region_entry}")
+                    else:
+                        new_lines.append(line)
+
+                if removed_count > 0:
+                    with open(completed_txt, 'w') as f:
+                        f.writelines(new_lines)
+            else:
+                print(
+                    f"[!] Warning: {completed_txt} not found. Cannot update completed regions."
+                )
+
+        print("-" * 48)
 
     delete_all = args.delete_all
 
