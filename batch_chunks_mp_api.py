@@ -35,6 +35,7 @@ INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
 TRACKER_FILE = None
+IS_SLURM = False
 
 # Global event for handling graceful shutdowns across threads/processes
 shutdown_event = threading.Event()
@@ -44,9 +45,8 @@ def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
     global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
-    global shutdown_event
+    global shutdown_event, IS_SLURM
 
-    # Ignore SIGINT (Ctrl+C) in child processes so they don't crash instantly.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     shutdown_event = event
@@ -59,6 +59,7 @@ def init_worker(config, event):
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
     TRACKER_FILE = config['TRACKER_FILE']
+    IS_SLURM = config['IS_SLURM']
 
 
 def slurm_signal_handler(signum, frame):
@@ -254,8 +255,9 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         with tqdm(total=len(land_bboxes),
                   desc=f"{desc_prefix} 1/5 BBoxes",
-                  position=pos,
-                  leave=False,
+                  position=0 if IS_SLURM else pos,
+                  leave=True if IS_SLURM else False,
+                  force_terminal=True if IS_SLURM else None,
                   mininterval=2.0) as pbar:
             # chunk size: 2,500
             for chunk in chunked_iterable(land_bboxes, 2500):
@@ -280,8 +282,9 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         with tqdm(total=len(unique_sequences),
                   desc=f"{desc_prefix} 2/5 Sequences",
-                  position=pos,
-                  leave=False,
+                  position=0 if IS_SLURM else pos,
+                  leave=True if IS_SLURM else False,
+                  force_terminal=True if IS_SLURM else None,
                   mininterval=2.0) as pbar:
             for chunk in chunked_iterable(unique_sequences, 2500):
                 if shutdown_event.is_set(): break
@@ -337,8 +340,9 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 3/5 Metadata",
-                      position=pos,
-                      leave=False,
+                      position=0 if IS_SLURM else pos,
+                      leave=True if IS_SLURM else False,
+                      force_terminal=True if IS_SLURM else None,
                       mininterval=2.0) as pbar:
                 for chunk in chunked_iterable(missing_ids, 2500):
                     if shutdown_event.is_set(): break
@@ -399,8 +403,9 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 4/5 Detections",
-                      position=pos,
-                      leave=False,
+                      position=0 if IS_SLURM else pos,
+                      leave=True if IS_SLURM else False,
+                      force_terminal=True if IS_SLURM else None,
                       mininterval=2.0) as pbar:
                 for chunk in chunked_iterable(missing_ids, 2500):
                     if shutdown_event.is_set(): break
@@ -628,8 +633,9 @@ def process_region(west,
             with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
                 with tqdm(total=len(download_tasks),
                           desc=f"{desc_prefix} 5/5 Downloads",
-                          position=pos,
-                          leave=False,
+                          position=0 if IS_SLURM else pos,
+                          leave=True if IS_SLURM else False,
+                          force_terminal=True if IS_SLURM else None,
                           mininterval=2.0) as pbar:
                     for chunk in chunked_iterable(download_tasks, 2500):
                         if shutdown_event.is_set(): break
@@ -713,6 +719,7 @@ if __name__ == "__main__":
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
     TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
+    IS_SLURM = args.slurm
 
     token_env_name = f"MLY_KEY_{args.token}" if args.token else "MLY_KEY"
     MLY_KEY = os.environ.get(token_env_name)
@@ -811,7 +818,8 @@ if __name__ == "__main__":
                 'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
-                'TRACKER_FILE': TRACKER_FILE
+                'TRACKER_FILE': TRACKER_FILE,
+                'IS_SLURM': IS_SLURM
             }
 
             with ProcessPoolExecutor(max_workers=OUTER_MAX_WORKERS,
