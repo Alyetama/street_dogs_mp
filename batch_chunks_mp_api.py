@@ -25,7 +25,7 @@ from urllib3.util.retry import Retry
 load_dotenv()
 
 # --- Global defaults (Overridden by argparse in __main__) ---
-MLY_KEY = os.environ.get('MLY_KEY')
+MLY_KEY = None
 ZOOM_LEVEL = 14
 GRID_CSV_FILE = None
 VISUALIZE = False
@@ -39,7 +39,7 @@ TRACKER_FILE = None
 
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event."""
-    global ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
+    global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
     global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
     global shutdown_event
 
@@ -47,6 +47,7 @@ def init_worker(config, event):
 
     shutdown_event = event
 
+    MLY_KEY = config['MLY_KEY']
     ZOOM_LEVEL = config['ZOOM_LEVEL']
     VISUALIZE = config['VISUALIZE']
     DOWNLOAD_IMAGES = config['DOWNLOAD_IMAGES']
@@ -637,9 +638,6 @@ def process_region(west, south, east, north, unique_region_id, run_name):
 
 
 if __name__ == "__main__":
-    if not MLY_KEY:
-        raise ValueError("MLY_KEY environment variable is missing.")
-
     parser = argparse.ArgumentParser(
         description="Mapillary Ground Animal API Downloader")
     parser.add_argument(
@@ -673,6 +671,11 @@ if __name__ == "__main__":
                         type=str,
                         default='grid_runs',
                         help="Output directory (default: grid_runs)")
+    parser.add_argument(
+        '--token',
+        type=int,
+        default=None,
+        help="Token index to use (e.g., 1 for MLY_KEY_1). Defaults to MLY_KEY")
 
     args = parser.parse_args()
 
@@ -685,6 +688,12 @@ if __name__ == "__main__":
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
     TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
+
+    token_env_name = f"MLY_KEY_{args.token}" if args.token else "MLY_KEY"
+    MLY_KEY = os.environ.get(token_env_name)
+
+    if not MLY_KEY:
+        raise ValueError(f"{token_env_name} environment variable is missing.")
 
     print('\033[?25l', end="")
     os.makedirs(PARENT_DIR, exist_ok=True)
@@ -716,6 +725,7 @@ if __name__ == "__main__":
             shutdown_event = m.Event()
 
             worker_config = {
+                'MLY_KEY': MLY_KEY,
                 'ZOOM_LEVEL': ZOOM_LEVEL,
                 'VISUALIZE': VISUALIZE,
                 'DOWNLOAD_IMAGES': DOWNLOAD_IMAGES,
