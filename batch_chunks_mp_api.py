@@ -257,7 +257,6 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                   desc=f"{desc_prefix} 1/5 BBoxes",
                   position=0 if IS_SLURM else pos,
                   leave=True if IS_SLURM else False,
-                  force_terminal=True if IS_SLURM else None,
                   mininterval=2.0) as pbar:
             # chunk size: 2,500
             for chunk in chunked_iterable(land_bboxes, 2500):
@@ -284,7 +283,6 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                   desc=f"{desc_prefix} 2/5 Sequences",
                   position=0 if IS_SLURM else pos,
                   leave=True if IS_SLURM else False,
-                  force_terminal=True if IS_SLURM else None,
                   mininterval=2.0) as pbar:
             for chunk in chunked_iterable(unique_sequences, 2500):
                 if shutdown_event.is_set(): break
@@ -342,7 +340,6 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                       desc=f"{desc_prefix} 3/5 Metadata",
                       position=0 if IS_SLURM else pos,
                       leave=True if IS_SLURM else False,
-                      force_terminal=True if IS_SLURM else None,
                       mininterval=2.0) as pbar:
                 for chunk in chunked_iterable(missing_ids, 2500):
                     if shutdown_event.is_set(): break
@@ -405,7 +402,6 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                       desc=f"{desc_prefix} 4/5 Detections",
                       position=0 if IS_SLURM else pos,
                       leave=True if IS_SLURM else False,
-                      force_terminal=True if IS_SLURM else None,
                       mininterval=2.0) as pbar:
                 for chunk in chunked_iterable(missing_ids, 2500):
                     if shutdown_event.is_set(): break
@@ -635,7 +631,6 @@ def process_region(west,
                           desc=f"{desc_prefix} 5/5 Downloads",
                           position=0 if IS_SLURM else pos,
                           leave=True if IS_SLURM else False,
-                          force_terminal=True if IS_SLURM else None,
                           mininterval=2.0) as pbar:
                     for chunk in chunked_iterable(download_tasks, 2500):
                         if shutdown_event.is_set(): break
