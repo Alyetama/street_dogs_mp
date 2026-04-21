@@ -36,13 +36,17 @@ SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
 TRACKER_FILE = None
 
+# Global event for handling graceful shutdowns across threads/processes
+shutdown_event = threading.Event()
+
 
 def init_worker(config, event):
-    """Initializes worker processes with the parsed CLI config and shutdown event."""
+    """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
     global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
     global shutdown_event
 
+    # Ignore SIGINT (Ctrl+C) in child processes so they don't crash instantly.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     shutdown_event = event
@@ -55,6 +59,14 @@ def init_worker(config, event):
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
     TRACKER_FILE = config['TRACKER_FILE']
+
+
+def slurm_signal_handler(signum, frame):
+    """Catches scancel (SIGTERM) or Ctrl+C (SIGINT) in SLURM mode to exit safely."""
+    tqdm.write(
+        f"\n[!] Shutdown signal ({signum}) received! Sealing files to prevent corruption..."
+    )
+    shutdown_event.set()
 
 
 def chunked_iterable(iterable, size):
@@ -106,7 +118,6 @@ def clean_jsonl_file(filepath):
                 os.remove(temp_filepath)
 
 
-# --- API Fetcher Helpers ---
 def get_sequences_for_bbox(bbox, session):
     bbox_str = f'{bbox.west},{bbox.south},{bbox.east},{bbox.north}'
     url = f'https://graph.mapillary.com/images?access_token={MLY_KEY}&fields=id,sequence&bbox={bbox_str}'
@@ -217,7 +228,6 @@ def build_mapillary_dataframe_from_records(records):
     return df[expected_columns]
 
 
-# --- Phase Handlers with Embedded TQDM Progress ---
 def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                        pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
@@ -338,6 +348,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                         for img_id in chunk
                     }
                     for future in as_completed(futures):
+                        # AGGRESSIVE CANCELLATION
                         if shutdown_event.is_set():
                             for f in futures:
                                 f.cancel()
@@ -399,6 +410,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                         for img_id in chunk
                     }
                     for future in as_completed(futures):
+                        # AGGRESSIVE CANCELLATION
                         if shutdown_event.is_set():
                             for f in futures:
                                 f.cancel()
@@ -421,13 +433,20 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
 
 # --- The Master Process Worker ---
-def process_region(west, south, east, north, unique_region_id, run_name):
+def process_region(west,
+                   south,
+                   east,
+                   north,
+                   unique_region_id,
+                   run_name,
+                   pos=None):
     if shutdown_event.is_set():
         return f"Aborted '{unique_region_id}' safely."
 
-    worker_name = multiprocessing.current_process().name
-    match = re.search(r'\d+', worker_name)
-    pos = int(match.group()) if match else 1
+    if pos is None:
+        worker_name = multiprocessing.current_process().name
+        match = re.search(r'\d+', worker_name)
+        pos = int(match.group()) if match else 1
 
     safe_region_id = sanitize_folder_name(unique_region_id)
     region_run_id = unique_region_id.replace('_', ' ')
@@ -644,6 +663,12 @@ if __name__ == "__main__":
         'grid_csv_file',
         type=str,
         help="Path to the input CSV file (e.g., indian_ocean.csv)")
+    parser.add_argument(
+        '--slurm',
+        action='store_true',
+        help=
+        "Run in SLURM Array mode (processes 1 task mapping to SLURM_ARRAY_TASK_ID)"
+    )
     parser.add_argument('--zoom-level',
                         type=int,
                         default=14,
@@ -705,17 +730,71 @@ if __name__ == "__main__":
         with open(TRACKER_FILE, 'r') as f:
             completed_regions = {line.strip() for line in f if line.strip()}
 
-    tasks_to_run = [
-        (row['sw_lon'], row['sw_lat'], row['ne_lon'], row['ne_lat'],
-         f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-         ) for _, row in df_grid.iterrows() if
-        f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-        not in completed_regions
-    ]
+    if args.slurm:
+        # ==========================================
+        #           SLURM EXECUTION PATH
+        # ==========================================
+        signal.signal(signal.SIGINT, slurm_signal_handler)
+        signal.signal(signal.SIGTERM, slurm_signal_handler)
 
-    if not tasks_to_run:
-        print(f"All {len(df_grid)} regions have already been completed.")
+        task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", 0))
+
+        if task_id >= len(df_grid):
+            print(
+                f"Task ID {task_id} is out of bounds for grid with {len(df_grid)} regions."
+            )
+            exit(0)
+
+        row = df_grid.iloc[task_id]
+        unique_region_id = f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
+
+        if unique_region_id in completed_regions:
+            print(f"Region {unique_region_id} is already completed. Exiting.")
+            exit(0)
+
+        tqdm.write(
+            f"Task {task_id}: Initiating single-region processing for {unique_region_id}. Run ID: {GLOBAL_RUN_NAME}"
+        )
+
+        try:
+            result_msg = process_region(row['sw_lon'],
+                                        row['sw_lat'],
+                                        row['ne_lon'],
+                                        row['ne_lat'],
+                                        unique_region_id,
+                                        GLOBAL_RUN_NAME,
+                                        pos=1)
+
+            if "Aborted" in result_msg:
+                tqdm.write(f"[-] {result_msg}")
+            else:
+                tqdm.write(f"[\u2713] {result_msg}")
+                # Safely append to tracker file
+                with open(TRACKER_FILE, 'a') as f:
+                    f.write(f"{unique_region_id}\n")
+
+        except Exception as exc:
+            tqdm.write(f"[X] Region '{unique_region_id}' failed: {exc}")
+        finally:
+            print('\033[?25h', end="")
+
     else:
+        # ==========================================
+        #        LOCAL MULTIPROCESSING PATH
+        # ==========================================
+        tasks_to_run = [
+            (row['sw_lon'], row['sw_lat'], row['ne_lon'], row['ne_lat'],
+             f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
+             ) for _, row in df_grid.iterrows() if
+            f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
+            not in completed_regions
+        ]
+
+        if not tasks_to_run:
+            print(f"All {len(df_grid)} regions have already been completed.")
+            print('\033[?25h', end="")
+            exit(0)
+
         tqdm.write(
             f"Initiating multi-region processing. {len(tasks_to_run)} tasks remaining. Run ID: {GLOBAL_RUN_NAME}"
         )
