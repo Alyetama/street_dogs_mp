@@ -6,6 +6,9 @@
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=10                    # Matches INNER_MAX_WORKERS
 #SBATCH --mem=32G
+#SBATCH --signal=B:INT@120
+
+REGION_FILE="<region>.csv"
 
 module load anaconda
 
@@ -16,7 +19,8 @@ mkdir -p logs
 
 echo "Starting Mapillary processing for Array Task ID: $SLURM_ARRAY_TASK_ID"
 
-python slurm_batch_chunks_mp_api.py '<region>.csv' \
-    --inner-max-workers $SLURM_CPUS_PER_TASK \
+exec python batch_chunks_mp_api.py "$REGION_FILE" \
+    --inner-max-workers $((SLURM_CPUS_PER_TASK * 4)) \
     --parent-dir grid_runs \
-    --no-download-images
+    --no-download-images \
+    --slurm
