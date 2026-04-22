@@ -8,3 +8,5 @@ tqdm
 contextily
 matplotlib
 urllib3
+orjson
+orjsonl
