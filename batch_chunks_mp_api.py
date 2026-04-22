@@ -2,7 +2,6 @@ import argparse
 import gc
 import gzip
 import itertools
-import json
 import multiprocessing
 import os
 import re
@@ -13,6 +12,8 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
 from datetime import datetime
 
 import mercantile
+import orjson
+import orjsonl
 import pandas as pd
 import piexif
 import requests
@@ -35,6 +36,8 @@ INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
 TRACKER_FILE = None
+API_CHUNK_SIZE = 2500
+CSV_CHUNK_SIZE = 250000
 
 # Global event for handling graceful shutdowns across threads/processes
 shutdown_event = threading.Event()
@@ -44,6 +47,7 @@ def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
     global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
+    global API_CHUNK_SIZE, CSV_CHUNK_SIZE
     global shutdown_event
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -58,6 +62,8 @@ def init_worker(config, event):
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
     TRACKER_FILE = config['TRACKER_FILE']
+    API_CHUNK_SIZE = config['API_CHUNK_SIZE']
+    CSV_CHUNK_SIZE = config['CSV_CHUNK_SIZE']
 
 
 def slurm_signal_handler(signum, frame):
@@ -90,7 +96,7 @@ def clean_jsonl_file(filepath):
 
     is_corrupt = False
     try:
-        with gzip.open(filepath, 'rt', encoding='utf-8') as f:
+        with gzip.open(filepath, 'rb') as f:
             for line in f:
                 pass
     except (EOFError, OSError):
@@ -99,15 +105,15 @@ def clean_jsonl_file(filepath):
     if is_corrupt:
         temp_filepath = filepath + ".tmp"
         try:
-            with gzip.open(filepath, 'rt', encoding='utf-8') as f_in, \
-                 gzip.open(temp_filepath, 'wt', encoding='utf-8') as f_out:
+            with gzip.open(filepath, 'rb') as f_in, \
+                 gzip.open(temp_filepath, 'wb') as f_out:
                 try:
                     for line in f_in:
                         if not line.strip(): continue
                         try:
-                            json.loads(line)
+                            orjson.loads(line)
                             f_out.write(line)
-                        except json.JSONDecodeError:
+                        except orjson.JSONDecodeError:
                             pass
                 except (EOFError, OSError):
                     pass
@@ -233,9 +239,9 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                                    f'topology_checkpoint_{sub_id}.json.gz')
     if os.path.exists(checkpoint_file):
         try:
-            with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
+            with gzip.open(checkpoint_file, 'rb') as f:
+                return orjson.loads(f.read())
+        except orjson.JSONDecodeError:
             pass
 
     tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
@@ -257,7 +263,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                   leave=False,
                   mininterval=2.0) as pbar:
             # chunk size: 2,500
-            for chunk in chunked_iterable(land_bboxes, 2500):
+            for chunk in chunked_iterable(land_bboxes, API_CHUNK_SIZE):
                 if shutdown_event.is_set(): break
                 futures = {
                     executor.submit(get_sequences_for_bbox, bbox, session):
@@ -282,7 +288,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                   position=pos,
                   leave=False,
                   mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(unique_sequences, 2500):
+            for chunk in chunked_iterable(unique_sequences, API_CHUNK_SIZE):
                 if shutdown_event.is_set(): break
                 futures = {
                     executor.submit(get_images_for_sequence, seq, session): seq
@@ -303,8 +309,8 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
 
     if not shutdown_event.is_set():
         temp_checkpoint = checkpoint_file + '.tmp'
-        with gzip.open(temp_checkpoint, 'wt', encoding='utf-8') as f:
-            json.dump(image_to_sequence_map, f)
+        with gzip.open(temp_checkpoint, 'wb') as f:
+            f.write(orjson.dumps(image_to_sequence_map))
         os.replace(temp_checkpoint, checkpoint_file)
 
     return image_to_sequence_map
@@ -319,12 +325,12 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
+        with gzip.open(checkpoint_file, 'rb') as f:
             for line in f:
                 if line.strip():
-                    match = re.search(r'"image_id"\s*:\s*"([^"]+)"', line)
+                    match = re.search(b'"image_id"\s*:\s*"([^"]+)"', line)
                     if match:
-                        completed_ids.add(match.group(1))
+                        completed_ids.add(match.group(1).decode('utf-8'))
 
     missing_ids = [
         img_id for img_id in image_ids if img_id not in completed_ids
@@ -332,14 +338,14 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-    with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
+    with gzip.open(checkpoint_file, 'ab') as f:
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 3/5 Metadata",
                       position=pos,
                       leave=False,
                       mininterval=2.0) as pbar:
-                for chunk in chunked_iterable(missing_ids, 2500):
+                for chunk in chunked_iterable(missing_ids, API_CHUNK_SIZE):
                     if shutdown_event.is_set(): break
                     futures = {
                         executor.submit(fetch_image_data, img_id, fields_str, session):
@@ -357,10 +363,10 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                         if data is not None:
                             with write_lock:
                                 f.write(
-                                    json.dumps({
+                                    orjson.dumps({
                                         'image_id': image_id,
                                         'data': data
-                                    }) + '\n')
+                                    }) + b'\n')
                         pbar.update(1)
 
                         del futures[future]
@@ -380,12 +386,12 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with gzip.open(checkpoint_file, 'rt', encoding='utf-8') as f:
+        with gzip.open(checkpoint_file, 'rb') as f:
             for line in f:
                 if line.strip():
-                    match = re.search(r'"image_id"\s*:\s*"([^"]+)"', line)
+                    match = re.search(b'"image_id"\s*:\s*"([^"]+)"', line)
                     if match:
-                        completed_ids.add(match.group(1))
+                        completed_ids.add(match.group(1).decode('utf-8'))
 
     missing_ids = [
         img_id for img_id in image_to_seq_map.keys()
@@ -394,14 +400,14 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-    with gzip.open(checkpoint_file, 'at', encoding='utf-8') as f:
+    with gzip.open(checkpoint_file, 'ab') as f:
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 4/5 Detections",
                       position=pos,
                       leave=False,
                       mininterval=2.0) as pbar:
-                for chunk in chunked_iterable(missing_ids, 2500):
+                for chunk in chunked_iterable(missing_ids, API_CHUNK_SIZE):
                     if shutdown_event.is_set(): break
                     futures = {
                         executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
@@ -418,10 +424,10 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                         image_id, features = future.result()
                         with write_lock:
                             f.write(
-                                json.dumps({
+                                orjson.dumps({
                                     'image_id': image_id,
                                     'features': features
-                                }) + '\n')
+                                }) + b'\n')
                         pbar.update(1)
                         del futures[future]
                         del features
@@ -518,15 +524,12 @@ def process_region(west,
 
         if os.path.exists(animal_checkpoint):
             try:
-                with gzip.open(animal_checkpoint, 'rt', encoding='utf-8') as f:
-                    for line in f:
-                        if shutdown_event.is_set(): break
-                        if not line.strip(): continue
-                        record = json.loads(line)
-                        features = record.get('features', [])
-                        if features:
-                            extracted_image_ids.add(record['image_id'])
-                            ground_animal_features.extend(features)
+                for record in orjsonl.stream(animal_checkpoint):
+                    if shutdown_event.is_set(): break
+                    features = record.get('features', [])
+                    if features:
+                        extracted_image_ids.add(record['image_id'])
+                        ground_animal_features.extend(features)
             except Exception as e:
                 raise RuntimeError(
                     f"\n[!] CORRUPT FILE DETECTED: {animal_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
@@ -540,8 +543,8 @@ def process_region(west,
                                            f'ground_animals_{sub_id}.json.gz')
             temp_json_path = final_json_path + '.tmp'
 
-            with gzip.open(temp_json_path, 'wt', encoding='utf-8') as f:
-                json.dump(ground_animal_features, f)
+            with gzip.open(temp_json_path, 'wb') as f:
+                f.write(orjson.dumps(ground_animal_features))
 
             os.replace(temp_json_path, final_json_path)
 
@@ -556,7 +559,6 @@ def process_region(west,
 
         records = []
         download_tasks = []
-        chunk_size = 1000
 
         def process_metadata_chunk(chunk_records):
             df = build_mapillary_dataframe_from_records(chunk_records)
@@ -593,23 +595,18 @@ def process_region(west,
 
         if os.path.exists(metadata_checkpoint):
             try:
-                with gzip.open(metadata_checkpoint, 'rt',
-                               encoding='utf-8') as f:
-                    for line in f:
-                        if shutdown_event.is_set(): break
-                        if not line.strip(): continue
-                        record = json.loads(line)
-                        row = record['data'].copy()
-                        row['image_id'] = record['image_id']
-                        if 'detections' in row and isinstance(
-                                row['detections'], dict):
-                            row['detections'] = row['detections'].get(
-                                'data', [])
-                        records.append(row)
+                for record in orjsonl.stream(metadata_checkpoint):
+                    if shutdown_event.is_set(): break
+                    row = record['data'].copy()
+                    row['image_id'] = record['image_id']
+                    if 'detections' in row and isinstance(
+                            row['detections'], dict):
+                        row['detections'] = row['detections'].get('data', [])
+                    records.append(row)
 
-                        if len(records) >= chunk_size:
-                            process_metadata_chunk(records)
-                            records = []
+                    if len(records) >= CSV_CHUNK_SIZE:
+                        process_metadata_chunk(records)
+                        records = []
             except Exception as e:
                 raise RuntimeError(
                     f"\n[!] CORRUPT FILE DETECTED: {metadata_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
@@ -630,7 +627,8 @@ def process_region(west,
                           position=pos,
                           leave=False,
                           mininterval=2.0) as pbar:
-                    for chunk in chunked_iterable(download_tasks, 2500):
+                    for chunk in chunked_iterable(download_tasks,
+                                                  API_CHUNK_SIZE):
                         if shutdown_event.is_set(): break
                         futures = {
                             executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
@@ -700,6 +698,17 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Token index to use (e.g., 1 for MLY_KEY_1). Defaults to MLY_KEY")
+    parser.add_argument(
+        '--api-chunk-size',
+        type=int,
+        default=2500,
+        help="Chunk size for multithreaded API requests (default: 2500)")
+    parser.add_argument(
+        '--csv-chunk-size',
+        type=int,
+        default=250000,
+        help="Chunk size for Pandas dataframe CSV generation (default: 250000)"
+    )
 
     args = parser.parse_args()
 
@@ -712,6 +721,8 @@ if __name__ == "__main__":
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
     TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
+    API_CHUNK_SIZE = args.api_chunk_size
+    CSV_CHUNK_SIZE = args.csv_chunk_size
 
     token_env_name = f"MLY_KEY_{args.token}" if args.token else "MLY_KEY"
     MLY_KEY = os.environ.get(token_env_name)
@@ -811,7 +822,9 @@ if __name__ == "__main__":
                 'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
-                'TRACKER_FILE': TRACKER_FILE
+                'TRACKER_FILE': TRACKER_FILE,
+                'API_CHUNK_SIZE': API_CHUNK_SIZE,
+                'CSV_CHUNK_SIZE': CSV_CHUNK_SIZE
             }
 
             with ProcessPoolExecutor(max_workers=OUTER_MAX_WORKERS,
