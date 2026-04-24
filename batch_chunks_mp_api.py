@@ -31,13 +31,14 @@ ZOOM_LEVEL = 14
 GRID_CSV_FILE = None
 VISUALIZE = False
 DOWNLOAD_IMAGES = True
+DOWNLOAD_ONLY = False
 OUTER_MAX_WORKERS = 5
 INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
 TRACKER_FILE = None
 API_CHUNK_SIZE = 2500
-CSV_CHUNK_SIZE = 250000
+CSV_CHUNK_SIZE = 10000
 
 # Global event for handling graceful shutdowns across threads/processes
 shutdown_event = threading.Event()
@@ -45,7 +46,7 @@ shutdown_event = threading.Event()
 
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
-    global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES
+    global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY
     global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
     global API_CHUNK_SIZE, CSV_CHUNK_SIZE
     global shutdown_event
@@ -58,6 +59,7 @@ def init_worker(config, event):
     ZOOM_LEVEL = config['ZOOM_LEVEL']
     VISUALIZE = config['VISUALIZE']
     DOWNLOAD_IMAGES = config['DOWNLOAD_IMAGES']
+    DOWNLOAD_ONLY = config['DOWNLOAD_ONLY']
     INNER_MAX_WORKERS = config['INNER_MAX_WORKERS']
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
@@ -328,7 +330,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
         with gzip.open(checkpoint_file, 'rb') as f:
             for line in f:
                 if line.strip():
-                    match = re.search(b'"image_id"\s*:\s*"([^"]+)"', line)
+                    match = re.search(rb'"image_id"\s*:\s*"([^"]+)"', line)
                     if match:
                         completed_ids.add(match.group(1).decode('utf-8'))
 
@@ -389,7 +391,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
         with gzip.open(checkpoint_file, 'rb') as f:
             for line in f:
                 if line.strip():
-                    match = re.search(b'"image_id"\s*:\s*"([^"]+)"', line)
+                    match = re.search(rb'"image_id"\s*:\s*"([^"]+)"', line)
                     if match:
                         completed_ids.add(match.group(1).decode('utf-8'))
 
@@ -459,6 +461,73 @@ def process_region(west,
     os.makedirs(region_dir, exist_ok=True)
     output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
+
+    # =========================================================
+    #                    DOWNLOAD-ONLY MODE
+    # =========================================================
+    if DOWNLOAD_ONLY:
+        animals_csv_path = os.path.join(
+            region_dir, f'ground_animals_{safe_region_id}.csv.gz')
+
+        if not os.path.exists(animals_csv_path):
+            return f"Skipped '{unique_region_id}': No ground_animals CSV found for download-only mode."
+
+        tqdm.write(
+            f"[{datetime.now().strftime('%H:%M:%S')}] [{region_run_id}] Loading CSV for Download-Only mode..."
+        )
+        try:
+            df = pd.read_csv(animals_csv_path,
+                             compression='gzip',
+                             low_memory=False)
+            if 'image_id' not in df.columns or 'thumb_original_url' not in df.columns:
+                return f"Skipped '{unique_region_id}': Required columns missing in CSV."
+
+            if 'captured_at' not in df.columns:
+                df['captured_at'] = None
+
+            download_tasks = []
+            for _, row in df.iterrows():
+                if pd.notna(row.get('thumb_original_url')):
+                    download_tasks.append(
+                        (row['image_id'], row['thumb_original_url'],
+                         row['captured_at']))
+
+        except pd.errors.EmptyDataError:
+            return f"Completed '{unique_region_id}' (CSV is empty)."
+        except Exception as e:
+            return f"Error reading CSV for '{unique_region_id}': {e}"
+
+        if not download_tasks:
+            return f"Completed '{unique_region_id}' (No images to download)."
+
+        tqdm.write(
+            f"[{datetime.now().strftime('%H:%M:%S')}] [{region_run_id}] Proceeding to download {len(download_tasks)} images..."
+        )
+
+        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+            with tqdm(total=len(download_tasks),
+                      desc=f"[{region_run_id}] Downloads",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                for chunk in chunked_iterable(download_tasks, API_CHUNK_SIZE):
+                    if shutdown_event.is_set(): break
+                    futures = {
+                        executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
+                        img_id
+                        for img_id, url, cap_at in chunk
+                    }
+                    for future in as_completed(futures):
+                        if shutdown_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                            break
+                        pbar.update(1)
+                        del futures[future]
+                    gc.collect()
+
+        return f"Completed '{unique_region_id}' (Downloaded {len(download_tasks)} images via Download-Only mode)."
+    # =========================================================
 
     session = requests.Session()
     retries = Retry(total=5,
@@ -677,6 +746,12 @@ if __name__ == "__main__":
                         dest='download_images',
                         action='store_false',
                         help="Disable downloading images (default: True)")
+    parser.add_argument(
+        '--download-only',
+        action='store_true',
+        help=
+        "Skip API fetching/CSV generation and ONLY download images from existing ground_animals CSVs."
+    )
     parser.add_argument('--outer-max-workers',
                         type=int,
                         default=5,
@@ -706,9 +781,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--csv-chunk-size',
         type=int,
-        default=250000,
-        help="Chunk size for Pandas dataframe CSV generation (default: 250000)"
-    )
+        default=10000,
+        help="Chunk size for Pandas dataframe CSV generation (default: 10000)")
 
     args = parser.parse_args()
 
@@ -819,6 +893,7 @@ if __name__ == "__main__":
                 'ZOOM_LEVEL': ZOOM_LEVEL,
                 'VISUALIZE': VISUALIZE,
                 'DOWNLOAD_IMAGES': DOWNLOAD_IMAGES,
+                'DOWNLOAD_ONLY': args.download_only,
                 'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
