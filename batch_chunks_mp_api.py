@@ -1,4 +1,5 @@
 import argparse
+import compression.zstd as zstd
 import gc
 import gzip
 import itertools
@@ -264,7 +265,6 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                   position=pos,
                   leave=False,
                   mininterval=2.0) as pbar:
-            # chunk size: 2,500
             for chunk in chunked_iterable(land_bboxes, API_CHUNK_SIZE):
                 if shutdown_event.is_set(): break
                 futures = {
@@ -355,7 +355,6 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                         for img_id in chunk
                     }
                     for future in as_completed(futures):
-                        # AGGRESSIVE CANCELLATION
                         if shutdown_event.is_set():
                             for f in futures:
                                 f.cancel()
@@ -417,7 +416,6 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                         for img_id in chunk
                     }
                     for future in as_completed(futures):
-                        # AGGRESSIVE CANCELLATION
                         if shutdown_event.is_set():
                             for f in futures:
                                 f.cancel()
@@ -462,12 +460,33 @@ def process_region(west,
     output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
 
+    all_csv_path = os.path.join(region_dir,
+                                f'all_data_{safe_region_id}.csv.zst')
+    animals_csv_path = os.path.join(
+        region_dir, f'ground_animals_{safe_region_id}.csv.zst')
+
+    if not DOWNLOAD_ONLY:
+        if os.path.exists(all_csv_path):
+            os.remove(all_csv_path)
+        if os.path.exists(animals_csv_path):
+            os.remove(animals_csv_path)
+
+        # Clean up any old gzip versions
+        old_all_csv_path = os.path.join(region_dir,
+                                        f'all_data_{safe_region_id}.csv.gz')
+        old_animals_csv_path = os.path.join(
+            region_dir, f'ground_animals_{safe_region_id}.csv.gz')
+        if os.path.exists(old_all_csv_path):
+            os.remove(old_all_csv_path)
+        if os.path.exists(old_animals_csv_path):
+            os.remove(old_animals_csv_path)
+
     # =========================================================
     #                    DOWNLOAD-ONLY MODE
     # =========================================================
     if DOWNLOAD_ONLY:
         animals_csv_path = os.path.join(
-            region_dir, f'ground_animals_{safe_region_id}.csv.gz')
+            region_dir, f'ground_animals_{safe_region_id}.csv.zst')
 
         if not os.path.exists(animals_csv_path):
             return f"Skipped '{unique_region_id}': No ground_animals CSV found for download-only mode."
@@ -476,9 +495,9 @@ def process_region(west,
             f"[{datetime.now().strftime('%H:%M:%S')}] [{region_run_id}] Loading CSV for Download-Only mode..."
         )
         try:
-            df = pd.read_csv(animals_csv_path,
-                             compression='gzip',
-                             low_memory=False)
+            with zstd.open(animals_csv_path, 'rt', encoding='utf-8') as f:
+                df = pd.read_csv(f, low_memory=False)
+
             if 'image_id' not in df.columns or 'thumb_original_url' not in df.columns:
                 return f"Skipped '{unique_region_id}': Required columns missing in CSV."
 
@@ -621,11 +640,6 @@ def process_region(west,
         total_animals_found += len(extracted_image_ids)
 
         # Step D: Process Metadata and Database Append
-        all_csv_path = os.path.join(region_dir,
-                                    f'all_data_{safe_region_id}.csv.gz')
-        animals_csv_path = os.path.join(
-            region_dir, f'ground_animals_{safe_region_id}.csv.gz')
-
         records = []
         download_tasks = []
 
@@ -640,18 +654,18 @@ def process_region(west,
 
             animals_df = df[df['image_id'].isin(extracted_image_ids)].copy()
 
-            df.to_csv(all_csv_path,
-                      mode='a',
-                      header=not os.path.exists(all_csv_path),
-                      index=False,
-                      compression='gzip')
+            all_exists = os.path.exists(all_csv_path)
+            with zstd.open(all_csv_path, 'at', encoding='utf-8') as f:
+                df.to_csv(f, mode='a', header=not all_exists, index=False)
 
             if not animals_df.empty:
-                animals_df.to_csv(animals_csv_path,
-                                  mode='a',
-                                  header=not os.path.exists(animals_csv_path),
-                                  index=False,
-                                  compression='gzip')
+                anim_exists = os.path.exists(animals_csv_path)
+                with zstd.open(animals_csv_path, 'at', encoding='utf-8') as f:
+                    animals_df.to_csv(f,
+                                      mode='a',
+                                      header=not anim_exists,
+                                      index=False)
+
                 for _, row in animals_df.iterrows():
                     if pd.notna(row.get('thumb_original_url')):
                         download_tasks.append(
@@ -705,7 +719,6 @@ def process_region(west,
                             for img_id, url, cap_at in chunk
                         }
                         for future in as_completed(futures):
-                            # AGGRESSIVE CANCELLATION
                             if shutdown_event.is_set():
                                 for f in futures:
                                     f.cancel()
@@ -854,7 +867,6 @@ if __name__ == "__main__":
                 tqdm.write(f"[-] {result_msg}")
             else:
                 tqdm.write(f"[\u2713] {result_msg}")
-                # Safely append to tracker file
                 with open(TRACKER_FILE, 'a') as f:
                     f.write(f"{unique_region_id}\n")
 
@@ -941,7 +953,7 @@ if __name__ == "__main__":
                         f.cancel()
 
                     tqdm.write(
-                        "[!] Sealing .gz files. Script will exit in just a few seconds..."
+                        "[!] Sealing .gz/.zst files. Script will exit in just a few seconds..."
                     )
 
         finally:
