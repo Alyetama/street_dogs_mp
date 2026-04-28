@@ -1,5 +1,4 @@
 import argparse
-import compression.zstd as zstd
 import gc
 import gzip
 import itertools
@@ -12,6 +11,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import compression.zstd as zstd
 import mercantile
 import orjson
 import orjsonl
@@ -33,6 +33,7 @@ GRID_CSV_FILE = None
 VISUALIZE = False
 DOWNLOAD_IMAGES = True
 DOWNLOAD_ONLY = False
+DOWNLOAD_MAX_WORKERS = 10
 OUTER_MAX_WORKERS = 5
 INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
@@ -47,7 +48,7 @@ shutdown_event = threading.Event()
 
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
-    global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY
+    global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
     global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
     global API_CHUNK_SIZE, CSV_CHUNK_SIZE
     global shutdown_event
@@ -61,6 +62,7 @@ def init_worker(config, event):
     VISUALIZE = config['VISUALIZE']
     DOWNLOAD_IMAGES = config['DOWNLOAD_IMAGES']
     DOWNLOAD_ONLY = config['DOWNLOAD_ONLY']
+    DOWNLOAD_MAX_WORKERS = config['DOWNLOAD_MAX_WORKERS']
     INNER_MAX_WORKERS = config['INNER_MAX_WORKERS']
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
@@ -179,12 +181,13 @@ def fetch_animal_detections(image_id, seq_id, session):
         return image_id, []
 
 
-def download_single_image(image_id, url, captured_at, output_folder_name):
+def download_single_image(image_id, url, captured_at, output_folder_name,
+                          session):
     filepath = os.path.join(output_folder_name, f"{image_id}.jpg")
     temp_filepath = filepath + ".tmp"
     if os.path.exists(filepath): return image_id, True
     try:
-        response = requests.get(url, stream=True, timeout=15)
+        response = session.get(url, stream=True, timeout=15)
         response.raise_for_status()
         with open(temp_filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -523,6 +526,16 @@ def process_region(west,
             f"[{datetime.now().strftime('%H:%M:%S')}] [{region_run_id}] Proceeding to download {len(download_tasks)} images..."
         )
 
+        dl_session = requests.Session()
+        retries = Retry(total=5,
+                        backoff_factor=1.5,
+                        status_forcelist=[429, 500, 502, 503, 504])
+        dl_session.mount(
+            'https://',
+            HTTPAdapter(max_retries=retries,
+                        pool_connections=DOWNLOAD_MAX_WORKERS,
+                        pool_maxsize=DOWNLOAD_MAX_WORKERS))
+
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(download_tasks),
                       desc=f"[{region_run_id}] Downloads",
@@ -532,7 +545,7 @@ def process_region(west,
                 for chunk in chunked_iterable(download_tasks, API_CHUNK_SIZE):
                     if shutdown_event.is_set(): break
                     futures = {
-                        executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
+                        executor.submit(download_single_image, img_id, url, cap_at, output_folder_name, dl_session):
                         img_id
                         for img_id, url, cap_at in chunk
                     }
@@ -704,7 +717,8 @@ def process_region(west,
 
         # Step E: Download
         if DOWNLOAD_IMAGES and download_tasks:
-            with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+            with ThreadPoolExecutor(
+                    max_workers=DOWNLOAD_MAX_WORKERS) as executor:
                 with tqdm(total=len(download_tasks),
                           desc=f"{desc_prefix} 5/5 Downloads",
                           position=pos,
@@ -714,7 +728,7 @@ def process_region(west,
                                                   API_CHUNK_SIZE):
                         if shutdown_event.is_set(): break
                         futures = {
-                            executor.submit(download_single_image, img_id, url, cap_at, output_folder_name):
+                            executor.submit(download_single_image, img_id, url, cap_at, output_folder_name, session):
                             img_id
                             for img_id, url, cap_at in chunk
                         }
@@ -765,6 +779,11 @@ if __name__ == "__main__":
         help=
         "Skip API fetching/CSV generation and ONLY download images from existing ground_animals CSVs."
     )
+    parser.add_argument(
+        '--download-max-workers',
+        type=int,
+        default=10,
+        help="Max threads specifically for image downloading (default: 10)")
     parser.add_argument('--outer-max-workers',
                         type=int,
                         default=5,
@@ -823,10 +842,9 @@ if __name__ == "__main__":
     GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     completed_regions = set()
-    if os.path.exists(TRACKER_FILE):
+    if not args.download_only and os.path.exists(TRACKER_FILE):
         with open(TRACKER_FILE, 'r') as f:
             completed_regions = {line.strip() for line in f if line.strip()}
-
     if args.slurm:
         # ==========================================
         #           SLURM EXECUTION PATH
@@ -867,8 +885,9 @@ if __name__ == "__main__":
                 tqdm.write(f"[-] {result_msg}")
             else:
                 tqdm.write(f"[\u2713] {result_msg}")
-                with open(TRACKER_FILE, 'a') as f:
-                    f.write(f"{unique_region_id}\n")
+                if not args.download_only:
+                    with open(TRACKER_FILE, 'a') as f:
+                        f.write(f"{unique_region_id}\n")
 
         except Exception as exc:
             tqdm.write(f"[X] Region '{unique_region_id}' failed: {exc}")
@@ -906,6 +925,7 @@ if __name__ == "__main__":
                 'VISUALIZE': VISUALIZE,
                 'DOWNLOAD_IMAGES': DOWNLOAD_IMAGES,
                 'DOWNLOAD_ONLY': args.download_only,
+                'DOWNLOAD_MAX_WORKERS': args.download_max_workers,
                 'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
@@ -938,8 +958,9 @@ if __name__ == "__main__":
                                 tqdm.write(f"[-] {result_msg}")
                             else:
                                 tqdm.write(f"[\u2713] {result_msg}")
-                                with open(TRACKER_FILE, 'a') as f:
-                                    f.write(f"{region_id}\n")
+                                if not args.download_only:
+                                    with open(TRACKER_FILE, 'a') as f:
+                                        f.write(f"{region_id}\n")
                         except Exception as exc:
                             tqdm.write(
                                 f"[X] Region '{region_id}' failed: {exc}")
