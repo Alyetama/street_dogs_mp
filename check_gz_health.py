@@ -65,6 +65,15 @@ def main():
         help=
         "Remove the region entry from completed_regions.txt if any corrupted file is found within it."
     )
+    parser.add_argument(
+        '-e',
+        '--exclude-ext',
+        type=str,
+        nargs='*',
+        default=[],
+        help=
+        "Exclude files ending with specific sub-extensions (e.g., '.csv.gz' 'metadata.json.gz'). Can specify multiple."
+    )
 
     args = parser.parse_args()
 
@@ -83,6 +92,11 @@ def main():
             continue
 
         if args.ignore_recent > 0 and f.stat().st_mtime >= cutoff_time:
+            continue
+
+        # Exclude files that end with any of the provided sub-extensions
+        if args.exclude_ext and any(
+                str(f).endswith(ext) for ext in args.exclude_ext):
             continue
 
         gz_files.append(f)
