@@ -1,6 +1,5 @@
 import argparse
 import gc
-import gzip
 import itertools
 import multiprocessing
 import os
@@ -14,7 +13,6 @@ from datetime import datetime
 import compression.zstd as zstd
 import mercantile
 import orjson
-import orjsonl
 import pandas as pd
 import piexif
 import requests
@@ -41,6 +39,9 @@ PARENT_DIR = 'grid_runs'
 TRACKER_FILE = None
 API_CHUNK_SIZE = 2500
 CSV_CHUNK_SIZE = 10000
+
+# Optimal Zstd multithreading (keeps compression fast without causing thread thrashing)
+ZSTD_OPTIONS = {zstd.CompressionParameter.nb_workers: 2}
 
 # Global event for handling graceful shutdowns across threads/processes
 shutdown_event = threading.Event()
@@ -95,23 +96,23 @@ def sanitize_folder_name(name):
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines from an interrupted .jsonl.gz file using streaming (Low RAM)."""
+    """Removes corrupt lines from an interrupted .jsonl.zst file using streaming (Low RAM)."""
     if not os.path.exists(filepath):
         return
 
     is_corrupt = False
     try:
-        with gzip.open(filepath, 'rb') as f:
+        with zstd.open(filepath, 'rb') as f:
             for line in f:
                 pass
-    except (EOFError, OSError):
+    except (EOFError, OSError, zstd.ZstdError):
         is_corrupt = True
 
     if is_corrupt:
         temp_filepath = filepath + ".tmp"
         try:
-            with gzip.open(filepath, 'rb') as f_in, \
-                 gzip.open(temp_filepath, 'wb') as f_out:
+            with zstd.open(filepath, 'rb') as f_in, \
+                 zstd.open(temp_filepath, 'wb', options=ZSTD_OPTIONS) as f_out:
                 try:
                     for line in f_in:
                         if not line.strip(): continue
@@ -120,7 +121,7 @@ def clean_jsonl_file(filepath):
                             f_out.write(line)
                         except orjson.JSONDecodeError:
                             pass
-                except (EOFError, OSError):
+                except (EOFError, OSError, zstd.ZstdError):
                     pass
             os.replace(temp_filepath, filepath)
         except Exception:
@@ -242,12 +243,12 @@ def build_mapillary_dataframe_from_records(records):
 def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                        pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
-                                   f'topology_checkpoint_{sub_id}.json.gz')
+                                   f'topology_checkpoint_{sub_id}.json.zst')
     if os.path.exists(checkpoint_file):
         try:
-            with gzip.open(checkpoint_file, 'rb') as f:
+            with zstd.open(checkpoint_file, 'rb') as f:
                 return orjson.loads(f.read())
-        except orjson.JSONDecodeError:
+        except (orjson.JSONDecodeError, zstd.ZstdError):
             pass
 
     tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
@@ -314,7 +315,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
 
     if not shutdown_event.is_set():
         temp_checkpoint = checkpoint_file + '.tmp'
-        with gzip.open(temp_checkpoint, 'wb') as f:
+        with zstd.open(temp_checkpoint, 'wb', options=ZSTD_OPTIONS) as f:
             f.write(orjson.dumps(image_to_sequence_map))
         os.replace(temp_checkpoint, checkpoint_file)
 
@@ -324,13 +325,13 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
 def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                             pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
-                                   f'metadata_checkpoint_{sub_id}.jsonl.gz')
+                                   f'metadata_checkpoint_{sub_id}.jsonl.zst')
 
     clean_jsonl_file(checkpoint_file)
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with gzip.open(checkpoint_file, 'rb') as f:
+        with zstd.open(checkpoint_file, 'rb') as f:
             for line in f:
                 if line.strip():
                     match = re.search(rb'"image_id"\s*:\s*"([^"]+)"', line)
@@ -343,7 +344,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-    with gzip.open(checkpoint_file, 'ab') as f:
+    with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 3/5 Metadata",
@@ -384,13 +385,13 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
 def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                               pos, desc_prefix):
     checkpoint_file = os.path.join(
-        region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.gz')
+        region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.zst')
 
     clean_jsonl_file(checkpoint_file)
 
     completed_ids = set()
     if os.path.exists(checkpoint_file):
-        with gzip.open(checkpoint_file, 'rb') as f:
+        with zstd.open(checkpoint_file, 'rb') as f:
             for line in f:
                 if line.strip():
                     match = re.search(rb'"image_id"\s*:\s*"([^"]+)"', line)
@@ -404,7 +405,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
     if not missing_ids: return
 
     write_lock = threading.Lock()
-    with gzip.open(checkpoint_file, 'ab') as f:
+    with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 4/5 Detections",
@@ -616,21 +617,24 @@ def process_region(west,
 
         # Step C: Parse Data & Clear Memory
         animal_checkpoint = os.path.join(
-            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.gz')
+            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.zst')
         metadata_checkpoint = os.path.join(
-            region_dir, f'metadata_checkpoint_{sub_id}.jsonl.gz')
+            region_dir, f'metadata_checkpoint_{sub_id}.jsonl.zst')
 
         extracted_image_ids = set()
         ground_animal_features = []
 
         if os.path.exists(animal_checkpoint):
             try:
-                for record in orjsonl.stream(animal_checkpoint):
-                    if shutdown_event.is_set(): break
-                    features = record.get('features', [])
-                    if features:
-                        extracted_image_ids.add(record['image_id'])
-                        ground_animal_features.extend(features)
+                with zstd.open(animal_checkpoint, 'rb') as f:
+                    for line in f:
+                        if shutdown_event.is_set(): break
+                        if not line.strip(): continue
+                        record = orjson.loads(line)
+                        features = record.get('features', [])
+                        if features:
+                            extracted_image_ids.add(record['image_id'])
+                            ground_animal_features.extend(features)
             except Exception as e:
                 raise RuntimeError(
                     f"\n[!] CORRUPT FILE DETECTED: {animal_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
@@ -640,11 +644,11 @@ def process_region(west,
             return f"Aborted '{unique_region_id}' safely."
 
         if ground_animal_features:
-            final_json_path = os.path.join(region_dir,
-                                           f'ground_animals_{sub_id}.json.gz')
+            final_json_path = os.path.join(
+                region_dir, f'ground_animals_{sub_id}.json.zst')
             temp_json_path = final_json_path + '.tmp'
 
-            with gzip.open(temp_json_path, 'wb') as f:
+            with zstd.open(temp_json_path, 'wb', options=ZSTD_OPTIONS) as f:
                 f.write(orjson.dumps(ground_animal_features))
 
             os.replace(temp_json_path, final_json_path)
@@ -668,12 +672,18 @@ def process_region(west,
             animals_df = df[df['image_id'].isin(extracted_image_ids)].copy()
 
             all_exists = os.path.exists(all_csv_path)
-            with zstd.open(all_csv_path, 'at', encoding='utf-8') as f:
+            with zstd.open(all_csv_path,
+                           'at',
+                           encoding='utf-8',
+                           options=ZSTD_OPTIONS) as f:
                 df.to_csv(f, mode='a', header=not all_exists, index=False)
 
             if not animals_df.empty:
                 anim_exists = os.path.exists(animals_csv_path)
-                with zstd.open(animals_csv_path, 'at', encoding='utf-8') as f:
+                with zstd.open(animals_csv_path,
+                               'at',
+                               encoding='utf-8',
+                               options=ZSTD_OPTIONS) as f:
                     animals_df.to_csv(f,
                                       mode='a',
                                       header=not anim_exists,
@@ -691,18 +701,22 @@ def process_region(west,
 
         if os.path.exists(metadata_checkpoint):
             try:
-                for record in orjsonl.stream(metadata_checkpoint):
-                    if shutdown_event.is_set(): break
-                    row = record['data'].copy()
-                    row['image_id'] = record['image_id']
-                    if 'detections' in row and isinstance(
-                            row['detections'], dict):
-                        row['detections'] = row['detections'].get('data', [])
-                    records.append(row)
+                with zstd.open(metadata_checkpoint, 'rb') as f:
+                    for line in f:
+                        if shutdown_event.is_set(): break
+                        if not line.strip(): continue
+                        record = orjson.loads(line)
+                        row = record['data'].copy()
+                        row['image_id'] = record['image_id']
+                        if 'detections' in row and isinstance(
+                                row['detections'], dict):
+                            row['detections'] = row['detections'].get(
+                                'data', [])
+                        records.append(row)
 
-                    if len(records) >= CSV_CHUNK_SIZE:
-                        process_metadata_chunk(records)
-                        records = []
+                        if len(records) >= CSV_CHUNK_SIZE:
+                            process_metadata_chunk(records)
+                            records = []
             except Exception as e:
                 raise RuntimeError(
                     f"\n[!] CORRUPT FILE DETECTED: {metadata_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
@@ -974,7 +988,7 @@ if __name__ == "__main__":
                         f.cancel()
 
                     tqdm.write(
-                        "[!] Sealing .gz/.zst files. Script will exit in just a few seconds..."
+                        "[!] Sealing .zst files. Script will exit in just a few seconds..."
                     )
 
         finally:
