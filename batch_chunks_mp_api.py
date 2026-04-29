@@ -182,48 +182,54 @@ def fetch_animal_detections(image_id, seq_id, session):
         return image_id, []
 
 
-def download_single_image(image_id, url, captured_at, output_folder_name,
-                          session):
+def download_single_image(image_id, url, output_folder_name, session):
+    """Pure network I/O download. No EXIF processing here to prevent GIL blocking."""
     filepath = os.path.join(output_folder_name, f"{image_id}.jpg")
     temp_filepath = filepath + ".tmp"
-    if os.path.exists(filepath): return image_id, True
-    try:
-        response = session.get(url, stream=True, timeout=15)
-        response.raise_for_status()
-        with open(temp_filepath, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        os.rename(temp_filepath, filepath)
 
-        if pd.notna(captured_at):
-            try:
-                dt = datetime.strptime(str(captured_at), "%Y-%m-%d %H:%M:%S")
-                exif_time = dt.strftime("%Y:%m:%d %H:%M:%S")
-                try:
-                    exif_dict = piexif.load(filepath)
-                except Exception:
-                    exif_dict = {
-                        "0th": {},
-                        "Exif": {},
-                        "GPS": {},
-                        "1st": {},
-                        "Interop": {}
-                    }
-                exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_time.encode(
-                    'utf-8')
-                exif_dict["Exif"][piexif.ExifIFD.
-                                  DateTimeOriginal] = exif_time.encode('utf-8')
-                exif_dict["Exif"][
-                    piexif.ExifIFD.DateTimeDigitized] = exif_time.encode(
-                        'utf-8')
-                piexif.insert(piexif.dump(exif_dict), filepath)
-                os.utime(filepath, (dt.timestamp(), dt.timestamp()))
-            except Exception:
-                pass
-        return image_id, True
+    if os.path.exists(filepath):
+        return filepath, True, False
+
+    try:
+        response = session.get(url, timeout=15)
+        response.raise_for_status()
+
+        with open(temp_filepath, 'wb') as f:
+            f.write(response.content)
+
+        os.rename(temp_filepath, filepath)
+        return filepath, True, True
     except Exception:
         if os.path.exists(temp_filepath): os.remove(temp_filepath)
-        return image_id, False
+        return filepath, False, False
+
+
+def apply_exif_data(filepath, captured_at):
+    """Pure CPU-bound task applying metadata timestamps to downloaded images."""
+    if pd.isna(captured_at): return
+    try:
+        dt = datetime.strptime(str(captured_at), "%Y-%m-%d %H:%M:%S")
+        exif_time = dt.strftime("%Y:%m:%d %H:%M:%S")
+        try:
+            exif_dict = piexif.load(filepath)
+        except Exception:
+            exif_dict = {
+                "0th": {},
+                "Exif": {},
+                "GPS": {},
+                "1st": {},
+                "Interop": {}
+            }
+        exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_time.encode('utf-8')
+        exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_time.encode(
+            'utf-8')
+        exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_time.encode(
+            'utf-8')
+
+        piexif.insert(piexif.dump(exif_dict), filepath)
+        os.utime(filepath, (dt.timestamp(), dt.timestamp()))
+    except Exception:
+        pass
 
 
 def build_mapillary_dataframe_from_records(records):
@@ -265,7 +271,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
 
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         with tqdm(total=len(land_bboxes),
-                  desc=f"{desc_prefix} 1/5 BBoxes",
+                  desc=f"{desc_prefix} 1/6 BBoxes",
                   position=pos,
                   leave=False,
                   mininterval=2.0) as pbar:
@@ -290,7 +296,7 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
     image_to_sequence_map = {}
     with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
         with tqdm(total=len(unique_sequences),
-                  desc=f"{desc_prefix} 2/5 Sequences",
+                  desc=f"{desc_prefix} 2/6 Sequences",
                   position=pos,
                   leave=False,
                   mininterval=2.0) as pbar:
@@ -347,7 +353,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
     with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
-                      desc=f"{desc_prefix} 3/5 Metadata",
+                      desc=f"{desc_prefix} 3/6 Metadata",
                       position=pos,
                       leave=False,
                       mininterval=2.0) as pbar:
@@ -382,8 +388,8 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                     gc.collect()
 
 
-def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
-                              pos, desc_prefix):
+def fetch_detections_to_jsonl(image_to_sequence_map, region_dir, sub_id,
+                              session, pos, desc_prefix):
     checkpoint_file = os.path.join(
         region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.zst')
 
@@ -399,7 +405,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                         completed_ids.add(match.group(1).decode('utf-8'))
 
     missing_ids = [
-        img_id for img_id in image_to_seq_map.keys()
+        img_id for img_id in image_to_sequence_map.keys()
         if img_id not in completed_ids
     ]
     if not missing_ids: return
@@ -408,14 +414,14 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
     with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
         with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
-                      desc=f"{desc_prefix} 4/5 Detections",
+                      desc=f"{desc_prefix} 4/6 Detections",
                       position=pos,
                       leave=False,
                       mininterval=2.0) as pbar:
                 for chunk in chunked_iterable(missing_ids, API_CHUNK_SIZE):
                     if shutdown_event.is_set(): break
                     futures = {
-                        executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
+                        executor.submit(fetch_animal_detections, img_id, image_to_sequence_map[img_id], session):
                         img_id
                         for img_id in chunk
                     }
@@ -540,7 +546,11 @@ def process_region(west,
                         pool_connections=DOWNLOAD_MAX_WORKERS,
                         pool_maxsize=DOWNLOAD_MAX_WORKERS))
 
-        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        # ---------------------------------------------------------
+        # PHASE 1: Pure Network Download
+        # ---------------------------------------------------------
+        exif_tasks = []
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS) as executor:
             with tqdm(total=len(download_tasks),
                       desc=f"[{region_run_id}] Downloads",
                       position=pos,
@@ -549,8 +559,8 @@ def process_region(west,
                 for chunk in chunked_iterable(download_tasks, API_CHUNK_SIZE):
                     if shutdown_event.is_set(): break
                     futures = {
-                        executor.submit(download_single_image, img_id, url, cap_at, output_folder_name, dl_session):
-                        img_id
+                        executor.submit(download_single_image, img_id, url, output_folder_name, dl_session):
+                        cap_at
                         for img_id, url, cap_at in chunk
                     }
                     for future in as_completed(futures):
@@ -558,11 +568,42 @@ def process_region(west,
                             for f in futures:
                                 f.cancel()
                             break
+                        cap_at = futures[future]
+                        filepath, success, newly_downloaded = future.result()
+
+                        if success and newly_downloaded:
+                            exif_tasks.append((filepath, cap_at))
+
                         pbar.update(1)
                         del futures[future]
                     gc.collect()
 
-        return f"Completed '{unique_region_id}' (Downloaded {len(download_tasks)} images via Download-Only mode)."
+        # ---------------------------------------------------------
+        # PHASE 2: Pure CPU EXIF processing
+        # ---------------------------------------------------------
+        if exif_tasks and not shutdown_event.is_set():
+            with ThreadPoolExecutor(
+                    max_workers=DOWNLOAD_MAX_WORKERS) as executor:
+                with tqdm(total=len(exif_tasks),
+                          desc=f"[{region_run_id}] EXIF Data",
+                          position=pos,
+                          leave=False,
+                          mininterval=2.0) as pbar:
+                    for chunk in chunked_iterable(exif_tasks, API_CHUNK_SIZE):
+                        if shutdown_event.is_set(): break
+                        futures = [
+                            executor.submit(apply_exif_data, fp, cat)
+                            for fp, cat in chunk
+                        ]
+                        for future in as_completed(futures):
+                            if shutdown_event.is_set():
+                                for f in futures:
+                                    f.cancel()
+                                break
+                            pbar.update(1)
+                        gc.collect()
+
+        return f"Completed '{unique_region_id}' (Processed {len(download_tasks)} images via Download-Only mode)."
     # =========================================================
 
     session = requests.Session()
@@ -735,12 +776,17 @@ def process_region(west,
         if shutdown_event.is_set():
             return f"Aborted '{unique_region_id}' safely."
 
-        # Step E: Download
+        # Step E: Download & EXIF
         if DOWNLOAD_IMAGES and download_tasks:
+
+            # ---------------------------------------------------------
+            # PHASE 1: Pure Network Download
+            # ---------------------------------------------------------
+            exif_tasks = []
             with ThreadPoolExecutor(
                     max_workers=DOWNLOAD_MAX_WORKERS) as executor:
                 with tqdm(total=len(download_tasks),
-                          desc=f"{desc_prefix} 5/5 Downloads",
+                          desc=f"{desc_prefix} 5/6 Downloads",
                           position=pos,
                           leave=False,
                           mininterval=2.0) as pbar:
@@ -748,8 +794,8 @@ def process_region(west,
                                                   API_CHUNK_SIZE):
                         if shutdown_event.is_set(): break
                         futures = {
-                            executor.submit(download_single_image, img_id, url, cap_at, output_folder_name, session):
-                            img_id
+                            executor.submit(download_single_image, img_id, url, output_folder_name, session):
+                            cap_at
                             for img_id, url, cap_at in chunk
                         }
                         for future in as_completed(futures):
@@ -758,9 +804,42 @@ def process_region(west,
                                     f.cancel()
                                 break
 
+                            cap_at = futures[future]
+                            filepath, success, newly_downloaded = future.result(
+                            )
+
+                            if success and newly_downloaded:
+                                exif_tasks.append((filepath, cap_at))
+
                             pbar.update(1)
                             del futures[future]
                         gc.collect()
+
+            # ---------------------------------------------------------
+            # PHASE 2: Pure CPU EXIF processing
+            # ---------------------------------------------------------
+            if exif_tasks and not shutdown_event.is_set():
+                with ThreadPoolExecutor(
+                        max_workers=DOWNLOAD_MAX_WORKERS) as executor:
+                    with tqdm(total=len(exif_tasks),
+                              desc=f"{desc_prefix} 6/6 EXIF Data",
+                              position=pos,
+                              leave=False,
+                              mininterval=2.0) as pbar:
+                        for chunk in chunked_iterable(exif_tasks,
+                                                      API_CHUNK_SIZE):
+                            if shutdown_event.is_set(): break
+                            futures = [
+                                executor.submit(apply_exif_data, fp, cat)
+                                for fp, cat in chunk
+                            ]
+                            for future in as_completed(futures):
+                                if shutdown_event.is_set():
+                                    for f in futures:
+                                        f.cancel()
+                                    break
+                                pbar.update(1)
+                            gc.collect()
 
         del download_tasks
         del image_to_seq_map
@@ -865,6 +944,7 @@ if __name__ == "__main__":
     if not args.download_only and os.path.exists(TRACKER_FILE):
         with open(TRACKER_FILE, 'r') as f:
             completed_regions = {line.strip() for line in f if line.strip()}
+
     if args.slurm:
         # ==========================================
         #           SLURM EXECUTION PATH
