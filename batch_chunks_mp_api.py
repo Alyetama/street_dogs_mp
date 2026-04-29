@@ -511,9 +511,12 @@ def process_region(west,
             download_tasks = []
             for _, row in df.iterrows():
                 if pd.notna(row.get('thumb_original_url')):
-                    download_tasks.append(
-                        (row['image_id'], row['thumb_original_url'],
-                         row['captured_at']))
+                    expected_filepath = os.path.join(output_folder_name,
+                                                     f"{row['image_id']}.jpg")
+                    if not os.path.exists(expected_filepath):
+                        download_tasks.append(
+                            (row['image_id'], row['thumb_original_url'],
+                             row['captured_at']))
 
         except pd.errors.EmptyDataError:
             return f"Completed '{unique_region_id}' (CSV is empty)."
@@ -691,9 +694,12 @@ def process_region(west,
 
                 for _, row in animals_df.iterrows():
                     if pd.notna(row.get('thumb_original_url')):
-                        download_tasks.append(
-                            (row['image_id'], row['thumb_original_url'],
-                             row['captured_at']))
+                        expected_filepath = os.path.join(
+                            output_folder_name, f"{row['image_id']}.jpg")
+                        if not os.path.exists(expected_filepath):
+                            download_tasks.append(
+                                (row['image_id'], row['thumb_original_url'],
+                                 row['captured_at']))
 
             del df
             del animals_df
