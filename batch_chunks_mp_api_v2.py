@@ -1,5 +1,4 @@
 import argparse
-import compression.zstd as zstd
 import gc
 import itertools
 import multiprocessing
@@ -12,6 +11,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import compression.zstd as zstd
 import mercantile
 import orjson
 import pandas as pd
@@ -37,6 +37,7 @@ OUTER_MAX_WORKERS = 5
 INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
+IMAGE_DIR = None
 TRACKER_FILE = None
 API_CHUNK_SIZE = 2500
 CSV_CHUNK_SIZE = 10000
@@ -52,7 +53,7 @@ shutdown_event = threading.Event()
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
-    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
+    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TRACKER_FILE
     global API_CHUNK_SIZE, CSV_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET
     global shutdown_event
 
@@ -69,6 +70,7 @@ def init_worker(config, event):
     INNER_MAX_WORKERS = config['INNER_MAX_WORKERS']
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
+    IMAGE_DIR = config.get('IMAGE_DIR')
     TRACKER_FILE = config['TRACKER_FILE']
     API_CHUNK_SIZE = config['API_CHUNK_SIZE']
     CSV_CHUNK_SIZE = config['CSV_CHUNK_SIZE']
@@ -494,7 +496,11 @@ def process_region(west,
     region_run_id = unique_region_id.replace('_', ' ')
     region_dir = os.path.join(PARENT_DIR, safe_region_id)
     os.makedirs(region_dir, exist_ok=True)
-    output_folder_name = os.path.join(region_dir, 'ground_animal_images')
+    if IMAGE_DIR:
+        output_folder_name = os.path.join(IMAGE_DIR, safe_region_id,
+                                          'ground_animal_images')
+    else:
+        output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
 
     all_csv_path = os.path.join(region_dir,
@@ -964,6 +970,10 @@ if __name__ == "__main__":
         help=
         "Path to a txt file containing image IDs to skip (e.g., completed_ledger.txt)"
     )
+    parser.add_argument('--image-dir',
+                        type=str,
+                        default=None,
+                        help="Output directory specifically for images (HDD)")
 
     args = parser.parse_args()
 
@@ -977,6 +987,7 @@ if __name__ == "__main__":
     INNER_MAX_WORKERS = args.inner_max_workers
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
+    IMAGE_DIR = args.image_dir
     TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
     API_CHUNK_SIZE = args.api_chunk_size
     CSV_CHUNK_SIZE = args.csv_chunk_size
@@ -1111,6 +1122,7 @@ if __name__ == "__main__":
                 'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
+                'IMAGE_DIR': args.image_dir,
                 'TRACKER_FILE': TRACKER_FILE,
                 'API_CHUNK_SIZE': API_CHUNK_SIZE,
                 'CSV_CHUNK_SIZE': CSV_CHUNK_SIZE,
