@@ -971,6 +971,8 @@ if __name__ == "__main__":
     ZOOM_LEVEL = args.zoom_level
     VISUALIZE = args.visualize
     DOWNLOAD_IMAGES = args.download_images
+    DOWNLOAD_ONLY = args.download_only
+    DOWNLOAD_MAX_WORKERS = args.download_max_workers
     OUTER_MAX_WORKERS = args.outer_max_workers
     INNER_MAX_WORKERS = args.inner_max_workers
     SUB_GRID_STEP = args.sub_grid_step
