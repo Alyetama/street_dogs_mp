@@ -189,3 +189,4 @@ mapillary_api_testing.ipynb
 */
 *.tar
 *.ipynb
+proxies.txt
