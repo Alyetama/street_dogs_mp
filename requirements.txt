@@ -1,7 +1,6 @@
 mercantile
 pandas
 piexif
-requests
 python-dotenv
 global-land-mask
 tqdm
@@ -10,3 +9,5 @@ matplotlib
 urllib3
 orjson
 orjsonl
+requests[socks]
+polars
