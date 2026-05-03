@@ -1,4 +1,5 @@
 import argparse
+import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -12,7 +13,6 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
-import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -777,6 +777,8 @@ def process_region(west,
 
     # ====================================================================
 
+    subgrids_processed = 0
+
     for i, (sw_lon, sw_lat, ne_lon, ne_lat) in enumerate(sub_bboxes):
         if shutdown_event.is_set():
             return f"Aborted '{unique_region_id}' safely."
@@ -792,6 +794,8 @@ def process_region(west,
 
         if os.path.exists(empty_marker):
             continue
+
+        subgrids_processed += 1
 
         image_to_seq_map = get_image_topology(sw_lon, sw_lat, ne_lon, ne_lat,
                                               region_dir, sub_id, session, pos,
@@ -906,6 +910,9 @@ def process_region(west,
     # ====================================================================
     if shutdown_event.is_set():
         return f"Aborted '{unique_region_id}' safely."
+
+    if subgrids_processed == 0:
+        return f"Skipped '{unique_region_id}' (All sub-regions already completed or empty)."
 
     if records:
         process_metadata_chunk(records)
