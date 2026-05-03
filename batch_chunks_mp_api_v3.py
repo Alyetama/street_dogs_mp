@@ -39,7 +39,6 @@ INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
 IMAGE_DIR = None
-TRACKER_FILE = None
 API_CHUNK_SIZE = 2500
 PARQUET_CHUNK_SIZE = 100000
 PROXY_LIST = []
@@ -54,7 +53,7 @@ shutdown_event = threading.Event()
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
-    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TRACKER_FILE
+    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR
     global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET
     global shutdown_event
 
@@ -72,7 +71,6 @@ def init_worker(config, event):
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
     IMAGE_DIR = config.get('IMAGE_DIR')
-    TRACKER_FILE = config['TRACKER_FILE']
     API_CHUNK_SIZE = config['API_CHUNK_SIZE']
     PARQUET_CHUNK_SIZE = config['PARQUET_CHUNK_SIZE']
     PROXY_LIST = config.get('PROXY_LIST', [])
@@ -911,73 +909,102 @@ def process_region(west,
     if shutdown_event.is_set():
         return f"Aborted '{unique_region_id}' safely."
 
-    if subgrids_processed == 0:
-        return f"Skipped '{unique_region_id}' (All sub-regions already completed or empty)."
-
     if records:
         process_metadata_chunk(records)
         records = []
 
-    total_animals_found = len(global_extracted_image_ids)
+    final_anim_files = glob.glob(
+        os.path.join(region_dir, f'ground_animals_{safe_region_id}_*.parquet'))
+    if final_anim_files:
+        total_animals_found = pl.scan_parquet(final_anim_files).select(
+            'image_id').unique().collect().height
+    else:
+        total_animals_found = len(global_extracted_image_ids)
 
-    if DOWNLOAD_IMAGES and download_tasks:
-        dl_session = requests.Session()
-        dl_session.mount(
-            'https://',
-            HTTPAdapter(pool_connections=DOWNLOAD_MAX_WORKERS,
-                        pool_maxsize=DOWNLOAD_MAX_WORKERS))
+    if DOWNLOAD_IMAGES:
+        if final_anim_files:
+            queued_ids = {t[0] for t in download_tasks}
 
-        exif_tasks = []
-        with ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS) as executor:
-            with tqdm(total=len(download_tasks),
-                      desc=f"[{region_run_id}] Downloads",
-                      position=pos,
-                      leave=False,
-                      mininterval=2.0) as pbar:
-                for chunk in chunked_iterable(download_tasks, API_CHUNK_SIZE):
-                    if shutdown_event.is_set(): break
-                    futures = {
-                        executor.submit(download_single_image, img_id, url, output_folder_name, dl_session):
-                        cap_at
-                        for img_id, url, cap_at in chunk
-                    }
-                    for future in as_completed(futures):
-                        if shutdown_event.is_set():
-                            for f in futures:
-                                f.cancel()
-                            break
+            df_dl = pl.scan_parquet(final_anim_files).select(
+                ['image_id', 'thumb_original_url', 'captured_at']).collect()
 
-                        cap_at = futures[future]
-                        filepath, success, newly_downloaded = future.result()
+            if 'captured_at' not in df_dl.columns:
+                df_dl = df_dl.with_columns(pl.lit(None).alias('captured_at'))
 
-                        if success and newly_downloaded:
-                            exif_tasks.append((filepath, cap_at))
+            for row in df_dl.iter_rows(named=True):
+                img_id = row['image_id']
+                if img_id not in queued_ids and row.get(
+                        'thumb_original_url') is not None and str(
+                            img_id) not in EXCLUDE_SET:
+                    expected_filepath = os.path.join(output_folder_name,
+                                                     f"{img_id}.jpg")
+                    if not os.path.exists(expected_filepath):
+                        download_tasks.append(
+                            (img_id, row['thumb_original_url'],
+                             row['captured_at']))
 
-                        pbar.update(1)
-                        del futures[future]
-                    gc.collect()
+        if download_tasks:
+            dl_session = requests.Session()
+            dl_session.mount(
+                'https://',
+                HTTPAdapter(pool_connections=DOWNLOAD_MAX_WORKERS,
+                            pool_maxsize=DOWNLOAD_MAX_WORKERS))
 
-        if exif_tasks and not shutdown_event.is_set():
+            exif_tasks = []
             with ThreadPoolExecutor(
                     max_workers=DOWNLOAD_MAX_WORKERS) as executor:
-                with tqdm(total=len(exif_tasks),
-                          desc=f"[{region_run_id}] EXIF Data",
+                with tqdm(total=len(download_tasks),
+                          desc=f"[{region_run_id}] Downloads",
                           position=pos,
                           leave=False,
                           mininterval=2.0) as pbar:
-                    for chunk in chunked_iterable(exif_tasks, API_CHUNK_SIZE):
+                    for chunk in chunked_iterable(download_tasks,
+                                                  API_CHUNK_SIZE):
                         if shutdown_event.is_set(): break
-                        futures = [
-                            executor.submit(apply_exif_data, fp, cat)
-                            for fp, cat in chunk
-                        ]
+                        futures = {
+                            executor.submit(download_single_image, img_id, url, output_folder_name, dl_session):
+                            cap_at
+                            for img_id, url, cap_at in chunk
+                        }
                         for future in as_completed(futures):
                             if shutdown_event.is_set():
                                 for f in futures:
                                     f.cancel()
                                 break
+
+                            cap_at = futures[future]
+                            filepath, success, newly_downloaded = future.result(
+                            )
+
+                            if success and newly_downloaded:
+                                exif_tasks.append((filepath, cap_at))
+
                             pbar.update(1)
+                            del futures[future]
                         gc.collect()
+
+            if exif_tasks and not shutdown_event.is_set():
+                with ThreadPoolExecutor(
+                        max_workers=DOWNLOAD_MAX_WORKERS) as executor:
+                    with tqdm(total=len(exif_tasks),
+                              desc=f"[{region_run_id}] EXIF Data",
+                              position=pos,
+                              leave=False,
+                              mininterval=2.0) as pbar:
+                        for chunk in chunked_iterable(exif_tasks,
+                                                      API_CHUNK_SIZE):
+                            if shutdown_event.is_set(): break
+                            futures = [
+                                executor.submit(apply_exif_data, fp, cat)
+                                for fp, cat in chunk
+                            ]
+                            for future in as_completed(futures):
+                                if shutdown_event.is_set():
+                                    for f in futures:
+                                        f.cancel()
+                                    break
+                                pbar.update(1)
+                            gc.collect()
 
     del download_tasks
     gc.collect()
@@ -1082,7 +1109,6 @@ if __name__ == "__main__":
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
     IMAGE_DIR = args.image_dir
-    TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
     API_CHUNK_SIZE = args.api_chunk_size
     PARQUET_CHUNK_SIZE = args.parquet_chunk_size
 
@@ -1122,11 +1148,6 @@ if __name__ == "__main__":
     df_grid = pl.read_csv(GRID_CSV_FILE)
     GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    completed_regions = set()
-    if not args.download_only and os.path.exists(TRACKER_FILE):
-        with open(TRACKER_FILE, 'r') as f:
-            completed_regions = {line.strip() for line in f if line.strip()}
-
     if args.slurm:
         # ==========================================
         #           SLURM EXECUTION PATH
@@ -1145,10 +1166,6 @@ if __name__ == "__main__":
 
         row = df_grid[task_id].to_dicts()[0]
         unique_region_id = f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-
-        if unique_region_id in completed_regions:
-            print(f"Region {unique_region_id} is already completed. Exiting.")
-            exit(0)
 
         tqdm.write(
             f"Task {task_id}: Initiating single-region processing for {unique_region_id}. Run ID: {GLOBAL_RUN_NAME}"
@@ -1173,9 +1190,6 @@ if __name__ == "__main__":
                 tqdm.write(f"[-] {result_msg}")
             else:
                 tqdm.write(f"[\u2713] {result_msg}")
-                if not args.download_only:
-                    with open(TRACKER_FILE, 'a') as f:
-                        f.write(f"{unique_region_id}\n")
 
         except Exception as exc:
             tqdm.write(f"[X] Region '{unique_region_id}' failed: {exc}")
@@ -1186,13 +1200,10 @@ if __name__ == "__main__":
         # ==========================================
         #        LOCAL MULTIPROCESSING PATH
         # ==========================================
-        tasks_to_run = [
-            (row['sw_lon'], row['sw_lat'], row['ne_lon'], row['ne_lat'],
-             f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-             ) for row in df_grid.iter_rows(named=True) if
+        tasks_to_run = [(
+            row['sw_lon'], row['sw_lat'], row['ne_lon'], row['ne_lat'],
             f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-            not in completed_regions
-        ]
+        ) for row in df_grid.iter_rows(named=True)]
 
         if not tasks_to_run:
             print(f"All {df_grid.height} regions have already been completed.")
@@ -1218,7 +1229,6 @@ if __name__ == "__main__":
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
                 'IMAGE_DIR': args.image_dir,
-                'TRACKER_FILE': TRACKER_FILE,
                 'API_CHUNK_SIZE': API_CHUNK_SIZE,
                 'PARQUET_CHUNK_SIZE': PARQUET_CHUNK_SIZE,
                 'PROXY_LIST': proxy_list,
@@ -1249,9 +1259,6 @@ if __name__ == "__main__":
                                 tqdm.write(f"[-] {result_msg}")
                             else:
                                 tqdm.write(f"[\u2713] {result_msg}")
-                                if not args.download_only:
-                                    with open(TRACKER_FILE, 'a') as f:
-                                        f.write(f"{region_id}\n")
                         except Exception as exc:
                             tqdm.write(
                                 f"[X] Region '{region_id}' failed: {exc}")
