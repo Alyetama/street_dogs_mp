@@ -1,5 +1,4 @@
 import argparse
-import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -13,6 +12,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -706,7 +706,23 @@ def process_region(west,
         os.path.join(region_dir, f'all_data_{safe_region_id}_*.parquet'))
 
     if existing_all_files:
+        existing_all_files.sort()
+        tqdm.write(
+            f"\n[{region_run_id}] Scanning existing Parquet files to prevent duplicates..."
+        )
         for f in existing_all_files:
+            # Extract chunk number for clean logging
+            chunk_num = f.split('_')[-1].replace('.parquet', '')
+            all_size_mb = os.path.getsize(f) / (1024 * 1024)
+
+            anim_f = f.replace('all_data_', 'ground_animals_')
+            anim_size_mb = os.path.getsize(anim_f) / (
+                1024 * 1024) if os.path.exists(anim_f) else 0.0
+
+            tqdm.write(
+                f"    [\u2713] Found Parquet Chunk {chunk_num} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+            )
+
             seen_image_ids.update(
                 pl.read_parquet(f, columns=['image_id'])['image_id'].to_list())
 
@@ -719,6 +735,7 @@ def process_region(west,
 
     def process_metadata_chunk(chunk_records):
         nonlocal part_index
+        original_count = len(chunk_records)
         df = build_mapillary_dataframe_from_records(chunk_records)
         if df.is_empty(): return
 
@@ -730,7 +747,13 @@ def process_region(west,
         df = df.unique(subset=['image_id'], keep='last')
 
         df = df.filter(~pl.col('image_id').is_in(seen_image_ids))
-        if df.is_empty(): return
+
+        # --- FIXED: Explicitly log when data is bypassed due to existing files ---
+        if df.is_empty():
+            tqdm.write(
+                f"    [i] Bypassed {original_count} records (Already safely stored in existing Parquet files)."
+            )
+            return
 
         seen_image_ids.update(df['image_id'].to_list())
 
@@ -740,11 +763,8 @@ def process_region(west,
         all_pq_path = os.path.join(
             region_dir, f'all_data_{safe_region_id}_{part_index:03d}.parquet')
 
-        status_msg = "Saved"
-        if os.path.exists(all_pq_path):
-            status_msg = "Found"
-        else:
-            df.write_parquet(all_pq_path, compression='zstd')
+        # Since part_index increments dynamically, any file written here is guaranteed to be new
+        df.write_parquet(all_pq_path, compression='zstd')
 
         all_size_mb = os.path.getsize(all_pq_path) / (1024 * 1024)
         anim_size_mb = 0.0
@@ -754,9 +774,7 @@ def process_region(west,
                 region_dir,
                 f'ground_animals_{safe_region_id}_{part_index:03d}.parquet')
 
-            if not os.path.exists(anim_pq_path):
-                animals_df.write_parquet(anim_pq_path, compression='zstd')
-
+            animals_df.write_parquet(anim_pq_path, compression='zstd')
             anim_size_mb = os.path.getsize(anim_pq_path) / (1024 * 1024)
 
             if DOWNLOAD_IMAGES:
@@ -772,7 +790,7 @@ def process_region(west,
                                  row['captured_at']))
 
         tqdm.write(
-            f"    [\u2713] {status_msg} Parquet Chunk {part_index:03d} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+            f"    [\u2713] Saved Parquet Chunk {part_index:03d} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
         )
 
         part_index += 1
