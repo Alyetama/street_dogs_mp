@@ -1,4 +1,5 @@
 import argparse
+import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -12,7 +13,6 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
-import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -702,9 +702,9 @@ def process_region(west,
         os.path.join(region_dir, f'all_data_{safe_region_id}_*.parquet'))
 
     if existing_all_files:
-        seen_ids = (pl.scan_parquet(existing_all_files).select(
-            'image_id').collect().get_column('image_id').to_list())
-        seen_image_ids.update(seen_ids)
+        for f in existing_all_files:
+            seen_image_ids.update(
+                pl.read_parquet(f, columns=['image_id'])['image_id'].to_list())
 
     part_index = len(existing_all_files)
 
