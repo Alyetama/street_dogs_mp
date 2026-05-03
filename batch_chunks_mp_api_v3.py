@@ -739,7 +739,12 @@ def process_region(west,
 
         all_pq_path = os.path.join(
             region_dir, f'all_data_{safe_region_id}_{part_index:03d}.parquet')
-        df.write_parquet(all_pq_path, compression='zstd')
+
+        status_msg = "Saved"
+        if os.path.exists(all_pq_path):
+            status_msg = "Found"
+        else:
+            df.write_parquet(all_pq_path, compression='zstd')
 
         all_size_mb = os.path.getsize(all_pq_path) / (1024 * 1024)
         anim_size_mb = 0.0
@@ -748,7 +753,9 @@ def process_region(west,
             anim_pq_path = os.path.join(
                 region_dir,
                 f'ground_animals_{safe_region_id}_{part_index:03d}.parquet')
-            animals_df.write_parquet(anim_pq_path, compression='zstd')
+
+            if not os.path.exists(anim_pq_path):
+                animals_df.write_parquet(anim_pq_path, compression='zstd')
 
             anim_size_mb = os.path.getsize(anim_pq_path) / (1024 * 1024)
 
@@ -765,7 +772,7 @@ def process_region(west,
                                  row['captured_at']))
 
         tqdm.write(
-            f"    [\u2713] Saved Parquet Chunk {part_index:03d} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+            f"    [\u2713] {status_msg} Parquet Chunk {part_index:03d} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
         )
 
         part_index += 1
