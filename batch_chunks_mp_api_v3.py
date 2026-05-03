@@ -1,4 +1,5 @@
 import argparse
+import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -12,7 +13,6 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
-import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -792,12 +792,23 @@ def process_region(west,
         sub_id = f"{safe_region_id}_sub_{i}"
         desc_prefix = f"[{region_run_id} C{i+1}/{len(sub_bboxes)}]"
 
+        empty_marker = os.path.join(region_dir, f'.empty_{sub_id}')
+        completed_marker = os.path.join(region_dir, f'.completed_{sub_id}')
+
+        if os.path.exists(completed_marker):
+            continue
+
+        if os.path.exists(empty_marker):
+            continue
+
         image_to_seq_map = get_image_topology(sw_lon, sw_lat, ne_lon, ne_lat,
                                               region_dir, sub_id, session, pos,
                                               desc_prefix)
         if not image_to_seq_map or shutdown_event.is_set():
             if shutdown_event.is_set():
                 return f"Aborted '{unique_region_id}' safely."
+
+            open(empty_marker, 'a').close()
             continue
 
         fields_str = 'id,computed_geometry,captured_at,sequence,is_pano,camera_type,computed_compass_angle,creator,height,width,detections,make,model,thumb_256_url,thumb_1024_url,thumb_2048_url,thumb_original_url'
@@ -893,7 +904,14 @@ def process_region(west,
                 os.remove(metadata_checkpoint)
                 records = []
 
-        # Notice: Remaining records are NOT flushed here. They carry over to the next loop iteration.
+        # --- FLUSH DATA & MARK 100% COMPLETE ---
+        # Flush records at the end of EVERY subgrid so we can safely mark it complete
+        if records:
+            process_metadata_chunk(records)
+            records = []
+
+        if not shutdown_event.is_set():
+            open(completed_marker, 'a').close()  # Touch the completion marker!
 
     # ====================================================================
     # OUTSIDE THE SUB-GRID LOOP (FINAL WRAP UP)
