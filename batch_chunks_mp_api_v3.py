@@ -1,4 +1,5 @@
 import argparse
+import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -12,7 +13,6 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
-import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -204,44 +204,78 @@ def fetch_animal_detections(image_id, seq_id, session):
 
 
 def download_single_image(image_id, url, output_folder_name, session):
-    """Network I/O download optimized for high-quality paid proxies using HTTP Keep-Alive."""
-    global PROXY_LIST
+    """Network I/O download with Keep-Alive, Proxies, and API Fallback for expired URLs."""
+    global PROXY_LIST, MLY_KEY
     filepath = os.path.join(output_folder_name, f"{image_id}.jpg")
 
     if os.path.exists(filepath):
-        return filepath, True, False
+        return image_id, filepath, True, False
+
+    def attempt_download(target_url, max_tries):
+        last_err = "Unknown Error"
+        for attempt in range(max_tries):
+            proxy_dict = None
+            if PROXY_LIST:
+                proxy_url = random.choice(PROXY_LIST)
+                proxy_dict = {"http": proxy_url, "https": proxy_url}
+
+            try:
+                response = session.get(target_url,
+                                       timeout=(5, 15),
+                                       proxies=proxy_dict)
+                response.raise_for_status()
+
+                with open(filepath, 'wb') as f:
+                    f.write(response.content)
+
+                return True, None
+
+            except requests.exceptions.HTTPError as e:
+                last_err = f"HTTP Error {e.response.status_code if e.response else 'Unknown'}"
+                if e.response is not None and e.response.status_code in [
+                        400, 401, 403, 404
+                ]:
+                    return False, last_err
+            except Exception as e:
+                last_err = str(e) or type(e).__name__
+
+        return False, last_err
 
     max_attempts = 3 if PROXY_LIST else 2
+    success, error = attempt_download(url, max_attempts)
 
-    for attempt in range(max_attempts):
-        proxy_dict = None
+    if success:
+        return image_id, filepath, True, True
 
-        if PROXY_LIST:
-            proxy_url = random.choice(PROXY_LIST)
-            proxy_dict = {"http": proxy_url, "https": proxy_url}
+    tqdm.write(
+        f"    [!] Download failed for {image_id} ({error}). Fetching fresh URL..."
+    )
 
-        try:
-            response = session.get(url, timeout=(5, 15), proxies=proxy_dict)
-            response.raise_for_status()
+    fallback_url = f'https://graph.mapillary.com/{image_id}?access_token={MLY_KEY}&fields=thumb_original_url'
+    try:
+        fb_response = session.get(fallback_url, timeout=10)
+        fb_response.raise_for_status()
+        new_url = fb_response.json().get('thumb_original_url')
 
-            with open(filepath, 'wb') as f:
-                f.write(response.content)
+        if new_url:
+            success, fallback_error = attempt_download(new_url, max_attempts)
+            if success:
+                tqdm.write(
+                    f"    [\u2713] Successfully recovered {image_id} using fresh URL."
+                )
+                return image_id, filepath, True, True
+            else:
+                error = f"Fallback download failed: {fallback_error}"
+        else:
+            error = "API returned no thumb_original_url."
+    except Exception as e:
+        error = f"Failed to fetch fresh URL: {e}"
 
-            return filepath, True, True
+    if os.path.exists(filepath):
+        os.remove(filepath)
 
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code in [
-                    400, 401, 403, 404
-            ]:
-                if os.path.exists(filepath): os.remove(filepath)
-                return filepath, False, False
-
-        except Exception:
-            pass
-
-        if attempt == max_attempts - 1:
-            if os.path.exists(filepath): os.remove(filepath)
-            return filepath, False, False
+    tqdm.write(f"    [X] Fatal Download Error ({image_id}): {error}")
+    return image_id, filepath, False, False
 
 
 def apply_exif_data(filepath, captured_at):
@@ -635,10 +669,17 @@ def process_region(west,
                             break
 
                         cap_at = futures[future]
-                        filepath, success, newly_downloaded = future.result()
+                        img_id, filepath, success, newly_downloaded = future.result(
+                        )
 
                         if success and newly_downloaded:
                             exif_tasks.append((filepath, cap_at))
+                        elif not success:
+                            failed_tracker_path = os.path.join(
+                                region_dir,
+                                f'failed_downloads_{safe_region_id}.txt')
+                            with open(failed_tracker_path, 'a') as f:
+                                f.write(f"{img_id}\n")
 
                         pbar.update(1)
                         del futures[future]
@@ -998,11 +1039,17 @@ def process_region(west,
                                 break
 
                             cap_at = futures[future]
-                            filepath, success, newly_downloaded = future.result(
+                            img_id, filepath, success, newly_downloaded = future.result(
                             )
 
                             if success and newly_downloaded:
                                 exif_tasks.append((filepath, cap_at))
+                            elif not success:
+                                failed_tracker_path = os.path.join(
+                                    region_dir,
+                                    f'failed_downloads_{safe_region_id}.txt')
+                                with open(failed_tracker_path, 'a') as f:
+                                    f.write(f"{img_id}\n")
 
                             pbar.update(1)
                             del futures[future]
