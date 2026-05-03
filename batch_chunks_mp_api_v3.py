@@ -1,5 +1,4 @@
 import argparse
-import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -13,6 +12,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -569,15 +569,10 @@ def process_region(west,
         tqdm.write(
             f"[{datetime.now().strftime('%H:%M:%S')}] [{region_run_id}] Loading Parquet chunks for Download-Only mode..."
         )
+
         try:
-            # Polars concatenates multiple partition chunks instantly
-            dfs = [
-                pl.read_parquet(
-                    f,
-                    columns=['image_id', 'thumb_original_url', 'captured_at'])
-                for f in animal_files
-            ]
-            df = pl.concat(dfs)
+            df = pl.scan_parquet(animal_files).select(
+                ['image_id', 'thumb_original_url', 'captured_at']).collect()
 
             if 'captured_at' not in df.columns:
                 df = df.with_columns(pl.lit(None).alias('captured_at'))
@@ -702,16 +697,14 @@ def process_region(west,
     download_tasks = []
     global_extracted_image_ids = set()
 
-    # --- High-Speed Python Set Tracker ---
     seen_image_ids = set()
     existing_all_files = glob.glob(
         os.path.join(region_dir, f'all_data_{safe_region_id}_*.parquet'))
 
     if existing_all_files:
-        for f in existing_all_files:
-            # Instantly map seen IDs to RAM to prevent cross-file duplicates
-            seen_image_ids.update(
-                pl.read_parquet(f, columns=['image_id'])['image_id'].to_list())
+        seen_ids = (pl.scan_parquet(existing_all_files).select(
+            'image_id').collect().get_column('image_id').to_list())
+        seen_image_ids.update(seen_ids)
 
     part_index = len(existing_all_files)
 
