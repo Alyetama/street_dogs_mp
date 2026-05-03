@@ -1,5 +1,4 @@
 import argparse
-import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -13,6 +12,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -86,9 +86,9 @@ def init_worker(config, event):
 def slurm_signal_handler(signum, frame):
     """Catches scancel (SIGTERM) or Ctrl+C (SIGINT) in SLURM mode to exit safely."""
     tqdm.write(
-        f"\n[!] Shutdown signal ({signum}) received! Sealing files to prevent corruption..."
+        f"\n[!] Shutdown signal ({signum}) received! INSTANT FORCE-KILL INITIATED."
     )
-    shutdown_event.set()
+    os._exit(1)
 
 
 def chunked_iterable(iterable, size):
@@ -107,8 +107,13 @@ def sanitize_folder_name(name):
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines from an interrupted .jsonl.zst file using streaming (Low RAM)."""
+    """Removes corrupt lines from an interrupted .jsonl.zst file and deletes 0-byte ghosts."""
     if not os.path.exists(filepath):
+        return
+
+    # Auto-delete completely empty files
+    if os.path.getsize(filepath) == 0:
+        os.remove(filepath)
         return
 
     is_corrupt = False
@@ -121,6 +126,7 @@ def clean_jsonl_file(filepath):
 
     if is_corrupt:
         temp_filepath = filepath + ".tmp"
+        valid_lines = 0
         try:
             with zstd.open(filepath, 'rb') as f_in, \
                  zstd.open(temp_filepath, 'wb', options=ZSTD_OPTIONS) as f_out:
@@ -130,11 +136,18 @@ def clean_jsonl_file(filepath):
                         try:
                             orjson.loads(line)
                             f_out.write(line)
+                            valid_lines += 1
                         except orjson.JSONDecodeError:
                             pass
                 except (EOFError, OSError, zstd.ZstdError):
                     pass
-            os.replace(temp_filepath, filepath)
+
+            if valid_lines == 0:
+                os.remove(filepath)
+                if os.path.exists(temp_filepath):
+                    os.remove(temp_filepath)
+            else:
+                os.replace(temp_filepath, filepath)
         except Exception:
             if os.path.exists(temp_filepath):
                 os.remove(temp_filepath)
@@ -571,8 +584,13 @@ def process_region(west,
         )
 
         try:
-            df = pl.scan_parquet(animal_files).select(
-                ['image_id', 'thumb_original_url', 'captured_at']).collect()
+            dfs = [
+                pl.read_parquet(
+                    f,
+                    columns=['image_id', 'thumb_original_url', 'captured_at'])
+                for f in animal_files
+            ]
+            df = pl.concat(dfs)
 
             if 'captured_at' not in df.columns:
                 df = df.with_columns(pl.lit(None).alias('captured_at'))
@@ -798,6 +816,17 @@ def process_region(west,
         metadata_checkpoint = os.path.join(
             region_dir, f'metadata_checkpoint_{sub_id}.jsonl.zst')
 
+        anim_size_mb = os.path.getsize(animal_checkpoint) / (
+            1024 * 1024) if os.path.exists(animal_checkpoint) else 0
+        meta_size_mb = os.path.getsize(metadata_checkpoint) / (
+            1024 * 1024) if os.path.exists(metadata_checkpoint) else 0
+
+        if anim_size_mb > 0 or meta_size_mb > 0:
+            tqdm.write(
+                f"{desc_prefix} Parsing Data -> Metadata: {meta_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+            )
+
+        extracted_image_ids = set()
         ground_animal_features = []
 
         if os.path.exists(animal_checkpoint):
@@ -813,9 +842,11 @@ def process_region(west,
                             global_extracted_image_ids.add(record['image_id'])
                             ground_animal_features.extend(features)
             except Exception as e:
-                raise RuntimeError(
-                    f"\n[!] CORRUPT FILE DETECTED: {animal_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
-                ) from e
+                tqdm.write(f"\n[!] SEVERE CORRUPTION IN: {animal_checkpoint}")
+                tqdm.write(
+                    f"    -> Auto-deleting unrecoverable file. Will skip for now. Re-run script later to backfill."
+                )
+                os.remove(animal_checkpoint)
 
         if shutdown_event.is_set():
             return f"Aborted '{unique_region_id}' safely."
@@ -854,9 +885,13 @@ def process_region(west,
                             process_metadata_chunk(records)
                             records = []
             except Exception as e:
-                raise RuntimeError(
-                    f"\n[!] CORRUPT FILE DETECTED: {metadata_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
-                ) from e
+                tqdm.write(
+                    f"\n[!] SEVERE CORRUPTION IN: {metadata_checkpoint}")
+                tqdm.write(
+                    f"    -> Auto-deleting unrecoverable file. Will skip for now. Re-run script later to backfill."
+                )
+                os.remove(metadata_checkpoint)
+                records = []
 
         # Notice: Remaining records are NOT flushed here. They carry over to the next loop iteration.
 
@@ -1213,16 +1248,12 @@ if __name__ == "__main__":
                                 f"[X] Region '{region_id}' failed: {exc}")
                 except KeyboardInterrupt:
                     tqdm.write(
-                        "\n\n[!] Ctrl+C detected! Cancelling tasks and forcing clean shutdown..."
+                        "\n\n[!] Ctrl+C detected! INSTANT FORCE-KILL INITIATED."
                     )
-                    shutdown_event.set()
-
-                    for f in outer_futures:
-                        f.cancel()
-
                     tqdm.write(
-                        "[!] Sealing files. Script will exit in just a few seconds..."
+                        "[!] Warning: Terminating abruptly. The current file being written may be corrupted."
                     )
+                    os._exit(1)
 
         finally:
             print('\033[?25h', end="")
