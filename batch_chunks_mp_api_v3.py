@@ -274,7 +274,8 @@ def download_single_image(image_id, url, output_folder_name, session):
     if os.path.exists(filepath):
         os.remove(filepath)
 
-    tqdm.write(f"    [X] Fatal Download Error ({image_id}): {error}")
+    tqdm.write(
+        f"\033[91m    [X] Fatal Download Error ({image_id}): {error}\033[0m")
     return image_id, filepath, False, False
 
 
@@ -912,9 +913,11 @@ def process_region(west,
                             global_extracted_image_ids.add(record['image_id'])
                             ground_animal_features.extend(features)
             except Exception as e:
-                tqdm.write(f"\n[!] SEVERE CORRUPTION IN: {animal_checkpoint}")
                 tqdm.write(
-                    f"    -> Auto-deleting unrecoverable file. Will skip for now. Re-run script later to backfill."
+                    f"\033[91m\n[!] SEVERE CORRUPTION IN: {animal_checkpoint}\033[0m"
+                )
+                tqdm.write(
+                    f"\033[91m    -> Auto-deleting unrecoverable file. Will skip for now. Re-run script later to backfill.\033[0m"
                 )
                 os.remove(animal_checkpoint)
 
