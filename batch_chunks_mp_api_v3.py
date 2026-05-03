@@ -1,5 +1,4 @@
 import argparse
-import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -13,6 +12,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -111,7 +111,6 @@ def clean_jsonl_file(filepath):
     if not os.path.exists(filepath):
         return
 
-    # Auto-delete completely empty files
     if os.path.getsize(filepath) == 0:
         os.remove(filepath)
         return
@@ -279,7 +278,6 @@ def build_mapillary_dataframe_from_records(records):
     """Builds a strictly typed Polars DataFrame safe from Float/Int type drifts."""
     if not records: return pl.DataFrame()
 
-    # Float64 for height/width ensures it will not crash during ingestion if a float arrives
     MAPILLARY_SCHEMA = {
         'image_id': pl.Utf8,
         'captured_at': pl.Int64,
@@ -319,12 +317,10 @@ def build_mapillary_dataframe_from_records(records):
         if col not in df.columns:
             df = df.with_columns(pl.lit(None).alias(col))
 
-    # Apply strict casts
     df = df.with_columns([
         pl.col('computed_geometry').cast(pl.Utf8),
         pl.col('creator').cast(pl.Utf8),
         pl.col('detections').cast(pl.Utf8),
-        # Safely chops off any decimals from floats and locks the schema to Int64
         pl.col('height').cast(pl.Int64, strict=False),
         pl.col('width').cast(pl.Int64, strict=False)
     ])
@@ -560,14 +556,6 @@ def process_region(west,
         output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
 
-    # if not DOWNLOAD_ONLY:
-    #     # Clean up legacy CSV versions to prevent folder clutter
-    #     for ext in ['.csv.zst', '.csv.gz']:
-    #         old_all = os.path.join(region_dir, f'all_data_{safe_region_id}{ext}')
-    #         old_anim = os.path.join(region_dir, f'ground_animals_{safe_region_id}{ext}')
-    #         if os.path.exists(old_all): os.remove(old_all)
-    #         if os.path.exists(old_anim): os.remove(old_anim)
-
     # =========================================================
     #                    DOWNLOAD-ONLY MODE
     # =========================================================
@@ -741,23 +729,22 @@ def process_region(west,
                 pl.col('captured_at').cast(pl.Int64, strict=False).cast(
                     pl.Datetime("ms")).dt.strftime('%Y-%m-%d %H:%M:%S'))
 
-        # Local Chunk Deduplication
         df = df.unique(subset=['image_id'], keep='last')
 
-        # Global Partition Deduplication (O(1) Hash Map prevents memory fragmentation)
         df = df.filter(~pl.col('image_id').is_in(seen_image_ids))
         if df.is_empty(): return
 
-        # Add new unique IDs to the tracker
         seen_image_ids.update(df['image_id'].to_list())
 
         animals_df = df.filter(
             pl.col('image_id').is_in(global_extracted_image_ids))
 
-        # --- Synced Parquet Saves (Zero RAM Hoarding) ---
         all_pq_path = os.path.join(
             region_dir, f'all_data_{safe_region_id}_{part_index:03d}.parquet')
         df.write_parquet(all_pq_path, compression='zstd')
+
+        all_size_mb = os.path.getsize(all_pq_path) / (1024 * 1024)
+        anim_size_mb = 0.0
 
         if not animals_df.is_empty():
             anim_pq_path = os.path.join(
@@ -765,7 +752,8 @@ def process_region(west,
                 f'ground_animals_{safe_region_id}_{part_index:03d}.parquet')
             animals_df.write_parquet(anim_pq_path, compression='zstd')
 
-            # Only queue downloads if explicitly enabled
+            anim_size_mb = os.path.getsize(anim_pq_path) / (1024 * 1024)
+
             if DOWNLOAD_IMAGES:
                 for row in animals_df.iter_rows(named=True):
                     if row.get('thumb_original_url') is not None:
@@ -777,6 +765,10 @@ def process_region(west,
                             download_tasks.append(
                                 (row['image_id'], row['thumb_original_url'],
                                  row['captured_at']))
+
+        tqdm.write(
+            f"    [\u2713] Saved Parquet Chunk {part_index:03d} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+        )
 
         part_index += 1
         del df
@@ -849,7 +841,6 @@ def process_region(west,
                         record = orjson.loads(line)
                         features = record.get('features', [])
                         if features:
-                            # Accumulate globally across all grids!
                             global_extracted_image_ids.add(record['image_id'])
                             ground_animal_features.extend(features)
             except Exception as e:
@@ -880,7 +871,6 @@ def process_region(west,
                         if not line.strip(): continue
                         record = orjson.loads(line)
 
-                        # Defensively extract the inner dict
                         row = record.get('data')
                         if not row: continue
 
@@ -904,14 +894,12 @@ def process_region(west,
                 os.remove(metadata_checkpoint)
                 records = []
 
-        # --- FLUSH DATA & MARK 100% COMPLETE ---
-        # Flush records at the end of EVERY subgrid so we can safely mark it complete
         if records:
             process_metadata_chunk(records)
             records = []
 
         if not shutdown_event.is_set():
-            open(completed_marker, 'a').close()  # Touch the completion marker!
+            open(completed_marker, 'a').close()
 
     # ====================================================================
     # OUTSIDE THE SUB-GRID LOOP (FINAL WRAP UP)
@@ -919,14 +907,12 @@ def process_region(west,
     if shutdown_event.is_set():
         return f"Aborted '{unique_region_id}' safely."
 
-    # 1. Flush any leftover records combined across all grids
     if records:
         process_metadata_chunk(records)
         records = []
 
     total_animals_found = len(global_extracted_image_ids)
 
-    # 2. Do the image downloads in ONE massive batch at the very end
     if DOWNLOAD_IMAGES and download_tasks:
         dl_session = requests.Session()
         dl_session.mount(
@@ -1126,7 +1112,6 @@ if __name__ == "__main__":
     print('\033[?25l', end="")
     os.makedirs(PARENT_DIR, exist_ok=True)
 
-    # Switch completely to Polars for CSV grid reads
     df_grid = pl.read_csv(GRID_CSV_FILE)
     GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -1151,7 +1136,6 @@ if __name__ == "__main__":
             )
             exit(0)
 
-        # Grab specific row as dictionary
         row = df_grid[task_id].to_dicts()[0]
         unique_region_id = f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
 
