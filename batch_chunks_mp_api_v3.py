@@ -1,5 +1,4 @@
 import argparse
-import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -13,6 +12,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -753,7 +753,6 @@ def process_region(west,
             f"\n[{region_run_id}] Scanning existing Parquet files to prevent duplicates..."
         )
         for f in existing_all_files:
-            # Extract chunk number for clean logging
             chunk_num = f.split('_')[-1].replace('.parquet', '')
             all_size_mb = os.path.getsize(f) / (1024 * 1024)
 
@@ -769,6 +768,7 @@ def process_region(west,
                 pl.read_parquet(f, columns=['image_id'])['image_id'].to_list())
 
     part_index = len(existing_all_files)
+    cumulative_bypassed = 0
 
     existing_anim_files = glob.glob(
         os.path.join(region_dir, f'ground_animals_{safe_region_id}_*.parquet'))
@@ -776,7 +776,7 @@ def process_region(west,
     animal_df_buffer = []
 
     def process_metadata_chunk(chunk_records):
-        nonlocal part_index
+        nonlocal part_index, cumulative_bypassed
         original_count = len(chunk_records)
         df = build_mapillary_dataframe_from_records(chunk_records)
         if df.is_empty(): return
@@ -790,10 +790,10 @@ def process_region(west,
 
         df = df.filter(~pl.col('image_id').is_in(seen_image_ids))
 
-        # --- FIXED: Explicitly log when data is bypassed due to existing files ---
         if df.is_empty():
+            cumulative_bypassed += original_count
             tqdm.write(
-                f"    [i] Bypassed {original_count} records (Already safely stored in existing Parquet files)."
+                f"    [i] Bypassed {cumulative_bypassed:,} total records so far (safely stored on disk)..."
             )
             return
 
@@ -805,7 +805,6 @@ def process_region(west,
         all_pq_path = os.path.join(
             region_dir, f'all_data_{safe_region_id}_{part_index:03d}.parquet')
 
-        # Since part_index increments dynamically, any file written here is guaranteed to be new
         df.write_parquet(all_pq_path, compression='zstd')
 
         all_size_mb = os.path.getsize(all_pq_path) / (1024 * 1024)
