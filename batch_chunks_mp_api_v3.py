@@ -1,4 +1,5 @@
 import argparse
+import compression.zstd as zstd
 import gc
 import glob
 import itertools
@@ -12,7 +13,6 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
-import compression.zstd as zstd
 import mercantile
 import orjson
 import piexif
@@ -1022,7 +1022,7 @@ def process_region(west,
             with ThreadPoolExecutor(
                     max_workers=DOWNLOAD_MAX_WORKERS) as executor:
                 with tqdm(total=len(download_tasks),
-                          desc=f"[{region_run_id}] Downloads",
+                          desc=f"[{region_run_id}] 5/6 Downloads",
                           position=pos,
                           leave=False,
                           mininterval=2.0) as pbar:
@@ -1061,7 +1061,7 @@ def process_region(west,
                 with ThreadPoolExecutor(
                         max_workers=DOWNLOAD_MAX_WORKERS) as executor:
                     with tqdm(total=len(exif_tasks),
-                              desc=f"[{region_run_id}] EXIF Data",
+                              desc=f"[{region_run_id}] 6/6 EXIF Data",
                               position=pos,
                               leave=False,
                               mininterval=2.0) as pbar:
