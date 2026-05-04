@@ -1,5 +1,4 @@
 import argparse
-import glob
 import os
 
 import geopandas as gpd
@@ -10,7 +9,7 @@ from tqdm import tqdm
 def main():
     parser = argparse.ArgumentParser(
         description=
-        "Extract covered countries directly into Parquet data regions across multiple drives."
+        "Extract covered countries directly into region folders across multiple drives."
     )
     parser.add_argument(
         '--dirs',
@@ -52,14 +51,6 @@ def main():
         ):
             folder_path = os.path.join(base_dir, folder)
 
-            parquet_files = glob.glob(os.path.join(folder_path, '*.parquet'))
-            empty_markers = glob.glob(os.path.join(folder_path, '.empty_*'))
-            completed_markers = glob.glob(
-                os.path.join(folder_path, '.completed_*'))
-
-            if not (parquet_files or empty_markers or completed_markers):
-                continue
-
             parts = folder.split('_')
             try:
                 ne_lat = float(parts[-1])
@@ -88,7 +79,7 @@ def main():
             processed_count += 1
 
     print(
-        f"\n[\u2713] Successfully generated country lists for {processed_count} valid regions across all drives."
+        f"\n[\u2713] Successfully generated country lists for {processed_count} regions across all drives."
     )
 
 
