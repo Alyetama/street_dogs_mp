@@ -11,3 +11,6 @@ orjson
 orjsonl
 requests[socks]
 polars
+rich
+geopandas
+shapely
