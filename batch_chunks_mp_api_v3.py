@@ -1169,6 +1169,13 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="Output directory specifically for images (HDD)")
+    parser.add_argument(
+        '--row-index',
+        type=int,
+        default=None,
+        help=
+        "Process only a specific 0-indexed row from the CSV (e.g., 0 for the first data row)."
+    )
 
     args = parser.parse_args()
 
@@ -1230,7 +1237,10 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, slurm_signal_handler)
         signal.signal(signal.SIGTERM, slurm_signal_handler)
 
-        task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", 0))
+        if args.row_index is not None:
+            task_id = args.row_index
+        else:
+            task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", 0))
 
         if task_id >= df_grid.height:
             print(
@@ -1274,6 +1284,14 @@ if __name__ == "__main__":
         # ==========================================
         #        LOCAL MULTIPROCESSING PATH
         # ==========================================
+        if args.row_index is not None:
+            if args.row_index < 0 or args.row_index >= df_grid.height:
+                print(
+                    f"Error: Row index {args.row_index} is out of bounds for grid with {df_grid.height} regions."
+                )
+                exit(0)
+            df_grid = df_grid.slice(args.row_index, 1)
+
         tasks_to_run = [(
             row['sw_lon'], row['sw_lat'], row['ne_lon'], row['ne_lat'],
             f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
