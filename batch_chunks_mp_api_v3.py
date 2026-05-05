@@ -1004,7 +1004,6 @@ def process_region(west,
                 HTTPAdapter(pool_connections=DOWNLOAD_MAX_WORKERS,
                             pool_maxsize=DOWNLOAD_MAX_WORKERS))
 
-            exif_tasks = []
             with ThreadPoolExecutor(
                     max_workers=DOWNLOAD_MAX_WORKERS) as executor:
                 with tqdm(total=len(download_tasks),
@@ -1043,28 +1042,27 @@ def process_region(west,
                             del futures[future]
                         gc.collect()
 
-            if exif_tasks and not shutdown_event.is_set():
-                with ThreadPoolExecutor(
-                        max_workers=DOWNLOAD_MAX_WORKERS) as executor:
-                    with tqdm(total=len(exif_tasks),
-                              desc=f"[{region_run_id}] 6/6 EXIF Data",
-                              position=pos,
-                              leave=False,
-                              mininterval=2.0) as pbar:
-                        for chunk in chunked_iterable(exif_tasks,
-                                                      API_CHUNK_SIZE):
-                            if shutdown_event.is_set(): break
-                            futures = [
-                                executor.submit(apply_exif_data, fp, cat)
-                                for fp, cat in chunk
-                            ]
-                            for future in as_completed(futures):
-                                if shutdown_event.is_set():
-                                    for f in futures:
-                                        f.cancel()
-                                    break
-                                pbar.update(1)
-                            gc.collect()
+        if exif_tasks and not shutdown_event.is_set():
+            with ThreadPoolExecutor(
+                    max_workers=DOWNLOAD_MAX_WORKERS) as executor:
+                with tqdm(total=len(exif_tasks),
+                          desc=f"[{region_run_id}] 6/6 EXIF Data",
+                          position=pos,
+                          leave=False,
+                          mininterval=2.0) as pbar:
+                    for chunk in chunked_iterable(exif_tasks, API_CHUNK_SIZE):
+                        if shutdown_event.is_set(): break
+                        futures = [
+                            executor.submit(apply_exif_data, fp, cat)
+                            for fp, cat in chunk
+                        ]
+                        for future in as_completed(futures):
+                            if shutdown_event.is_set():
+                                for f in futures:
+                                    f.cancel()
+                                break
+                            pbar.update(1)
+                        gc.collect()
 
     del download_tasks
     gc.collect()
