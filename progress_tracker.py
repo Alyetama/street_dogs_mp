@@ -1,5 +1,6 @@
 import argparse
 import csv
+import datetime
 import glob
 import os
 import re
@@ -54,10 +55,6 @@ def main():
         type=float,
         default=1.0,
         help="Step size used in the main script (default: 1.0)")
-    parser.add_argument('--output',
-                        type=str,
-                        default='progress_report.csv',
-                        help="Output CSV filename")
 
     args = parser.parse_args()
 
@@ -220,13 +217,20 @@ def main():
     console.print("\n")
     console.print(table)
 
-    with open(args.output, 'w', newline='', encoding='utf-8') as f:
+    output_dir = "progress_files"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_path = os.path.join(output_dir, f"progress_report_{timestamp}.csv")
+
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=csv_data[0].keys())
         writer.writeheader()
         writer.writerows(csv_data)
 
     console.print(
-        f"\n[\u2713] Detailed report successfully saved to [bold green]{args.output}[/]"
+        f"\n[\u2713] Detailed report successfully saved to [bold green]{output_path}[/]"
     )
 
 
