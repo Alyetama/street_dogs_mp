@@ -1,4 +1,5 @@
 import argparse
+import compression.zstd as zstd
 import gc
 import itertools
 import multiprocessing
@@ -10,7 +11,6 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
-import compression.zstd as zstd
 import mercantile
 import orjson
 import pandas as pd

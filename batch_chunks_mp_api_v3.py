@@ -283,18 +283,21 @@ def apply_exif_data(filepath, captured_at):
     """Pure CPU-bound task applying metadata timestamps to downloaded images."""
     if not captured_at: return
     try:
-        dt = datetime.strptime(str(captured_at), "%Y-%m-%d %H:%M:%S")
+        val = str(captured_at)
+        if '-' in val:
+            dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+        else:
+            dt = datetime.fromtimestamp(int(val) / 1000.0)
+
         exif_time = dt.strftime("%Y:%m:%d %H:%M:%S")
-        try:
-            exif_dict = piexif.load(filepath)
-        except Exception:
-            exif_dict = {
-                "0th": {},
-                "Exif": {},
-                "GPS": {},
-                "1st": {},
-                "Interop": {}
-            }
+
+        exif_dict = {
+            "0th": {},
+            "Exif": {},
+            "GPS": {},
+            "1st": {},
+            "Interop": {}
+        }
         exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_time.encode('utf-8')
         exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_time.encode(
             'utf-8')
@@ -303,8 +306,8 @@ def apply_exif_data(filepath, captured_at):
 
         piexif.insert(piexif.dump(exif_dict), filepath)
         os.utime(filepath, (dt.timestamp(), dt.timestamp()))
-    except Exception:
-        pass
+    except Exception as e:
+        tqdm.write(f"\033[91m    [X] EXIF Error ({filepath}): {e}\033[0m")
 
 
 def build_mapillary_dataframe_from_records(records):
@@ -645,7 +648,7 @@ def process_region(west,
                         pool_maxsize=DOWNLOAD_MAX_WORKERS))
 
         # ---------------------------------------------------------
-        # PHASE 1: Pure Network Download
+        # PHASE 1: Pure Network Download (No EXIF in this mode)
         # ---------------------------------------------------------
         with ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS) as executor:
             with tqdm(total=len(download_tasks),
@@ -987,8 +990,14 @@ def process_region(west,
                     else:
                         if row['captured_at']:
                             try:
-                                dt = datetime.strptime(str(row['captured_at']),
-                                                       "%Y-%m-%d %H:%M:%S")
+                                val = str(row['captured_at'])
+                                if '-' in val:
+                                    dt = datetime.strptime(
+                                        val, "%Y-%m-%d %H:%M:%S")
+                                else:
+                                    dt = datetime.fromtimestamp(
+                                        int(val) / 1000.0)
+
                                 if int(os.path.getmtime(
                                         expected_filepath)) != int(
                                             dt.timestamp()):
