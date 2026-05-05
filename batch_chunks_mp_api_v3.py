@@ -647,7 +647,6 @@ def process_region(west,
         # ---------------------------------------------------------
         # PHASE 1: Pure Network Download
         # ---------------------------------------------------------
-        exif_tasks = []
         with ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS) as executor:
             with tqdm(total=len(download_tasks),
                       desc=f"[{region_run_id}] Downloads",
@@ -669,13 +668,10 @@ def process_region(west,
                                 f.cancel()
                             break
 
-                        cap_at = futures[future]
                         img_id, filepath, success, newly_downloaded = future.result(
                         )
 
-                        if success and newly_downloaded:
-                            exif_tasks.append((filepath, cap_at))
-                        elif not success:
+                        if not success:
                             failed_tracker_path = os.path.join(
                                 region_dir,
                                 f'failed_downloads_{safe_region_id}.txt')
@@ -685,31 +681,6 @@ def process_region(west,
                         pbar.update(1)
                         del futures[future]
                     gc.collect()
-
-        # ---------------------------------------------------------
-        # PHASE 2: Pure CPU EXIF processing
-        # ---------------------------------------------------------
-        if exif_tasks and not shutdown_event.is_set():
-            with ThreadPoolExecutor(
-                    max_workers=DOWNLOAD_MAX_WORKERS) as executor:
-                with tqdm(total=len(exif_tasks),
-                          desc=f"[{region_run_id}] EXIF Data",
-                          position=pos,
-                          leave=False,
-                          mininterval=2.0) as pbar:
-                    for chunk in chunked_iterable(exif_tasks, API_CHUNK_SIZE):
-                        if shutdown_event.is_set(): break
-                        futures = [
-                            executor.submit(apply_exif_data, fp, cat)
-                            for fp, cat in chunk
-                        ]
-                        for future in as_completed(futures):
-                            if shutdown_event.is_set():
-                                for f in futures:
-                                    f.cancel()
-                                break
-                            pbar.update(1)
-                        gc.collect()
 
         return f"Completed '{unique_region_id}' (Processed {len(download_tasks)} images via Download-Only mode)."
     # =========================================================
@@ -990,6 +961,8 @@ def process_region(west,
         total_animals_found = len(global_extracted_image_ids)
 
     if DOWNLOAD_IMAGES:
+        exif_tasks = []
+
         if final_anim_files:
             queued_ids = {t[0] for t in download_tasks}
 
@@ -1006,10 +979,23 @@ def process_region(west,
                             img_id) not in EXCLUDE_SET:
                     expected_filepath = os.path.join(output_folder_name,
                                                      f"{img_id}.jpg")
+
                     if not os.path.exists(expected_filepath):
                         download_tasks.append(
                             (img_id, row['thumb_original_url'],
                              row['captured_at']))
+                    else:
+                        if row['captured_at']:
+                            try:
+                                dt = datetime.strptime(str(row['captured_at']),
+                                                       "%Y-%m-%d %H:%M:%S")
+                                if int(os.path.getmtime(
+                                        expected_filepath)) != int(
+                                            dt.timestamp()):
+                                    exif_tasks.append((expected_filepath,
+                                                       row['captured_at']))
+                            except Exception:
+                                pass
 
         if download_tasks:
             dl_session = requests.Session()
