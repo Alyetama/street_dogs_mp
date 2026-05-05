@@ -20,6 +20,7 @@ import polars as pl
 import requests
 from dotenv import load_dotenv
 from global_land_mask import globe
+from PIL import Image
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
@@ -203,12 +204,24 @@ def fetch_animal_detections(image_id, seq_id, session):
         return image_id, []
 
 
+def is_valid_image(filepath):
+    """Thorough validation using Pillow to catch half-downloaded/corrupted files."""
+    if not os.path.exists(filepath) or os.path.getsize(filepath) < 100:
+        return False
+    try:
+        with Image.open(filepath) as img:
+            img.verify()
+        return True
+    except Exception:
+        return False
+
+
 def download_single_image(image_id, url, output_folder_name, session):
     """Network I/O download with Keep-Alive, Proxies, and API Fallback for expired URLs."""
     global PROXY_LIST, MLY_KEY
     filepath = os.path.join(output_folder_name, f"{image_id}.jpg")
 
-    if os.path.exists(filepath):
+    if is_valid_image(filepath):
         return image_id, filepath, True, False
 
     def attempt_download(target_url, max_tries):
@@ -626,7 +639,7 @@ def process_region(west,
                         continue
                     expected_filepath = os.path.join(output_folder_name,
                                                      f"{row['image_id']}.jpg")
-                    if not os.path.exists(expected_filepath):
+                    if not is_valid_image(expected_filepath):
                         download_tasks.append(
                             (row['image_id'], row['thumb_original_url'],
                              row['captured_at']))
@@ -799,7 +812,7 @@ def process_region(west,
                             continue
                         expected_filepath = os.path.join(
                             output_folder_name, f"{row['image_id']}.jpg")
-                        if not os.path.exists(expected_filepath):
+                        if not is_valid_image(expected_filepath):
                             download_tasks.append(
                                 (row['image_id'], row['thumb_original_url'],
                                  row['captured_at']))
@@ -983,7 +996,7 @@ def process_region(west,
                     expected_filepath = os.path.join(output_folder_name,
                                                      f"{img_id}.jpg")
 
-                    if not os.path.exists(expected_filepath):
+                    if not is_valid_image(expected_filepath):
                         download_tasks.append(
                             (img_id, row['thumb_original_url'],
                              row['captured_at']))

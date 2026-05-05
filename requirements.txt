@@ -14,3 +14,4 @@ polars
 rich
 geopandas
 shapely
+pillow
