@@ -30,8 +30,6 @@ Install dependencies with:
 python -m pip install -r requirements.txt
 ```
 
-> Note: the main script imports `compression.zstd`. If your environment does not provide that module after installing `requirements.txt`, install the matching zstd package used by your environment before running the pipeline.
-
 ## Mapillary token setup
 
 Create a `.env` file in the project root:
