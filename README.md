@@ -19,7 +19,7 @@ The pipeline is designed for large runs: it uses local multiprocessing across re
 
 ## Requirements
 
-- Python 3.10+ recommended.
+- Python 3.14+.
 - A Mapillary access token.
 - Dependencies from `requirements.txt`.
 - Enough disk space for compressed checkpoint files, Parquet partitions, and optional image downloads.
@@ -59,17 +59,17 @@ The required positional argument is a CSV file containing one row per region. Th
 
 | Column | Description |
 | --- | --- |
-| `region` | Human-readable region name used in output paths. |
 | `sw_lon` | Southwest longitude. |
 | `sw_lat` | Southwest latitude. |
 | `ne_lon` | Northeast longitude. |
 | `ne_lat` | Northeast latitude. |
+| `region` | Human-readable region name used in output paths. |
 
 Example:
 
 ```csv
-region,sw_lon,sw_lat,ne_lon,ne_lat
-example_city,-74.10,40.60,-73.70,40.90
+sw_lon,sw_lat,ne_lon,ne_lat,region
+-74.10,40.60,-73.70,40.90,sample_region
 ```
 
 ## Quick start
