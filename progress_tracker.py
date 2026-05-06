@@ -80,11 +80,11 @@ def main():
             "[bold cyan]Scanning directories and analyzing Parquet chunks...",
             spinner="dots"):
         for row in df_grid.iter_rows(named=True):
-            mother_region = row['region']
-            unique_region_id = f"{mother_region}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
+            parent_region = row['region']
+            unique_region_id = f"{parent_region}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
             safe_region_id = sanitize_folder_name(unique_region_id)
 
-            tracker[mother_region]["total_regions"] += 1
+            tracker[parent_region]["total_regions"] += 1
 
             region_dirs = []
             for d in args.dirs:
@@ -130,24 +130,24 @@ def main():
 
             total_markers = empty_markers + completed_markers
             if total_markers >= expected_subgrids:
-                tracker[mother_region]["completed_regions"] += 1
+                tracker[parent_region]["completed_regions"] += 1
 
-            tracker[mother_region]["total_data_points"] += count_parquet_rows(
+            tracker[parent_region]["total_data_points"] += count_parquet_rows(
                 list(set(all_data_files)))
 
-            tracker[mother_region]["total_animals"] += count_parquet_rows(
+            tracker[parent_region]["total_animals"] += count_parquet_rows(
                 list(set(animal_files)))
 
-            tracker[mother_region]["total_images"] += image_count
+            tracker[parent_region]["total_images"] += image_count
 
     table = Table(title="Mapillary Extraction Progress",
                   title_style="bold magenta")
-    table.add_column("Mother Region", style="cyan", no_wrap=True)
+    table.add_column("Parent Region", style="cyan", no_wrap=True)
     table.add_column("% Completed", justify="right", style="green")
-    table.add_column("% Incomplete", justify="right", style="red")
     table.add_column("Total Data Points", justify="right", style="blue")
     table.add_column("Ground Animals", justify="right", style="yellow")
     table.add_column("Images Collected", justify="right", style="magenta")
+    table.add_column("% Img Downloaded", justify="right", style="bright_cyan")
 
     csv_data = []
 
@@ -157,12 +157,14 @@ def main():
     grand_total_animals = 0
     grand_total_images = 0
 
-    for mother_region, stats in sorted(tracker.items()):
+    for parent_region, stats in sorted(tracker.items()):
         total = stats["total_regions"]
         completed = stats["completed_regions"]
 
         pct_completed = (completed / total) * 100 if total > 0 else 0.0
-        pct_incomplete = 100.0 - pct_completed
+
+        pct_images_downloaded = (stats['total_images'] / stats['total_animals']
+                                 ) * 100 if stats['total_animals'] > 0 else 0.0
 
         grand_total_regions += total
         grand_completed_regions += completed
@@ -170,48 +172,50 @@ def main():
         grand_total_animals += stats['total_animals']
         grand_total_images += stats['total_images']
 
-        table.add_row(mother_region,
+        table.add_row(parent_region,
                       f"{pct_completed:.1f}% ({completed}/{total})",
-                      f"{pct_incomplete:.1f}%",
                       f"{stats['total_data_points']:,}",
                       f"{stats['total_animals']:,}",
-                      f"{stats['total_images']:,}")
+                      f"{stats['total_images']:,}",
+                      f"{pct_images_downloaded:.1f}%")
 
         csv_data.append({
-            "Mother Region": mother_region,
+            "Parent Region": parent_region,
             "% Completed": round(pct_completed, 2),
-            "% Incomplete": round(pct_incomplete, 2),
             "Total Regions": total,
             "Completed Regions": completed,
             "Total Data Points": stats['total_data_points'],
             "Ground Animals": stats['total_animals'],
-            "Images Collected": stats['total_images']
+            "Images Collected": stats['total_images'],
+            "% Images Downloaded": round(pct_images_downloaded, 2)
         })
 
     grand_pct_completed = (grand_completed_regions / grand_total_regions
                            ) * 100 if grand_total_regions > 0 else 0.0
-    grand_pct_incomplete = 100.0 - grand_pct_completed
+
+    grand_pct_images = (grand_total_images / grand_total_animals
+                        ) * 100 if grand_total_animals > 0 else 0.0
 
     table.add_section()
 
     table.add_row(
         "GLOBAL TOTAL",
         f"{grand_pct_completed:.1f}% ({grand_completed_regions}/{grand_total_regions})",
-        f"{grand_pct_incomplete:.1f}%",
         f"{grand_total_data_points:,}",
         f"{grand_total_animals:,}",
         f"{grand_total_images:,}",
+        f"{grand_pct_images:.1f}%",
         style="bold white on default")
 
     csv_data.append({
-        "Mother Region": "GLOBAL TOTAL",
+        "Parent Region": "GLOBAL TOTAL",
         "% Completed": round(grand_pct_completed, 2),
-        "% Incomplete": round(grand_pct_incomplete, 2),
         "Total Regions": grand_total_regions,
         "Completed Regions": grand_completed_regions,
         "Total Data Points": grand_total_data_points,
         "Ground Animals": grand_total_animals,
-        "Images Collected": grand_total_images
+        "Images Collected": grand_total_images,
+        "% Images Downloaded": round(grand_pct_images, 2)
     })
 
     console.print("\n")

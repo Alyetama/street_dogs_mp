@@ -5,8 +5,10 @@ import glob
 import itertools
 import multiprocessing
 import os
+import queue
 import random
 import re
+import shutil
 import signal
 import threading
 from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
@@ -39,6 +41,7 @@ INNER_MAX_WORKERS = 20
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
 IMAGE_DIR = None
+TEMP_DIR = None
 API_CHUNK_SIZE = 2500
 PARQUET_CHUNK_SIZE = 100000
 PROXY_LIST = []
@@ -53,7 +56,7 @@ shutdown_event = threading.Event()
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
-    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR
+    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TEMP_DIR
     global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET
     global shutdown_event
 
@@ -71,6 +74,7 @@ def init_worker(config, event):
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
     IMAGE_DIR = config.get('IMAGE_DIR')
+    TEMP_DIR = config.get('TEMP_DIR')
     API_CHUNK_SIZE = config['API_CHUNK_SIZE']
     PARQUET_CHUNK_SIZE = config['PARQUET_CHUNK_SIZE']
     PROXY_LIST = config.get('PROXY_LIST', [])
@@ -229,8 +233,23 @@ def is_valid_image(filepath, image_id, valid_set, lock, ledger_path):
     return False
 
 
+def background_hdd_mover(move_queue):
+    """Dedicated background thread to sequentially move files from fast SSD to slow HDD."""
+    while True:
+        item = move_queue.get()
+        if item is None:
+            break
+        temp_path, final_path = item
+        try:
+            shutil.move(temp_path, final_path)
+        except Exception:
+            pass
+        move_queue.task_done()
+
+
 def download_single_image(image_id, url, output_folder_name, session,
-                          valid_set, lock, ledger_path):
+                          valid_set, lock, ledger_path, temp_folder_name,
+                          move_queue):
     """Network I/O download with Keep-Alive, Proxies, and API Fallback for expired URLs."""
     global PROXY_LIST, MLY_KEY
     filepath = os.path.join(output_folder_name, f"{image_id}.jpg")
@@ -252,8 +271,15 @@ def download_single_image(image_id, url, output_folder_name, session,
                                        proxies=proxy_dict)
                 response.raise_for_status()
 
-                with open(filepath, 'wb') as f:
-                    f.write(response.content)
+                if temp_folder_name and move_queue:
+                    temp_filepath = os.path.join(temp_folder_name,
+                                                 f"{image_id}.jpg")
+                    with open(temp_filepath, 'wb') as f:
+                        f.write(response.content)
+                    move_queue.put((temp_filepath, filepath))
+                else:
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
 
                 with lock:
                     valid_set.add(str(image_id))
@@ -270,6 +296,13 @@ def download_single_image(image_id, url, output_folder_name, session,
                     return False, last_err
             except Exception as e:
                 last_err = str(e) or type(e).__name__
+                if temp_folder_name:
+                    try:
+                        err_tmp = os.path.join(temp_folder_name,
+                                               f"{image_id}.jpg")
+                        if os.path.exists(err_tmp): os.remove(err_tmp)
+                    except Exception:
+                        pass
 
         return False, last_err
 
@@ -624,6 +657,20 @@ def process_region(west,
         output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
 
+    if TEMP_DIR:
+        temp_folder_name = os.path.join(TEMP_DIR, safe_region_id,
+                                        'ground_animal_images')
+        os.makedirs(temp_folder_name, exist_ok=True)
+        move_queue = queue.Queue()
+        mover_thread = threading.Thread(target=background_hdd_mover,
+                                        args=(move_queue, ),
+                                        daemon=True)
+        mover_thread.start()
+    else:
+        temp_folder_name = None
+        move_queue = None
+        mover_thread = None
+
     valid_ledger_path = os.path.join(region_dir,
                                      f'validated_images_{safe_region_id}.txt')
     validated_set = set()
@@ -702,7 +749,7 @@ def process_region(west,
                     if shutdown_event.is_set(): break
 
                     futures = {
-                        executor.submit(download_single_image, img_id, url, output_folder_name, dl_session, validated_set, valid_lock, valid_ledger_path):
+                        executor.submit(download_single_image, img_id, url, output_folder_name, dl_session, validated_set, valid_lock, valid_ledger_path, temp_folder_name, move_queue):
                         cap_at
                         for img_id, url, cap_at in chunk
                     }
@@ -726,6 +773,11 @@ def process_region(west,
                         pbar.update(1)
                         del futures[future]
                     gc.collect()
+
+        if mover_thread:
+            move_queue.join()
+            move_queue.put(None)
+            mover_thread.join()
 
         return f"Completed '{unique_region_id}' (Processed {len(download_tasks)} images via Download-Only mode)."
     # =========================================================
@@ -1070,7 +1122,7 @@ def process_region(west,
                                                   API_CHUNK_SIZE):
                         if shutdown_event.is_set(): break
                         futures = {
-                            executor.submit(download_single_image, img_id, url, output_folder_name, dl_session, validated_set, valid_lock, valid_ledger_path):
+                            executor.submit(download_single_image, img_id, url, output_folder_name, dl_session, validated_set, valid_lock, valid_ledger_path, temp_folder_name, move_queue):
                             cap_at
                             for img_id, url, cap_at in chunk
                         }
@@ -1097,6 +1149,10 @@ def process_region(west,
                             del futures[future]
                         gc.collect()
 
+            # --- CRITICAL: Wait for background moves to finish BEFORE checking EXIF ---
+            if mover_thread:
+                move_queue.join()
+
         if exif_tasks and not shutdown_event.is_set():
             with ThreadPoolExecutor(
                     max_workers=DOWNLOAD_MAX_WORKERS) as executor:
@@ -1121,6 +1177,10 @@ def process_region(west,
 
     del download_tasks
     gc.collect()
+
+    if mover_thread:
+        move_queue.put(None)
+        mover_thread.join()
 
     return f"Completed '{unique_region_id}' ({total_animals_found} animals found across all chunks)."
 
@@ -1215,6 +1275,11 @@ if __name__ == "__main__":
         help=
         "Process only a specific 0-indexed row from the CSV (e.g., 0 for the first data row)."
     )
+    parser.add_argument(
+        '--temp-dir',
+        type=str,
+        default=None,
+        help="Fast SSD temp directory to spool downloads before moving to HDD")
 
     args = parser.parse_args()
 
@@ -1229,6 +1294,7 @@ if __name__ == "__main__":
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
     IMAGE_DIR = args.image_dir
+    TEMP_DIR = args.temp_dir
     API_CHUNK_SIZE = args.api_chunk_size
     PARQUET_CHUNK_SIZE = args.parquet_chunk_size
 
@@ -1360,6 +1426,7 @@ if __name__ == "__main__":
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
                 'IMAGE_DIR': args.image_dir,
+                'TEMP_DIR': args.temp_dir,
                 'API_CHUNK_SIZE': API_CHUNK_SIZE,
                 'PARQUET_CHUNK_SIZE': PARQUET_CHUNK_SIZE,
                 'PROXY_LIST': proxy_list,
