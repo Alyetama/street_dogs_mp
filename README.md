@@ -96,6 +96,12 @@ Download images later from existing `ground_animals_*.parquet` files:
 python batch_chunks_mp_api_v3.py regions.csv --download-only
 ```
 
+Process existing JSON checkpoints into Parquet files without fetching new Mapillary API data:
+
+```bash
+python batch_chunks_mp_api_v3.py regions.csv --parquet-only
+```
+
 Send image downloads to a separate disk or mount point:
 
 ```bash
@@ -118,6 +124,8 @@ python batch_chunks_mp_api_v3.py regions.csv --image-dir /path/to/image_storage
 | `--exclude-ledger` | unset | Text file of image IDs to skip. |
 | `--token` | unset | Selects `MLY_KEY_<n>` instead of `MLY_KEY`. |
 | `--slurm` | `False` | Runs one region based on `SLURM_ARRAY_TASK_ID` or `--row-index`. |
+| `--download-only` | `False` | Skip API fetching and ONLY download images from existing ground_animals Parquets. |
+| `--parquet-only` | `False` | Skip all API fetching and ONLY process existing JSON files into Parquet chunks. |
 
 For the complete CLI reference, run:
 
