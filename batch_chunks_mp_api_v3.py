@@ -661,7 +661,8 @@ def process_region(west,
         temp_folder_name = os.path.join(TEMP_DIR, safe_region_id,
                                         'ground_animal_images')
         os.makedirs(temp_folder_name, exist_ok=True)
-        move_queue = queue.Queue()
+
+        move_queue = queue.Queue(maxsize=2000)
         mover_thread = threading.Thread(target=background_hdd_mover,
                                         args=(move_queue, ),
                                         daemon=True)
