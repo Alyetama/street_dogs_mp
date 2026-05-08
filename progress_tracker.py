@@ -54,7 +54,6 @@ def process_region_row(row, dirs, sub_grid_step):
         if os.path.exists(possible_path):
             region_dirs.append(possible_path)
 
-    # Always count the region in the total, even if no directory exists yet
     if not region_dirs:
         return parent_region, 1, 0, 0, 0, 0
 
@@ -69,7 +68,6 @@ def process_region_row(row, dirs, sub_grid_step):
     image_count = 0
 
     for r_dir in region_dirs:
-        # Single-pass directory scan (Massive speedup over multiple globbing for HDDs)
         try:
             for entry in os.scandir(r_dir):
                 if entry.is_file():
@@ -90,7 +88,6 @@ def process_region_row(row, dirs, sub_grid_step):
         image_folder = os.path.join(r_dir, 'ground_animal_images')
         if os.path.exists(image_folder):
             try:
-                # Fast generator count for images
                 image_count += sum(
                     1 for entry in os.scandir(image_folder)
                     if entry.is_file() and entry.name.lower().endswith('.jpg'))
@@ -184,7 +181,6 @@ def main():
 
                 progress.advance(task_id)
 
-    # --- Formatting the Output Table ---
     table = Table(title="Mapillary Extraction Progress",
                   title_style="bold magenta")
     table.add_column("Parent Region", style="cyan", no_wrap=True)
