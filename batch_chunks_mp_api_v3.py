@@ -43,12 +43,13 @@ DOWNLOAD_IMAGES = True
 DOWNLOAD_ONLY = False
 DOWNLOAD_MAX_WORKERS = 10
 OUTER_MAX_WORKERS = 5
-INNER_MAX_WORKERS = 20
+SEARCH_MAX_WORKERS = 150 // OUTER_MAX_WORKERS
+ENTITY_MAX_WORKERS = 520 // OUTER_MAX_WORKERS
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
 IMAGE_DIR = None
 TEMP_DIR = None
-API_CHUNK_SIZE = 2500
+API_CHUNK_SIZE = 5000
 PARQUET_CHUNK_SIZE = 100000
 PROXY_LIST = []
 EXCLUDE_SET = set()
@@ -62,7 +63,7 @@ shutdown_event = threading.Event()
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
-    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TEMP_DIR
+    global SEARCH_MAX_WORKERS, ENTITY_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TEMP_DIR
     global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET
     global shutdown_event
 
@@ -76,7 +77,8 @@ def init_worker(config, event):
     DOWNLOAD_IMAGES = config['DOWNLOAD_IMAGES']
     DOWNLOAD_ONLY = config['DOWNLOAD_ONLY']
     DOWNLOAD_MAX_WORKERS = config['DOWNLOAD_MAX_WORKERS']
-    INNER_MAX_WORKERS = config['INNER_MAX_WORKERS']
+    SEARCH_MAX_WORKERS = config['SEARCH_MAX_WORKERS']
+    ENTITY_MAX_WORKERS = config['ENTITY_MAX_WORKERS']
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
     IMAGE_DIR = config.get('IMAGE_DIR')
@@ -164,32 +166,34 @@ def get_sequences_for_bbox(bbox, session):
     bbox_str = f'{bbox.west},{bbox.south},{bbox.east},{bbox.north}'
     url = f'https://graph.mapillary.com/images?access_token={MLY_KEY}&fields=id,sequence&bbox={bbox_str}'
     try:
-        return {
+        data = {
             img['sequence']
             for img in session.get(url, timeout=10).json().get('data', [])
             if 'sequence' in img
         }
-    except Exception:
-        return set()
+        return bbox_str, data, None
+    except Exception as e:
+        return bbox_str, set(), str(e)
 
 
 def get_images_for_sequence(seq, session):
     url = f'https://graph.mapillary.com/image_ids?access_token={MLY_KEY}&sequence_id={seq}'
     try:
-        return [
+        data = [
             obj['id']
             for obj in session.get(url, timeout=10).json().get('data', [])
         ]
-    except Exception:
-        return []
+        return seq, data, None
+    except Exception as e:
+        return seq, [], str(e)
 
 
 def fetch_image_data(image_id, fields_str, session):
     url = f'https://graph.mapillary.com/{image_id}?access_token={MLY_KEY}&fields={fields_str}'
     try:
-        return image_id, session.get(url, timeout=10).json()
-    except Exception:
-        return image_id, None
+        return image_id, session.get(url, timeout=10).json(), None
+    except Exception as e:
+        return image_id, None, str(e)
 
 
 def fetch_animal_detections(image_id, seq_id, session):
@@ -208,9 +212,9 @@ def fetch_animal_detections(image_id, seq_id, session):
                     },
                     'geometry': det['geometry']
                 })
-        return image_id, features
-    except Exception:
-        return image_id, []
+        return image_id, features, None
+    except Exception as e:
+        return image_id, [], str(e)
 
 
 def is_valid_image(filepath, image_id, valid_set, lock, ledger_path):
@@ -439,76 +443,121 @@ def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                        pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
                                    f'topology_checkpoint_{sub_id}.json.zst')
+    failed_bboxes_file = os.path.join(region_dir,
+                                      f'failed_bboxes_{sub_id}.txt')
+    failed_seqs_file = os.path.join(region_dir,
+                                    f'failed_sequences_{sub_id}.txt')
+
+    image_to_sequence_map = {}
     if os.path.exists(checkpoint_file):
         try:
             with zstd.open(checkpoint_file, 'rb') as f:
-                return orjson.loads(f.read())
+                image_to_sequence_map = orjson.loads(f.read())
         except (orjson.JSONDecodeError, zstd.ZstdError):
             pass
 
-    tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
-    all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
-    land_bboxes = [
-        bbox for bbox in all_bboxes
-        if globe.is_land((bbox.south + bbox.north) /
-                         2.0, (bbox.west + bbox.east) / 2.0)
-    ]
+    target_bboxes = []
+    target_sequences = set()
 
-    if not land_bboxes: return {}
+    # 1. Resume Failed BBoxes
+    if os.path.exists(failed_bboxes_file):
+        with open(failed_bboxes_file, 'r') as f:
+            for line in f:
+                if '|' in line:
+                    bbox_str = line.split('|')[0].strip()
+                    parts = bbox_str.split(',')
+                    if len(parts) == 4:
+                        from collections import namedtuple
+                        BBox = namedtuple('BBox',
+                                          ['west', 'south', 'east', 'north'])
+                        target_bboxes.append(BBox(*map(float, parts)))
+        os.remove(
+            failed_bboxes_file)  # Delete log so we can write fresh failures
 
-    unique_sequences = set()
+    # 2. Resume Failed Sequences
+    if os.path.exists(failed_seqs_file):
+        with open(failed_seqs_file, 'r') as f:
+            for line in f:
+                if '|' in line:
+                    seq_str = line.split('|')[0].strip()
+                    target_sequences.add(seq_str)
+        os.remove(failed_seqs_file)
 
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        with tqdm(total=len(land_bboxes),
-                  desc=f"{desc_prefix} 1/6 BBoxes",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(land_bboxes, API_CHUNK_SIZE):
-                if shutdown_event.is_set(): break
-                futures = {
-                    executor.submit(get_sequences_for_bbox, bbox, session):
-                    bbox
-                    for bbox in chunk
-                }
-                for future in as_completed(futures):
-                    if shutdown_event.is_set():
-                        for f in futures:
-                            f.cancel()
-                        break
+    # 3. Completely Fresh Run
+    if not image_to_sequence_map and not target_bboxes and not target_sequences:
+        tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
+        all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
+        target_bboxes = [
+            bbox for bbox in all_bboxes
+            if globe.is_land((bbox.south + bbox.north) /
+                             2.0, (bbox.west + bbox.east) / 2.0)
+        ]
 
-                    unique_sequences.update(future.result())
-                    pbar.update(1)
-                    del futures[future]
-                gc.collect()
+    # 4. If checkpoint exists and no error logs found, it is 100% complete
+    if not target_bboxes and not target_sequences and image_to_sequence_map:
+        return image_to_sequence_map
 
-    image_to_sequence_map = {}
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        with tqdm(total=len(unique_sequences),
-                  desc=f"{desc_prefix} 2/6 Sequences",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(unique_sequences, API_CHUNK_SIZE):
-                if shutdown_event.is_set(): break
-                futures = {
-                    executor.submit(get_images_for_sequence, seq, session): seq
-                    for seq in chunk
-                }
-                for future in as_completed(futures):
-                    if shutdown_event.is_set():
-                        for f in futures:
-                            f.cancel()
-                        break
+    if target_bboxes:
+        with ThreadPoolExecutor(max_workers=SEARCH_MAX_WORKERS) as executor:
+            with tqdm(total=len(target_bboxes),
+                      desc=f"{desc_prefix} 1/6 BBoxes",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                for chunk in chunked_iterable(target_bboxes, API_CHUNK_SIZE):
+                    if shutdown_event.is_set(): break
+                    futures = {
+                        executor.submit(get_sequences_for_bbox, bbox, session):
+                        bbox
+                        for bbox in chunk
+                    }
+                    for future in as_completed(futures):
+                        if shutdown_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                            break
+                        bbox_str, seqs, error = future.result()
+                        if error:
+                            with open(failed_bboxes_file, 'a') as ef:
+                                ef.write(f"{bbox_str} | Error: {error}\n")
+                        else:
+                            target_sequences.update(seqs)
+                        pbar.update(1)
+                        del futures[future]
+                    gc.collect()
 
-                    seq_id = futures[future]
-                    for img_id in future.result():
-                        image_to_sequence_map[img_id] = seq_id
-                    pbar.update(1)
-                    del futures[future]
-                gc.collect()
+    if target_sequences:
+        with ThreadPoolExecutor(max_workers=SEARCH_MAX_WORKERS) as executor:
+            with tqdm(total=len(target_sequences),
+                      desc=f"{desc_prefix} 2/6 Sequences",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                for chunk in chunked_iterable(target_sequences,
+                                              API_CHUNK_SIZE):
+                    if shutdown_event.is_set(): break
+                    futures = {
+                        executor.submit(get_images_for_sequence, seq, session):
+                        seq
+                        for seq in chunk
+                    }
+                    for future in as_completed(futures):
+                        if shutdown_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                            break
+                        seq_id, img_ids, error = future.result()
+                        if error:
+                            with open(failed_seqs_file, 'a') as ef:
+                                ef.write(f"{seq_id} | Error: {error}\n")
+                        else:
+                            for img_id in img_ids:
+                                image_to_sequence_map[img_id] = seq_id
+                        pbar.update(1)
+                        del futures[future]
+                    gc.collect()
 
-    if not shutdown_event.is_set():
+    if not shutdown_event.is_set() and image_to_sequence_map:
         temp_checkpoint = checkpoint_file + '.tmp'
         with zstd.open(temp_checkpoint, 'wb', options=ZSTD_OPTIONS) as f:
             f.write(orjson.dumps(image_to_sequence_map))
@@ -521,6 +570,10 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                             pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
                                    f'metadata_checkpoint_{sub_id}.jsonl.zst')
+    failed_log = os.path.join(region_dir, f'failed_metadata_{sub_id}.txt')
+
+    if os.path.exists(failed_log):
+        os.remove(failed_log)
 
     clean_jsonl_file(checkpoint_file)
 
@@ -540,7 +593,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
 
     write_lock = threading.Lock()
     with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
-        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=ENTITY_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 3/6 Metadata",
                       position=pos,
@@ -555,12 +608,15 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                     }
                     for future in as_completed(futures):
                         if shutdown_event.is_set():
-                            for f in futures:
-                                f.cancel()
+                            for fut in futures:
+                                fut.cancel()
                             break
 
-                        image_id, data = future.result()
-                        if data is not None:
+                        image_id, data, error = future.result()
+                        if error:
+                            with open(failed_log, 'a') as ef:
+                                ef.write(f"{image_id} | Error: {error}\n")
+                        elif data is not None:
                             with write_lock:
                                 f.write(
                                     orjson.dumps({
@@ -581,6 +637,10 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                               pos, desc_prefix):
     checkpoint_file = os.path.join(
         region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.zst')
+    failed_log = os.path.join(region_dir, f'failed_detections_{sub_id}.txt')
+
+    if os.path.exists(failed_log):
+        os.remove(failed_log)
 
     clean_jsonl_file(checkpoint_file)
 
@@ -601,7 +661,7 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
 
     write_lock = threading.Lock()
     with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
-        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=ENTITY_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 4/6 Detections",
                       position=pos,
@@ -616,17 +676,21 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                     }
                     for future in as_completed(futures):
                         if shutdown_event.is_set():
-                            for f in futures:
-                                f.cancel()
+                            for fut in futures:
+                                fut.cancel()
                             break
 
-                        image_id, features = future.result()
-                        with write_lock:
-                            f.write(
-                                orjson.dumps({
-                                    'image_id': image_id,
-                                    'features': features
-                                }) + b'\n')
+                        image_id, features, error = future.result()
+                        if error:
+                            with open(failed_log, 'a') as ef:
+                                ef.write(f"{image_id} | Error: {error}\n")
+                        else:
+                            with write_lock:
+                                f.write(
+                                    orjson.dumps({
+                                        'image_id': image_id,
+                                        'features': features
+                                    }) + b'\n')
                         pbar.update(1)
                         del futures[future]
                         del features
@@ -761,6 +825,14 @@ def process_region(west,
             validated_set = {line.strip() for line in f if line.strip()}
     valid_lock = threading.Lock()
 
+    failed_tracker_path = os.path.join(
+        region_dir, f'failed_downloads_{safe_region_id}.txt')
+    failed_set = set()
+    if os.path.exists(failed_tracker_path):
+        with open(failed_tracker_path, 'r') as f:
+            failed_set = {line.strip() for line in f if line.strip()}
+    failed_lock = threading.Lock()
+
     # =========================================================
     #                    DOWNLOAD-ONLY MODE
     # =========================================================
@@ -783,7 +855,8 @@ def process_region(west,
                     columns=['image_id', 'thumb_original_url', 'captured_at'])
                 for f in animal_files
             ]
-            df = pl.concat(dfs)
+
+            df = pl.concat(dfs).unique(subset=['image_id'], keep='first')
 
             if 'captured_at' not in df.columns:
                 df = df.with_columns(pl.lit(None).alias('captured_at'))
@@ -846,11 +919,11 @@ def process_region(west,
                         )
 
                         if not success:
-                            failed_tracker_path = os.path.join(
-                                region_dir,
-                                f'failed_downloads_{safe_region_id}.txt')
-                            with open(failed_tracker_path, 'a') as f:
-                                f.write(f"{img_id}\n")
+                            with failed_lock:
+                                if str(img_id) not in failed_set:
+                                    with open(failed_tracker_path, 'a') as f:
+                                        f.write(f"{img_id}\n")
+                                    failed_set.add(str(img_id))
 
                         pbar.update(1)
                         del futures[future]
@@ -871,8 +944,9 @@ def process_region(west,
     session.mount(
         'https://',
         HTTPAdapter(max_retries=retries,
-                    pool_connections=INNER_MAX_WORKERS,
-                    pool_maxsize=INNER_MAX_WORKERS))
+                    pool_connections=max(SEARCH_MAX_WORKERS,
+                                         ENTITY_MAX_WORKERS),
+                    pool_maxsize=max(SEARCH_MAX_WORKERS, ENTITY_MAX_WORKERS)))
 
     sub_bboxes = []
     cur_lat = south
@@ -1147,8 +1221,9 @@ def process_region(west,
         if final_anim_files:
             queued_ids = {t[0] for t in download_tasks}
 
-            df_dl = pl.scan_parquet(final_anim_files).select(
-                ['image_id', 'thumb_original_url', 'captured_at']).collect()
+            df_dl = pl.scan_parquet(final_anim_files).select([
+                'image_id', 'thumb_original_url', 'captured_at'
+            ]).unique(subset=['image_id'], keep='first').collect()
 
             if 'captured_at' not in df_dl.columns:
                 df_dl = df_dl.with_columns(pl.lit(None).alias('captured_at'))
@@ -1167,6 +1242,7 @@ def process_region(west,
                         download_tasks.append(
                             (img_id, row['thumb_original_url'],
                              row['captured_at']))
+                        queued_ids.add(img_id)
                     else:
                         if row['captured_at']:
                             try:
@@ -1221,11 +1297,12 @@ def process_region(west,
                             if success and newly_downloaded:
                                 exif_tasks.append((filepath, cap_at))
                             elif not success:
-                                failed_tracker_path = os.path.join(
-                                    region_dir,
-                                    f'failed_downloads_{safe_region_id}.txt')
-                                with open(failed_tracker_path, 'a') as f:
-                                    f.write(f"{img_id}\n")
+                                with failed_lock:
+                                    if str(img_id) not in failed_set:
+                                        with open(failed_tracker_path,
+                                                  'a') as f:
+                                            f.write(f"{img_id}\n")
+                                        failed_set.add(str(img_id))
 
                             pbar.update(1)
                             del futures[future]
@@ -1306,10 +1383,20 @@ if __name__ == "__main__":
                         type=int,
                         default=5,
                         help="Max parallel regions (default: 5)")
-    parser.add_argument('--inner-max-workers',
-                        type=int,
-                        default=20,
-                        help="Max threads per region (default: 20)")
+    parser.add_argument(
+        '--search-max-workers',
+        type=int,
+        default=None,
+        help=
+        "Max threads for Search APIs (Dynamically defaults to 150 / outer-workers)"
+    )
+    parser.add_argument(
+        '--entity-max-workers',
+        type=int,
+        default=None,
+        help=
+        "Max threads for Entity APIs (Dynamically defaults to 520 / outer-workers)"
+    )
     parser.add_argument('--sub-grid-step',
                         type=float,
                         default=1.0,
@@ -1326,8 +1413,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--api-chunk-size',
         type=int,
-        default=2500,
-        help="Chunk size for multithreaded API requests (default: 2500)")
+        default=5000,
+        help="Chunk size for multithreaded API requests (default: 5000)")
     parser.add_argument(
         '--parquet-chunk-size',
         type=int,
@@ -1365,6 +1452,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.search_max_workers is None:
+        args.search_max_workers = max(1, 150 // args.outer_max_workers)
+
+    if args.entity_max_workers is None:
+        args.entity_max_workers = max(1, 520 // args.outer_max_workers)
+
     GRID_CSV_FILE = args.grid_csv_file
     ZOOM_LEVEL = args.zoom_level
     VISUALIZE = args.visualize
@@ -1372,7 +1465,8 @@ if __name__ == "__main__":
     DOWNLOAD_ONLY = args.download_only
     DOWNLOAD_MAX_WORKERS = args.download_max_workers
     OUTER_MAX_WORKERS = args.outer_max_workers
-    INNER_MAX_WORKERS = args.inner_max_workers
+    SEARCH_MAX_WORKERS = args.search_max_workers
+    ENTITY_MAX_WORKERS = args.entity_max_workers
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
     IMAGE_DIR = args.image_dir
@@ -1504,7 +1598,8 @@ if __name__ == "__main__":
                 'DOWNLOAD_IMAGES': DOWNLOAD_IMAGES,
                 'DOWNLOAD_ONLY': args.download_only,
                 'DOWNLOAD_MAX_WORKERS': args.download_max_workers,
-                'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
+                'SEARCH_MAX_WORKERS': SEARCH_MAX_WORKERS,
+                'ENTITY_MAX_WORKERS': ENTITY_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
                 'IMAGE_DIR': args.image_dir,
