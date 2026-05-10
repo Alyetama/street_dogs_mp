@@ -16,10 +16,15 @@ def main():
     parser.add_argument('--output',
                         default="global_exclude_ledger.txt",
                         help="Output text file name")
+    parser.add_argument(
+        '--substring',
+        default="",
+        help="Optional substring to filter regions (e.g., 'North_America')")
     args = parser.parse_args()
 
     console = Console()
 
+    # 1. Load existing IDs if the file already exists
     existing_ids = set()
     if os.path.exists(args.output):
         console.print(
@@ -29,20 +34,29 @@ def main():
             existing_ids = {line.strip() for line in f if line.strip()}
         console.print(f"[\u2713] Loaded {len(existing_ids):,} existing IDs.")
 
+    # 2. Scan the hard drive for images (with substring filter)
+    filter_msg = f" (Filtering by: '{args.substring}')" if args.substring else ""
     console.print(
-        f"\n[cyan]Scanning for .jpg files in {args.image_dir}...[/cyan]")
+        f"\n[cyan]Scanning for .jpg files in {args.image_dir}{filter_msg}...[/cyan]"
+    )
+
     scanned_ids = set()
 
     for root, _, files in os.walk(args.image_dir):
+        # --- NEW: Skip folders that don't match the substring ---
+        if args.substring and args.substring not in root:
+            continue
+
         for file in files:
             if file.lower().endswith('.jpg'):
                 scanned_ids.add(Path(file).stem)
 
     if not scanned_ids:
         console.print(
-            "[yellow]No .jpg files found in the specified directory.[/yellow]")
+            "[yellow]No .jpg files found matching your criteria.[/yellow]")
         return
 
+    # 3. Mathematically subtract the old IDs from the scanned IDs
     new_ids = scanned_ids - existing_ids
 
     if not new_ids:
@@ -55,6 +69,7 @@ def main():
         f"[\u2713] Found [green]{len(new_ids):,}[/green] NEW unique images. Appending to ledger..."
     )
 
+    # 4. Open the file in 'a' (append) mode so it doesn't overwrite
     with open(args.output, 'a') as f:
         for img_id in new_ids:
             f.write(f"{img_id}\n")

@@ -20,8 +20,10 @@ def has_image_file(region_path):
     valid_exts = ('.jpg', '.jpeg', '.png')
     try:
         for entry in os.scandir(region_path):
-            if entry.is_file() and entry.name.lower().endswith(valid_exts):
-                return True
+            if entry.is_file():
+                name_lower = entry.name.lower()
+                if name_lower.endswith(valid_exts) and not name_lower.endswith('_tiles.png'):
+                    return True
             elif entry.is_dir():
                 if has_image_file(entry.path):
                     return True

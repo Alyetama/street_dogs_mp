@@ -15,6 +15,7 @@ from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import matplotlib
 import mercantile
 import orjson
 import piexif
@@ -25,6 +26,11 @@ from global_land_mask import globe
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+
+matplotlib.use('Agg')
+import contextily as cx
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 
 load_dotenv()
 
@@ -630,6 +636,69 @@ def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
                     gc.collect()
 
 
+def generate_region_visualization(sw_lon, sw_lat, ne_lon, ne_lat, zoom,
+                                  region_dir, safe_region_id):
+    """Generates a visualization of land/water tiles for a given region."""
+    tiles = list(mercantile.tiles(sw_lon, sw_lat, ne_lon, ne_lat, zoom))
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.set_xlim(sw_lon, ne_lon)
+    ax.set_ylim(sw_lat, ne_lat)
+
+    land_count = 0
+    water_count = 0
+
+    for t in tiles:
+        bbox = mercantile.bounds(t.x, t.y, t.z)
+        center_lat_tile = (bbox.south + bbox.north) / 2.0
+        center_lon_tile = (bbox.west + bbox.east) / 2.0
+        is_land = globe.is_land(center_lat_tile, center_lon_tile)
+
+        if is_land:
+            facecolor = '#00FF00'
+            alpha = 0.3
+            land_count += 1
+        else:
+            facecolor = '#FF0000'
+            alpha = 0.15
+            water_count += 1
+
+        rect = patches.Rectangle((bbox.west, bbox.south),
+                                 bbox.east - bbox.west,
+                                 bbox.north - bbox.south,
+                                 linewidth=0.5,
+                                 edgecolor='black',
+                                 facecolor=facecolor,
+                                 alpha=alpha)
+        ax.add_patch(rect)
+
+    main_rect = patches.Rectangle((sw_lon, sw_lat),
+                                  ne_lon - sw_lon,
+                                  ne_lat - sw_lat,
+                                  linewidth=3,
+                                  edgecolor='yellow',
+                                  facecolor='none')
+    ax.add_patch(main_rect)
+
+    try:
+        cx.add_basemap(ax,
+                       crs="EPSG:4326",
+                       source=cx.providers.Esri.WorldImagery)
+    except Exception:
+        pass
+
+    plt.title(
+        f"Tile Filtering: {safe_region_id}\n{land_count} Land (Green) | {water_count} Water (Red)",
+        color='white',
+        backgroundcolor='black')
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+
+    output_file = os.path.join(region_dir, f"{safe_region_id}_tiles.png")
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
 # --- The Master Process Worker ---
 def process_region(west,
                    south,
@@ -650,6 +719,18 @@ def process_region(west,
     region_run_id = unique_region_id.replace('_', ' ')
     region_dir = os.path.join(PARENT_DIR, safe_region_id)
     os.makedirs(region_dir, exist_ok=True)
+
+    if VISUALIZE:
+        expected_png = os.path.join(region_dir, f"{safe_region_id}_tiles.png")
+        if not os.path.exists(expected_png):
+            try:
+                generate_region_visualization(west, south, east, north,
+                                              ZOOM_LEVEL, region_dir,
+                                              safe_region_id)
+            except Exception as e:
+                tqdm.write(
+                    f"    [!] Visualization failed for {safe_region_id}: {e}")
+
     if IMAGE_DIR:
         output_folder_name = os.path.join(IMAGE_DIR, safe_region_id,
                                           'ground_animal_images')
