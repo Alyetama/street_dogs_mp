@@ -64,7 +64,7 @@ def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
     global SEARCH_MAX_WORKERS, ENTITY_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TEMP_DIR
-    global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET
+    global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET, TARGET_SUB_INDICES
     global shutdown_event
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -86,6 +86,7 @@ def init_worker(config, event):
     API_CHUNK_SIZE = config['API_CHUNK_SIZE']
     PARQUET_CHUNK_SIZE = config['PARQUET_CHUNK_SIZE']
     PROXY_LIST = config.get('PROXY_LIST', [])
+    TARGET_SUB_INDICES = config.get('TARGET_SUB_INDICES')
 
     ledger_path = config.get('EXCLUDE_LEDGER')
     if ledger_path and os.path.exists(ledger_path):
@@ -1074,6 +1075,9 @@ def process_region(west,
     subgrids_processed = 0
 
     for i, (sw_lon, sw_lat, ne_lon, ne_lat) in enumerate(sub_bboxes):
+        if TARGET_SUB_INDICES and i not in TARGET_SUB_INDICES:
+            continue
+
         if shutdown_event.is_set():
             return f"Aborted '{unique_region_id}' safely."
 
@@ -1453,6 +1457,13 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Fast SSD temp directory to spool downloads before moving to HDD")
+    parser.add_argument(
+        '--sub-indices',
+        type=str,
+        default=None,
+        help=
+        "Process specific sub-grid indices. Can be a single number or comma-separated (e.g., '4' or '4,12,15')."
+    )
 
     args = parser.parse_args()
 
@@ -1477,6 +1488,11 @@ if __name__ == "__main__":
     TEMP_DIR = args.temp_dir
     API_CHUNK_SIZE = args.api_chunk_size
     PARQUET_CHUNK_SIZE = args.parquet_chunk_size
+
+    TARGET_SUB_INDICES = None
+    if args.sub_indices:
+        TARGET_SUB_INDICES = set(
+            int(x.strip()) for x in args.sub_indices.split(','))
 
     proxy_list = []
     if args.proxy_file and os.path.exists(args.proxy_file):
@@ -1611,7 +1627,8 @@ if __name__ == "__main__":
                 'API_CHUNK_SIZE': API_CHUNK_SIZE,
                 'PARQUET_CHUNK_SIZE': PARQUET_CHUNK_SIZE,
                 'PROXY_LIST': proxy_list,
-                'EXCLUDE_LEDGER': args.exclude_ledger
+                'EXCLUDE_LEDGER': args.exclude_ledger,
+                'TARGET_SUB_INDICES': TARGET_SUB_INDICES
             }
 
             with ProcessPoolExecutor(max_workers=OUTER_MAX_WORKERS,
