@@ -794,6 +794,10 @@ def process_region(west,
             except Exception as e:
                 tqdm.write(
                     f"    [!] Visualization failed for {safe_region_id}: {e}")
+        else:
+            tqdm.write(
+                f"    [i] Visualization already exists for {safe_region_id}, skipping generation."
+            )
 
     if IMAGE_DIR:
         output_folder_name = os.path.join(IMAGE_DIR, safe_region_id,
