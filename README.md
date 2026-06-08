@@ -96,16 +96,22 @@ Download images later from existing `ground_animals_*.parquet` files:
 python batch_chunks_mp_api_v3.py regions.csv --download-only
 ```
 
-Process existing JSON checkpoints into Parquet files without fetching new Mapillary API data:
-
-```bash
-python batch_chunks_mp_api_v3.py regions.csv --parquet-only
-```
-
 Send image downloads to a separate disk or mount point:
 
 ```bash
 python batch_chunks_mp_api_v3.py regions.csv --image-dir /path/to/image_storage
+```
+
+Use a fast SSD as a write buffer before moving images to a slow HDD:
+
+```bash
+python batch_chunks_mp_api_v3.py regions.csv --image-dir /mnt/hdd/images --temp-dir /tmp/ssd_spool
+```
+
+Process only specific sub-grid indices within a region (useful for backfilling):
+
+```bash
+python batch_chunks_mp_api_v3.py regions.csv --sub-indices 4,12,15
 ```
 
 ## Common options
@@ -114,18 +120,21 @@ python batch_chunks_mp_api_v3.py regions.csv --image-dir /path/to/image_storage
 | --- | ---: | --- |
 | `--zoom-level` | `14` | Mercantile tile zoom used while scanning bounding boxes. |
 | `--outer-max-workers` | `5` | Number of regions processed in parallel in local mode. |
-| `--inner-max-workers` | `20` | Threads per region for Mapillary API calls. |
+| `--search-max-workers` | `150 / outer` | Threads per region for bbox/sequence search API calls. Dynamically scaled from `--outer-max-workers` by default. |
+| `--entity-max-workers` | `520 / outer` | Threads per region for metadata and detection API calls. Dynamically scaled from `--outer-max-workers` by default. |
 | `--download-max-workers` | `10` | Threads used specifically for image downloads. |
 | `--sub-grid-step` | `1.0` | Degree step used to split large input regions into smaller sub-grids. |
+| `--sub-indices` | unset | Comma-separated sub-grid indices to process (e.g., `4` or `4,12,15`). Processes all sub-grids when unset. |
 | `--parent-dir` | `grid_runs` | Root directory for per-region outputs and checkpoints. |
-| `--api-chunk-size` | `2500` | Batch size for threaded API work. |
+| `--image-dir` | unset | Separate directory for image downloads (e.g., a different disk). |
+| `--temp-dir` | unset | Fast SSD temp directory to buffer downloads before moving to `--image-dir`. |
+| `--api-chunk-size` | `5000` | Batch size for threaded API work. |
 | `--parquet-chunk-size` | `100000` | Rows per `all_data_*.parquet` output partition. |
 | `--proxy-file` | unset | Optional proxy list file. Supports `ip:port`, `ip:port:user:password`, and full proxy URLs. |
 | `--exclude-ledger` | unset | Text file of image IDs to skip. |
 | `--token` | unset | Selects `MLY_KEY_<n>` instead of `MLY_KEY`. |
 | `--slurm` | `False` | Runs one region based on `SLURM_ARRAY_TASK_ID` or `--row-index`. |
 | `--download-only` | `False` | Skip API fetching and ONLY download images from existing ground_animals Parquets. |
-| `--parquet-only` | `False` | Skip all API fetching and ONLY process existing JSON files into Parquet chunks. |
 
 For the complete CLI reference, run:
 
@@ -150,6 +159,7 @@ Typical files include:
 | `ground_animal_images/` | Downloaded `.jpg` files when image downloading is enabled. |
 | `validated_images_<safe_region_id>.txt` | Ledger of images that passed local validity checks. |
 | `failed_downloads_<safe_region_id>.txt` | Image IDs that failed download attempts. |
+| `covered_countries.txt` | Countries intersecting the region bounding box (written by `generate_countries.py`). |
 | `.completed_<sub_id>` | Resume marker indicating a sub-grid completed. |
 | `.empty_<sub_id>` | Resume marker indicating a sub-grid had no usable topology results. |
 
@@ -178,19 +188,162 @@ Example command inside a job script:
 ```bash
 python batch_chunks_mp_api_v3.py regions.csv \
   --slurm \
-  --inner-max-workers "$((SLURM_CPUS_PER_TASK * 4))" \
+  --search-max-workers "$((SLURM_CPUS_PER_TASK * 4))" \
+  --entity-max-workers "$((SLURM_CPUS_PER_TASK * 16))" \
   --parent-dir grid_runs \
   --no-download-images
 ```
 
 ## Helper scripts
 
-This repository also contains utility scripts for preparing grids, checking/compressing outputs, and visualization, including `generate_countries.py`, `split_regions.py`, `scan_regions.py`, `check_gz_health.py`, `convert_to_zstd.py`, `compress_checkpoints.py`, `progress_tracker.py`, and `visualize_region_tiles.py`. These are supporting tools; the primary pipeline entry point remains `batch_chunks_mp_api_v3.py`.
+### Grid preparation
+
+#### `split_regions.py`
+
+Splits `global_grid_5deg.csv` into individual per-region CSV files placed under `regions/pending/`. Each file contains the rows for a single named region and is ready to pass directly to `batch_chunks_mp_api_v3.py`.
+
+```bash
+python split_regions.py
+```
+
+#### `generate_countries.py`
+
+For every region folder found under one or more `--dirs` directories, writes a `covered_countries.txt` file listing the countries whose boundaries intersect that region's bounding box. Uses Natural Earth 110 m country data.
+
+```bash
+python generate_countries.py --dirs grid_runs /mnt/hdd/grid_runs
+```
+
+---
+
+### Progress and navigation
+
+#### `progress_tracker.py`
+
+Displays a Rich-formatted progress table grouped by parent region, showing completion percentage, total data points, ground-animal counts, and image download rate. Accepts multiple base directories so runs spread across several drives can be reported together. Saves a timestamped CSV report to `progress_files/`.
+
+```bash
+python progress_tracker.py regions.csv --dirs grid_runs /mnt/hdd/grid_runs
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--dirs` | required | One or more base directories to scan for grid runs. |
+| `--sub-grid-step` | `1.0` | Must match the `--sub-grid-step` used in the main script. |
+| `-w` / `--workers` | `2 × CPU` | Concurrent threads for scanning. |
+
+#### `find_location_folder.py`
+
+Geocodes a city or country name via Nominatim and finds which region folders in your grid runs overlap with it. Useful for quickly locating data for a specific place across multiple drives.
+
+```bash
+python find_location_folder.py "Japan" --dirs grid_runs /mnt/hdd/grid_runs
+python find_location_folder.py "Paris" --dirs grid_runs
+```
+
+#### `scan_regions.py`
+
+Scans one or more base directories for folders matching a region prefix, then recommends the exact `--parent-dir` and `--image-dir` flags to pass to the main script. Also reports per-directory breakdowns and flags any regions whose data or images are split across unexpected directories.
+
+```bash
+python scan_regions.py South_America --dirs grid_runs /mnt/hdd/grid_runs
+```
+
+---
+
+### Ledger management
+
+#### `generate_ledger.py`
+
+Builds or appends to an exclude ledger (a plain-text file of image IDs) by scanning a directory tree for `.jpg` files. Pass the resulting file to the main script via `--exclude-ledger` to skip images that have already been downloaded.
+
+```bash
+python generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt
+python generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt --substring North_America
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--image-dir` | required | Base directory containing grid run folders with images. |
+| `--output` | `global_exclude_ledger.txt` | Ledger file to create or append to. |
+| `--substring` | unset | Only include images from folders whose path contains this string. |
+
+---
+
+### Checkpoint maintenance
+
+#### `compress_checkpoints.py`
+
+One-time migration utility. Scans `grid_runs/` for uncompressed `.json`, `.jsonl`, and `.csv` files and gzip-compresses them in place. Only needed if you have checkpoints produced before the pipeline switched to zstd.
+
+```bash
+python compress_checkpoints.py
+```
+
+#### `convert_to_zstd.py`
+
+Converts `.json.gz` and `.jsonl.gz` checkpoint files to `.zst` format, with optional byte-level verification and automatic deletion of the original `.gz` files after a confirmed match.
+
+```bash
+python convert_to_zstd.py regions.csv --parent-dirs grid_runs /mnt/hdd/grid_runs
+python convert_to_zstd.py regions.csv --parent-dirs grid_runs --compare --delete-gz
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--parent-dirs` | `grid_runs` | One or more directories to scan for `.gz` files. |
+| `--compare` | `False` | Verify the decompressed `.zst` stream matches the original `.gz` byte-for-byte. |
+| `--delete-gz` | `False` | Delete `.gz` files after processing (only after a verified match if `--compare` is set). |
+| `--overwrite` | `False` | Re-convert even if a `.zst` file already exists. |
+| `--ram-gb` | `8.0` | Memory budget for read/write chunks. |
+| `--workers` | all cores | Zstandard compression threads. |
+
+#### `check_gz_health.py`
+
+Concurrently tests all `.gz` files under `grid_runs/` using `gzip -t`. Lists corrupted files and optionally deletes them interactively or in bulk.
+
+```bash
+python check_gz_health.py
+python check_gz_health.py --delete-all --substring Pacific_Ocean --ignore-recent 2.0
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `-d` / `--delete-all` | `False` | Delete all corrupted files without prompting. |
+| `-s` / `--substring` | unset | Only check files whose path contains this string. |
+| `-i` / `--ignore-recent` | `0` | Skip files modified within the last N hours. |
+| `-c` / `--clear-completed` | `False` | Remove the region from `completed_regions.txt` if corruption is found. |
+| `-e` / `--exclude-ext` | unset | Skip files ending with specific sub-extensions (e.g., `.csv.gz`). |
+| `-w` / `--workers` | CPU count | Concurrent workers. |
+
+#### `check_zst_health.py`
+
+Same as `check_gz_health.py` but for `.zst` files, using `zstd -t`. When `--clear-completed` is set, deletes the corresponding `.completed_<sub_id>` marker instead of a region-level text file, so the main script will re-process the affected sub-grid on the next run.
+
+```bash
+python check_zst_health.py
+python check_zst_health.py --delete-all --clear-completed --ignore-recent 1.5
+```
+
+---
+
+### Visualization
+
+#### `visualize_region_tiles.py`
+
+Generates a static map image showing mercantile tiles for a region, colored green (land) or red (water). Saves the PNG into the region's output folder. Requires a folder name in the format `Name_SWLon_SWLat_NELon_NELat`.
+
+```bash
+python visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9"
+python visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9" --zoom 14 --parent_dir grid_runs
+```
 
 ## Troubleshooting
 
 - **Missing token:** ensure `.env` contains `MLY_KEY` or the numbered `MLY_KEY_<n>` selected by `--token`.
 - **No images downloaded:** confirm that `--no-download-images` was not used and that `ground_animals_*.parquet` files contain non-null `thumb_original_url` values.
-- **Rate limits or network failures:** reduce `--inner-max-workers`, reduce `--download-max-workers`, or provide `--proxy-file` if appropriate for your environment.
+- **Rate limits or network failures:** reduce `--search-max-workers`, reduce `--entity-max-workers`, reduce `--download-max-workers`, or provide `--proxy-file` if appropriate for your environment.
 - **Large output directories:** increase available disk space, use `--image-dir` for images, or run with `--no-download-images` first and download later with `--download-only`.
+- **Slow HDD writes during downloads:** use `--temp-dir` pointing to a fast SSD; the pipeline writes there first and moves files to `--image-dir` in a background thread.
+- **Need to reprocess a specific sub-grid:** use `--sub-indices` with the sub-grid number (zero-based) to target only that cell without reprocessing the entire region.
 - **Interrupted run:** re-run the same command. Existing checkpoints, Parquet chunks, and completion markers are used to resume work where possible.
