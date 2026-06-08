@@ -65,7 +65,7 @@ def process_region_row(row, dirs, sub_grid_step):
     completed_markers = 0
     all_data_files = []
     animal_files = []
-    image_count = 0
+    unique_image_names = set()
 
     for r_dir in region_dirs:
         try:
@@ -88,9 +88,9 @@ def process_region_row(row, dirs, sub_grid_step):
         image_folder = os.path.join(r_dir, 'ground_animal_images')
         if os.path.exists(image_folder):
             try:
-                image_count += sum(
-                    1 for entry in os.scandir(image_folder)
-                    if entry.is_file() and entry.name.lower().endswith('.jpg'))
+                for entry in os.scandir(image_folder):
+                    if entry.is_file() and entry.name.lower().endswith('.jpg'):
+                        unique_image_names.add(entry.name)
             except Exception:
                 pass
 
@@ -100,7 +100,8 @@ def process_region_row(row, dirs, sub_grid_step):
     data_points = count_parquet_rows(list(set(all_data_files)))
     animals = count_parquet_rows(list(set(animal_files)))
 
-    return parent_region, 1, completed_val, data_points, animals, image_count
+    return parent_region, 1, completed_val, data_points, animals, len(
+        unique_image_names)
 
 
 def main():
