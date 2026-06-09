@@ -1359,6 +1359,8 @@ function renderSearchSlot(displayName, folderCount, errorMsg) {
       <span>🔍</span>
       <span class="sr-label" title="${esc(displayName)}">${esc(displayName)}</span>
       <span class="sr-count">${folderCount} folder${folderCount !== 1 ? 's' : ''}</span>
+      <button class="map-btn" title="Map search results"
+              onclick="event.stopPropagation(); openRegionMap('__search__')">🗺</button>
       <button class="sr-clear" onclick="event.stopPropagation();clearSearch()" title="Clear search">✕</button>
     </div>`;
 }
@@ -1450,11 +1452,16 @@ function renderContent() {
     return;
   }
 
+  const canMap = S.type !== 'images';
   const typeBar = `
     <div class="type-bar">
       ${DATA_TYPES.map(t => `
         <button class="type-btn${t.key === S.type ? ' active' : ''}"
                 onclick="setType('${t.key}')">${t.label}</button>`).join('')}
+      ${canMap ? `
+      <div style="flex:1"></div>
+      <button class="type-btn" style="border-color:var(--accent);color:var(--accent)"
+              onclick="openRegionMap(${esc(JSON.stringify(S.selected))})">🗺 Map all</button>` : ''}
     </div>`;
 
   if (S.loading || !S.result) {
