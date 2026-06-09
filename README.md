@@ -194,6 +194,36 @@ python batch_chunks_mp_api_v3.py regions.csv \
   --no-download-images
 ```
 
+## Web browser
+
+### `browse.py`
+
+A single-file Flask web application for interactively browsing pipeline output data stored under one or more `--dirs` directories. Requires `flask` and `polars` (already in `requirements.txt`).
+
+```bash
+python browse.py --dirs grid_runs /mnt/hdd/grid_runs
+python browse.py --dirs grid_runs --port 8080 --host 0.0.0.0
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--dirs` | `grid_runs` | One or more base directories to scan for region folders. |
+| `--host` | `127.0.0.1` | Address to bind the server to. |
+| `--port` | `5000` | Port to listen on. |
+
+**Features:**
+
+- **Region sidebar** — lists all parent regions derived from folder names. Click a region to filter the file listing.
+- **Location search** — geocodes any city or country via Nominatim and filters the sidebar to folders whose bounding boxes intersect the result.
+- **Data type tabs** — switch between *All Data* (`all_data_*.parquet`), *Animal Detections* (`ground_animals_*.parquet`), and *Downloaded Images* (`ground_animal_images/*.jpg`).
+- **Paginated listing** — 25 files per page for parquets, 50 thumbnail images per page for the images tab.
+- **Image lightbox** — click any thumbnail to view the full image with previous/next navigation. Images can be sorted by name, newest first, or oldest first (capture timestamp is taken from the file's modification time, which the pipeline sets to the Mapillary capture date).
+- **Map visualization** — click the 🗺 button on any file row or region to plot coordinates from a parquet file on an interactive Leaflet map, rendered as a heatmap for large datasets. A *Map all* button in the type bar maps every parquet in the current region or search result for the active tab type.
+- **Download buttons** — every file row and image thumbnail has a direct download link.
+- **Login page** — session-based authentication; credentials are set in the script (`ADMIN_USER` / `ADMIN_PASS`).
+
+---
+
 ## Helper scripts
 
 ### Grid preparation
@@ -324,6 +354,49 @@ Same as `check_gz_health.py` but for `.zst` files, using `zstd -t`. When `--clea
 python check_zst_health.py
 python check_zst_health.py --delete-all --clear-completed --ignore-recent 1.5
 ```
+
+---
+
+### Audit and repair
+
+#### `audit_markers.py`
+
+Scans `grid_runs/` for orphaned `.completed_*` resume markers — markers whose corresponding `metadata_checkpoint_*.jsonl.zst` or `animal_detections_checkpoint_*.jsonl.zst` files are missing. Orphaned markers would otherwise convince the main script that a sub-grid finished successfully, causing it to be skipped silently on the next run. Any orphaned markers found are deleted automatically so the pipeline will re-process those sub-grids.
+
+```bash
+python audit_markers.py
+```
+
+#### `audit_silent_skips.py`
+
+A multiprocessed auditor that detects *silent skips* — sub-grids marked as `.completed_` but whose checkpoint files contain fewer records than expected. For each completed sub-grid it loads the topology checkpoint to get the expected image count, then counts lines in the metadata and animal-detection checkpoints. If either count falls short, the `.completed_` marker is deleted to force a backfill rerun. Use `--dry-run` to report discrepancies without deleting anything.
+
+```bash
+python audit_silent_skips.py
+python audit_silent_skips.py --dry-run --substring North_America
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--workers` | all cores | Parallel CPU workers for checkpoint parsing. |
+| `--dry-run` | `False` | Report discrepancies without deleting markers. |
+| `--substring` | unset | Only audit sub-grids whose path contains this string (e.g., `North_America`). |
+
+#### `generate_rerun_commands.py`
+
+Reads a grid CSV and checks every region directory for missing `.completed_*` or `.empty_*` markers. For each region with incomplete sub-grids, it generates a ready-to-run `batch_chunks_mp_api_v3.py` command using `--row-index` and `--sub-indices` to target only the missing cells. All commands are printed to the terminal and saved to a bash script that can be executed directly.
+
+```bash
+python generate_rerun_commands.py regions.csv
+python generate_rerun_commands.py regions.csv --substring "South America" --output-script rerun_sa.sh
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--parent-dir` | `grid_runs` | Directory containing region output folders. |
+| `--substring` | unset | Filter to rows whose region name contains this string. |
+| `--sub-grid-step` | `1.0` | Must match the `--sub-grid-step` used in the main script. |
+| `--output-script` | `run_missing.sh` | Name of the generated bash script. |
 
 ---
 
