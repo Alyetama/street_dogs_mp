@@ -149,6 +149,7 @@ def collect_files(folders: list[dict], data_type: str) -> list[dict]:
                                 'path': entry.path,
                                 'size': st.st_size,
                                 'size_human': human_size(st.st_size),
+                                'mtime': int(st.st_mtime),
                                 'folder': folder_name,
                             })
         except OSError:
@@ -299,8 +300,14 @@ def api_files():
     if data_type not in ('animal', 'all_data', 'images'):
         data_type = 'animal'
 
+    sort = request.args.get('sort', 'name')
     per_page = PAGE_SIZE_IMAGES if data_type == 'images' else PAGE_SIZE_PARQUET
     all_files = collect_files(REGION_MAP[region], data_type)
+
+    if data_type == 'images' and sort in ('date_asc', 'date_desc'):
+        all_files.sort(key=lambda f: f.get('mtime', 0),
+                       reverse=(sort == 'date_desc'))
+
     total = len(all_files)
     pages = max(1, math.ceil(total / per_page))
     page = min(page, pages)
@@ -1032,6 +1039,7 @@ tbody td { padding: 9px 16px; vertical-align: middle; }
   gap: 4px;
 }
 .thumb-size { font-size: 10px; color: var(--muted); }
+.thumb-date { font-size: 10px; color: var(--muted); margin-top: 2px; }
 .thumb-dl {
   display: inline-flex;
   align-items: center;
@@ -1048,6 +1056,24 @@ tbody td { padding: 9px 16px; vertical-align: middle; }
   flex-shrink: 0;
 }
 .thumb-dl:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+/* Sort bar (images tab) */
+.sort-bar {
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--muted);
+  flex-shrink: 0; background: var(--bg);
+}
+.sort-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.sort-btn {
+  padding: 3px 11px; border-radius: 12px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--muted); font-size: 11.5px; cursor: pointer;
+  font-family: var(--sans); transition: all .12s;
+}
+.sort-btn:hover { border-color: var(--accent); color: var(--text); }
+.sort-btn.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
 /* Map icon button (sidebar + table) */
 .map-btn {
@@ -1092,12 +1118,30 @@ tbody td { padding: 9px 16px; vertical-align: middle; }
   transition: background .12s;
 }
 .lightbox-close:hover { background: rgba(255,255,255,.2); }
+.lb-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  background: rgba(255,255,255,.1); border: none; color: #fff;
+  font-size: 28px; width: 48px; height: 48px; border-radius: 50%;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background .12s; z-index: 1;
+}
+.lb-nav:hover:not(:disabled) { background: rgba(255,255,255,.22); }
+.lb-nav:disabled { opacity: .18; cursor: default; }
+.lb-prev { left: 20px; }
+.lb-next { right: 20px; }
+.lb-counter {
+  position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.6); color: rgba(255,255,255,.65);
+  padding: 4px 14px; border-radius: 20px; font-size: 12px;
+  pointer-events: none; white-space: nowrap;
+}
 .lightbox-info {
   position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: rgba(0,0,0,.7); color: #e2e8f0;
   padding: 6px 16px; border-radius: 20px;
   font-size: 12px; font-family: var(--mono);
-  white-space: nowrap;
+  white-space: nowrap; max-width: 80vw;
+  overflow: hidden; text-overflow: ellipsis;
 }
 
 /* Map modal */
@@ -1178,8 +1222,11 @@ tbody td { padding: 9px 16px; vertical-align: middle; }
 
 <!-- Lightbox -->
 <div id="lightbox" class="lightbox" style="display:none" onclick="closeLightbox()">
-  <button class="lightbox-close" onclick="closeLightbox()">✕</button>
+  <button class="lightbox-close" onclick="event.stopPropagation(); closeLightbox()">✕</button>
+  <button class="lb-nav lb-prev" id="lbPrev" onclick="event.stopPropagation(); lbNav(-1)">‹</button>
   <img id="lightboxImg" src="" alt="" onclick="event.stopPropagation()">
+  <button class="lb-nav lb-next" id="lbNext" onclick="event.stopPropagation(); lbNav(1)">›</button>
+  <div class="lb-counter" id="lbCounter"></div>
   <div class="lightbox-info" id="lightboxInfo"></div>
 </div>
 
@@ -1219,6 +1266,7 @@ const S = {
   filteredRegions: [],
   selected: null,
   type: 'all_data',
+  sort: 'name',      // 'name' | 'date_asc' | 'date_desc'
   page: 1,
   result: null,
   loading: false,
@@ -1340,8 +1388,9 @@ async function loadFiles() {
 
   const params = new URLSearchParams({
     region: S.selected,
-    type: S.type,
-    page: S.page,
+    type:   S.type,
+    sort:   S.sort,
+    page:   S.page,
   });
   const res = await fetch('/api/files?' + params);
   S.result = await res.json();
@@ -1352,8 +1401,15 @@ async function loadFiles() {
 
 function setType(type) {
   S.type = type;
+  S.sort = 'name';
   S.page = 1;
   S.result = null;
+  loadFiles();
+}
+
+function setSort(sort) {
+  S.sort = sort;
+  S.page = 1;
   loadFiles();
 }
 
@@ -1426,7 +1482,14 @@ function renderContent() {
   }
 
   if (S.type === 'images') {
-    el.innerHTML = typeBar + searchBanner + statsBar + renderThumbGrid(r) +
+    const sortBar = `
+      <div class="sort-bar">
+        <span class="sort-label">Sort</span>
+        <button class="sort-btn${S.sort === 'name'      ? ' active' : ''}" onclick="setSort('name')">Name</button>
+        <button class="sort-btn${S.sort === 'date_desc' ? ' active' : ''}" onclick="setSort('date_desc')">Newest first</button>
+        <button class="sort-btn${S.sort === 'date_asc'  ? ' active' : ''}" onclick="setSort('date_asc')">Oldest first</button>
+      </div>`;
+    el.innerHTML = typeBar + searchBanner + sortBar + statsBar + renderThumbGrid(r) +
       (r.pages > 1 ? renderPagination(r.page, r.pages) : '');
     lazyLoadThumbs();
     return;
@@ -1469,19 +1532,28 @@ function renderContent() {
 }
 
 function renderThumbGrid(r) {
-  const cards = r.files.map(f => {
-    const src = `/api/serve?path=${encodeURIComponent(f.path)}`;
-    const dl  = src + '&download=1';
+  // Store full image list so lightbox can navigate without re-encoding paths in HTML
+  _lbImages = r.files.map(f => ({
+    src:  `/api/serve?path=${encodeURIComponent(f.path)}`,
+    name: f.name,
+  }));
+
+  const cards = r.files.map((f, i) => {
+    const src  = _lbImages[i].src;
+    const dl   = src + '&download=1';
+    const date = f.mtime
+      ? new Date(f.mtime * 1000).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'})
+      : '';
     return `
       <div class="thumb-card">
-        <div class="thumb-img-wrap" style="cursor:zoom-in"
-             onclick="openLightbox(${esc(JSON.stringify(src))}, ${esc(JSON.stringify(f.name))})">
+        <div class="thumb-img-wrap" style="cursor:zoom-in" onclick="openLightbox(${i})">
           <img class="thumb-img loading" data-src="${esc(src)}" alt="${esc(f.name)}"
                onload="this.classList.remove('loading')"
                onerror="this.style.display='none'">
         </div>
         <div class="thumb-info">
           <div class="thumb-name" title="${esc(f.name)}">${esc(f.name)}</div>
+          ${date ? `<div class="thumb-date">${esc(date)}</div>` : ''}
           <div class="thumb-meta">
             <span class="thumb-size">${esc(f.size_human)}</span>
             <a class="thumb-dl" href="${esc(dl)}" title="Download" download>⬇</a>
@@ -1543,21 +1615,46 @@ function esc(s) {
 }
 
 // ── Lightbox ──────────────────────────────────────────
-function openLightbox(src, name) {
-  const lb  = document.getElementById('lightbox');
-  const img = document.getElementById('lightboxImg');
-  const inf = document.getElementById('lightboxInfo');
-  img.src = src;
-  inf.textContent = name;
-  lb.style.display = 'flex';
+let _lbImages = [];   // [{src, name}] - set by renderThumbGrid
+let _lbIdx    = 0;
+
+function openLightbox(idx) {
+  _lbIdx = idx;
+  _lbUpdate();
+  document.getElementById('lightbox').style.display = 'flex';
   document.addEventListener('keydown', onLightboxKey);
 }
+
+function _lbUpdate() {
+  const item = _lbImages[_lbIdx];
+  const img  = document.getElementById('lightboxImg');
+  img.src = item.src;
+  img.alt = item.name;
+  document.getElementById('lightboxInfo').textContent = item.name;
+  document.getElementById('lbCounter').textContent    = `${_lbIdx + 1} / ${_lbImages.length}`;
+  document.getElementById('lbPrev').disabled = (_lbIdx === 0);
+  document.getElementById('lbNext').disabled = (_lbIdx === _lbImages.length - 1);
+}
+
+function lbNav(dir) {
+  const next = _lbIdx + dir;
+  if (next >= 0 && next < _lbImages.length) {
+    _lbIdx = next;
+    _lbUpdate();
+  }
+}
+
 function closeLightbox() {
   document.getElementById('lightbox').style.display = 'none';
   document.getElementById('lightboxImg').src = '';
   document.removeEventListener('keydown', onLightboxKey);
 }
-function onLightboxKey(e) { if (e.key === 'Escape') closeLightbox(); }
+
+function onLightboxKey(e) {
+  if      (e.key === 'Escape')     closeLightbox();
+  else if (e.key === 'ArrowLeft')  lbNav(-1);
+  else if (e.key === 'ArrowRight') lbNav(1);
+}
 
 // ── Map ───────────────────────────────────────────────
 let _leaflet = null;
