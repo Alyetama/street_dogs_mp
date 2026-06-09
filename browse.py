@@ -357,7 +357,7 @@ def api_map():
     path = request.args.get('path', '')
     region = request.args.get('region', '')
     dtype = request.args.get('type', 'animal')
-    max_pts = 8000
+    max_pts = 30000  # heatmap handles this easily
 
     if path:
         real = os.path.realpath(path)
@@ -378,20 +378,31 @@ def api_map():
     if not pq_files:
         return jsonify({'points': [], 'total': 0, 'sampled': 0})
 
-    def _read_one(f):
-        lf = pl.scan_parquet(f)
+    def _coords(lf):
         return lf.select([
             pl.col('computed_geometry').str.json_path_match(
                 '$.coordinates[0]').cast(pl.Float64).alias('lon'),
             pl.col('computed_geometry').str.json_path_match(
                 '$.coordinates[1]').cast(pl.Float64).alias('lat'),
-        ]).drop_nulls().collect()
+        ]).drop_nulls()
 
-    frames = []
-    skipped = 0
+    def _read_one(f, per_file_max):
+        lf = pl.scan_parquet(f)
+        # Get row count from parquet footer metadata - fast, no data read
+        n_rows = lf.select(pl.len()).collect().item()
+        step = max(1, n_rows // per_file_max) if n_rows > per_file_max else 1
+        lf = _coords(lf)
+        if step > 1:
+            lf = lf.gather_every(step)
+        # streaming=True processes chunk-by-chunk; avoids loading the whole
+        # file into RAM at once - essential for files with millions of rows
+        return lf.collect(streaming=True)
+
+    per_file_max = max(500, max_pts // max(len(pq_files), 1))
+    frames, skipped = [], 0
     for f in pq_files:
         try:
-            frames.append(_read_one(f))
+            frames.append(_read_one(f, per_file_max))
         except Exception:
             skipped += 1
 
@@ -400,18 +411,20 @@ def api_map():
         return jsonify({'error': msg, 'points': [], 'total': 0, 'sampled': 0})
 
     df = pl.concat(frames)
-    total = len(df)
-    if total > max_pts:
-        step = max(1, total // max_pts)
-        df = df.filter(pl.int_range(pl.len(), eager=True) % step == 0)
+    # Final guard: if many files, total might still exceed max_pts
+    total_sampled = len(df)
+    if total_sampled > max_pts:
+        step = max(1, total_sampled // max_pts)
+        df = df.gather_every(step)
+
     points = df.select(['lat', 'lon']).to_numpy().tolist()
     warn = f' ({skipped} corrupted file(s) skipped)' if skipped else ''
     return jsonify({
         'points': points,
-        'total': total,
+        'total': total_sampled,
         'sampled': len(points),
         'skipped': skipped,
-        'warn': warn
+        'warn': warn,
     })
 
 
@@ -536,6 +549,7 @@ HTML = r"""<!DOCTYPE html>
 <title>Street Dogs - Data Browser</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -1236,6 +1250,10 @@ tbody td { padding: 9px 16px; vertical-align: middle; }
     <div class="map-header">
       <h3 id="mapTitle">Map</h3>
       <span class="map-meta" id="mapMeta"></span>
+      <div id="mapModeToggle" style="display:none;gap:4px;align-items:center">
+        <button class="sort-btn active" id="btnHeat" onclick="setMapMode('heat')">🔥 Heat</button>
+        <button class="sort-btn"        id="btnDots" onclick="setMapMode('dots')">● Dots</button>
+      </div>
       <button class="map-close" onclick="closeMap()">✕</button>
     </div>
     <div id="leafletMap"></div>
@@ -1657,7 +1675,10 @@ function onLightboxKey(e) {
 }
 
 // ── Map ───────────────────────────────────────────────
-let _leaflet = null;
+let _leaflet   = null;
+let _mapData   = null;   // last loaded {points, total, sampled, warn}
+let _mapMode   = 'heat'; // 'heat' | 'dots'
+let _mapLayers = [];     // current data layers (heat or dot)
 
 function openRegionMap(region) {
   const dtype = (S.type === 'images') ? 'animal' : S.type;
@@ -1670,23 +1691,58 @@ function openFileMap(path, name) {
   showMapModal(name, `/api/map?path=${encodeURIComponent(path)}`);
 }
 
+function _clearMapLayers() {
+  _mapLayers.forEach(l => _leaflet.removeLayer(l));
+  _mapLayers = [];
+}
+
+function _renderMapData() {
+  if (!_mapData || !_leaflet) return;
+  _clearMapLayers();
+
+  const pts = _mapData.points;  // [[lat, lon], ...]
+
+  if (_mapMode === 'heat') {
+    // leaflet-heat: expects [lat, lng, intensity]
+    const heatPts = pts.map(([lat, lon]) => [lat, lon, 1]);
+    const layer = L.heatLayer(heatPts, {
+      radius: 18, blur: 15, maxZoom: 17, max: 1,
+      gradient: { 0.2: '#3b82f6', 0.5: '#8b5cf6', 0.8: '#ef4444', 1.0: '#f97316' },
+    }).addTo(_leaflet);
+    _mapLayers.push(layer);
+  } else {
+    // Dots - CircleMarker (canvas-rendered via preferCanvas)
+    pts.forEach(([lat, lon]) => {
+      const m = L.circleMarker([lat, lon], {
+        radius: 3, color: '#5b8dee', fillColor: '#5b8dee',
+        fillOpacity: 0.7, weight: 0,
+      }).addTo(_leaflet);
+      _mapLayers.push(m);
+    });
+  }
+}
+
+function setMapMode(mode) {
+  _mapMode = mode;
+  document.getElementById('btnHeat').classList.toggle('active', mode === 'heat');
+  document.getElementById('btnDots').classList.toggle('active', mode === 'dots');
+  _renderMapData();
+}
+
 async function showMapModal(title, apiUrl) {
   document.getElementById('mapTitle').textContent = title;
-  document.getElementById('mapMeta').textContent = 'Loading…';
+  document.getElementById('mapMeta').textContent  = 'Loading…';
+  document.getElementById('mapModeToggle').style.display = 'none';
   document.getElementById('mapOverlay').style.display = 'flex';
 
-  // Init Leaflet once
   if (!_leaflet) {
     _leaflet = L.map('leafletMap', { preferCanvas: true });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '© OpenStreetMap contributors', maxZoom: 19,
     }).addTo(_leaflet);
   } else {
-    const old = [];
-    _leaflet.eachLayer(l => { if (l instanceof L.CircleMarker) old.push(l); });
-    old.forEach(l => _leaflet.removeLayer(l));
+    _clearMapLayers();
   }
-  // Give the browser time to paint display:flex before Leaflet measures the div
   setTimeout(() => _leaflet.invalidateSize(), 120);
 
   const res  = await fetch(apiUrl);
@@ -1701,21 +1757,23 @@ async function showMapModal(title, apiUrl) {
     return;
   }
 
-  const sampled = data.sampled < data.total
-    ? `${data.sampled.toLocaleString()} of ${data.total.toLocaleString()} points shown`
+  _mapData = data;
+
+  const label = data.sampled < data.total
+    ? `${data.sampled.toLocaleString()} of ${data.total.toLocaleString()} points`
     : `${data.total.toLocaleString()} points`;
-  document.getElementById('mapMeta').textContent = sampled + (data.warn || '');
+  document.getElementById('mapMeta').textContent = label + (data.warn || '');
 
-  const latlngs = [];
-  data.points.forEach(([lat, lon]) => {
-    L.circleMarker([lat, lon], {
-      radius: 3, color: '#5b8dee', fillColor: '#5b8dee',
-      fillOpacity: 0.7, weight: 0,
-    }).addTo(_leaflet);
-    latlngs.push([lat, lon]);
-  });
+  // Show mode toggle and keep current mode selection fresh
+  const toggle = document.getElementById('mapModeToggle');
+  toggle.style.display = 'flex';
+  document.getElementById('btnHeat').classList.toggle('active', _mapMode === 'heat');
+  document.getElementById('btnDots').classList.toggle('active', _mapMode === 'dots');
 
-  if (latlngs.length) _leaflet.fitBounds(L.latLngBounds(latlngs), { padding: [20, 20] });
+  _renderMapData();
+
+  const bounds = L.latLngBounds(data.points.map(([lat, lon]) => [lat, lon]));
+  _leaflet.fitBounds(bounds, { padding: [20, 20] });
 }
 
 function closeMap() {
