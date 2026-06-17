@@ -328,27 +328,9 @@ python convert_to_zstd.py regions.csv --parent-dirs grid_runs --compare --delete
 | `--ram-gb` | `8.0` | Memory budget for read/write chunks. |
 | `--workers` | all cores | Zstandard compression threads. |
 
-#### `check_gz_health.py`
-
-Concurrently tests all `.gz` files under `grid_runs/` using `gzip -t`. Lists corrupted files and optionally deletes them interactively or in bulk.
-
-```bash
-python check_gz_health.py
-python check_gz_health.py --delete-all --substring Pacific_Ocean --ignore-recent 2.0
-```
-
-| Option | Default | Purpose |
-| --- | ---: | --- |
-| `-d` / `--delete-all` | `False` | Delete all corrupted files without prompting. |
-| `-s` / `--substring` | unset | Only check files whose path contains this string. |
-| `-i` / `--ignore-recent` | `0` | Skip files modified within the last N hours. |
-| `-c` / `--clear-completed` | `False` | Remove the region from `completed_regions.txt` if corruption is found. |
-| `-e` / `--exclude-ext` | unset | Skip files ending with specific sub-extensions (e.g., `.csv.gz`). |
-| `-w` / `--workers` | CPU count | Concurrent workers. |
-
 #### `check_zst_health.py`
 
-Same as `check_gz_health.py` but for `.zst` files, using `zstd -t`. When `--clear-completed` is set, deletes the corresponding `.completed_<sub_id>` marker instead of a region-level text file, so the main script will re-process the affected sub-grid on the next run.
+Tests all `.zst` files under `grid_runs/` using `zstd -t`. Lists corrupted files and optionally deletes them interactively or in bulk. When `--clear-completed` is set, deletes the corresponding `.completed_<sub_id>` marker instead of a region-level text file, so the main script will re-process the affected sub-grid on the next run.
 
 ```bash
 python check_zst_health.py
