@@ -191,3 +191,11 @@ mapillary_api_testing.ipynb
 *.ipynb
 proxies.txt
 run_missing_*.sh
+
+# Docs site source
+!docs/
+!docs/**
+!docs/**/*.json
+!docs/.gitignore
+!.github/
+!.github/**
