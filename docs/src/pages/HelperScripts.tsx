@@ -136,24 +136,6 @@ const categories: { title: string; scripts: Script[] }[] = [
           { option: '-w / --workers', default: 'CPU count', description: 'Concurrent workers.' },
         ],
       },
-      {
-        name: 'check_gz_health.py',
-        description:
-          'Concurrently tests all .gz files under grid_runs/ using gzip -t. Lists corrupted files and optionally deletes them interactively or in bulk. Useful for auditing legacy gzip checkpoints before converting them to zstd.',
-        usage: 'python check_gz_health.py [options]',
-        examples: [
-          'python check_gz_health.py',
-          'python check_gz_health.py --delete-all --substring Pacific_Ocean --ignore-recent 2.0',
-        ],
-        options: [
-          { option: '-d / --delete-all', default: 'False', description: 'Delete all corrupted files without prompting.' },
-          { option: '-s / --substring', default: 'unset', description: 'Only check files whose path contains this string.' },
-          { option: '-i / --ignore-recent', default: '0', description: 'Skip files modified within the last N hours.' },
-          { option: '-c / --clear-completed', default: 'False', description: 'Remove the region from completed_regions.txt if corruption is found.' },
-          { option: '-e / --exclude-ext', default: 'unset', description: 'Skip files ending with specific sub-extensions (e.g., .csv.gz).' },
-          { option: '-w / --workers', default: 'CPU count', description: 'Concurrent workers.' },
-        ],
-      },
     ],
   },
   {
