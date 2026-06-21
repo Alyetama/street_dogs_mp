@@ -89,6 +89,8 @@ from urllib.parse import quote
 import mercantile
 import orjson
 import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 import requests
 from dotenv import dotenv_values
 from global_land_mask import globe
@@ -1708,10 +1710,12 @@ def cmd_audit(args):
                         dirs=args.dirs,
                         data_dir=args.data_dir,
                         region=args.region,
-                        out=args.missing_out))
+                        out=args.missing_out,
+                        rebuild=args.rebuild_diff))
     if SHUTDOWN.is_set():
-        console.print("\n[yellow]⏸ Interrupted (Ctrl+C) during diff. "
-                      "Re-run to resume; datefilter runs once diff finishes.[/]")
+        console.print(
+            "\n[yellow]⏸ Interrupted (Ctrl+C) during diff. "
+            "Re-run to resume; datefilter runs once diff finishes.[/]")
         return
 
     console.rule("[bold]audit 4/4 · datefilter")
@@ -1729,168 +1733,223 @@ def cmd_audit(args):
 # --------------------------------------------------------------------------- #
 # diff
 # --------------------------------------------------------------------------- #
-def _save_diff_progress(path, done, offset, stats):
+MISSING_SCHEMA = pa.schema([
+    ('image_id', pa.string()),
+    ('safe_region_id', pa.string()),
+    ('parent_region', pa.string()),
+    ('sequence', pa.string()),
+    ('captured_at', pa.int64()),
+])
+
+
+def _save_diff_progress(path, done):
     """Atomically persist diff resume state.
 
     Args:
         path: Progress sidecar path.
-        done: Set of safe region ids already written.
-        offset: Byte offset in the output CSV up to the last fully-written
-            region (any bytes past this are a partial region, dropped on resume).
-        stats: Cumulative summary counters.
+        done: ``{safe: [cov, missing, full_seq, part_seq]}`` for finished
+            regions (its keys also drive resume skipping).
     """
     tmp = path + '.tmp'
     with open(tmp, 'wb') as f:
-        f.write(
-            orjson.dumps({
-                'done': sorted(done),
-                'offset': offset,
-                'stats': stats
-            }))
+        f.write(orjson.dumps({'done': done}))
     os.replace(tmp, path)
 
 
+def _write_missing_shard(path, imgmap, have, safe, region, chunk=2_000_000):
+    """Write one region's missing images to a Parquet shard, incrementally.
+
+    Streams row groups of at most ``chunk`` rows so the only extra memory over
+    the (already-loaded) image map is one chunk's worth of columns -- never the
+    full missing list materialized at once. Written to ``path + '.tmp'`` then
+    atomically renamed.
+
+    Args:
+        path: Destination ``<safe>.parquet`` path.
+        imgmap: ``{image_id: [sequence, captured_at_ms]}`` for the region.
+        have: Set of already-downloaded image-id strings.
+        safe: Sanitized region id.
+        region: Parent-region name.
+        chunk: Rows per Parquet row group.
+
+    Returns:
+        ``(region_cov, region_missing, full_seq, part_seq)`` counts.
+    """
+    tmp = path + '.tmp'
+    writer = pq.ParquetWriter(tmp, MISSING_SCHEMA, compression='zstd')
+    ids, seqs, caps = [], [], []
+    region_missing = 0
+    seq_total, seq_missing = {}, {}
+
+    def flush():
+        if not ids:
+            return
+        n = len(ids)
+        writer.write_table(
+            pa.table(
+                {
+                    'image_id': pa.array(ids, pa.string()),
+                    'safe_region_id': pa.array([safe] * n, pa.string()),
+                    'parent_region': pa.array([region] * n, pa.string()),
+                    'sequence': pa.array(seqs, pa.string()),
+                    'captured_at': pa.array(caps, pa.int64()),
+                },
+                schema=MISSING_SCHEMA))
+        ids.clear()
+        seqs.clear()
+        caps.clear()
+
+    try:
+        for iid, val in imgmap.items():
+            seq, cap = val[0], val[1]
+            seq_total[seq] = seq_total.get(seq, 0) + 1
+            if iid in have:
+                continue
+            region_missing += 1
+            seq_missing[seq] = seq_missing.get(seq, 0) + 1
+            ids.append(iid)
+            seqs.append(seq)
+            caps.append(cap)
+            if len(ids) >= chunk:
+                flush()
+        flush()
+    finally:
+        writer.close()
+    os.replace(tmp, path)
+    full = sum(1 for s, mc in seq_missing.items() if mc == seq_total[s])
+    part = len(seq_missing) - full
+    return len(imgmap), region_missing, full, part
+
+
 def cmd_diff(args):
-    """Compute missing images per region and write them to a CSV.
+    """Compute missing images per region and write them as Parquet shards.
 
     missing = coverage_ids - all_data_ids. Only MVT checkpoints are processed
-    (pre-MVT ones are skipped). The captured_at from the checkpoint is carried
-    into each output row, and a per-region/overall summary is printed.
+    (pre-MVT ones are skipped). Each grid cell is written to its own
+    ``<out>/<ParentRegion>/<safe>.parquet`` shard (image_id, safe_region_id,
+    parent_region, sequence, captured_at) -- grouped by parent region so each
+    parent's missing set is a self-contained sub-dataset. Parquet is columnar +
+    zstd-compressed, so the output is a fraction of the equivalent CSV and far
+    faster to read back.
 
-    Resumable per region: a ``<out>.progress.json`` sidecar records the regions
-    already written, the CSV byte offset up to the last fully-written region,
-    and the running summary. On a re-run that sidecar (if present) makes diff
-    truncate any partial region, skip the done ones, and continue; it is deleted
-    on full completion, so a clean run always starts fresh. Ctrl+C / SHUTDOWN
-    stops after the current region with progress saved. Delete the sidecar to
-    force a full re-diff.
+    Idempotent / non-destructive by default: any grid cell that already has a
+    shard on disk (or is recorded in the ``<out>/.diff_progress.json`` resume
+    sidecar) is SKIPPED, and existing shards are never cleared -- so re-running
+    just fills in what's missing. Pass ``--rebuild`` to wipe the shard dir and
+    recompute everything (e.g. after downloading more images, since missing =
+    coverage - downloaded changes). Each shard is written atomically (tmp +
+    rename); Ctrl+C / SHUTDOWN stops after the current region with progress
+    saved.
 
-    Memory: missing rows are streamed straight to the CSV (never accumulated
-    across regions) and each region does a single pass over its image map with
-    no duplicate id sets, so peak stays at roughly one region's map plus its
-    downloaded-id set.
+    Memory: each region does a single pass over its image map writing the shard
+    in row-group chunks, so peak stays at roughly one region's map plus its
+    downloaded-id set (no full missing list in RAM).
 
     Args:
         args: Parsed args (grid_csv, dirs, data_dir, region, out).
     """
     rows = region_rows(args.grid_csv, args.region)
-    cols = [
-        'image_id', 'safe_region_id', 'parent_region', 'sequence',
-        'captured_at'
-    ]
-    prog_path = args.out + '.progress.json'
-    done = set()
-    stats = {
-        'tot_cov': 0,
-        'tot_have': 0,
-        'tot_missing': 0,
-        'full_seq': 0,
-        'part_seq': 0,
-        'n_written': 0
-    }
-    resume = os.path.exists(prog_path) and os.path.exists(args.out)
-    offset = 0
-    if resume:
-        try:
-            pj = read_meta(prog_path)
-            done = set(pj.get('done', []))
-            stats.update(pj.get('stats', {}))
-            offset = min(pj.get('offset', 0), os.path.getsize(args.out))
-        except Exception:
-            resume = False
+    parts = args.out
+    os.makedirs(parts, exist_ok=True)
+    prog_path = os.path.join(parts, '.diff_progress.json')
 
-    fout = open(args.out, 'r+', newline='') if resume \
-        else open(args.out, 'w', newline='')
+    rebuild = getattr(args, 'rebuild', False)
+    if rebuild:
+        for p in glob.glob(os.path.join(parts, '**', '*.parquet'),
+                           recursive=True):
+            os.remove(p)
+        if os.path.exists(prog_path):
+            os.remove(prog_path)
+
+    done = {}
+    if not rebuild and os.path.exists(prog_path):
+        try:
+            done = read_meta(prog_path).get('done', {})
+        except Exception:
+            done = {}
+    if not rebuild:
+        for p in glob.glob(os.path.join(parts, '*', '*.parquet')):
+            cell = os.path.basename(p)[:-len('.parquet')]
+            if cell not in done:
+                try:
+                    n = int(
+                        pl.scan_parquet(p).select(
+                            pl.len()).collect()['len'][0])
+                except Exception:
+                    n = 0
+                done[cell] = [None, n, None, None]
+    if done:
+        console.print(f"[dim]diff · {len(done)} region(s) already processed — "
+                      f"skipping existing (use --rebuild to redo)[/]")
+
     interrupted = False
-    try:
-        if resume:
-            fout.seek(offset)
-            fout.truncate()
-            console.print(f"[dim]diff · resuming — {len(done)} region(s) "
-                          f"already done, continuing[/]")
-        w = csv.writer(fout)
-        if not resume:
-            w.writerow(cols)
-            fout.flush()
-            offset = fout.tell()
-        with make_progress() as progress:
-            dtask = progress.add_task("[bold]diff regions", total=len(rows))
-            for r in rows:
-                safe = safe_of(r)
-                if safe in done:
-                    progress.advance(dtask)
-                    continue
-                if SHUTDOWN.is_set():
-                    interrupted = True
-                    break
-                cov_f = find_coverage_ckpt(safe, [args.data_dir])
-                meta_p = os.path.join(args.data_dir, safe,
-                                      coverage_meta_name(safe))
-                ok = bool(cov_f) and os.path.exists(meta_p)
-                if ok:
-                    try:
-                        ok = read_meta(meta_p).get('method') == MVT_METHOD
-                    except Exception:
-                        ok = False
-                if not cov_f:
-                    pass
-                elif not ok:
-                    console.print(f"  [yellow][skip][/] {safe}: non-MVT "
-                                  f"checkpoint -- re-run enumerate")
-                if cov_f and ok:
-                    imgmap = load_imgmap(cov_f)
-                    have = all_data_ids(safe, args.dirs)
-                    region = r['region']
-                    region_cov = len(imgmap)
-                    region_missing = 0
-                    seq_total, seq_missing = {}, {}
-                    for iid, val in imgmap.items():
-                        seq, cap = val[0], val[1]
-                        seq_total[seq] = seq_total.get(seq, 0) + 1
-                        if iid in have:
-                            continue
-                        region_missing += 1
-                        seq_missing[seq] = seq_missing.get(seq, 0) + 1
-                        w.writerow((iid, safe, region, seq or '',
-                                    cap if cap is not None else ''))
-                    for s, mc in seq_missing.items():
-                        if mc == seq_total[s]:
-                            stats['full_seq'] += 1
-                        else:
-                            stats['part_seq'] += 1
-                    stats['tot_cov'] += region_cov
-                    stats['tot_missing'] += region_missing
-                    stats['tot_have'] += region_cov - region_missing
-                    stats['n_written'] += region_missing
-                    if region_missing:
-                        console.print(
-                            f"  [bold]{safe:<34}[/] "
-                            f"coverage=[cyan]{region_cov:>11,}[/]"
-                            f"  have=[green]{region_cov - region_missing:>11,}[/]"
-                            f"  missing=[red]{region_missing:>10,}[/]")
-                    del imgmap, have, seq_total, seq_missing
-                    gc.collect()
-                fout.flush()
-                offset = fout.tell()
-                done.add(safe)
-                _save_diff_progress(prog_path, done, offset, stats)
+    with make_progress() as progress:
+        dtask = progress.add_task("[bold]diff regions", total=len(rows))
+        for r in rows:
+            safe = safe_of(r)
+            if safe in done:
                 progress.advance(dtask)
-    finally:
-        fout.close()
+                continue
+            if SHUTDOWN.is_set():
+                interrupted = True
+                break
+            cov_f = find_coverage_ckpt(safe, [args.data_dir])
+            meta_p = os.path.join(args.data_dir, safe,
+                                  coverage_meta_name(safe))
+            ok = bool(cov_f) and os.path.exists(meta_p)
+            if ok:
+                try:
+                    ok = read_meta(meta_p).get('method') == MVT_METHOD
+                except Exception:
+                    ok = False
+            if cov_f and not ok:
+                console.print(f"  [yellow][skip][/] {safe}: non-MVT "
+                              f"checkpoint -- re-run enumerate")
+            if cov_f and ok:
+                imgmap = load_imgmap(cov_f)
+                have = all_data_ids(safe, args.dirs)
+                shard_dir = os.path.join(parts,
+                                         sanitize_folder_name(r['region']))
+                os.makedirs(shard_dir, exist_ok=True)
+                shard = os.path.join(shard_dir, f'{safe}.parquet')
+                cov, missing, full, part = _write_missing_shard(
+                    shard, imgmap, have, safe, r['region'])
+                if missing:
+                    console.print(
+                        f"  [bold]{safe:<34}[/] coverage=[cyan]{cov:>11,}[/]"
+                        f"  have=[green]{cov - missing:>11,}[/]"
+                        f"  missing=[red]{missing:>10,}[/]")
+                del imgmap, have
+                gc.collect()
+                done[safe] = [cov, missing, full, part]
+            else:
+                done[safe] = [0, 0, 0, 0]
+            _save_diff_progress(prog_path, done)
+            progress.advance(dtask)
 
     if interrupted:
-        console.print("[yellow]⏸ diff interrupted; progress saved "
-                      f"({len(done)}/{len(rows)} regions). Re-run to resume.[/]")
+        console.print(
+            "[yellow]⏸ diff interrupted; progress saved "
+            f"({len(done)}/{len(rows)} regions). Re-run to resume.[/]")
         return
 
     if os.path.exists(prog_path):
         os.remove(prog_path)
-    console.print(f"[bold]diff[/] · coverage [cyan]{stats['tot_cov']:,}[/] · "
-                  f"have [green]{stats['tot_have']:,}[/] · "
-                  f"[red]MISSING {stats['tot_missing']:,}[/]")
-    console.print(f"[dim]   sequences fully missing {stats['full_seq']:,} · "
-                  f"partially missing {stats['part_seq']:,}[/]")
-    console.print(f"[dim]   wrote {stats['n_written']:,} rows → {args.out} · "
+    tot_missing = sum(v[1] for v in done.values())
+    fresh = [v for v in done.values() if v[0] is not None]
+    skipped = len(done) - len(fresh)
+    note = f" ({skipped} pre-existing skipped)" if skipped else ""
+    console.print(f"[bold]diff[/] · [red]MISSING {tot_missing:,}[/] across "
+                  f"{len(done)} region(s){note}")
+    if fresh:
+        fc = sum(v[0] for v in fresh)
+        fm = sum(v[1] for v in fresh)
+        console.print(
+            f"[dim]   this run: coverage {fc:,} · have {fc - fm:,} · "
+            f"missing {fm:,} · seq fully missing "
+            f"{sum(v[2] for v in fresh):,} · partial "
+            f"{sum(v[3] for v in fresh):,}[/]")
+    console.print(f"[dim]   shards → {parts}/<parent>/*.parquet · "
                   f"next: datefilter[/]")
 
 
@@ -1898,101 +1957,156 @@ def cmd_diff(args):
 # datefilter  (local when captured_at present; API fallback otherwise)
 # --------------------------------------------------------------------------- #
 def cmd_datefilter(args):
-    """Keep missing rows captured on/before the cutoff date.
+    """Keep missing rows captured on/before the cutoff date, per parent region.
 
-    Local (no API) when ``captured_at`` is present in the missing CSV (it is,
-    from MVT); falls back to the Graph API only for rows lacking it.
+    Reads the ``diff`` output -- per-parent shard sub-datasets
+    (``<missing>/<ParentRegion>/*.parquet``) -- and writes one in-scope Parquet
+    per parent region into ``--out`` (a directory):
+    ``<out>/<ParentRegion>.parquet``. Almost everything is resolved LOCALLY from
+    the inline captured_at; only rows whose captured_at is null fall back to the
+    Graph API.
+
+    Memory: each parent's local filter is a streamed polars query
+    (``scan_parquet`` -> ``filter`` -> ``sink_parquet``), so a parent's dataset
+    is never fully materialized; only the rare null-captured rows are collected
+    for the API pass.
 
     Args:
         args: Parsed args (missing, cutoff, out, workers, env, proxies).
     """
     cutoff = dt.datetime.strptime(args.cutoff, '%Y-%m-%d')
     cutoff_ms = int((cutoff + dt.timedelta(days=1)).timestamp() * 1000)
-    rows = list(csv.DictReader(open(args.missing)))
-    cols = [
-        'image_id', 'safe_region_id', 'parent_region', 'sequence',
-        'captured_at'
-    ]
 
-    keep, newer, gone, unk = [], 0, 0, 0
-    need_api = []
-    for r in rows:
-        c = r.get('captured_at')
-        if c in (None, ''):
-            need_api.append(r)
-            continue
+    groups = {}
+    for p in sorted(glob.glob(os.path.join(args.missing, '*', '*.parquet'))):
+        parent = os.path.basename(os.path.dirname(p))
+        groups.setdefault(parent,
+                          os.path.join(args.missing, parent, '*.parquet'))
+    flat = glob.glob(os.path.join(args.missing, '*.parquet'))
+    if flat:
+        label = os.path.basename(os.path.normpath(args.missing)) or 'all'
+        groups.setdefault(label, os.path.join(args.missing, '*.parquet'))
+    if not groups:
+        console.print(f"[yellow]datefilter · no shards under {args.missing} "
+                      f"(run diff first).[/]")
+        return
+    os.makedirs(args.out, exist_ok=True)
+
+    api = {}
+
+    def ensure_api():
+        """Lazily build the Graph-API fallback machinery (only if needed)."""
+        if not api:
+            api['rot'] = KeyRotator(load_keys(args.env))
+            api['session'] = build_session(pool=args.workers + 32)
+            api['proxypool'] = load_proxies(args)
+        return api
+
+    def cap(iid):
+        """Fetch one image's captured_at via the Graph API.
+
+        Args:
+            iid: Image id.
+
+        Returns:
+            ``(iid, captured_at_or_None, dead)`` where dead marks a 400/404.
+        """
+        url = (f'https://graph.mapillary.com/{iid}'
+               f'?access_token={api["rot"].next()}&fields=captured_at')
+        pid, proxies = (None, None)
+        if api['proxypool'] is not None:
+            pid, proxies = api['proxypool'].acquire()
         try:
-            c = int(c)
-        except (TypeError, ValueError):
-            need_api.append(r)
-            continue
-        if c <= cutoff_ms:
-            keep.append(r)
+            rr = api['session'].get(url, timeout=15, proxies=proxies)
+            if rr.status_code in (400, 404):
+                return iid, None, True
+            return iid, rr.json().get('captured_at'), False
+        except Exception:
+            return iid, None, False
+        finally:
+            if api['proxypool'] is not None:
+                api['proxypool'].release(pid)
+
+    cap_col = pl.col('captured_at')
+    in_scope = cap_col.is_not_null() & (cap_col <= cutoff_ms)
+    tot = dict(keep_local=0,
+               newer_local=0,
+               na=0,
+               keep_api=0,
+               newer_api=0,
+               gone=0,
+               unk=0)
+
+    for parent, pattern in groups.items():
+        lf = pl.scan_parquet(pattern)
+        counts = lf.select([
+            cap_col.is_null().sum().alias('na'),
+            in_scope.sum().alias('kl'),
+            (cap_col.is_not_null() & (cap_col > cutoff_ms)).sum().alias('nl'),
+        ]).collect()
+        na = int(counts['na'][0])
+        kl = int(counts['kl'][0])
+        nl = int(counts['nl'][0])
+        out_path = os.path.join(args.out, f'{parent}.parquet')
+        local_keep = lf.filter(in_scope)
+        keep_api = newer_api = gone = unk = 0
+        if not na:
+            local_keep.sink_parquet(out_path)
         else:
-            newer += 1
-    n_local = len(keep) + newer
+            ensure_api()
+            need = lf.filter(cap_col.is_null()).collect()
+            resolved = {}
+            with make_progress() as progress, \
+                    ThreadPoolExecutor(max_workers=args.workers) as ex:
+                task = progress.add_task(
+                    f"[bold]{parent} captured_at (API fallback)", total=na)
+                for iid, c, dead in (f.result() for f in as_completed(
+                        ex.submit(cap, i)
+                        for i in need['image_id'].to_list())):
+                    if dead:
+                        gone += 1
+                    elif c is None:
+                        unk += 1
+                    elif int(c) <= cutoff_ms:
+                        resolved[iid] = int(c)
+                        keep_api += 1
+                    else:
+                        newer_api += 1
+                    progress.advance(task)
+            api_keep = (need.filter(pl.col('image_id').is_in(
+                list(resolved))).with_columns(
+                    pl.col('image_id').replace_strict(
+                        resolved, return_dtype=pl.Int64).alias('captured_at')))
+            pl.concat([local_keep, api_keep.lazy()]).sink_parquet(out_path)
 
-    if need_api:
-        rot = KeyRotator(load_keys(args.env))
-        session = build_session(pool=args.workers + 32)
-        proxypool = load_proxies(args)
+        tot['keep_local'] += kl
+        tot['newer_local'] += nl
+        tot['na'] += na
+        tot['keep_api'] += keep_api
+        tot['newer_api'] += newer_api
+        tot['gone'] += gone
+        tot['unk'] += unk
+        console.print(f"  [bold]{parent:<24}[/] in-scope "
+                      f"[green]{kl + keep_api:>11,}[/] · newer "
+                      f"[yellow]{nl + newer_api:>11,}[/] → {parent}.parquet")
 
-        def cap(row):
-            """Fetch one image's captured_at via the Graph API.
-
-            Args:
-                row: The missing-CSV row (mutated/returned).
-
-            Returns:
-                ``(row, captured_at_or_None, dead)`` where dead marks a 400/404.
-            """
-            iid = row['image_id']
-            url = (f'https://graph.mapillary.com/{iid}'
-                   f'?access_token={rot.next()}&fields=captured_at')
-            pid, proxies = (None, None)
-            if proxypool is not None:
-                pid, proxies = proxypool.acquire()
-            try:
-                r = session.get(url, timeout=15, proxies=proxies)
-                if r.status_code in (400, 404):
-                    return row, None, True
-                return row, r.json().get('captured_at'), False
-            except Exception:
-                return row, None, False
-            finally:
-                if proxypool is not None:
-                    proxypool.release(pid)
-
-        with make_progress() as progress, \
-                ThreadPoolExecutor(max_workers=args.workers) as ex:
-            task = progress.add_task("[bold]captured_at (API fallback)",
-                                     total=len(need_api))
-            for row, c, dead in (f.result() for f in as_completed(
-                    ex.submit(cap, r) for r in need_api)):
-                if dead:
-                    gone += 1
-                elif c is None:
-                    unk += 1
-                elif int(c) <= cutoff_ms:
-                    row['captured_at'] = c
-                    keep.append(row)
-                else:
-                    newer += 1
-                progress.advance(task)
-
-    with open(args.out, 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
-        for r in keep:
-            w.writerow({k: r.get(k, '') for k in cols})
+    keep_total = tot['keep_local'] + tot['keep_api']
+    newer = tot['newer_local'] + tot['newer_api']
+    n_local = tot['keep_local'] + tot['newer_local']
     console.print(
-        f"[bold]datefilter[/] · in-scope (≤ {args.cutoff}) "
-        f"[green]{len(keep):,}[/] · newer (skip) [yellow]{newer:,}[/] · "
-        f"local [cyan]{n_local:,}[/] · via API {len(need_api):,}")
-    if need_api:
-        console.print(f"[dim]   gone (404/400) {gone:,} · "
-                      f"unknown/transient {unk:,}[/]")
-    console.print(f"[dim]   wrote → {args.out}[/]")
+        f"[bold]datefilter[/] · {len(groups)} parent region(s) · in-scope "
+        f"(≤ {args.cutoff}) [green]{keep_total:,}[/] · newer (skip) "
+        f"[yellow]{newer:,}[/] · local [cyan]{n_local:,}[/] · via API "
+        f"{tot['na']:,}")
+    if tot['na']:
+        console.print(f"[dim]   gone (404/400) {tot['gone']:,} · "
+                      f"unknown/transient {tot['unk']:,}[/]")
+    files = [f'{p}.parquet' for p in groups]
+    if len(files) == 1:
+        console.print(f"[dim]   wrote → {os.path.join(args.out, files[0])}[/]")
+    else:
+        console.print(f"[dim]   wrote → {args.out}/ "
+                      f"({', '.join(sorted(files))})[/]")
 
 
 def main():
@@ -2101,12 +2215,24 @@ def main():
     d.add_argument('--dirs', nargs='+', required=True)
     add_data_dir(d)
     d.add_argument('--region', default=None)
-    d.add_argument('--out', default='coverage_missing.csv')
+    d.add_argument('--out',
+                   default='coverage_missing',
+                   help='Dir of per-parent Parquet shard sub-datasets '
+                   '(<out>/<ParentRegion>/<cell>.parquet; resumable).')
+    d.add_argument('--rebuild',
+                   action='store_true',
+                   help='Recompute every region from scratch (wipes existing '
+                   'shards). Default skips cells that already have a shard.')
 
     f = sub.add_parser('datefilter')
-    f.add_argument('--missing', default='coverage_missing.csv')
+    f.add_argument(
+        '--missing',
+        default='coverage_missing',
+        help='Dir of diff shards (<missing>/<ParentRegion>/*.parquet).')
     f.add_argument('--cutoff', default='2026-05-31')
-    f.add_argument('--out', default='coverage_missing_inscope.csv')
+    f.add_argument('--out',
+                   default='coverage_missing_inscope',
+                   help='Dir; one in-scope Parquet per parent region.')
     f.add_argument('-w',
                    '--workers',
                    type=int,
@@ -2147,8 +2273,12 @@ def main():
         help='tiles.mapillary.com requests/day cap (default 50000). '
         'Audit stops at the cap and resumes on the next run.')
     a.add_argument('--cutoff', default='2026-05-31')
-    a.add_argument('--missing-out', default='coverage_missing.csv')
-    a.add_argument('--inscope-out', default='coverage_missing_inscope.csv')
+    a.add_argument('--missing-out', default='coverage_missing')
+    a.add_argument('--inscope-out', default='coverage_missing_inscope')
+    a.add_argument('--rebuild-diff',
+                   action='store_true',
+                   help='Force diff to recompute every region (default skips '
+                   'cells that already have a shard).')
     add_outer(a)
     add_proxies(a)
     a.add_argument('--env', default='.env')
