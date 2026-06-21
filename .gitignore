@@ -199,3 +199,4 @@ run_missing_*.sh
 !docs/.gitignore
 !.github/
 !.github/**
+.claude/

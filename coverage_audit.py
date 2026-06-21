@@ -359,6 +359,10 @@ def region_state(data_dir, safe):
 def load_imgmap(ckpt_path):
     """Load a region's checkpoint image map.
 
+    JSON object keys are always strings, so orjson already returns string keys;
+    the decoded dict is returned directly to avoid a full second copy (which
+    would double peak memory for huge regions).
+
     Args:
         ckpt_path: Path to a ``coverage_checkpoint_*.json.zst`` file.
 
@@ -366,8 +370,7 @@ def load_imgmap(ckpt_path):
         ``{image_id: [sequence_id, captured_at_ms]}`` with string keys.
     """
     with zstd.open(ckpt_path, 'rb') as f:
-        d = orjson.loads(f.read())
-    return {str(k): v for k, v in d.items()}
+        return orjson.loads(f.read())
 
 
 def read_meta(meta_path):
@@ -1706,6 +1709,10 @@ def cmd_audit(args):
                         data_dir=args.data_dir,
                         region=args.region,
                         out=args.missing_out))
+    if SHUTDOWN.is_set():
+        console.print("\n[yellow]⏸ Interrupted (Ctrl+C) during diff. "
+                      "Re-run to resume; datefilter runs once diff finishes.[/]")
+        return
 
     console.rule("[bold]audit 4/4 · datefilter")
     cmd_datefilter(
@@ -1722,6 +1729,27 @@ def cmd_audit(args):
 # --------------------------------------------------------------------------- #
 # diff
 # --------------------------------------------------------------------------- #
+def _save_diff_progress(path, done, offset, stats):
+    """Atomically persist diff resume state.
+
+    Args:
+        path: Progress sidecar path.
+        done: Set of safe region ids already written.
+        offset: Byte offset in the output CSV up to the last fully-written
+            region (any bytes past this are a partial region, dropped on resume).
+        stats: Cumulative summary counters.
+    """
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(
+            orjson.dumps({
+                'done': sorted(done),
+                'offset': offset,
+                'stats': stats
+            }))
+    os.replace(tmp, path)
+
+
 def cmd_diff(args):
     """Compute missing images per region and write them to a CSV.
 
@@ -1729,83 +1757,140 @@ def cmd_diff(args):
     (pre-MVT ones are skipped). The captured_at from the checkpoint is carried
     into each output row, and a per-region/overall summary is printed.
 
+    Resumable per region: a ``<out>.progress.json`` sidecar records the regions
+    already written, the CSV byte offset up to the last fully-written region,
+    and the running summary. On a re-run that sidecar (if present) makes diff
+    truncate any partial region, skip the done ones, and continue; it is deleted
+    on full completion, so a clean run always starts fresh. Ctrl+C / SHUTDOWN
+    stops after the current region with progress saved. Delete the sidecar to
+    force a full re-diff.
+
+    Memory: missing rows are streamed straight to the CSV (never accumulated
+    across regions) and each region does a single pass over its image map with
+    no duplicate id sets, so peak stays at roughly one region's map plus its
+    downloaded-id set.
+
     Args:
         args: Parsed args (grid_csv, dirs, data_dir, region, out).
     """
     rows = region_rows(args.grid_csv, args.region)
-    miss_rows = []
-    tot_cov = tot_have = tot_missing = 0
-    full_seq = part_seq = 0
-    with make_progress() as progress:
-        dtask = progress.add_task("[bold]diff regions", total=len(rows))
-        for r in rows:
-            safe = safe_of(r)
-            cov_f = find_coverage_ckpt(safe, [args.data_dir])
-            if not cov_f:
-                progress.advance(dtask)
-                continue
-            meta_p = os.path.join(args.data_dir, safe,
-                                  coverage_meta_name(safe))
-            ok = os.path.exists(meta_p)
-            if ok:
-                try:
-                    ok = read_meta(meta_p).get('method') == MVT_METHOD
-                except Exception:
-                    ok = False
-            if not ok:
-                console.print(f"  [yellow][skip][/] {safe}: non-MVT "
-                              f"checkpoint -- re-run enumerate")
-                progress.advance(dtask)
-                continue
-            imgmap = load_imgmap(cov_f)
-            cov_ids = set(imgmap.keys())
-            have = all_data_ids(safe, args.dirs)
-            missing = cov_ids - have
-            tot_cov += len(cov_ids)
-            tot_have += len(have & cov_ids)
-            tot_missing += len(missing)
-            seq_missing, seq_total = {}, {}
-            for i in cov_ids:
-                s = imgmap[i][0]
-                seq_total[s] = seq_total.get(s, 0) + 1
-                if i in missing:
-                    seq_missing[s] = seq_missing.get(s, 0) + 1
-            for s, mc in seq_missing.items():
-                if mc == seq_total[s]:
-                    full_seq += 1
-                else:
-                    part_seq += 1
-            for i in missing:
-                seq, cap = imgmap[i]
-                miss_rows.append({
-                    'image_id': i,
-                    'safe_region_id': safe,
-                    'parent_region': r['region'],
-                    'sequence': seq or '',
-                    'captured_at': cap if cap is not None else ''
-                })
-            if missing:
-                console.print(
-                    f"  [bold]{safe:<34}[/] coverage=[cyan]{len(cov_ids):>11,}[/]"
-                    f"  have=[green]{len(have & cov_ids):>11,}[/]"
-                    f"  missing=[red]{len(missing):>10,}[/]")
-            del imgmap
-            gc.collect()
-            progress.advance(dtask)
+    cols = [
+        'image_id', 'safe_region_id', 'parent_region', 'sequence',
+        'captured_at'
+    ]
+    prog_path = args.out + '.progress.json'
+    done = set()
+    stats = {
+        'tot_cov': 0,
+        'tot_have': 0,
+        'tot_missing': 0,
+        'full_seq': 0,
+        'part_seq': 0,
+        'n_written': 0
+    }
+    resume = os.path.exists(prog_path) and os.path.exists(args.out)
+    offset = 0
+    if resume:
+        try:
+            pj = read_meta(prog_path)
+            done = set(pj.get('done', []))
+            stats.update(pj.get('stats', {}))
+            offset = min(pj.get('offset', 0), os.path.getsize(args.out))
+        except Exception:
+            resume = False
 
-    with open(args.out, 'w', newline='') as f:
-        w = csv.DictWriter(f,
-                           fieldnames=[
-                               'image_id', 'safe_region_id', 'parent_region',
-                               'sequence', 'captured_at'
-                           ])
-        w.writeheader()
-        w.writerows(miss_rows)
-    console.print(f"[bold]diff[/] · coverage [cyan]{tot_cov:,}[/] · have "
-                  f"[green]{tot_have:,}[/] · [red]MISSING {tot_missing:,}[/]")
-    console.print(f"[dim]   sequences fully missing {full_seq:,} · "
-                  f"partially missing {part_seq:,}[/]")
-    console.print(f"[dim]   wrote {len(miss_rows):,} rows → {args.out} · "
+    fout = open(args.out, 'r+', newline='') if resume \
+        else open(args.out, 'w', newline='')
+    interrupted = False
+    try:
+        if resume:
+            fout.seek(offset)
+            fout.truncate()
+            console.print(f"[dim]diff · resuming — {len(done)} region(s) "
+                          f"already done, continuing[/]")
+        w = csv.writer(fout)
+        if not resume:
+            w.writerow(cols)
+            fout.flush()
+            offset = fout.tell()
+        with make_progress() as progress:
+            dtask = progress.add_task("[bold]diff regions", total=len(rows))
+            for r in rows:
+                safe = safe_of(r)
+                if safe in done:
+                    progress.advance(dtask)
+                    continue
+                if SHUTDOWN.is_set():
+                    interrupted = True
+                    break
+                cov_f = find_coverage_ckpt(safe, [args.data_dir])
+                meta_p = os.path.join(args.data_dir, safe,
+                                      coverage_meta_name(safe))
+                ok = bool(cov_f) and os.path.exists(meta_p)
+                if ok:
+                    try:
+                        ok = read_meta(meta_p).get('method') == MVT_METHOD
+                    except Exception:
+                        ok = False
+                if not cov_f:
+                    pass
+                elif not ok:
+                    console.print(f"  [yellow][skip][/] {safe}: non-MVT "
+                                  f"checkpoint -- re-run enumerate")
+                if cov_f and ok:
+                    imgmap = load_imgmap(cov_f)
+                    have = all_data_ids(safe, args.dirs)
+                    region = r['region']
+                    region_cov = len(imgmap)
+                    region_missing = 0
+                    seq_total, seq_missing = {}, {}
+                    for iid, val in imgmap.items():
+                        seq, cap = val[0], val[1]
+                        seq_total[seq] = seq_total.get(seq, 0) + 1
+                        if iid in have:
+                            continue
+                        region_missing += 1
+                        seq_missing[seq] = seq_missing.get(seq, 0) + 1
+                        w.writerow((iid, safe, region, seq or '',
+                                    cap if cap is not None else ''))
+                    for s, mc in seq_missing.items():
+                        if mc == seq_total[s]:
+                            stats['full_seq'] += 1
+                        else:
+                            stats['part_seq'] += 1
+                    stats['tot_cov'] += region_cov
+                    stats['tot_missing'] += region_missing
+                    stats['tot_have'] += region_cov - region_missing
+                    stats['n_written'] += region_missing
+                    if region_missing:
+                        console.print(
+                            f"  [bold]{safe:<34}[/] "
+                            f"coverage=[cyan]{region_cov:>11,}[/]"
+                            f"  have=[green]{region_cov - region_missing:>11,}[/]"
+                            f"  missing=[red]{region_missing:>10,}[/]")
+                    del imgmap, have, seq_total, seq_missing
+                    gc.collect()
+                fout.flush()
+                offset = fout.tell()
+                done.add(safe)
+                _save_diff_progress(prog_path, done, offset, stats)
+                progress.advance(dtask)
+    finally:
+        fout.close()
+
+    if interrupted:
+        console.print("[yellow]⏸ diff interrupted; progress saved "
+                      f"({len(done)}/{len(rows)} regions). Re-run to resume.[/]")
+        return
+
+    if os.path.exists(prog_path):
+        os.remove(prog_path)
+    console.print(f"[bold]diff[/] · coverage [cyan]{stats['tot_cov']:,}[/] · "
+                  f"have [green]{stats['tot_have']:,}[/] · "
+                  f"[red]MISSING {stats['tot_missing']:,}[/]")
+    console.print(f"[dim]   sequences fully missing {stats['full_seq']:,} · "
+                  f"partially missing {stats['part_seq']:,}[/]")
+    console.print(f"[dim]   wrote {stats['n_written']:,} rows → {args.out} · "
                   f"next: datefilter[/]")
 
 
@@ -2069,7 +2154,7 @@ def main():
     a.add_argument('--env', default='.env')
 
     args = p.parse_args()
-    if args.mode in ('enumerate', 'retry', 'audit'):
+    if args.mode in ('enumerate', 'retry', 'audit', 'diff'):
         _install_sigint()
     {
         'enumerate': cmd_enumerate,
