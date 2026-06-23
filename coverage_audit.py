@@ -531,6 +531,20 @@ class TokenBudget:
         if self._today() != self.date:
             self.date, self.counts, self.disabled = self._today(), {}, set()
 
+    def reset_for_new_day(self):
+        """Force a fresh budget window: clear per-token counts + disabled set.
+
+        Used by ``--wait`` once the server has been observed to serve tiles
+        again (the daily limit reset) -- independent of local-date rollover, so
+        the actual reset timezone need not be known.
+        """
+        with self._lock:
+            self.date = self._today()
+            self.counts = {}
+            self.disabled = set()
+            self._dirty = 0
+            self._save()
+
     def acquire(self, slot=0):
         """Reserve one request on the next available token in a worker's slot.
 
@@ -816,16 +830,21 @@ def load_proxies(args):
 def region_rows(grid_csv, region):
     """Read grid rows from a CSV, optionally filtered to one parent region.
 
+    The filter is sanitize-insensitive: ``--region "Middle East"`` and
+    ``--region Middle_East`` both match the grid's ``"Middle East"`` (compared
+    via ``sanitize_folder_name`` on both sides, matching the on-disk cell names).
+
     Args:
         grid_csv: Path to the grid CSV.
-        region: Optional parent-region name to keep.
+        region: Optional parent-region name (raw or sanitized) to keep.
 
     Returns:
         List of row dicts.
     """
     rows = list(pl.read_csv(grid_csv).iter_rows(named=True))
     if region:
-        rows = [r for r in rows if r['region'] == region]
+        key = sanitize_folder_name(region)
+        rows = [r for r in rows if sanitize_folder_name(r['region']) == key]
     return rows
 
 
@@ -1099,6 +1118,75 @@ def images_from_tile(tile, key, session, end_ms, proxypool=None, slot=0):
         return {}, f'parse:{e}', 'tile_err', proxy_id
 
 
+# Dense z14 tiles (city centres) used to probe whether the daily tile budget has
+# reset: a real protobuf tile means the server is serving again.
+_PROBE_LONLAT = [(2.3522, 48.8566), (-0.1276, 51.5074), (13.4050, 52.5200)]
+
+
+def probe_budget_back(budget, session, proxypool):
+    """Return True if tiles.mapillary.com serves tiles again (limit reset).
+
+    Resets the budget window, fetches a few dense probe tiles, and treats an
+    ``ok`` (real protobuf tile) as "budget available". Probe usage is wiped
+    afterward so it doesn't count against the fresh day.
+
+    Args:
+        budget: The shared ``TokenBudget``.
+        session: A requests Session.
+        proxypool: Optional ``ProxyPool``.
+
+    Returns:
+        True if at least one probe tile came back ``ok``.
+    """
+    budget.reset_for_new_day()
+    ok = 0
+    for lon, lat in _PROBE_LONLAT:
+        if SHUTDOWN.is_set():
+            break
+        t = mercantile.tile(lon, lat, ZOOM)
+        tok = budget.acquire(0)
+        if tok is None:
+            break
+        _, _, status, pid = images_from_tile(t, tok, session, None, proxypool, 0)
+        if proxypool is not None:
+            proxypool.release(pid)
+        if status == 'ok':
+            ok += 1
+    budget.reset_for_new_day()
+    return ok > 0
+
+
+def wait_for_budget(budget, session, proxypool, interval):
+    """Block until the daily tile budget is available again, then resume.
+
+    Probes every ``interval`` seconds (so the reset timezone is irrelevant --
+    the server itself tells us when it is serving again). Interruptible: returns
+    False if Ctrl+C / SHUTDOWN fires while waiting.
+
+    Args:
+        budget: The shared ``TokenBudget``.
+        session: A requests Session.
+        proxypool: Optional ``ProxyPool``.
+        interval: Seconds between probes.
+
+    Returns:
+        True once budget is back, False if interrupted.
+    """
+    console.print(f"[yellow]⏳ daily tile budget exhausted — probing every "
+                  f"{interval // 60} min for the reset (Ctrl+C to stop).[/]")
+    while not SHUTDOWN.is_set():
+        if probe_budget_back(budget, session, proxypool):
+            console.print(f"[green]✓ tile budget available "
+                          f"({dt.datetime.now():%H:%M:%S}) — resuming.[/]")
+            return True
+        console.print("[dim]   still over limit; waiting…[/]")
+        slept = 0
+        while slept < interval and not SHUTDOWN.is_set():
+            time.sleep(min(5, interval - slept))
+            slept += 5
+    return False
+
+
 def fetch_tiles(tiles,
                 budget,
                 workers,
@@ -1353,17 +1441,12 @@ def cmd_enumerate(args, budget=None, proxypool=None):
             os.path.join(args.data_dir, BUDGET_FILE), load_keys(args.env),
             getattr(args, 'daily_tile_limit', DAILY_TILE_LIMIT))
 
-    todo = [(r, *region_state(args.data_dir, safe_of(r))) for r in rows]
-    todo = [(r, st, m) for (r, st, m) in todo if st != 'done']
-    n_resume = sum(1 for _, st, _ in todo if st == 'resume')
     outer, inner = plan_parallelism(args, budget, proxypool)
-    console.print(
-        f"[bold]enumerate[/] · {len(rows)} regions, [cyan]{len(todo)}[/] to do "
-        f"({n_resume} resuming) · budget [cyan]{budget.remaining():,}[/] across "
-        f"{budget.n_active()} tokens (~{budget.limit:,}/token)")
-
+    wait = getattr(args, 'wait', False)
+    wait_interval = getattr(args, 'wait_interval', 1800)
     failures = {}
     flock = threading.Lock()
+    progress = None
 
     def handle(item, slot):
         """Enumerate one region (fresh or resumed) and checkpoint it.
@@ -1421,17 +1504,37 @@ def cmd_enumerate(args, budget=None, proxypool=None):
         gc.collect()
         return len(pending)
 
-    with make_progress() as progress:
-        rtask = progress.add_task("[bold]Regions", total=len(todo))
-        stopped, _ = run_regions(todo, outer, progress, rtask, handle,
-                                 lambda slot: budget.remaining(slot) > 0)
+    stopped = False
+    while True:
+        todo = [(r, *region_state(args.data_dir, safe_of(r))) for r in rows]
+        todo = [(r, st, m) for (r, st, m) in todo if st != 'done']
+        if not todo:
+            stopped = False
+            break
+        n_resume = sum(1 for _, st, _ in todo if st == 'resume')
+        console.print(
+            f"[bold]enumerate[/] · {len(rows)} regions, [cyan]{len(todo)}[/] "
+            f"to do ({n_resume} resuming) · budget "
+            f"[cyan]{budget.remaining():,}[/] across {budget.n_active()} tokens "
+            f"(~{budget.limit:,}/token)")
+        with make_progress() as progress:
+            rtask = progress.add_task("[bold]Regions", total=len(todo))
+            stopped, _ = run_regions(todo, outer, progress, rtask, handle,
+                                     lambda slot: budget.remaining(slot) > 0)
+        if not stopped or SHUTDOWN.is_set():
+            break
+        if not wait:
+            break
+        if not wait_for_budget(budget, session, proxypool, wait_interval):
+            break
+
     if stopped:
         if SHUTDOWN.is_set():
             console.print("[yellow]⏸ interrupted (Ctrl+C); checkpointed. "
                           "Re-run to resume.[/]")
-        else:
+        elif not wait:
             console.print("[yellow]⏸ daily tile budget exhausted; stopping. "
-                          "Re-run to resume tomorrow.[/]")
+                          "Re-run to resume tomorrow (or use --wait).[/]")
     return failures, stopped
 
 
@@ -1628,7 +1731,15 @@ def cmd_retry(args):
         console.print(
             f"[dim]retry · {len(legacy)} legacy/non-MVT region(s) -- "
             f"re-run enumerate to rebuild those.[/]")
-    _, total = retry_core(args, failures, session, end_ms, budget, proxypool)
+    wait = getattr(args, 'wait', False)
+    while True:
+        failures, total = retry_core(args, failures, session, end_ms, budget,
+                                     proxypool)
+        if total == 0 or SHUTDOWN.is_set() or not wait \
+                or budget.remaining() > 0:
+            break
+        if not wait_for_budget(budget, session, proxypool, args.wait_interval):
+            break
     return total
 
 
@@ -1662,6 +1773,8 @@ def cmd_audit(args):
         workers=args.workers,
         outer_workers=args.outer_workers,
         save_interval=args.save_interval,
+        wait=args.wait,
+        wait_interval=args.wait_interval,
         env=args.env,
         daily_tile_limit=args.daily_tile_limit),
                                       budget=budget,
@@ -1689,6 +1802,9 @@ def cmd_audit(args):
             console.print("[green]✓ all regions clean.[/]")
             break
         if budget.remaining() <= 0:
+            if args.wait and not SHUTDOWN.is_set() and wait_for_budget(
+                    budget, session, proxypool, args.wait_interval):
+                continue
             console.print(
                 "\n[yellow]⏸ daily tile budget exhausted during retry. Re-run "
                 "to finish the remaining tiles (resumes automatically).[/]")
@@ -2156,6 +2272,18 @@ def main():
                         'checkpoints (crash/Ctrl+C resume from the last flush '
                         f'instead of restarting the region). Default '
                         f'{SAVE_INTERVAL}.')
+        sp.add_argument('--wait',
+                        action='store_true',
+                        help='When the daily tile budget is exhausted, wait '
+                        'and auto-resume instead of stopping. Probes the server '
+                        'periodically for the reset, so the reset timezone need '
+                        'not be known.')
+        sp.add_argument('--wait-interval',
+                        type=int,
+                        default=1800,
+                        metavar='SECONDS',
+                        help='Seconds between budget-reset probes when --wait '
+                        'is set (default 1800 = 30 min).')
 
     e = sub.add_parser('enumerate')
     e.add_argument('grid_csv')
