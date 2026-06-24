@@ -42,6 +42,11 @@ MLY_KEY_2=your_second_token
 
 ## Repository layout
 
+The repo root holds only the three pipeline scripts (`batch_chunks_mp_api.py`, `coverage_audit.py`, `backfill_missing.py`) and the `browse.py` web app. Everything else lives under `tools/`. Configuration (`.env`, `proxies.txt`), the master grid `original_global_grid_5deg.csv`, and the live data directories (`grid_runs/`, `coverage_missing/`, `coverage_missing_inscope/`, `progress_files/`) stay at the root.
+
+<details>
+<summary><strong>Full directory map</strong></summary>
+
 | Location | Contents |
 | --- | --- |
 | *(root)* | The three pipeline scripts (`batch_chunks_mp_api.py`, `coverage_audit.py`, `backfill_missing.py`) and the `browse.py` web app. |
@@ -55,7 +60,7 @@ MLY_KEY_2=your_second_token
 | `logs/` | Run logs from helper scripts. |
 | `archived/` | Superseded scripts kept for reference. |
 
-Configuration (`.env`, `proxies.txt`), the master grid `original_global_grid_5deg.csv`, and the live data directories (`grid_runs/`, `coverage_missing/`, `coverage_missing_inscope/`, `progress_files/`) stay at the root.
+</details>
 
 ---
 
@@ -72,7 +77,8 @@ Configuration (`.env`, `proxies.txt`), the master grid `original_global_grid_5de
 
 It's built for large runs: multiprocessing across regions, threaded API/download work within each region, compressed checkpoints, chunked Parquet, and resume markers.
 
-### Input CSV
+<details>
+<summary><strong>Input CSV format</strong></summary>
 
 One row per region, with these columns:
 
@@ -86,6 +92,8 @@ One row per region, with these columns:
 sw_lon,sw_lat,ne_lon,ne_lat,region
 -74.10,40.60,-73.70,40.90,sample_region
 ```
+
+</details>
 
 ### Quick start
 
@@ -112,7 +120,8 @@ python batch_chunks_mp_api.py regions.csv --image-dir /mnt/hdd/images --temp-dir
 python batch_chunks_mp_api.py regions.csv --token 1
 ```
 
-### Common options
+<details>
+<summary><strong>All CLI options</strong></summary>
 
 | Option | Default | Purpose |
 | --- | ---: | --- |
@@ -134,7 +143,10 @@ python batch_chunks_mp_api.py regions.csv --token 1
 
 Run `python batch_chunks_mp_api.py --help` for the full reference.
 
-### Output layout
+</details>
+
+<details>
+<summary><strong>Output layout</strong></summary>
 
 Outputs are written under `grid_runs/<safe_region_id>/` (the safe ID is built from the region name and bounding box):
 
@@ -151,11 +163,12 @@ Outputs are written under `grid_runs/<safe_region_id>/` (the safe ID is built fr
 
 With `--image-dir`, jpgs go to `<image-dir>/<region>/ground_animal_images/` while checkpoints and Parquet stay under `--parent-dir`.
 
-### Resume & interruption
+</details>
+
+<details>
+<summary><strong>Resume, interruption &amp; SLURM</strong></summary>
 
 Re-running the same command resumes: it reuses checkpoints, skips completed sub-grids, avoids reprocessing image IDs already in Parquet, and skips images recorded in the validation ledger. `Ctrl+C` force-exits quickly and may leave the in-progress file corrupt; the next run cleans interrupted JSONL checkpoints automatically.
-
-### SLURM
 
 `submit_mp_jobs.slurm` is a starting point for cluster runs — update the CSV path, array range, conda env, and command first. The SLURM path processes one CSV row per task, using `SLURM_ARRAY_TASK_ID` unless `--row-index` is given.
 
@@ -166,6 +179,8 @@ python batch_chunks_mp_api.py regions.csv \
   --entity-max-workers "$((SLURM_CPUS_PER_TASK * 16))" \
   --no-download-images
 ```
+
+</details>
 
 ---
 
@@ -195,6 +210,9 @@ python coverage_audit.py diff original_global_grid_5deg.csv --dirs grid_runs --r
 python coverage_audit.py datefilter --cutoff 2026-05-31
 ```
 
+<details>
+<summary><strong>All CLI options</strong></summary>
+
 | Option | Default | Purpose |
 | --- | ---: | --- |
 | `--region` | all | One parent region; accepts the original or sanitized name (`"Middle East"` or `Middle_East`). |
@@ -205,6 +223,8 @@ python coverage_audit.py datefilter --cutoff 2026-05-31
 | `--daily-tile-limit` | `50000` | Per-token daily tile cap, tracked in `.tile_request_budget.json`. |
 | `--wait` | off | When the daily budget is exhausted, wait for the reset and resume (timezone-agnostic). |
 | `--wait-interval` | `1800` | Seconds between budget-reset probes. |
+
+</details>
 
 **Daily limit.** `tiles.mapillary.com` allows ~50k requests/day per token (16 tokens ≈ 800k tiles/day). A continental enumeration spans multiple days — just re-run the same command (or pass `--wait`); completed regions are skipped and a cut-off region resumes from its pending tiles. A live token-budget bar shows spend while it runs.
 
@@ -221,6 +241,9 @@ python backfill_missing.py \
     --processes 3 --entity-workers 520 --download-workers 10
 ```
 
+<details>
+<summary><strong>All CLI options</strong></summary>
+
 | Option | Default | Purpose |
 | --- | ---: | --- |
 | `--inscope` | `coverage_missing_inscope` | Datefilter output dir (or a single parquet). |
@@ -234,6 +257,8 @@ python backfill_missing.py \
 | `--download-workers` | `10` | Threads for image downloads. |
 | `--batch` | `50000` | Rows fetched per flush. |
 | `--proxies` | unset | Rotating proxies for metadata fetches. |
+
+</details>
 
 Resumable: the in-scope parquet is processed sequentially with a per-parent row offset in a `.backfill_progress*.json` sidecar; per-cell part numbers continue past existing `*_backfill_*.parquet`.
 
@@ -272,56 +297,57 @@ Features: a region sidebar; location search (geocodes a city/country via Nominat
 
 All run from the repository root. Use `--help` on any script for its full options.
 
-### Grid preparation
+<details>
+<summary><strong>Grid preparation</strong> — split the grid, list countries, visualize tiles</summary>
+
 - **`tools/grid/split_regions.py`** — split `global_grid_5deg.csv` into per-region CSVs under `regions/pending/`.
 - **`tools/grid/generate_countries.py`** — write a `covered_countries.txt` into each region folder (Natural Earth 110 m).
+- **`tools/grid/visualize_region_tiles.py`** — render a static map of a region's tiles (green=land, red=water) into its folder. Needs a `Name_SWLon_SWLat_NELon_NELat` folder name.
 
-  ```bash
-  python tools/grid/generate_countries.py --dirs grid_runs /mnt/hdd/grid_runs
-  ```
+```bash
+python tools/grid/generate_countries.py --dirs grid_runs /mnt/hdd/grid_runs
+python tools/grid/visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9" --zoom 14
+```
 
-### Progress & navigation
+</details>
+
+<details>
+<summary><strong>Progress &amp; navigation</strong> — monitor runs, locate regions</summary>
+
 - **`tools/progress/progress_tracker.py`** — Rich progress table by parent region (completion %, data points, ground-animal counts, download rate); saves a timestamped CSV to `progress_files/`. Key flags: `--dirs` (required), `-w/--workers`.
-
-  ```bash
-  python tools/progress/progress_tracker.py regions.csv --dirs grid_runs /mnt/hdd/grid_runs
-  ```
-
 - **`tools/progress/find_location_folder.py`** — geocode a place and find which region folders overlap it.
 - **`tools/progress/scan_regions.py`** — scan dirs for a region prefix and recommend the exact `--parent-dir` / `--image-dir` flags; flags data/images split across unexpected drives.
 
-  ```bash
-  python tools/progress/find_location_folder.py "Japan" --dirs grid_runs /mnt/hdd/grid_runs
-  python tools/progress/scan_regions.py South_America --dirs grid_runs /mnt/hdd/grid_runs
-  ```
+```bash
+python tools/progress/progress_tracker.py regions.csv --dirs grid_runs /mnt/hdd/grid_runs
+python tools/progress/find_location_folder.py "Japan" --dirs grid_runs /mnt/hdd/grid_runs
+python tools/progress/scan_regions.py South_America --dirs grid_runs /mnt/hdd/grid_runs
+```
 
-### Ledger management
-- **`tools/maintenance/generate_ledger.py`** — build/append an exclude ledger of downloaded image IDs (pass to extract via `--exclude-ledger`). Flags: `--image-dir` (required), `--output`, `--substring`.
+</details>
 
-  ```bash
-  python tools/maintenance/generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt
-  ```
+<details>
+<summary><strong>Run integrity &amp; maintenance</strong> — markers, silent skips, checkpoints, ledgers</summary>
 
-### Checkpoint maintenance
-- **`tools/maintenance/check_zst_health.py`** — test all `.zst` with `zstd -t`; list/delete corrupt files. `--clear-completed` drops the matching `.completed_` marker so the sub-grid re-runs.
-
-  ```bash
-  python tools/maintenance/check_zst_health.py --delete-all --clear-completed --ignore-recent 1.5
-  ```
-
-### Audit & repair (extraction markers)
 - **`tools/maintenance/audit_markers.py`** — delete orphaned `.completed_*` markers whose checkpoints are missing (which would otherwise silently skip the sub-grid).
 - **`tools/maintenance/audit_silent_skips.py`** — detect sub-grids marked `.completed_` but whose checkpoints hold fewer records than expected; deletes the marker to force a re-run. `--dry-run` to report only.
 - **`tools/maintenance/generate_rerun_commands.py`** — emit ready-to-run `batch_chunks` commands targeting only the incomplete cells of each region (via `--row-index` / `--sub-indices`).
+- **`tools/maintenance/check_zst_health.py`** — test all `.zst` with `zstd -t`; list/delete corrupt files. `--clear-completed` drops the matching `.completed_` marker so the sub-grid re-runs.
+- **`tools/maintenance/generate_ledger.py`** — build/append an exclude ledger of downloaded image IDs (pass to extract via `--exclude-ledger`).
 - **`tools/coverage/check_grid_data.py`** — report which CSV rows already have Parquet data on disk.
 
-  ```bash
-  python tools/maintenance/audit_silent_skips.py --dry-run --substring North_America
-  python tools/maintenance/generate_rerun_commands.py regions.csv --substring "South America" --output-script rerun_sa.sh
-  python tools/coverage/check_grid_data.py regions/running/north_america.csv --dirs grid_runs /mnt/hdd/grid_runs
-  ```
+```bash
+python tools/maintenance/audit_silent_skips.py --dry-run --substring North_America
+python tools/maintenance/generate_rerun_commands.py regions.csv --substring "South America" --output-script rerun_sa.sh
+python tools/maintenance/check_zst_health.py --delete-all --clear-completed --ignore-recent 1.5
+python tools/maintenance/generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt
+```
 
-### Image-gap repair
+</details>
+
+<details>
+<summary><strong>Image-gap repair</strong> — fix on-disk jpgs vs manifest drift</summary>
+
 These fix `% Images Downloaded` anomalies when on-disk jpgs and `ground_animals_*.parquet` manifests drift apart (expired URLs, or lost parquet rows whose images survived).
 
 - **`tools/repair/diagnose_images.py`** — compare parquet `image_id`s vs jpgs on disk; report orphaned images and missing downloads. Run this first.
@@ -329,27 +355,24 @@ These fix `% Images Downloaded` anomalies when on-disk jpgs and `ground_animals_
 - **`tools/repair/rebuild_manifest_from_images.py`** — treat images as source of truth (the `% > 100` case): re-query detections for orphan jpgs and rebuild the missing `ground_animals_*_recovered_*.parquet` rows.
 - **`tools/repair/drop_dead_from_manifest.py`** — remove permanently-dead IDs (`data/dead_images.txt`) from manifests so they stop inflating the gap; archives removed rows first; idempotent; dry-run by default (`--execute`).
 - **`tools/repair/cleanup_offending_regions.py`** — delete parquet/checkpoint/markers (but keep images + ledger) for a hard-coded list of regions, forcing clean re-extraction; dry-run by default.
-
-  ```bash
-  python tools/repair/diagnose_images.py original_global_grid_5deg.csv --dirs grid_runs --region "South Asia"
-  python tools/repair/fetch_missing_images.py all original_global_grid_5deg.csv --dirs grid_runs --proxy-file proxies.txt -w 24
-  python tools/repair/drop_dead_from_manifest.py --dirs grid_runs /mnt/hdd/grid_runs --execute
-  ```
-
-### Data maintenance & visualization
 - **`tools/repair/deduplicate_parquets.py`** — multiprocessed pass removing duplicate `image_id` rows; rewrites only files that had duplicates.
-- **`tools/grid/visualize_region_tiles.py`** — render a static map of a region's tiles (green=land, red=water) into its folder. Needs a `Name_SWLon_SWLat_NELon_NELat` folder name.
 - **`runners/monitor_and_verify.sh`** — wait for a manifest rebuild to finish, then regenerate the progress report.
 
-  ```bash
-  python tools/repair/deduplicate_parquets.py --parent-dir grid_runs --substring North_America
-  python tools/grid/visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9" --zoom 14
-  ./runners/monitor_and_verify.sh
-  ```
+```bash
+python tools/repair/diagnose_images.py original_global_grid_5deg.csv --dirs grid_runs --region "South Asia"
+python tools/repair/fetch_missing_images.py all original_global_grid_5deg.csv --dirs grid_runs --proxy-file proxies.txt -w 24
+python tools/repair/drop_dead_from_manifest.py --dirs grid_runs /mnt/hdd/grid_runs --execute
+python tools/repair/deduplicate_parquets.py --parent-dir grid_runs --substring North_America
+```
+
+</details>
 
 ---
 
 ## Troubleshooting
+
+<details>
+<summary><strong>Common problems &amp; fixes</strong></summary>
 
 | Symptom | Fix |
 | --- | --- |
@@ -360,3 +383,5 @@ These fix `% Images Downloaded` anomalies when on-disk jpgs and `ground_animals_
 | **Slow HDD writes during downloads** | Point `--temp-dir` at a fast SSD; the pipeline buffers there and moves files in the background. |
 | **Reprocess one sub-grid** | `--sub-indices <n>` targets only that cell. |
 | **Interrupted run** | Re-run the same command — checkpoints, Parquet, and markers resume the work. |
+
+</details>
