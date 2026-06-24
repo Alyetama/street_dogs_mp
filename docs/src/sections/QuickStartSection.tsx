@@ -8,6 +8,7 @@ const tabs = [
   { id: 'install', label: 'Install' },
   { id: 'token', label: 'Token Setup' },
   { id: 'run', label: 'Run' },
+  { id: 'audit', label: 'Audit + Backfill' },
   { id: 'output', label: 'Output' },
 ]
 
@@ -55,6 +56,24 @@ python batch_chunks_mp_api.py regions.csv \\
 
 # Process specific sub-grid indices
 python batch_chunks_mp_api.py regions.csv --sub-indices 4,12,15`,
+  },
+  audit: {
+    code: `# Stage 2 — audit coverage (enumerate -> retry -> diff -> datefilter)
+python coverage_audit.py audit original_global_grid_5deg.csv \\
+  --dirs grid_runs /mnt/hdd/grid_runs --region Europe --wait
+
+# List the in-scope missing set (writes coverage_missing_inscope/)
+python coverage_audit.py datefilter --cutoff 2026-05-31
+
+# Stage 3 — backfill the missing set (parquets + images)
+python backfill_missing.py \\
+  --inscope coverage_missing_inscope --region Europe \\
+  --out-dir /path/to/grid_runs --image-dir /path/to/images \\
+  --processes 3
+
+# Download images for an already-backfilled region
+python backfill_missing.py --download-only \\
+  --out-dir /path/to/grid_runs --image-dir /path/to/images`,
   },
   output: {
     html: `<div class="text-[#adb5bd] text-[13px] leading-[1.7] font-mono">

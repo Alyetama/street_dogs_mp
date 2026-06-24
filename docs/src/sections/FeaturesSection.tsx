@@ -1,7 +1,7 @@
 import { useRef, useEffect } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import { Globe, RefreshCw, Grid3X3, Server, FlaskConical, Zap } from 'lucide-react'
+import { Globe, RefreshCw, ScanSearch, Server, FlaskConical, Zap } from 'lucide-react'
 
 gsap.registerPlugin(ScrollTrigger)
 
@@ -19,10 +19,10 @@ const features = [
       'zstd-compressed checkpoints and completion markers let you resume interrupted runs without losing progress.',
   },
   {
-    icon: Grid3X3,
-    title: 'Mercantile Grid',
+    icon: ScanSearch,
+    title: 'Completeness Audit',
     description:
-      'Splits regions into Mapillary tiles at configurable zoom levels. Filters to land-only tiles for efficiency.',
+      'A second pipeline enumerates Mapillary vector tiles to prove every image was captured, then backfills any in-scope gap.',
   },
   {
     icon: Server,
