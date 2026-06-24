@@ -1,73 +1,41 @@
-# React + TypeScript + Vite
+# Documentation site
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The marketing / documentation site for **street_dogs_mp**, built with React 19,
+Vite 7, TypeScript, and Tailwind CSS. It documents the three-stage pipeline
+(Extract → Audit → Backfill) and the helper-script catalog.
 
-Currently, two official plugins are available:
+## Develop
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd docs
+npm install
+npm run dev      # local dev server with HMR
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Build & preview
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run build    # type-checks (tsc -b) then bundles to dist/
+npm run preview  # serve the production build locally
 ```
+
+## Structure
+
+| Path | Purpose |
+| --- | --- |
+| `src/pages/` | Routed pages: `Home`, `CLIReference` (Extract), `CoverageAudit`, `Backfill`, `HelperScripts`. |
+| `src/sections/` | Home sections + the shared `ReferencePage` used by the three stage pages. |
+| `src/App.tsx` | Routes. |
+| `src/components/ui/` | shadcn/ui primitives. |
+
+The three stage reference pages (`CLIReference`, `CoverageAudit`, `Backfill`)
+all render through `src/sections/ReferencePage.tsx` — edit that component to
+change their shared layout, and the per-page data files for their content.
+
+## Deploy
+
+The app uses `HashRouter` under the base path `/street_dogs_mp/` (set in
+`vite.config.ts`), so routes live behind a `#` (e.g.
+`/street_dogs_mp/#/coverage-audit`) and **no SPA rewrites are needed** — any
+static host serving `dist/` at that base path works (e.g. GitHub Pages). If you
+deploy at a different base, update `base` in `vite.config.ts`.
