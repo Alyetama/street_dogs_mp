@@ -56,7 +56,7 @@ const outputs = [
   { file: 'ground_animal_images/', description: 'Downloaded .jpg files when image downloading is enabled.' },
   { file: 'validated_images_<region>.txt', description: 'Ledger of images that passed local validity checks.' },
   { file: 'failed_downloads_<region>.txt', description: 'Image IDs that failed download attempts.' },
-  { file: 'covered_countries.txt', description: 'Countries intersecting the region bounding box (written by generate_countries.py).' },
+  { file: 'covered_countries.txt', description: 'Countries intersecting the region bounding box (written by tools/grid/generate_countries.py).' },
   { file: '.completed_<sub_id>', description: 'Resume marker indicating a sub-grid completed.' },
   { file: '.empty_<sub_id>', description: 'Resume marker indicating a sub-grid had no usable topology results.' },
 ]

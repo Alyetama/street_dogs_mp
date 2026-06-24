@@ -21,20 +21,20 @@ const categories: { title: string; scripts: Script[] }[] = [
     title: 'Grid Preparation',
     scripts: [
       {
-        name: 'split_regions.py',
+        name: 'tools/grid/split_regions.py',
         description:
           'Splits global_grid_5deg.csv into individual per-region CSV files placed under regions/pending/. Each file contains the rows for a single named region and is ready to pass directly to batch_chunks_mp_api.py.',
-        usage: 'python split_regions.py',
-        examples: ['python split_regions.py'],
+        usage: 'python tools/grid/split_regions.py',
+        examples: ['python tools/grid/split_regions.py'],
       },
       {
-        name: 'generate_countries.py',
+        name: 'tools/grid/generate_countries.py',
         description:
           'For every region folder found under one or more --dirs directories, writes a covered_countries.txt file listing the countries whose boundaries intersect that region\'s bounding box. Uses Natural Earth 110 m country data.',
-        usage: 'python generate_countries.py --dirs <dir> [<dir> ...]',
+        usage: 'python tools/grid/generate_countries.py --dirs <dir> [<dir> ...]',
         examples: [
-          'python generate_countries.py --dirs grid_runs',
-          'python generate_countries.py --dirs grid_runs /mnt/hdd/grid_runs',
+          'python tools/grid/generate_countries.py --dirs grid_runs',
+          'python tools/grid/generate_countries.py --dirs grid_runs /mnt/hdd/grid_runs',
         ],
       },
     ],
@@ -43,13 +43,13 @@ const categories: { title: string; scripts: Script[] }[] = [
     title: 'Progress & Navigation',
     scripts: [
       {
-        name: 'progress_tracker.py',
+        name: 'tools/progress/progress_tracker.py',
         description:
           'Displays a Rich-formatted progress table grouped by parent region, showing completion percentage, total data points, ground-animal counts, and image download rate. Accepts multiple base directories so runs spread across several drives can be reported together. Saves a timestamped CSV report to progress_files/.',
-        usage: 'python progress_tracker.py <regions.csv> --dirs <dir> [<dir> ...] [options]',
+        usage: 'python tools/progress/progress_tracker.py <regions.csv> --dirs <dir> [<dir> ...] [options]',
         examples: [
-          'python progress_tracker.py regions.csv --dirs grid_runs',
-          'python progress_tracker.py regions.csv --dirs grid_runs /mnt/hdd/grid_runs',
+          'python tools/progress/progress_tracker.py regions.csv --dirs grid_runs',
+          'python tools/progress/progress_tracker.py regions.csv --dirs grid_runs /mnt/hdd/grid_runs',
         ],
         options: [
           { option: '--dirs', default: 'required', description: 'One or more base directories to scan for grid runs.' },
@@ -58,22 +58,22 @@ const categories: { title: string; scripts: Script[] }[] = [
         ],
       },
       {
-        name: 'find_location_folder.py',
+        name: 'tools/progress/find_location_folder.py',
         description:
           'Geocodes a city or country name via Nominatim and finds which region folders in your grid runs overlap with it. Useful for quickly locating data for a specific place across multiple drives.',
-        usage: 'python find_location_folder.py "<place>" --dirs <dir> [<dir> ...]',
+        usage: 'python tools/progress/find_location_folder.py "<place>" --dirs <dir> [<dir> ...]',
         examples: [
-          'python find_location_folder.py "Japan" --dirs grid_runs /mnt/hdd/grid_runs',
-          'python find_location_folder.py "Paris" --dirs grid_runs',
+          'python tools/progress/find_location_folder.py "Japan" --dirs grid_runs /mnt/hdd/grid_runs',
+          'python tools/progress/find_location_folder.py "Paris" --dirs grid_runs',
         ],
       },
       {
-        name: 'scan_regions.py',
+        name: 'tools/progress/scan_regions.py',
         description:
           'Scans one or more base directories for folders matching a region prefix, then recommends the exact --parent-dir and --image-dir flags to pass to the main script. Also reports per-directory breakdowns and flags any regions whose data or images are split across unexpected directories.',
-        usage: 'python scan_regions.py <region_prefix> --dirs <dir> [<dir> ...]',
+        usage: 'python tools/progress/scan_regions.py <region_prefix> --dirs <dir> [<dir> ...]',
         examples: [
-          'python scan_regions.py South_America --dirs grid_runs /mnt/hdd/grid_runs',
+          'python tools/progress/scan_regions.py South_America --dirs grid_runs /mnt/hdd/grid_runs',
         ],
       },
     ],
@@ -82,13 +82,13 @@ const categories: { title: string; scripts: Script[] }[] = [
     title: 'Ledger Management',
     scripts: [
       {
-        name: 'generate_ledger.py',
+        name: 'tools/maintenance/generate_ledger.py',
         description:
           'Builds or appends to an exclude ledger (a plain-text file of image IDs) by scanning a directory tree for .jpg files. Pass the resulting file to the main script via --exclude-ledger to skip images that have already been downloaded.',
-        usage: 'python generate_ledger.py --image-dir <dir> --output <ledger.txt> [options]',
+        usage: 'python tools/maintenance/generate_ledger.py --image-dir <dir> --output <ledger.txt> [options]',
         examples: [
-          'python generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt',
-          'python generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt --substring North_America',
+          'python tools/maintenance/generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt',
+          'python tools/maintenance/generate_ledger.py --image-dir /mnt/hdd/grid_runs --output global_exclude_ledger.txt --substring North_America',
         ],
         options: [
           { option: '--image-dir', default: 'required', description: 'Base directory containing grid run folders with images.' },
@@ -102,13 +102,13 @@ const categories: { title: string; scripts: Script[] }[] = [
     title: 'Checkpoint Maintenance',
     scripts: [
       {
-        name: 'check_zst_health.py',
+        name: 'tools/maintenance/check_zst_health.py',
         description:
           'Tests all .zst files under the grid run directories using zstd -t. When --clear-completed is set, deletes the corresponding .completed_<sub_id> marker so the main script will re-process the affected sub-grid on the next run.',
-        usage: 'python check_zst_health.py [options]',
+        usage: 'python tools/maintenance/check_zst_health.py [options]',
         examples: [
-          'python check_zst_health.py',
-          'python check_zst_health.py --delete-all --clear-completed --ignore-recent 1.5',
+          'python tools/maintenance/check_zst_health.py',
+          'python tools/maintenance/check_zst_health.py --delete-all --clear-completed --ignore-recent 1.5',
         ],
         options: [
           { option: '-d / --delete-all', default: 'False', description: 'Delete all corrupted files without prompting.' },
@@ -124,20 +124,20 @@ const categories: { title: string; scripts: Script[] }[] = [
     title: 'Audit & Repair',
     scripts: [
       {
-        name: 'audit_markers.py',
+        name: 'tools/maintenance/audit_markers.py',
         description:
           'Scans grid_runs/ for orphaned .completed_* resume markers — markers whose corresponding metadata_checkpoint_*.jsonl.zst or animal_detections_checkpoint_*.jsonl.zst files are missing. Orphaned markers would otherwise convince the main script that a sub-grid finished successfully, causing it to be skipped silently on the next run. Any orphaned markers found are deleted automatically.',
-        usage: 'python audit_markers.py',
-        examples: ['python audit_markers.py'],
+        usage: 'python tools/maintenance/audit_markers.py',
+        examples: ['python tools/maintenance/audit_markers.py'],
       },
       {
-        name: 'audit_silent_skips.py',
+        name: 'tools/maintenance/audit_silent_skips.py',
         description:
           'A multiprocessed auditor that detects silent skips — sub-grids marked as .completed_ but whose checkpoint files contain fewer records than expected. For each completed sub-grid it loads the topology checkpoint to get the expected image count, then counts lines in the metadata and animal-detection checkpoints. If either count falls short, the .completed_ marker is deleted to force a backfill rerun.',
-        usage: 'python audit_silent_skips.py [options]',
+        usage: 'python tools/maintenance/audit_silent_skips.py [options]',
         examples: [
-          'python audit_silent_skips.py',
-          'python audit_silent_skips.py --dry-run --substring North_America',
+          'python tools/maintenance/audit_silent_skips.py',
+          'python tools/maintenance/audit_silent_skips.py --dry-run --substring North_America',
         ],
         options: [
           { option: '--workers', default: 'all cores', description: 'Parallel CPU workers for checkpoint parsing.' },
@@ -146,13 +146,13 @@ const categories: { title: string; scripts: Script[] }[] = [
         ],
       },
       {
-        name: 'generate_rerun_commands.py',
+        name: 'tools/maintenance/generate_rerun_commands.py',
         description:
           'Reads a grid CSV and checks every region directory for missing .completed_* or .empty_* markers. For each region with incomplete sub-grids, it generates a ready-to-run batch_chunks_mp_api.py command using --row-index and --sub-indices to target only the missing cells.',
-        usage: 'python generate_rerun_commands.py <regions.csv> [options]',
+        usage: 'python tools/maintenance/generate_rerun_commands.py <regions.csv> [options]',
         examples: [
-          'python generate_rerun_commands.py regions.csv',
-          'python generate_rerun_commands.py regions.csv --substring "South America" --output-script rerun_sa.sh',
+          'python tools/maintenance/generate_rerun_commands.py regions.csv',
+          'python tools/maintenance/generate_rerun_commands.py regions.csv --substring "South America" --output-script rerun_sa.sh',
         ],
         options: [
           { option: '--parent-dir', default: 'grid_runs', description: 'Directory containing region output folders.' },
@@ -228,13 +228,13 @@ const categories: { title: string; scripts: Script[] }[] = [
     title: 'Visualization',
     scripts: [
       {
-        name: 'visualize_region_tiles.py',
+        name: 'tools/grid/visualize_region_tiles.py',
         description:
           'Generates a static map image showing mercantile tiles for a region, colored green (land) or red (water). Saves the PNG into the region\'s output folder. Requires a folder name in the format Name_SWLon_SWLat_NELon_NELat.',
-        usage: 'python visualize_region_tiles.py "<folder_name>" [options]',
+        usage: 'python tools/grid/visualize_region_tiles.py "<folder_name>" [options]',
         examples: [
-          'python visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9"',
-          'python visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9" --zoom 14 --parent_dir grid_runs',
+          'python tools/grid/visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9"',
+          'python tools/grid/visualize_region_tiles.py "Sample_Region_-74.1_40.6_-73.7_40.9" --zoom 14 --parent_dir grid_runs',
         ],
       },
     ],
