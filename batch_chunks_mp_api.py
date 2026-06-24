@@ -1,26 +1,36 @@
 import argparse
 import compression.zstd as zstd
 import gc
+import glob
 import itertools
 import multiprocessing
 import os
+import queue
+import random
 import re
+import shutil
 import signal
 import threading
 from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 as_completed)
 from datetime import datetime
 
+import matplotlib
 import mercantile
 import orjson
-import pandas as pd
 import piexif
+import polars as pl
 import requests
 from dotenv import load_dotenv
 from global_land_mask import globe
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+
+matplotlib.use('Agg')
+import contextily as cx
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 
 load_dotenv()
 
@@ -33,14 +43,17 @@ DOWNLOAD_IMAGES = True
 DOWNLOAD_ONLY = False
 DOWNLOAD_MAX_WORKERS = 10
 OUTER_MAX_WORKERS = 5
-INNER_MAX_WORKERS = 20
+SEARCH_MAX_WORKERS = 150 // OUTER_MAX_WORKERS
+ENTITY_MAX_WORKERS = 520 // OUTER_MAX_WORKERS
 SUB_GRID_STEP = 1.0
 PARENT_DIR = 'grid_runs'
-TRACKER_FILE = None
-API_CHUNK_SIZE = 2500
-CSV_CHUNK_SIZE = 10000
+IMAGE_DIR = None
+TEMP_DIR = None
+API_CHUNK_SIZE = 5000
+PARQUET_CHUNK_SIZE = 100000
+PROXY_LIST = []
+EXCLUDE_SET = set()
 
-# Optimal Zstd multithreading (keeps compression fast without causing thread thrashing)
 ZSTD_OPTIONS = {zstd.CompressionParameter.nb_workers: 2}
 
 # Global event for handling graceful shutdowns across threads/processes
@@ -50,8 +63,8 @@ shutdown_event = threading.Event()
 def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
-    global INNER_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, TRACKER_FILE
-    global API_CHUNK_SIZE, CSV_CHUNK_SIZE
+    global SEARCH_MAX_WORKERS, ENTITY_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TEMP_DIR
+    global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET, TARGET_SUB_INDICES
     global shutdown_event
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -64,20 +77,29 @@ def init_worker(config, event):
     DOWNLOAD_IMAGES = config['DOWNLOAD_IMAGES']
     DOWNLOAD_ONLY = config['DOWNLOAD_ONLY']
     DOWNLOAD_MAX_WORKERS = config['DOWNLOAD_MAX_WORKERS']
-    INNER_MAX_WORKERS = config['INNER_MAX_WORKERS']
+    SEARCH_MAX_WORKERS = config['SEARCH_MAX_WORKERS']
+    ENTITY_MAX_WORKERS = config['ENTITY_MAX_WORKERS']
     SUB_GRID_STEP = config['SUB_GRID_STEP']
     PARENT_DIR = config['PARENT_DIR']
-    TRACKER_FILE = config['TRACKER_FILE']
+    IMAGE_DIR = config.get('IMAGE_DIR')
+    TEMP_DIR = config.get('TEMP_DIR')
     API_CHUNK_SIZE = config['API_CHUNK_SIZE']
-    CSV_CHUNK_SIZE = config['CSV_CHUNK_SIZE']
+    PARQUET_CHUNK_SIZE = config['PARQUET_CHUNK_SIZE']
+    PROXY_LIST = config.get('PROXY_LIST', [])
+    TARGET_SUB_INDICES = config.get('TARGET_SUB_INDICES')
+
+    ledger_path = config.get('EXCLUDE_LEDGER')
+    if ledger_path and os.path.exists(ledger_path):
+        with open(ledger_path, 'r') as f:
+            EXCLUDE_SET = {line.strip() for line in f if line.strip()}
 
 
 def slurm_signal_handler(signum, frame):
     """Catches scancel (SIGTERM) or Ctrl+C (SIGINT) in SLURM mode to exit safely."""
     tqdm.write(
-        f"\n[!] Shutdown signal ({signum}) received! Sealing files to prevent corruption..."
+        f"\n[!] Shutdown signal ({signum}) received! INSTANT FORCE-KILL INITIATED."
     )
-    shutdown_event.set()
+    os._exit(1)
 
 
 def chunked_iterable(iterable, size):
@@ -96,8 +118,12 @@ def sanitize_folder_name(name):
 
 
 def clean_jsonl_file(filepath):
-    """Removes corrupt lines from an interrupted .jsonl.zst file using streaming (Low RAM)."""
+    """Removes corrupt lines from an interrupted .jsonl.zst file and deletes 0-byte ghosts."""
     if not os.path.exists(filepath):
+        return
+
+    if os.path.getsize(filepath) == 0:
+        os.remove(filepath)
         return
 
     is_corrupt = False
@@ -110,6 +136,7 @@ def clean_jsonl_file(filepath):
 
     if is_corrupt:
         temp_filepath = filepath + ".tmp"
+        valid_lines = 0
         try:
             with zstd.open(filepath, 'rb') as f_in, \
                  zstd.open(temp_filepath, 'wb', options=ZSTD_OPTIONS) as f_out:
@@ -119,11 +146,18 @@ def clean_jsonl_file(filepath):
                         try:
                             orjson.loads(line)
                             f_out.write(line)
+                            valid_lines += 1
                         except orjson.JSONDecodeError:
                             pass
                 except (EOFError, OSError, zstd.ZstdError):
                     pass
-            os.replace(temp_filepath, filepath)
+
+            if valid_lines == 0:
+                os.remove(filepath)
+                if os.path.exists(temp_filepath):
+                    os.remove(temp_filepath)
+            else:
+                os.replace(temp_filepath, filepath)
         except Exception:
             if os.path.exists(temp_filepath):
                 os.remove(temp_filepath)
@@ -133,32 +167,34 @@ def get_sequences_for_bbox(bbox, session):
     bbox_str = f'{bbox.west},{bbox.south},{bbox.east},{bbox.north}'
     url = f'https://graph.mapillary.com/images?access_token={MLY_KEY}&fields=id,sequence&bbox={bbox_str}'
     try:
-        return {
+        data = {
             img['sequence']
             for img in session.get(url, timeout=10).json().get('data', [])
             if 'sequence' in img
         }
-    except Exception:
-        return set()
+        return bbox_str, data, None
+    except Exception as e:
+        return bbox_str, set(), str(e)
 
 
 def get_images_for_sequence(seq, session):
     url = f'https://graph.mapillary.com/image_ids?access_token={MLY_KEY}&sequence_id={seq}'
     try:
-        return [
+        data = [
             obj['id']
             for obj in session.get(url, timeout=10).json().get('data', [])
         ]
-    except Exception:
-        return []
+        return seq, data, None
+    except Exception as e:
+        return seq, [], str(e)
 
 
 def fetch_image_data(image_id, fields_str, session):
     url = f'https://graph.mapillary.com/{image_id}?access_token={MLY_KEY}&fields={fields_str}'
     try:
-        return image_id, session.get(url, timeout=10).json()
-    except Exception:
-        return image_id, None
+        return image_id, session.get(url, timeout=10).json(), None
+    except Exception as e:
+        return image_id, None, str(e)
 
 
 def fetch_animal_detections(image_id, seq_id, session):
@@ -177,49 +213,167 @@ def fetch_animal_detections(image_id, seq_id, session):
                     },
                     'geometry': det['geometry']
                 })
-        return image_id, features
-    except Exception:
-        return image_id, []
+        return image_id, features, None
+    except Exception as e:
+        return image_id, [], str(e)
 
 
-def download_single_image(image_id, url, output_folder_name, session):
-    """Pure network I/O download. No EXIF processing here to prevent GIL blocking."""
-    filepath = os.path.join(output_folder_name, f"{image_id}.jpg")
-    temp_filepath = filepath + ".tmp"
+def is_valid_image(filepath, image_id, valid_set, lock, ledger_path):
+    """Fast validation that remembers healthy files between script runs."""
+    img_id_str = str(image_id)
 
-    if os.path.exists(filepath):
-        return filepath, True, False
+    if img_id_str in valid_set:
+        return True
+
+    if not os.path.exists(filepath):
+        return False
+    if os.path.getsize(filepath) < 100:
+        return False
 
     try:
-        response = session.get(url, timeout=15)
-        response.raise_for_status()
-
-        with open(temp_filepath, 'wb') as f:
-            f.write(response.content)
-
-        os.rename(temp_filepath, filepath)
-        return filepath, True, True
+        with open(filepath, 'rb') as f:
+            if f.read(2) == b'\xff\xd8':
+                with lock:
+                    valid_set.add(img_id_str)
+                    with open(ledger_path, 'a') as lf:
+                        lf.write(f"{img_id_str}\n")
+                return True
     except Exception:
-        if os.path.exists(temp_filepath): os.remove(temp_filepath)
-        return filepath, False, False
+        pass
+
+    return False
+
+
+def background_hdd_mover(move_queue):
+    """Dedicated background thread to sequentially move files from fast SSD to slow HDD."""
+    while True:
+        item = move_queue.get()
+        if item is None:
+            break
+        temp_path, final_path = item
+        try:
+            shutil.move(temp_path, final_path)
+        except Exception:
+            pass
+        move_queue.task_done()
+
+
+def download_single_image(image_id, url, output_folder_name, session,
+                          valid_set, lock, ledger_path, temp_folder_name,
+                          move_queue):
+    """Network I/O download with Keep-Alive, Proxies, and API Fallback for expired URLs."""
+    global PROXY_LIST, MLY_KEY
+    filepath = os.path.join(output_folder_name, f"{image_id}.jpg")
+
+    if is_valid_image(filepath, image_id, valid_set, lock, ledger_path):
+        return image_id, filepath, True, False
+
+    def attempt_download(target_url, max_tries):
+        last_err = "Unknown Error"
+        for attempt in range(max_tries):
+            proxy_dict = None
+            if PROXY_LIST:
+                proxy_url = random.choice(PROXY_LIST)
+                proxy_dict = {"http": proxy_url, "https": proxy_url}
+
+            try:
+                response = session.get(target_url,
+                                       timeout=(5, 15),
+                                       proxies=proxy_dict)
+                response.raise_for_status()
+
+                if temp_folder_name and move_queue:
+                    temp_filepath = os.path.join(temp_folder_name,
+                                                 f"{image_id}.jpg")
+                    with open(temp_filepath, 'wb') as f:
+                        f.write(response.content)
+                    move_queue.put((temp_filepath, filepath))
+                else:
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
+
+                with lock:
+                    valid_set.add(str(image_id))
+                    with open(ledger_path, 'a') as lf:
+                        lf.write(f"{str(image_id)}\n")
+
+                return True, None
+
+            except requests.exceptions.HTTPError as e:
+                last_err = f"HTTP Error {e.response.status_code if e.response else 'Unknown'}"
+                if e.response is not None and e.response.status_code in [
+                        400, 401, 403, 404
+                ]:
+                    return False, last_err
+            except Exception as e:
+                last_err = str(e) or type(e).__name__
+                if temp_folder_name:
+                    try:
+                        err_tmp = os.path.join(temp_folder_name,
+                                               f"{image_id}.jpg")
+                        if os.path.exists(err_tmp): os.remove(err_tmp)
+                    except Exception:
+                        pass
+
+        return False, last_err
+
+    max_attempts = 3 if PROXY_LIST else 2
+    success, error = attempt_download(url, max_attempts)
+
+    if success:
+        return image_id, filepath, True, True
+
+    tqdm.write(
+        f"    [!] Download failed for {image_id} ({error}). Fetching fresh URL..."
+    )
+
+    fallback_url = f'https://graph.mapillary.com/{image_id}?access_token={MLY_KEY}&fields=thumb_original_url'
+    try:
+        fb_response = session.get(fallback_url, timeout=10)
+        fb_response.raise_for_status()
+        new_url = fb_response.json().get('thumb_original_url')
+
+        if new_url:
+            success, fallback_error = attempt_download(new_url, max_attempts)
+            if success:
+                tqdm.write(
+                    f"    [\u2713] Successfully recovered {image_id} using fresh URL."
+                )
+                return image_id, filepath, True, True
+            else:
+                error = f"Fallback download failed: {fallback_error}"
+        else:
+            error = "API returned no thumb_original_url."
+    except Exception as e:
+        error = f"Failed to fetch fresh URL: {e}"
+
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+    tqdm.write(
+        f"\033[91m    [X] Fatal Download Error ({image_id}): {error}\033[0m")
+    return image_id, filepath, False, False
 
 
 def apply_exif_data(filepath, captured_at):
     """Pure CPU-bound task applying metadata timestamps to downloaded images."""
-    if pd.isna(captured_at): return
+    if not captured_at: return
     try:
-        dt = datetime.strptime(str(captured_at), "%Y-%m-%d %H:%M:%S")
+        val = str(captured_at)
+        if '-' in val:
+            dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+        else:
+            dt = datetime.fromtimestamp(int(val) / 1000.0)
+
         exif_time = dt.strftime("%Y:%m:%d %H:%M:%S")
-        try:
-            exif_dict = piexif.load(filepath)
-        except Exception:
-            exif_dict = {
-                "0th": {},
-                "Exif": {},
-                "GPS": {},
-                "1st": {},
-                "Interop": {}
-            }
+
+        exif_dict = {
+            "0th": {},
+            "Exif": {},
+            "GPS": {},
+            "1st": {},
+            "Interop": {}
+        }
         exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_time.encode('utf-8')
         exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_time.encode(
             'utf-8')
@@ -228,98 +382,183 @@ def apply_exif_data(filepath, captured_at):
 
         piexif.insert(piexif.dump(exif_dict), filepath)
         os.utime(filepath, (dt.timestamp(), dt.timestamp()))
-    except Exception:
-        pass
+    except Exception as e:
+        tqdm.write(f"\033[91m    [X] EXIF Error ({filepath}): {e}\033[0m")
 
 
 def build_mapillary_dataframe_from_records(records):
-    if not records: return pd.DataFrame()
-    df = pd.DataFrame(records)
-    expected_columns = [
-        'image_id', 'computed_geometry', 'captured_at', 'sequence', 'is_pano',
-        'camera_type', 'computed_compass_angle', 'creator', 'height', 'width',
-        'detections', 'make', 'model', 'thumb_256_url', 'thumb_1024_url',
-        'thumb_2048_url', 'thumb_original_url'
+    """Builds a strictly typed Polars DataFrame safe from Float/Int type drifts."""
+    if not records: return pl.DataFrame()
+
+    MAPILLARY_SCHEMA = {
+        'image_id': pl.Utf8,
+        'captured_at': pl.Int64,
+        'sequence': pl.Utf8,
+        'is_pano': pl.Boolean,
+        'camera_type': pl.Utf8,
+        'computed_compass_angle': pl.Float64,
+        'height': pl.Float64,
+        'width': pl.Float64,
+        'make': pl.Utf8,
+        'model': pl.Utf8,
+        'thumb_256_url': pl.Utf8,
+        'thumb_1024_url': pl.Utf8,
+        'thumb_2048_url': pl.Utf8,
+        'thumb_original_url': pl.Utf8
+    }
+
+    for record in records:
+        if record.get('computed_geometry'):
+            record['computed_geometry'] = orjson.dumps(
+                record['computed_geometry']).decode('utf-8')
+        if record.get('creator'):
+            record['creator'] = orjson.dumps(record['creator']).decode('utf-8')
+        if record.get('detections'):
+            record['detections'] = orjson.dumps(
+                record['detections']).decode('utf-8')
+
+    df = pl.DataFrame(records,
+                      schema_overrides=MAPILLARY_SCHEMA,
+                      infer_schema_length=10000)
+
+    expected_columns = list(MAPILLARY_SCHEMA.keys()) + [
+        'computed_geometry', 'creator', 'detections'
     ]
+
     for col in expected_columns:
-        if col not in df.columns: df[col] = None
-    return df[expected_columns]
+        if col not in df.columns:
+            df = df.with_columns(pl.lit(None).alias(col))
+
+    df = df.with_columns([
+        pl.col('computed_geometry').cast(pl.Utf8),
+        pl.col('creator').cast(pl.Utf8),
+        pl.col('detections').cast(pl.Utf8),
+        pl.col('height').cast(pl.Int64, strict=False),
+        pl.col('width').cast(pl.Int64, strict=False)
+    ])
+
+    return df.select(expected_columns)
 
 
 def get_image_topology(west, south, east, north, region_dir, sub_id, session,
                        pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
                                    f'topology_checkpoint_{sub_id}.json.zst')
+    failed_bboxes_file = os.path.join(region_dir,
+                                      f'failed_bboxes_{sub_id}.txt')
+    failed_seqs_file = os.path.join(region_dir,
+                                    f'failed_sequences_{sub_id}.txt')
+
+    image_to_sequence_map = {}
     if os.path.exists(checkpoint_file):
         try:
             with zstd.open(checkpoint_file, 'rb') as f:
-                return orjson.loads(f.read())
+                image_to_sequence_map = orjson.loads(f.read())
         except (orjson.JSONDecodeError, zstd.ZstdError):
             pass
 
-    tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
-    all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
-    land_bboxes = [
-        bbox for bbox in all_bboxes
-        if globe.is_land((bbox.south + bbox.north) /
-                         2.0, (bbox.west + bbox.east) / 2.0)
-    ]
+    target_bboxes = []
+    target_sequences = set()
 
-    if not land_bboxes: return {}
+    # 1. Resume Failed BBoxes
+    if os.path.exists(failed_bboxes_file):
+        with open(failed_bboxes_file, 'r') as f:
+            for line in f:
+                if '|' in line:
+                    bbox_str = line.split('|')[0].strip()
+                    parts = bbox_str.split(',')
+                    if len(parts) == 4:
+                        from collections import namedtuple
+                        BBox = namedtuple('BBox',
+                                          ['west', 'south', 'east', 'north'])
+                        target_bboxes.append(BBox(*map(float, parts)))
+        os.remove(
+            failed_bboxes_file)  # Delete log so we can write fresh failures
 
-    unique_sequences = set()
+    # 2. Resume Failed Sequences
+    if os.path.exists(failed_seqs_file):
+        with open(failed_seqs_file, 'r') as f:
+            for line in f:
+                if '|' in line:
+                    seq_str = line.split('|')[0].strip()
+                    target_sequences.add(seq_str)
+        os.remove(failed_seqs_file)
 
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        with tqdm(total=len(land_bboxes),
-                  desc=f"{desc_prefix} 1/6 BBoxes",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(land_bboxes, API_CHUNK_SIZE):
-                if shutdown_event.is_set(): break
-                futures = {
-                    executor.submit(get_sequences_for_bbox, bbox, session):
-                    bbox
-                    for bbox in chunk
-                }
-                for future in as_completed(futures):
-                    if shutdown_event.is_set():
-                        for f in futures:
-                            f.cancel()
-                        break
+    # 3. Completely Fresh Run
+    if not image_to_sequence_map and not target_bboxes and not target_sequences:
+        tiles = list(mercantile.tiles(west, south, east, north, ZOOM_LEVEL))
+        all_bboxes = [mercantile.bounds(t.x, t.y, t.z) for t in tiles]
+        target_bboxes = [
+            bbox for bbox in all_bboxes
+            if globe.is_land((bbox.south + bbox.north) /
+                             2.0, (bbox.west + bbox.east) / 2.0)
+        ]
 
-                    unique_sequences.update(future.result())
-                    pbar.update(1)
-                    del futures[future]
-                gc.collect()
+    # 4. If checkpoint exists and no error logs found, it is 100% complete
+    if not target_bboxes and not target_sequences and image_to_sequence_map:
+        return image_to_sequence_map
 
-    image_to_sequence_map = {}
-    with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
-        with tqdm(total=len(unique_sequences),
-                  desc=f"{desc_prefix} 2/6 Sequences",
-                  position=pos,
-                  leave=False,
-                  mininterval=2.0) as pbar:
-            for chunk in chunked_iterable(unique_sequences, API_CHUNK_SIZE):
-                if shutdown_event.is_set(): break
-                futures = {
-                    executor.submit(get_images_for_sequence, seq, session): seq
-                    for seq in chunk
-                }
-                for future in as_completed(futures):
-                    if shutdown_event.is_set():
-                        for f in futures:
-                            f.cancel()
-                        break
+    if target_bboxes:
+        with ThreadPoolExecutor(max_workers=SEARCH_MAX_WORKERS) as executor:
+            with tqdm(total=len(target_bboxes),
+                      desc=f"{desc_prefix} 1/6 BBoxes",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                for chunk in chunked_iterable(target_bboxes, API_CHUNK_SIZE):
+                    if shutdown_event.is_set(): break
+                    futures = {
+                        executor.submit(get_sequences_for_bbox, bbox, session):
+                        bbox
+                        for bbox in chunk
+                    }
+                    for future in as_completed(futures):
+                        if shutdown_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                            break
+                        bbox_str, seqs, error = future.result()
+                        if error:
+                            with open(failed_bboxes_file, 'a') as ef:
+                                ef.write(f"{bbox_str} | Error: {error}\n")
+                        else:
+                            target_sequences.update(seqs)
+                        pbar.update(1)
+                        del futures[future]
+                    gc.collect()
 
-                    seq_id = futures[future]
-                    for img_id in future.result():
-                        image_to_sequence_map[img_id] = seq_id
-                    pbar.update(1)
-                    del futures[future]
-                gc.collect()
+    if target_sequences:
+        with ThreadPoolExecutor(max_workers=SEARCH_MAX_WORKERS) as executor:
+            with tqdm(total=len(target_sequences),
+                      desc=f"{desc_prefix} 2/6 Sequences",
+                      position=pos,
+                      leave=False,
+                      mininterval=2.0) as pbar:
+                for chunk in chunked_iterable(target_sequences,
+                                              API_CHUNK_SIZE):
+                    if shutdown_event.is_set(): break
+                    futures = {
+                        executor.submit(get_images_for_sequence, seq, session):
+                        seq
+                        for seq in chunk
+                    }
+                    for future in as_completed(futures):
+                        if shutdown_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                            break
+                        seq_id, img_ids, error = future.result()
+                        if error:
+                            with open(failed_seqs_file, 'a') as ef:
+                                ef.write(f"{seq_id} | Error: {error}\n")
+                        else:
+                            for img_id in img_ids:
+                                image_to_sequence_map[img_id] = seq_id
+                        pbar.update(1)
+                        del futures[future]
+                    gc.collect()
 
-    if not shutdown_event.is_set():
+    if not shutdown_event.is_set() and image_to_sequence_map:
         temp_checkpoint = checkpoint_file + '.tmp'
         with zstd.open(temp_checkpoint, 'wb', options=ZSTD_OPTIONS) as f:
             f.write(orjson.dumps(image_to_sequence_map))
@@ -332,6 +571,10 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                             pos, desc_prefix):
     checkpoint_file = os.path.join(region_dir,
                                    f'metadata_checkpoint_{sub_id}.jsonl.zst')
+    failed_log = os.path.join(region_dir, f'failed_metadata_{sub_id}.txt')
+
+    if os.path.exists(failed_log):
+        os.remove(failed_log)
 
     clean_jsonl_file(checkpoint_file)
 
@@ -351,7 +594,7 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
 
     write_lock = threading.Lock()
     with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
-        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=ENTITY_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 3/6 Metadata",
                       position=pos,
@@ -366,12 +609,15 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                     }
                     for future in as_completed(futures):
                         if shutdown_event.is_set():
-                            for f in futures:
-                                f.cancel()
+                            for fut in futures:
+                                fut.cancel()
                             break
 
-                        image_id, data = future.result()
-                        if data is not None:
+                        image_id, data, error = future.result()
+                        if error:
+                            with open(failed_log, 'a') as ef:
+                                ef.write(f"{image_id} | Error: {error}\n")
+                        elif data is not None:
                             with write_lock:
                                 f.write(
                                     orjson.dumps({
@@ -388,10 +634,14 @@ def fetch_metadata_to_jsonl(image_ids, fields_str, region_dir, sub_id, session,
                     gc.collect()
 
 
-def fetch_detections_to_jsonl(image_to_sequence_map, region_dir, sub_id,
-                              session, pos, desc_prefix):
+def fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id, session,
+                              pos, desc_prefix):
     checkpoint_file = os.path.join(
         region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.zst')
+    failed_log = os.path.join(region_dir, f'failed_detections_{sub_id}.txt')
+
+    if os.path.exists(failed_log):
+        os.remove(failed_log)
 
     clean_jsonl_file(checkpoint_file)
 
@@ -405,14 +655,14 @@ def fetch_detections_to_jsonl(image_to_sequence_map, region_dir, sub_id,
                         completed_ids.add(match.group(1).decode('utf-8'))
 
     missing_ids = [
-        img_id for img_id in image_to_sequence_map.keys()
+        img_id for img_id in image_to_seq_map.keys()
         if img_id not in completed_ids
     ]
     if not missing_ids: return
 
     write_lock = threading.Lock()
     with zstd.open(checkpoint_file, 'ab', options=ZSTD_OPTIONS) as f:
-        with ThreadPoolExecutor(max_workers=INNER_MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=ENTITY_MAX_WORKERS) as executor:
             with tqdm(total=len(missing_ids),
                       desc=f"{desc_prefix} 4/6 Detections",
                       position=pos,
@@ -421,23 +671,27 @@ def fetch_detections_to_jsonl(image_to_sequence_map, region_dir, sub_id,
                 for chunk in chunked_iterable(missing_ids, API_CHUNK_SIZE):
                     if shutdown_event.is_set(): break
                     futures = {
-                        executor.submit(fetch_animal_detections, img_id, image_to_sequence_map[img_id], session):
+                        executor.submit(fetch_animal_detections, img_id, image_to_seq_map[img_id], session):
                         img_id
                         for img_id in chunk
                     }
                     for future in as_completed(futures):
                         if shutdown_event.is_set():
-                            for f in futures:
-                                f.cancel()
+                            for fut in futures:
+                                fut.cancel()
                             break
 
-                        image_id, features = future.result()
-                        with write_lock:
-                            f.write(
-                                orjson.dumps({
-                                    'image_id': image_id,
-                                    'features': features
-                                }) + b'\n')
+                        image_id, features, error = future.result()
+                        if error:
+                            with open(failed_log, 'a') as ef:
+                                ef.write(f"{image_id} | Error: {error}\n")
+                        else:
+                            with write_lock:
+                                f.write(
+                                    orjson.dumps({
+                                        'image_id': image_id,
+                                        'features': features
+                                    }) + b'\n')
                         pbar.update(1)
                         del futures[future]
                         del features
@@ -445,6 +699,69 @@ def fetch_detections_to_jsonl(image_to_sequence_map, region_dir, sub_id,
 
                     f.flush()
                     gc.collect()
+
+
+def generate_region_visualization(sw_lon, sw_lat, ne_lon, ne_lat, zoom,
+                                  region_dir, safe_region_id):
+    """Generates a visualization of land/water tiles for a given region."""
+    tiles = list(mercantile.tiles(sw_lon, sw_lat, ne_lon, ne_lat, zoom))
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.set_xlim(sw_lon, ne_lon)
+    ax.set_ylim(sw_lat, ne_lat)
+
+    land_count = 0
+    water_count = 0
+
+    for t in tiles:
+        bbox = mercantile.bounds(t.x, t.y, t.z)
+        center_lat_tile = (bbox.south + bbox.north) / 2.0
+        center_lon_tile = (bbox.west + bbox.east) / 2.0
+        is_land = globe.is_land(center_lat_tile, center_lon_tile)
+
+        if is_land:
+            facecolor = '#00FF00'
+            alpha = 0.3
+            land_count += 1
+        else:
+            facecolor = '#FF0000'
+            alpha = 0.15
+            water_count += 1
+
+        rect = patches.Rectangle((bbox.west, bbox.south),
+                                 bbox.east - bbox.west,
+                                 bbox.north - bbox.south,
+                                 linewidth=0.5,
+                                 edgecolor='black',
+                                 facecolor=facecolor,
+                                 alpha=alpha)
+        ax.add_patch(rect)
+
+    main_rect = patches.Rectangle((sw_lon, sw_lat),
+                                  ne_lon - sw_lon,
+                                  ne_lat - sw_lat,
+                                  linewidth=3,
+                                  edgecolor='yellow',
+                                  facecolor='none')
+    ax.add_patch(main_rect)
+
+    try:
+        cx.add_basemap(ax,
+                       crs="EPSG:4326",
+                       source=cx.providers.Esri.WorldImagery)
+    except Exception:
+        pass
+
+    plt.title(
+        f"Tile Filtering: {safe_region_id}\n{land_count} Land (Green) | {water_count} Water (Red)",
+        color='white',
+        backgroundcolor='black')
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+
+    output_file = os.path.join(region_dir, f"{safe_region_id}_tiles.png")
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.close(fig)
 
 
 # --- The Master Process Worker ---
@@ -467,67 +784,104 @@ def process_region(west,
     region_run_id = unique_region_id.replace('_', ' ')
     region_dir = os.path.join(PARENT_DIR, safe_region_id)
     os.makedirs(region_dir, exist_ok=True)
-    output_folder_name = os.path.join(region_dir, 'ground_animal_images')
+
+    if VISUALIZE:
+        expected_png = os.path.join(region_dir, f"{safe_region_id}_tiles.png")
+        if not os.path.exists(expected_png):
+            try:
+                generate_region_visualization(west, south, east, north,
+                                              ZOOM_LEVEL, region_dir,
+                                              safe_region_id)
+            except Exception as e:
+                tqdm.write(
+                    f"    [!] Visualization failed for {safe_region_id}: {e}")
+        else:
+            tqdm.write(
+                f"    [i] Visualization already exists for {safe_region_id}, skipping generation."
+            )
+
+    if IMAGE_DIR:
+        output_folder_name = os.path.join(IMAGE_DIR, safe_region_id,
+                                          'ground_animal_images')
+    else:
+        output_folder_name = os.path.join(region_dir, 'ground_animal_images')
     os.makedirs(output_folder_name, exist_ok=True)
 
-    all_csv_path = os.path.join(region_dir,
-                                f'all_data_{safe_region_id}.csv.zst')
-    animals_csv_path = os.path.join(
-        region_dir, f'ground_animals_{safe_region_id}.csv.zst')
+    if TEMP_DIR:
+        temp_folder_name = os.path.join(TEMP_DIR, safe_region_id,
+                                        'ground_animal_images')
+        os.makedirs(temp_folder_name, exist_ok=True)
 
-    if not DOWNLOAD_ONLY:
-        if os.path.exists(all_csv_path):
-            os.remove(all_csv_path)
-        if os.path.exists(animals_csv_path):
-            os.remove(animals_csv_path)
+        move_queue = queue.Queue(maxsize=2000)
+        mover_thread = threading.Thread(target=background_hdd_mover,
+                                        args=(move_queue, ),
+                                        daemon=True)
+        mover_thread.start()
+    else:
+        temp_folder_name = None
+        move_queue = None
+        mover_thread = None
 
-        # Clean up any old gzip versions
-        old_all_csv_path = os.path.join(region_dir,
-                                        f'all_data_{safe_region_id}.csv.gz')
-        old_animals_csv_path = os.path.join(
-            region_dir, f'ground_animals_{safe_region_id}.csv.gz')
-        if os.path.exists(old_all_csv_path):
-            os.remove(old_all_csv_path)
-        if os.path.exists(old_animals_csv_path):
-            os.remove(old_animals_csv_path)
+    valid_ledger_path = os.path.join(region_dir,
+                                     f'validated_images_{safe_region_id}.txt')
+    validated_set = set()
+    if os.path.exists(valid_ledger_path):
+        with open(valid_ledger_path, 'r') as f:
+            validated_set = {line.strip() for line in f if line.strip()}
+    valid_lock = threading.Lock()
+
+    failed_tracker_path = os.path.join(
+        region_dir, f'failed_downloads_{safe_region_id}.txt')
+    failed_set = set()
+    if os.path.exists(failed_tracker_path):
+        with open(failed_tracker_path, 'r') as f:
+            failed_set = {line.strip() for line in f if line.strip()}
+    failed_lock = threading.Lock()
 
     # =========================================================
     #                    DOWNLOAD-ONLY MODE
     # =========================================================
     if DOWNLOAD_ONLY:
-        animals_csv_path = os.path.join(
-            region_dir, f'ground_animals_{safe_region_id}.csv.zst')
+        animal_files = glob.glob(
+            os.path.join(region_dir,
+                         f'ground_animals_{safe_region_id}_*.parquet'))
 
-        if not os.path.exists(animals_csv_path):
-            return f"Skipped '{unique_region_id}': No ground_animals CSV found for download-only mode."
+        if not animal_files:
+            return f"Skipped '{unique_region_id}': No ground_animals Parquet found for download-only mode."
 
         tqdm.write(
-            f"[{datetime.now().strftime('%H:%M:%S')}] [{region_run_id}] Loading CSV for Download-Only mode..."
+            f"[{datetime.now().strftime('%H:%M:%S')}] [{region_run_id}] Loading Parquet chunks for Download-Only mode..."
         )
-        try:
-            with zstd.open(animals_csv_path, 'rt', encoding='utf-8') as f:
-                df = pd.read_csv(f, low_memory=False)
 
-            if 'image_id' not in df.columns or 'thumb_original_url' not in df.columns:
-                return f"Skipped '{unique_region_id}': Required columns missing in CSV."
+        try:
+            dfs = [
+                pl.read_parquet(
+                    f,
+                    columns=['image_id', 'thumb_original_url', 'captured_at'])
+                for f in animal_files
+            ]
+
+            df = pl.concat(dfs).unique(subset=['image_id'], keep='first')
 
             if 'captured_at' not in df.columns:
-                df['captured_at'] = None
+                df = df.with_columns(pl.lit(None).alias('captured_at'))
 
             download_tasks = []
-            for _, row in df.iterrows():
-                if pd.notna(row.get('thumb_original_url')):
+            for row in df.iter_rows(named=True):
+                if row.get('thumb_original_url') is not None:
+                    if str(row['image_id']) in EXCLUDE_SET:
+                        continue
                     expected_filepath = os.path.join(output_folder_name,
                                                      f"{row['image_id']}.jpg")
-                    if not os.path.exists(expected_filepath):
+                    if not is_valid_image(expected_filepath, row['image_id'],
+                                          validated_set, valid_lock,
+                                          valid_ledger_path):
                         download_tasks.append(
                             (row['image_id'], row['thumb_original_url'],
                              row['captured_at']))
 
-        except pd.errors.EmptyDataError:
-            return f"Completed '{unique_region_id}' (CSV is empty)."
         except Exception as e:
-            return f"Error reading CSV for '{unique_region_id}': {e}"
+            return f"Error reading Parquet for '{unique_region_id}': {e}"
 
         if not download_tasks:
             return f"Completed '{unique_region_id}' (No images to download)."
@@ -537,19 +891,14 @@ def process_region(west,
         )
 
         dl_session = requests.Session()
-        retries = Retry(total=5,
-                        backoff_factor=1.5,
-                        status_forcelist=[429, 500, 502, 503, 504])
         dl_session.mount(
             'https://',
-            HTTPAdapter(max_retries=retries,
-                        pool_connections=DOWNLOAD_MAX_WORKERS,
+            HTTPAdapter(pool_connections=DOWNLOAD_MAX_WORKERS,
                         pool_maxsize=DOWNLOAD_MAX_WORKERS))
 
         # ---------------------------------------------------------
-        # PHASE 1: Pure Network Download
+        # PHASE 1: Pure Network Download (No EXIF in this mode)
         # ---------------------------------------------------------
-        exif_tasks = []
         with ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS) as executor:
             with tqdm(total=len(download_tasks),
                       desc=f"[{region_run_id}] Downloads",
@@ -558,34 +907,424 @@ def process_region(west,
                       mininterval=2.0) as pbar:
                 for chunk in chunked_iterable(download_tasks, API_CHUNK_SIZE):
                     if shutdown_event.is_set(): break
+
                     futures = {
-                        executor.submit(download_single_image, img_id, url, output_folder_name, dl_session):
+                        executor.submit(download_single_image, img_id, url, output_folder_name, dl_session, validated_set, valid_lock, valid_ledger_path, temp_folder_name, move_queue):
                         cap_at
                         for img_id, url, cap_at in chunk
                     }
+
                     for future in as_completed(futures):
                         if shutdown_event.is_set():
                             for f in futures:
                                 f.cancel()
                             break
-                        cap_at = futures[future]
-                        filepath, success, newly_downloaded = future.result()
 
-                        if success and newly_downloaded:
-                            exif_tasks.append((filepath, cap_at))
+                        img_id, filepath, success, newly_downloaded = future.result(
+                        )
+
+                        if not success:
+                            with failed_lock:
+                                if str(img_id) not in failed_set:
+                                    with open(failed_tracker_path, 'a') as f:
+                                        f.write(f"{img_id}\n")
+                                    failed_set.add(str(img_id))
 
                         pbar.update(1)
                         del futures[future]
                     gc.collect()
 
-        # ---------------------------------------------------------
-        # PHASE 2: Pure CPU EXIF processing
-        # ---------------------------------------------------------
+        if mover_thread:
+            move_queue.join()
+            move_queue.put(None)
+            mover_thread.join()
+
+        return f"Completed '{unique_region_id}' (Processed {len(download_tasks)} images via Download-Only mode)."
+    # =========================================================
+
+    session = requests.Session()
+    retries = Retry(total=5,
+                    backoff_factor=1,
+                    status_forcelist=[429, 500, 502, 503, 504])
+    session.mount(
+        'https://',
+        HTTPAdapter(max_retries=retries,
+                    pool_connections=max(SEARCH_MAX_WORKERS,
+                                         ENTITY_MAX_WORKERS),
+                    pool_maxsize=max(SEARCH_MAX_WORKERS, ENTITY_MAX_WORKERS)))
+
+    sub_bboxes = []
+    cur_lat = south
+    while cur_lat < north:
+        next_lat = min(cur_lat + SUB_GRID_STEP, north)
+        cur_lon = west
+        while cur_lon < east:
+            next_lon = min(cur_lon + SUB_GRID_STEP, east)
+            sub_bboxes.append((cur_lon, cur_lat, next_lon, next_lat))
+            cur_lon += SUB_GRID_STEP
+        cur_lat += SUB_GRID_STEP
+
+    # ====================================================================
+    # ARCHITECTURE FIX: GLOBALLY TRACK BUFFERS ACROSS ALL SUB-GRIDS
+    # ====================================================================
+    total_animals_found = 0
+    records = []
+    download_tasks = []
+    global_extracted_image_ids = set()
+
+    seen_image_ids = set()
+    existing_all_files = glob.glob(
+        os.path.join(region_dir, f'all_data_{safe_region_id}_*.parquet'))
+
+    if existing_all_files:
+        existing_all_files.sort()
+        tqdm.write(
+            f"\n[{region_run_id}] Scanning existing Parquet files to prevent duplicates..."
+        )
+        for f in existing_all_files:
+            chunk_num = f.split('_')[-1].replace('.parquet', '')
+            all_size_mb = os.path.getsize(f) / (1024 * 1024)
+
+            anim_f = f.replace('all_data_', 'ground_animals_')
+            anim_size_mb = os.path.getsize(anim_f) / (
+                1024 * 1024) if os.path.exists(anim_f) else 0.0
+
+            tqdm.write(
+                f"    [\u2713] Found Parquet Chunk {chunk_num} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+            )
+
+            seen_image_ids.update(
+                pl.read_parquet(f, columns=['image_id'])['image_id'].to_list())
+
+    part_index = len(existing_all_files)
+    cumulative_bypassed = 0
+
+    existing_anim_files = glob.glob(
+        os.path.join(region_dir, f'ground_animals_{safe_region_id}_*.parquet'))
+    anim_part_index = len(existing_anim_files)
+    animal_df_buffer = []
+
+    def process_metadata_chunk(chunk_records):
+        nonlocal part_index, cumulative_bypassed
+        original_count = len(chunk_records)
+        df = build_mapillary_dataframe_from_records(chunk_records)
+        if df.is_empty(): return
+
+        if 'captured_at' in df.columns:
+            df = df.with_columns(
+                pl.col('captured_at').cast(pl.Int64, strict=False).cast(
+                    pl.Datetime("ms")).dt.strftime('%Y-%m-%d %H:%M:%S'))
+
+        df = df.unique(subset=['image_id'], keep='last')
+
+        df = df.filter(~pl.col('image_id').is_in(seen_image_ids))
+
+        if df.is_empty():
+            cumulative_bypassed += original_count
+            tqdm.write(
+                f"    [i] Bypassed {cumulative_bypassed:,} total records so far (safely stored on disk)..."
+            )
+            return
+
+        seen_image_ids.update(df['image_id'].to_list())
+
+        animals_df = df.filter(
+            pl.col('image_id').is_in(global_extracted_image_ids))
+
+        all_pq_path = os.path.join(
+            region_dir, f'all_data_{safe_region_id}_{part_index:03d}.parquet')
+
+        df.write_parquet(all_pq_path, compression='zstd')
+
+        all_size_mb = os.path.getsize(all_pq_path) / (1024 * 1024)
+        anim_size_mb = 0.0
+
+        if not animals_df.is_empty():
+            anim_pq_path = os.path.join(
+                region_dir,
+                f'ground_animals_{safe_region_id}_{part_index:03d}.parquet')
+
+            animals_df.write_parquet(anim_pq_path, compression='zstd')
+            anim_size_mb = os.path.getsize(anim_pq_path) / (1024 * 1024)
+
+            if DOWNLOAD_IMAGES:
+                for row in animals_df.iter_rows(named=True):
+                    if row.get('thumb_original_url') is not None:
+                        if str(row['image_id']) in EXCLUDE_SET:
+                            continue
+                        expected_filepath = os.path.join(
+                            output_folder_name, f"{row['image_id']}.jpg")
+                        if not is_valid_image(expected_filepath,
+                                              row['image_id'], validated_set,
+                                              valid_lock, valid_ledger_path):
+                            download_tasks.append(
+                                (row['image_id'], row['thumb_original_url'],
+                                 row['captured_at']))
+
+        tqdm.write(
+            f"    [\u2713] Saved Parquet Chunk {part_index:03d} -> All Data: {all_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+        )
+
+        part_index += 1
+        del df
+        del animals_df
+        gc.collect()
+
+    # ====================================================================
+
+    subgrids_processed = 0
+
+    for i, (sw_lon, sw_lat, ne_lon, ne_lat) in enumerate(sub_bboxes):
+        if TARGET_SUB_INDICES and i not in TARGET_SUB_INDICES:
+            continue
+
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
+
+        sub_id = f"{safe_region_id}_sub_{i}"
+        desc_prefix = f"[{region_run_id} C{i+1}/{len(sub_bboxes)}]"
+
+        empty_marker = os.path.join(region_dir, f'.empty_{sub_id}')
+        completed_marker = os.path.join(region_dir, f'.completed_{sub_id}')
+
+        if os.path.exists(completed_marker):
+            continue
+
+        if os.path.exists(empty_marker):
+            continue
+
+        subgrids_processed += 1
+
+        image_to_seq_map = get_image_topology(sw_lon, sw_lat, ne_lon, ne_lat,
+                                              region_dir, sub_id, session, pos,
+                                              desc_prefix)
+        if not image_to_seq_map or shutdown_event.is_set():
+            if shutdown_event.is_set():
+                return f"Aborted '{unique_region_id}' safely."
+
+            open(empty_marker, 'a').close()
+            continue
+
+        fields_str = 'id,computed_geometry,captured_at,sequence,is_pano,camera_type,computed_compass_angle,creator,height,width,detections,make,model,thumb_256_url,thumb_1024_url,thumb_2048_url,thumb_original_url'
+        fetch_metadata_to_jsonl(list(image_to_seq_map.keys()), fields_str,
+                                region_dir, sub_id, session, pos, desc_prefix)
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
+
+        fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id,
+                                  session, pos, desc_prefix)
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
+
+        animal_checkpoint = os.path.join(
+            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.zst')
+        metadata_checkpoint = os.path.join(
+            region_dir, f'metadata_checkpoint_{sub_id}.jsonl.zst')
+
+        anim_size_mb = os.path.getsize(animal_checkpoint) / (
+            1024 * 1024) if os.path.exists(animal_checkpoint) else 0
+        meta_size_mb = os.path.getsize(metadata_checkpoint) / (
+            1024 * 1024) if os.path.exists(metadata_checkpoint) else 0
+
+        if anim_size_mb > 0 or meta_size_mb > 0:
+            tqdm.write(
+                f"{desc_prefix} Parsing Data -> Metadata: {meta_size_mb:.2f} MB | Animals: {anim_size_mb:.2f} MB"
+            )
+
+        extracted_image_ids = set()
+        ground_animal_features = []
+
+        if os.path.exists(animal_checkpoint):
+            try:
+                with zstd.open(animal_checkpoint, 'rb') as f:
+                    for line in f:
+                        if shutdown_event.is_set(): break
+                        if not line.strip(): continue
+                        record = orjson.loads(line)
+                        features = record.get('features', [])
+                        if features:
+                            global_extracted_image_ids.add(record['image_id'])
+                            ground_animal_features.extend(features)
+            except Exception as e:
+                tqdm.write(
+                    f"\033[91m\n[!] SEVERE CORRUPTION IN: {animal_checkpoint}\033[0m"
+                )
+                tqdm.write(
+                    f"\033[91m    -> Auto-deleting unrecoverable file. Will skip for now. Re-run script later to backfill.\033[0m"
+                )
+                os.remove(animal_checkpoint)
+
+        if shutdown_event.is_set():
+            return f"Aborted '{unique_region_id}' safely."
+
+        if ground_animal_features:
+            final_json_path = os.path.join(
+                region_dir, f'ground_animals_{sub_id}.json.zst')
+            temp_json_path = final_json_path + '.tmp'
+
+            with zstd.open(temp_json_path, 'wb', options=ZSTD_OPTIONS) as f:
+                f.write(orjson.dumps(ground_animal_features))
+
+            os.replace(temp_json_path, final_json_path)
+
+        if os.path.exists(metadata_checkpoint):
+            try:
+                with zstd.open(metadata_checkpoint, 'rb') as f:
+                    for line in f:
+                        if shutdown_event.is_set(): break
+                        if not line.strip(): continue
+                        record = orjson.loads(line)
+
+                        row = record.get('data')
+                        if not row: continue
+
+                        row = row.copy()
+                        row['image_id'] = record['image_id']
+                        if 'detections' in row and isinstance(
+                                row['detections'], dict):
+                            row['detections'] = row['detections'].get(
+                                'data', [])
+                        records.append(row)
+
+                        if len(records) >= PARQUET_CHUNK_SIZE:
+                            process_metadata_chunk(records)
+                            records = []
+            except Exception as e:
+                tqdm.write(
+                    f"\n[!] SEVERE CORRUPTION IN: {metadata_checkpoint}")
+                tqdm.write(
+                    f"    -> Auto-deleting unrecoverable file. Will skip for now. Re-run script later to backfill."
+                )
+                os.remove(metadata_checkpoint)
+                records = []
+
+        if records:
+            process_metadata_chunk(records)
+            records = []
+
+        if not shutdown_event.is_set():
+            open(completed_marker, 'a').close()
+
+    # ====================================================================
+    # OUTSIDE THE SUB-GRID LOOP (FINAL WRAP UP)
+    # ====================================================================
+    if shutdown_event.is_set():
+        return f"Aborted '{unique_region_id}' safely."
+
+    if records:
+        process_metadata_chunk(records)
+        records = []
+
+    final_anim_files = glob.glob(
+        os.path.join(region_dir, f'ground_animals_{safe_region_id}_*.parquet'))
+    if final_anim_files:
+        total_animals_found = pl.scan_parquet(final_anim_files).select(
+            'image_id').unique().collect().height
+    else:
+        total_animals_found = len(global_extracted_image_ids)
+
+    if DOWNLOAD_IMAGES:
+        exif_tasks = []
+
+        if final_anim_files:
+            queued_ids = {t[0] for t in download_tasks}
+
+            df_dl = pl.scan_parquet(final_anim_files).select([
+                'image_id', 'thumb_original_url', 'captured_at'
+            ]).unique(subset=['image_id'], keep='first').collect()
+
+            if 'captured_at' not in df_dl.columns:
+                df_dl = df_dl.with_columns(pl.lit(None).alias('captured_at'))
+
+            for row in df_dl.iter_rows(named=True):
+                img_id = row['image_id']
+                if img_id not in queued_ids and row.get(
+                        'thumb_original_url') is not None and str(
+                            img_id) not in EXCLUDE_SET:
+                    expected_filepath = os.path.join(output_folder_name,
+                                                     f"{img_id}.jpg")
+
+                    if not is_valid_image(expected_filepath, img_id,
+                                          validated_set, valid_lock,
+                                          valid_ledger_path):
+                        download_tasks.append(
+                            (img_id, row['thumb_original_url'],
+                             row['captured_at']))
+                        queued_ids.add(img_id)
+                    else:
+                        if row['captured_at']:
+                            try:
+                                val = str(row['captured_at'])
+                                if '-' in val:
+                                    dt = datetime.strptime(
+                                        val, "%Y-%m-%d %H:%M:%S")
+                                else:
+                                    dt = datetime.fromtimestamp(
+                                        int(val) / 1000.0)
+
+                                if int(os.path.getmtime(
+                                        expected_filepath)) != int(
+                                            dt.timestamp()):
+                                    exif_tasks.append((expected_filepath,
+                                                       row['captured_at']))
+                            except Exception:
+                                pass
+
+        if download_tasks:
+            dl_session = requests.Session()
+            dl_session.mount(
+                'https://',
+                HTTPAdapter(pool_connections=DOWNLOAD_MAX_WORKERS,
+                            pool_maxsize=DOWNLOAD_MAX_WORKERS))
+
+            with ThreadPoolExecutor(
+                    max_workers=DOWNLOAD_MAX_WORKERS) as executor:
+                with tqdm(total=len(download_tasks),
+                          desc=f"[{region_run_id}] 5/6 Downloads",
+                          position=pos,
+                          leave=False,
+                          mininterval=2.0) as pbar:
+                    for chunk in chunked_iterable(download_tasks,
+                                                  API_CHUNK_SIZE):
+                        if shutdown_event.is_set(): break
+                        futures = {
+                            executor.submit(download_single_image, img_id, url, output_folder_name, dl_session, validated_set, valid_lock, valid_ledger_path, temp_folder_name, move_queue):
+                            cap_at
+                            for img_id, url, cap_at in chunk
+                        }
+                        for future in as_completed(futures):
+                            if shutdown_event.is_set():
+                                for f in futures:
+                                    f.cancel()
+                                break
+
+                            cap_at = futures[future]
+                            img_id, filepath, success, newly_downloaded = future.result(
+                            )
+
+                            if success and newly_downloaded:
+                                exif_tasks.append((filepath, cap_at))
+                            elif not success:
+                                with failed_lock:
+                                    if str(img_id) not in failed_set:
+                                        with open(failed_tracker_path,
+                                                  'a') as f:
+                                            f.write(f"{img_id}\n")
+                                        failed_set.add(str(img_id))
+
+                            pbar.update(1)
+                            del futures[future]
+                        gc.collect()
+
+            # --- CRITICAL: Wait for background moves to finish BEFORE checking EXIF ---
+            if mover_thread:
+                move_queue.join()
+
         if exif_tasks and not shutdown_event.is_set():
             with ThreadPoolExecutor(
                     max_workers=DOWNLOAD_MAX_WORKERS) as executor:
                 with tqdm(total=len(exif_tasks),
-                          desc=f"[{region_run_id}] EXIF Data",
+                          desc=f"[{region_run_id}] 6/6 EXIF Data",
                           position=pos,
                           leave=False,
                           mininterval=2.0) as pbar:
@@ -603,247 +1342,12 @@ def process_region(west,
                             pbar.update(1)
                         gc.collect()
 
-        return f"Completed '{unique_region_id}' (Processed {len(download_tasks)} images via Download-Only mode)."
-    # =========================================================
+    del download_tasks
+    gc.collect()
 
-    session = requests.Session()
-    retries = Retry(total=5,
-                    backoff_factor=1,
-                    status_forcelist=[429, 500, 502, 503, 504])
-    session.mount(
-        'https://',
-        HTTPAdapter(max_retries=retries,
-                    pool_connections=INNER_MAX_WORKERS,
-                    pool_maxsize=INNER_MAX_WORKERS))
-
-    # 1. Generate Sub-BBoxes
-    sub_bboxes = []
-    cur_lat = south
-    while cur_lat < north:
-        next_lat = min(cur_lat + SUB_GRID_STEP, north)
-        cur_lon = west
-        while cur_lon < east:
-            next_lon = min(cur_lon + SUB_GRID_STEP, east)
-            sub_bboxes.append((cur_lon, cur_lat, next_lon, next_lat))
-            cur_lon += SUB_GRID_STEP
-        cur_lat += SUB_GRID_STEP
-
-    total_animals_found = 0
-
-    # 2. Iterate through sub-regions sequentially
-    for i, (sw_lon, sw_lat, ne_lon, ne_lat) in enumerate(sub_bboxes):
-        if shutdown_event.is_set():
-            return f"Aborted '{unique_region_id}' safely."
-
-        sub_id = f"{safe_region_id}_sub_{i}"
-        desc_prefix = f"[{region_run_id} C{i+1}/{len(sub_bboxes)}]"
-
-        # Step A: Topology
-        image_to_seq_map = get_image_topology(sw_lon, sw_lat, ne_lon, ne_lat,
-                                              region_dir, sub_id, session, pos,
-                                              desc_prefix)
-        if not image_to_seq_map or shutdown_event.is_set():
-            if shutdown_event.is_set():
-                return f"Aborted '{unique_region_id}' safely."
-            continue
-
-        # Step B: Metadata & Detections
-        fields_str = 'id,computed_geometry,captured_at,sequence,is_pano,camera_type,computed_compass_angle,creator,height,width,detections,make,model,thumb_256_url,thumb_1024_url,thumb_2048_url,thumb_original_url'
-        fetch_metadata_to_jsonl(list(image_to_seq_map.keys()), fields_str,
-                                region_dir, sub_id, session, pos, desc_prefix)
-        if shutdown_event.is_set():
-            return f"Aborted '{unique_region_id}' safely."
-
-        fetch_detections_to_jsonl(image_to_seq_map, region_dir, sub_id,
-                                  session, pos, desc_prefix)
-        if shutdown_event.is_set():
-            return f"Aborted '{unique_region_id}' safely."
-
-        # Step C: Parse Data & Clear Memory
-        animal_checkpoint = os.path.join(
-            region_dir, f'animal_detections_checkpoint_{sub_id}.jsonl.zst')
-        metadata_checkpoint = os.path.join(
-            region_dir, f'metadata_checkpoint_{sub_id}.jsonl.zst')
-
-        extracted_image_ids = set()
-        ground_animal_features = []
-
-        if os.path.exists(animal_checkpoint):
-            try:
-                with zstd.open(animal_checkpoint, 'rb') as f:
-                    for line in f:
-                        if shutdown_event.is_set(): break
-                        if not line.strip(): continue
-                        record = orjson.loads(line)
-                        features = record.get('features', [])
-                        if features:
-                            extracted_image_ids.add(record['image_id'])
-                            ground_animal_features.extend(features)
-            except Exception as e:
-                raise RuntimeError(
-                    f"\n[!] CORRUPT FILE DETECTED: {animal_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
-                ) from e
-
-        if shutdown_event.is_set():
-            return f"Aborted '{unique_region_id}' safely."
-
-        if ground_animal_features:
-            final_json_path = os.path.join(
-                region_dir, f'ground_animals_{sub_id}.json.zst')
-            temp_json_path = final_json_path + '.tmp'
-
-            with zstd.open(temp_json_path, 'wb', options=ZSTD_OPTIONS) as f:
-                f.write(orjson.dumps(ground_animal_features))
-
-            os.replace(temp_json_path, final_json_path)
-
-        del ground_animal_features
-        total_animals_found += len(extracted_image_ids)
-
-        # Step D: Process Metadata and Database Append
-        records = []
-        download_tasks = []
-
-        def process_metadata_chunk(chunk_records):
-            df = build_mapillary_dataframe_from_records(chunk_records)
-            if df.empty: return
-
-            if 'captured_at' in df.columns:
-                df['captured_at'] = pd.to_datetime(
-                    df['captured_at'], unit='ms',
-                    errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
-
-            animals_df = df[df['image_id'].isin(extracted_image_ids)].copy()
-
-            all_exists = os.path.exists(all_csv_path)
-            with zstd.open(all_csv_path,
-                           'at',
-                           encoding='utf-8',
-                           options=ZSTD_OPTIONS) as f:
-                df.to_csv(f, mode='a', header=not all_exists, index=False)
-
-            if not animals_df.empty:
-                anim_exists = os.path.exists(animals_csv_path)
-                with zstd.open(animals_csv_path,
-                               'at',
-                               encoding='utf-8',
-                               options=ZSTD_OPTIONS) as f:
-                    animals_df.to_csv(f,
-                                      mode='a',
-                                      header=not anim_exists,
-                                      index=False)
-
-                for _, row in animals_df.iterrows():
-                    if pd.notna(row.get('thumb_original_url')):
-                        expected_filepath = os.path.join(
-                            output_folder_name, f"{row['image_id']}.jpg")
-                        if not os.path.exists(expected_filepath):
-                            download_tasks.append(
-                                (row['image_id'], row['thumb_original_url'],
-                                 row['captured_at']))
-
-            del df
-            del animals_df
-            gc.collect()
-
-        if os.path.exists(metadata_checkpoint):
-            try:
-                with zstd.open(metadata_checkpoint, 'rb') as f:
-                    for line in f:
-                        if shutdown_event.is_set(): break
-                        if not line.strip(): continue
-                        record = orjson.loads(line)
-                        row = record['data'].copy()
-                        row['image_id'] = record['image_id']
-                        if 'detections' in row and isinstance(
-                                row['detections'], dict):
-                            row['detections'] = row['detections'].get(
-                                'data', [])
-                        records.append(row)
-
-                        if len(records) >= CSV_CHUNK_SIZE:
-                            process_metadata_chunk(records)
-                            records = []
-            except Exception as e:
-                raise RuntimeError(
-                    f"\n[!] CORRUPT FILE DETECTED: {metadata_checkpoint}\n[!] Action Required: Delete this file and rerun the task."
-                ) from e
-
-            if records:
-                process_metadata_chunk(records)
-                records = []
-
-        if shutdown_event.is_set():
-            return f"Aborted '{unique_region_id}' safely."
-
-        # Step E: Download & EXIF
-        if DOWNLOAD_IMAGES and download_tasks:
-
-            # ---------------------------------------------------------
-            # PHASE 1: Pure Network Download
-            # ---------------------------------------------------------
-            exif_tasks = []
-            with ThreadPoolExecutor(
-                    max_workers=DOWNLOAD_MAX_WORKERS) as executor:
-                with tqdm(total=len(download_tasks),
-                          desc=f"{desc_prefix} 5/6 Downloads",
-                          position=pos,
-                          leave=False,
-                          mininterval=2.0) as pbar:
-                    for chunk in chunked_iterable(download_tasks,
-                                                  API_CHUNK_SIZE):
-                        if shutdown_event.is_set(): break
-                        futures = {
-                            executor.submit(download_single_image, img_id, url, output_folder_name, session):
-                            cap_at
-                            for img_id, url, cap_at in chunk
-                        }
-                        for future in as_completed(futures):
-                            if shutdown_event.is_set():
-                                for f in futures:
-                                    f.cancel()
-                                break
-
-                            cap_at = futures[future]
-                            filepath, success, newly_downloaded = future.result(
-                            )
-
-                            if success and newly_downloaded:
-                                exif_tasks.append((filepath, cap_at))
-
-                            pbar.update(1)
-                            del futures[future]
-                        gc.collect()
-
-            # ---------------------------------------------------------
-            # PHASE 2: Pure CPU EXIF processing
-            # ---------------------------------------------------------
-            if exif_tasks and not shutdown_event.is_set():
-                with ThreadPoolExecutor(
-                        max_workers=DOWNLOAD_MAX_WORKERS) as executor:
-                    with tqdm(total=len(exif_tasks),
-                              desc=f"{desc_prefix} 6/6 EXIF Data",
-                              position=pos,
-                              leave=False,
-                              mininterval=2.0) as pbar:
-                        for chunk in chunked_iterable(exif_tasks,
-                                                      API_CHUNK_SIZE):
-                            if shutdown_event.is_set(): break
-                            futures = [
-                                executor.submit(apply_exif_data, fp, cat)
-                                for fp, cat in chunk
-                            ]
-                            for future in as_completed(futures):
-                                if shutdown_event.is_set():
-                                    for f in futures:
-                                        f.cancel()
-                                    break
-                                pbar.update(1)
-                            gc.collect()
-
-        del download_tasks
-        del image_to_seq_map
-        gc.collect()
+    if mover_thread:
+        move_queue.put(None)
+        mover_thread.join()
 
     return f"Completed '{unique_region_id}' ({total_animals_found} animals found across all chunks)."
 
@@ -876,7 +1380,7 @@ if __name__ == "__main__":
         '--download-only',
         action='store_true',
         help=
-        "Skip API fetching/CSV generation and ONLY download images from existing ground_animals CSVs."
+        "Skip API fetching/generation and ONLY download images from existing ground_animals Parquets."
     )
     parser.add_argument(
         '--download-max-workers',
@@ -887,10 +1391,20 @@ if __name__ == "__main__":
                         type=int,
                         default=5,
                         help="Max parallel regions (default: 5)")
-    parser.add_argument('--inner-max-workers',
-                        type=int,
-                        default=20,
-                        help="Max threads per region (default: 20)")
+    parser.add_argument(
+        '--search-max-workers',
+        type=int,
+        default=None,
+        help=
+        "Max threads for Search APIs (Dynamically defaults to 150 / outer-workers)"
+    )
+    parser.add_argument(
+        '--entity-max-workers',
+        type=int,
+        default=None,
+        help=
+        "Max threads for Entity APIs (Dynamically defaults to 520 / outer-workers)"
+    )
     parser.add_argument('--sub-grid-step',
                         type=float,
                         default=1.0,
@@ -907,27 +1421,102 @@ if __name__ == "__main__":
     parser.add_argument(
         '--api-chunk-size',
         type=int,
-        default=2500,
-        help="Chunk size for multithreaded API requests (default: 2500)")
+        default=5000,
+        help="Chunk size for multithreaded API requests (default: 5000)")
     parser.add_argument(
-        '--csv-chunk-size',
+        '--parquet-chunk-size',
         type=int,
-        default=10000,
-        help="Chunk size for Pandas dataframe CSV generation (default: 10000)")
+        default=100000,
+        help="Rows per Parquet partition file (default: 100000)")
+    parser.add_argument(
+        '--proxy-file',
+        type=str,
+        default=None,
+        help="Path to a txt file containing proxies (e.g., free-proxy-list.txt)"
+    )
+    parser.add_argument(
+        '--exclude-ledger',
+        type=str,
+        default=None,
+        help=
+        "Path to a txt file containing image IDs to skip (e.g., completed_ledger.txt)"
+    )
+    parser.add_argument('--image-dir',
+                        type=str,
+                        default=None,
+                        help="Output directory specifically for images (HDD)")
+    parser.add_argument(
+        '--row-index',
+        type=int,
+        default=None,
+        help=
+        "Process only a specific 0-indexed row from the CSV (e.g., 0 for the first data row)."
+    )
+    parser.add_argument(
+        '--temp-dir',
+        type=str,
+        default=None,
+        help="Fast SSD temp directory to spool downloads before moving to HDD")
+    parser.add_argument(
+        '--sub-indices',
+        type=str,
+        default=None,
+        help=
+        "Process specific sub-grid indices. Can be a single number or comma-separated (e.g., '4' or '4,12,15')."
+    )
 
     args = parser.parse_args()
+
+    if args.search_max_workers is None:
+        args.search_max_workers = max(1, 150 // args.outer_max_workers)
+
+    if args.entity_max_workers is None:
+        args.entity_max_workers = max(1, 520 // args.outer_max_workers)
 
     GRID_CSV_FILE = args.grid_csv_file
     ZOOM_LEVEL = args.zoom_level
     VISUALIZE = args.visualize
     DOWNLOAD_IMAGES = args.download_images
+    DOWNLOAD_ONLY = args.download_only
+    DOWNLOAD_MAX_WORKERS = args.download_max_workers
     OUTER_MAX_WORKERS = args.outer_max_workers
-    INNER_MAX_WORKERS = args.inner_max_workers
+    SEARCH_MAX_WORKERS = args.search_max_workers
+    ENTITY_MAX_WORKERS = args.entity_max_workers
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
-    TRACKER_FILE = os.path.join(PARENT_DIR, 'completed_regions.txt')
+    IMAGE_DIR = args.image_dir
+    TEMP_DIR = args.temp_dir
     API_CHUNK_SIZE = args.api_chunk_size
-    CSV_CHUNK_SIZE = args.csv_chunk_size
+    PARQUET_CHUNK_SIZE = args.parquet_chunk_size
+
+    TARGET_SUB_INDICES = None
+    if args.sub_indices:
+        TARGET_SUB_INDICES = set(
+            int(x.strip()) for x in args.sub_indices.split(','))
+
+    proxy_list = []
+    if args.proxy_file and os.path.exists(args.proxy_file):
+        with open(args.proxy_file, 'r') as pf:
+            for line in pf:
+                line = line.strip()
+                if not line: continue
+
+                parts = line.split(':')
+
+                if len(parts) == 4:
+                    ip, port, user, password = parts
+                    formatted_proxy = f"http://{user}:{password}@{ip}:{port}"
+                    proxy_list.append(formatted_proxy)
+
+                elif len(parts) == 2:
+                    ip, port = parts
+                    formatted_proxy = f"http://{ip}:{port}"
+                    proxy_list.append(formatted_proxy)
+
+                elif line.startswith(('http', 'socks')):
+                    proxy_list.append(line)
+
+        print(f"Loaded {len(proxy_list)} proxies from {args.proxy_file}")
 
     token_env_name = f"MLY_KEY_{args.token}" if args.token else "MLY_KEY"
     MLY_KEY = os.environ.get(token_env_name)
@@ -937,13 +1526,9 @@ if __name__ == "__main__":
 
     print('\033[?25l', end="")
     os.makedirs(PARENT_DIR, exist_ok=True)
-    df_grid = pd.read_csv(GRID_CSV_FILE)
-    GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    completed_regions = set()
-    if not args.download_only and os.path.exists(TRACKER_FILE):
-        with open(TRACKER_FILE, 'r') as f:
-            completed_regions = {line.strip() for line in f if line.strip()}
+    df_grid = pl.read_csv(GRID_CSV_FILE)
+    GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     if args.slurm:
         # ==========================================
@@ -953,26 +1538,31 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, slurm_signal_handler)
         signal.signal(signal.SIGTERM, slurm_signal_handler)
 
-        task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", 0))
+        if args.row_index is not None:
+            task_id = args.row_index
+        else:
+            task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", 0))
 
-        if task_id >= len(df_grid):
+        if task_id >= df_grid.height:
             print(
-                f"Task ID {task_id} is out of bounds for grid with {len(df_grid)} regions."
+                f"Task ID {task_id} is out of bounds for grid with {df_grid.height} regions."
             )
             exit(0)
 
-        row = df_grid.iloc[task_id]
+        row = df_grid[task_id].to_dicts()[0]
         unique_region_id = f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-
-        if unique_region_id in completed_regions:
-            print(f"Region {unique_region_id} is already completed. Exiting.")
-            exit(0)
 
         tqdm.write(
             f"Task {task_id}: Initiating single-region processing for {unique_region_id}. Run ID: {GLOBAL_RUN_NAME}"
         )
 
         try:
+            PROXY_LIST = proxy_list
+
+            if args.exclude_ledger and os.path.exists(args.exclude_ledger):
+                with open(args.exclude_ledger, 'r') as f:
+                    EXCLUDE_SET = {line.strip() for line in f if line.strip()}
+
             result_msg = process_region(row['sw_lon'],
                                         row['sw_lat'],
                                         row['ne_lon'],
@@ -985,9 +1575,6 @@ if __name__ == "__main__":
                 tqdm.write(f"[-] {result_msg}")
             else:
                 tqdm.write(f"[\u2713] {result_msg}")
-                if not args.download_only:
-                    with open(TRACKER_FILE, 'a') as f:
-                        f.write(f"{unique_region_id}\n")
 
         except Exception as exc:
             tqdm.write(f"[X] Region '{unique_region_id}' failed: {exc}")
@@ -998,16 +1585,21 @@ if __name__ == "__main__":
         # ==========================================
         #        LOCAL MULTIPROCESSING PATH
         # ==========================================
-        tasks_to_run = [
-            (row['sw_lon'], row['sw_lat'], row['ne_lon'], row['ne_lat'],
-             f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-             ) for _, row in df_grid.iterrows() if
+        if args.row_index is not None:
+            if args.row_index < 0 or args.row_index >= df_grid.height:
+                print(
+                    f"Error: Row index {args.row_index} is out of bounds for grid with {df_grid.height} regions."
+                )
+                exit(0)
+            df_grid = df_grid.slice(args.row_index, 1)
+
+        tasks_to_run = [(
+            row['sw_lon'], row['sw_lat'], row['ne_lon'], row['ne_lat'],
             f"{row['region']}_{row['sw_lon']}_{row['sw_lat']}_{row['ne_lon']}_{row['ne_lat']}"
-            not in completed_regions
-        ]
+        ) for row in df_grid.iter_rows(named=True)]
 
         if not tasks_to_run:
-            print(f"All {len(df_grid)} regions have already been completed.")
+            print(f"All {df_grid.height} regions have already been completed.")
             print('\033[?25h', end="")
             exit(0)
 
@@ -1026,12 +1618,17 @@ if __name__ == "__main__":
                 'DOWNLOAD_IMAGES': DOWNLOAD_IMAGES,
                 'DOWNLOAD_ONLY': args.download_only,
                 'DOWNLOAD_MAX_WORKERS': args.download_max_workers,
-                'INNER_MAX_WORKERS': INNER_MAX_WORKERS,
+                'SEARCH_MAX_WORKERS': SEARCH_MAX_WORKERS,
+                'ENTITY_MAX_WORKERS': ENTITY_MAX_WORKERS,
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
-                'TRACKER_FILE': TRACKER_FILE,
+                'IMAGE_DIR': args.image_dir,
+                'TEMP_DIR': args.temp_dir,
                 'API_CHUNK_SIZE': API_CHUNK_SIZE,
-                'CSV_CHUNK_SIZE': CSV_CHUNK_SIZE
+                'PARQUET_CHUNK_SIZE': PARQUET_CHUNK_SIZE,
+                'PROXY_LIST': proxy_list,
+                'EXCLUDE_LEDGER': args.exclude_ledger,
+                'TARGET_SUB_INDICES': TARGET_SUB_INDICES
             }
 
             with ProcessPoolExecutor(max_workers=OUTER_MAX_WORKERS,
@@ -1058,24 +1655,17 @@ if __name__ == "__main__":
                                 tqdm.write(f"[-] {result_msg}")
                             else:
                                 tqdm.write(f"[\u2713] {result_msg}")
-                                if not args.download_only:
-                                    with open(TRACKER_FILE, 'a') as f:
-                                        f.write(f"{region_id}\n")
                         except Exception as exc:
                             tqdm.write(
                                 f"[X] Region '{region_id}' failed: {exc}")
                 except KeyboardInterrupt:
                     tqdm.write(
-                        "\n\n[!] Ctrl+C detected! Cancelling tasks and forcing clean shutdown..."
+                        "\n\n[!] Ctrl+C detected! INSTANT FORCE-KILL INITIATED."
                     )
-                    shutdown_event.set()
-
-                    for f in outer_futures:
-                        f.cancel()
-
                     tqdm.write(
-                        "[!] Sealing .zst files. Script will exit in just a few seconds..."
+                        "[!] Warning: Terminating abruptly. The current file being written may be corrupted."
                     )
+                    os._exit(1)
 
         finally:
             print('\033[?25h', end="")

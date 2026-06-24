@@ -6,7 +6,7 @@ ENUMERATION USES VECTOR TILES (not the /images?bbox API). The bbox API has two
 fatal limits for a completeness audit, both verified live:
   * it hard-caps at ~2000 results per query with NO pagination cursor, so any
     tile with >2000 images is silently truncated (this affected BOTH the old
-    coverage audit and batch_chunks_mp_api_v3.py); and
+    coverage audit and batch_chunks_mp_api.py); and
   * it returns HTTP 500 "reduce the amount of data" for hyper-dense city-center
     cells, which no amount of bbox-splitting, limit=, or date-windowing avoids.
 Mapillary's own map tiles (mly1_public vector tiles, max zoom 14) have neither
@@ -802,7 +802,7 @@ class ProxyPool:
 def build_session(pool=64, retry_429=True):
     """Build a requests Session with a retrying HTTPS adapter.
 
-    Mirrors batch_chunks_mp_api_v3.py's error-avoidance posture (total=5,
+    Mirrors batch_chunks_mp_api.py's error-avoidance posture (total=5,
     backoff_factor=1) for transient codes. Tile fetching passes
     ``retry_429=False`` so a 429 surfaces immediately and the caller disables
     that token rather than blindly retrying the exhausted token five times.

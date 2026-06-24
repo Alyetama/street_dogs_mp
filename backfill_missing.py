@@ -13,7 +13,7 @@ main pipeline's schema, and downloads the ground-animal jpgs:
 
 `--out-dir` (parquets) and `--image-dir` (jpgs, defaults to --out-dir) can point
 at different drives. `--no-download` writes parquets only. Schema + download/exif
-reuse `batch_chunks_mp_api_v3.py`; tokens + session + graceful Ctrl+C reuse
+reuse `batch_chunks_mp_api.py`; tokens + session + graceful Ctrl+C reuse
 `coverage_audit.py`. Image downloads are never proxied (only metadata fetches
 may be, via --proxies).
 
@@ -21,7 +21,7 @@ TOKENS / RATE: only the entity API (graph.mapillary.com/:id) is used -- limited
 to 60,000/min PER TOKEN. Requests round-robin across every token and each is
 capped at that rate (so 42 tokens -> ~2.5M/min ceiling). The search API
 (/images?bbox, 10,000/min) is NOT used here. Worker defaults mirror
-batch_chunks_mp_api_v3.py (entity 520, download 10); downloads stay modest
+batch_chunks_mp_api.py (entity 520, download 10); downloads stay modest
 because the real ground-animal volume is bandwidth-bound.
 
 Resumable: the in-scope parquet is cell-contiguous and processed sequentially;
@@ -30,7 +30,7 @@ Per-cell part numbers continue past existing `*_backfill_*.parquet`.
 
     python backfill_missing.py \
         --inscope coverage_missing_inscope --region Europe \
-        --out-dir /home/biodiv/weasel/street_dogs_mp_weasel/grid_runs \
+        --out-dir /path/to/grid_runs --image-dir /path/to/images \
         --entity-workers 520 --download-workers 10 [--proxies proxies.txt]
 """
 
@@ -47,7 +47,7 @@ import orjson
 import polars as pl
 from tqdm import tqdm
 
-import batch_chunks_mp_api_v3 as bc
+import batch_chunks_mp_api as bc
 import coverage_audit as ca
 
 GROUND = 'animal--ground-animal'

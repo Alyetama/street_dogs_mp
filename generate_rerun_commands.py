@@ -36,6 +36,12 @@ def main():
                         default='grid_runs',
                         help="Directory containing the output folders")
     parser.add_argument(
+        '--image-dir',
+        type=str,
+        default=None,
+        help="Optional separate image directory to put in the generated "
+        "commands (omitted when unset)")
+    parser.add_argument(
         '--substring',
         type=str,
         default="",
@@ -125,14 +131,13 @@ def main():
         f"\n[bold red][!] Found {len(missing_details)} regions missing one or more sub-grid markers.[/bold red]\n"
     )
 
-    # Hardcoded base command string provided by user
     base_cmd = (
-        f'python batch_chunks_mp_api_v3.py "{args.csv_file}" '
+        f'python batch_chunks_mp_api.py "{args.csv_file}" '
         '--outer-max-workers 1 --search-max-workers 150 --entity-max-workers 520 '
         '--api-chunk-size 5000 --parquet-chunk-size 100000 '
-        '--parent-dir "/media/biodiv/crucial/street_dogs_mp_crucial/grid_runs" '
-        '--image-dir "/home/biodiv/capybara/street_dogs_mp_capybara/grid_runs" '
-        '--no-download-images')
+        f'--parent-dir "{args.parent_dir}" '
+        + (f'--image-dir "{args.image_dir}" ' if args.image_dir else '')
+        + '--no-download-images')
 
     commands = []
 
