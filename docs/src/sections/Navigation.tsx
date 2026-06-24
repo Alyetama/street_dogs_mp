@@ -82,7 +82,7 @@ export default function Navigation() {
               street_dogs_mp
             </span>
             <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-[#6c757d]">
-              Mapillary Pipeline v3
+              Mapillary Ingestion Pipeline
             </span>
           </div>
         </a>
