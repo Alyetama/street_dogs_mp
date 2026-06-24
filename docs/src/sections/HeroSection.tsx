@@ -32,12 +32,13 @@ export default function HeroSection() {
 
           {/* Subtitle */}
           <p className="mt-6 max-w-[520px] text-[15px] leading-[1.65] text-[#adb5bd]">
-            A resumable, multiprocessing Mapillary pipeline. Scan geographic grid cells,
-            extract image metadata, isolate{' '}
+            A resumable, multiprocessing Mapillary pipeline. Scan geographic grid cells
+            and extract{' '}
             <code className="rounded bg-[#2c3034] px-1.5 py-0.5 text-[13px] text-[#e8a645]">
               animal--ground-animal
             </code>{' '}
-            detections, and download the matching imagery — at continental scale.
+            imagery, then audit coverage against Mapillary's vector tiles and backfill
+            anything missed — at continental scale.
           </p>
 
           {/* CTAs */}
@@ -60,10 +61,10 @@ export default function HeroSection() {
           <div className="mt-12 flex flex-wrap items-end gap-8">
             <div>
               <div className="flex h-9 items-end">
-                <div className="text-[36px] font-normal leading-none text-[#e8a645]">6</div>
+                <div className="text-[36px] font-normal leading-none text-[#e8a645]">3</div>
               </div>
               <div className="mt-1 text-[11px] font-medium uppercase tracking-[0.06em] text-[#6c757d]">
-                Phase Workflow
+                Stage Pipeline
               </div>
             </div>
             <div>

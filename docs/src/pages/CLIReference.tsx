@@ -1,14 +1,6 @@
-import { useRef, useEffect } from 'react'
-import { Link } from 'react-router'
-import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import Navigation from '../sections/Navigation'
-import FooterSection from '../sections/FooterSection'
-import { Terminal, FileOutput, ArrowRight } from 'lucide-react'
+import ReferencePage from '../sections/ReferencePage'
 
-gsap.registerPlugin(ScrollTrigger)
-
-const cliOptions = [
+const options = [
   { option: '--zoom-level', default: '14', description: 'Mercantile tile zoom used while scanning bounding boxes.' },
   { option: '--outer-max-workers', default: '5', description: 'Number of regions processed in parallel in local mode.' },
   { option: '--search-max-workers', default: '150 / outer', description: 'Threads per region for bbox/sequence search API calls.' },
@@ -30,37 +22,19 @@ const cliOptions = [
   { option: '--row-index', default: 'unset', description: 'Run one specific CSV row by zero-based index.' },
 ]
 
-const usageExamples = [
-  {
-    title: 'Run all regions in a CSV',
-    code: `python batch_chunks_mp_api.py regions.csv`,
-  },
-  {
-    title: 'Run one specific row by index',
-    code: `python batch_chunks_mp_api.py regions.csv --row-index 0`,
-  },
-  {
-    title: 'Fetch metadata without downloading images',
-    code: `python batch_chunks_mp_api.py regions.csv --no-download-images`,
-  },
-  {
-    title: 'Download images later from existing Parquets',
-    code: `python batch_chunks_mp_api.py regions.csv --download-only`,
-  },
-  {
-    title: 'Send images to a separate disk or mount',
-    code: `python batch_chunks_mp_api.py regions.csv --image-dir /path/to/storage`,
-  },
+const examples = [
+  { title: 'Run all regions in a CSV', code: `python batch_chunks_mp_api.py regions.csv` },
+  { title: 'Run one specific row by index', code: `python batch_chunks_mp_api.py regions.csv --row-index 0` },
+  { title: 'Fetch metadata without downloading images', code: `python batch_chunks_mp_api.py regions.csv --no-download-images` },
+  { title: 'Download images later from existing Parquets', code: `python batch_chunks_mp_api.py regions.csv --download-only` },
+  { title: 'Send images to a separate disk or mount', code: `python batch_chunks_mp_api.py regions.csv --image-dir /path/to/storage` },
   {
     title: 'Use an SSD as a write buffer for a slow HDD',
     code: `python batch_chunks_mp_api.py regions.csv \\
   --image-dir /mnt/hdd/images \\
   --temp-dir /tmp/ssd_spool`,
   },
-  {
-    title: 'Backfill specific sub-grid indices',
-    code: `python batch_chunks_mp_api.py regions.csv --sub-indices 4,12,15`,
-  },
+  { title: 'Backfill specific sub-grid indices', code: `python batch_chunks_mp_api.py regions.csv --sub-indices 4,12,15` },
   {
     title: 'SLURM array job example',
     code: `python batch_chunks_mp_api.py regions.csv \\
@@ -72,7 +46,7 @@ const usageExamples = [
   },
 ]
 
-const outputFiles = [
+const outputs = [
   { file: 'topology_checkpoint_<sub_id>.json.zst', description: 'Compressed image-to-sequence topology checkpoint for a sub-grid.' },
   { file: 'metadata_checkpoint_<sub_id>.jsonl.zst', description: 'Compressed JSONL metadata checkpoint for all collected image IDs.' },
   { file: 'animal_detections_checkpoint_<sub_id>.jsonl.zst', description: 'Compressed JSONL animal-detection checkpoint.' },
@@ -87,212 +61,36 @@ const outputFiles = [
   { file: '.empty_<sub_id>', description: 'Resume marker indicating a sub-grid had no usable topology results.' },
 ]
 
+const lead =
+  'The supported entry point for the pipeline. It processes a CSV of geographic regions through a resumable six-phase workflow: tile generation, sequence query, image expansion, metadata fetch, detection filtering, and output/download. Re-run the same command to resume from compressed checkpoints and completion markers.'
+
+const code = (s: string) => (
+  <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
+    {s}
+  </code>
+)
+
+const outputIntro = (
+  <>
+    By default, outputs are written under {code('grid_runs/<safe_region_id>/')}. If{' '}
+    {code('--image-dir')} is provided, downloaded images go to{' '}
+    {code('<image-dir>/<safe_region_id>/ground_animal_images/')} while checkpoints
+    and Parquet outputs stay under {code('--parent-dir')}.
+  </>
+)
+
 export default function CLIReference() {
-  const mainRef = useRef<HTMLElement>(null)
-  const tableRef = useRef<HTMLDivElement>(null)
-  const examplesRef = useRef<HTMLDivElement>(null)
-  const outputRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const main = mainRef.current
-    if (!main) return
-
-    const sections = [tableRef.current, examplesRef.current, outputRef.current].filter(Boolean)
-    const ctx = gsap.context(() => {
-      gsap.from(sections, {
-        y: 25,
-        opacity: 0,
-        stagger: 0.12,
-        duration: 0.5,
-        ease: 'power2.out',
-        scrollTrigger: {
-          trigger: main,
-          start: 'top 80%',
-        },
-      })
-    }, main)
-
-    return () => ctx.revert()
-  }, [])
-
   return (
-    <div className="min-h-screen bg-[#1a1a1a]">
-      <Navigation />
-
-      <main ref={mainRef} className="pt-24 pb-20">
-        <section className="mx-auto max-w-[1000px] px-6 pb-16">
-          <div className="mb-6 inline-flex items-center rounded-[20px] border border-[rgba(232,166,69,0.3)] px-3 py-1">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-[#e8a645]">
-              CLI Reference
-            </span>
-          </div>
-          <h1 className="text-[clamp(2rem,4vw,3.5rem)] font-normal leading-[1.15] tracking-tight text-[#f8f9fa]">
-            <span className="text-[#e8a645]">batch_chunks_mp_api.py</span>
-          </h1>
-          <p className="mt-5 max-w-[720px] text-[15px] leading-[1.65] text-[#adb5bd]">
-            The supported entry point for the pipeline. It processes a CSV of geographic regions through
-            a resumable six-phase workflow: tile generation, sequence query, image expansion, metadata
-            fetch, detection filtering, and output/download. Re-run the same command to resume from
-            compressed checkpoints and completion markers.
-          </p>
-          <div className="mt-8 flex flex-wrap items-center gap-3">
-            <Link
-              to="/helper-scripts"
-              className="group inline-flex items-center gap-2 rounded-md border border-[#495057] bg-transparent px-5 py-2.5 text-[14px] font-medium text-[#f8f9fa] transition-colors duration-200 hover:border-[#adb5bd]"
-            >
-              Helper Scripts
-              <ArrowRight size={16} className="transition-transform duration-200 group-hover:translate-x-1" />
-            </Link>
-            <a
-              href="https://github.com/Alyetama/street_dogs_mp"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="rounded-md bg-[#e8a645] px-5 py-2.5 text-[14px] font-medium text-[#1a1a1a] transition-colors duration-200 hover:bg-[#f0b85c]"
-            >
-              View on GitHub
-            </a>
-          </div>
-        </section>
-
-        {/* CLI options table */}
-        <section ref={tableRef} className="mx-auto max-w-[1000px] px-6 py-12">
-          <div className="mb-8 flex items-center gap-3">
-            <Terminal size={22} className="text-[#e8a645]" />
-            <h2 className="text-[clamp(1.4rem,2.5vw,1.8rem)] font-normal text-[#f8f9fa]">
-              CLI Options
-            </h2>
-          </div>
-
-          <div className="overflow-x-auto rounded-lg border border-[#495057]">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="bg-[#2c3034]">
-                  <th className="px-4 py-3 text-[12px] font-medium uppercase tracking-wider text-[#e8a645]">
-                    Option
-                  </th>
-                  <th className="px-4 py-3 text-[12px] font-medium uppercase tracking-wider text-[#e8a645]">
-                    Default
-                  </th>
-                  <th className="px-4 py-3 text-[12px] font-medium uppercase tracking-wider text-[#e8a645]">
-                    Description
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {cliOptions.map((opt, i) => (
-                  <tr
-                    key={opt.option}
-                    className={`${
-                      i % 2 === 0 ? 'bg-[#212529]' : 'bg-[#1e1e1e]'
-                    } border-t border-[rgba(73,80,87,0.3)]`}
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-[#e8a645]">
-                      {opt.option}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-[#adb5bd]">
-                      {opt.default}
-                    </td>
-                    <td className="px-4 py-3 text-[14px] text-[#adb5bd]">
-                      {opt.description}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <p className="mt-4 text-[13px] text-[#6c757d]">
-            For the complete CLI reference, run:{' '}
-            <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
-              python batch_chunks_mp_api.py --help
-            </code>
-          </p>
-        </section>
-
-        {/* Usage examples */}
-        <section ref={examplesRef} className="mx-auto max-w-[1000px] px-6 py-12">
-          <h2 className="mb-8 text-[clamp(1.4rem,2.5vw,1.8rem)] font-normal text-[#f8f9fa]">
-            Usage Examples
-          </h2>
-
-          <div className="space-y-6">
-            {usageExamples.map((ex) => (
-              <div key={ex.title}>
-                <h3 className="mb-2 text-[14px] font-medium text-[#f8f9fa]">{ex.title}</h3>
-                <div className="rounded-lg bg-[#1e1e1e] border border-[rgba(73,80,87,0.5)] p-4">
-                  <pre className="overflow-x-auto font-mono text-[13px] leading-[1.7] text-[#d4d4d4]">
-                    <code>{ex.code}</code>
-                  </pre>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Output files */}
-        <section ref={outputRef} className="mx-auto max-w-[1000px] px-6 py-12">
-          <div className="mb-8 flex items-center gap-3">
-            <FileOutput size={22} className="text-[#e8a645]" />
-            <h2 className="text-[clamp(1.4rem,2.5vw,1.8rem)] font-normal text-[#f8f9fa]">
-              Output Files
-            </h2>
-          </div>
-
-          <p className="mb-6 text-[14px] leading-[1.65] text-[#adb5bd]">
-            By default, outputs are written under{' '}
-            <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
-              grid_runs/&lt;safe_region_id&gt;/
-            </code>
-            . If{' '}
-            <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
-              --image-dir
-            </code>{' '}
-            is provided, downloaded images are written to{' '}
-            <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
-              &lt;image-dir&gt;/&lt;safe_region_id&gt;/ground_animal_images/
-            </code>{' '}
-            while checkpoints and Parquet outputs stay under{' '}
-            <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
-              --parent-dir
-            </code>
-            .
-          </p>
-
-          <div className="overflow-x-auto rounded-lg border border-[#495057]">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="bg-[#2c3034]">
-                  <th className="px-4 py-3 text-[12px] font-medium uppercase tracking-wider text-[#e8a645]">
-                    File / Directory
-                  </th>
-                  <th className="px-4 py-3 text-[12px] font-medium uppercase tracking-wider text-[#e8a645]">
-                    Description
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {outputFiles.map((out, i) => (
-                  <tr
-                    key={out.file}
-                    className={`${
-                      i % 2 === 0 ? 'bg-[#212529]' : 'bg-[#1e1e1e]'
-                    } border-t border-[rgba(73,80,87,0.3)]`}
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-[#e8a645]">
-                      {out.file}
-                    </td>
-                    <td className="px-4 py-3 text-[14px] text-[#adb5bd]">
-                      {out.description}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </main>
-
-      <FooterSection />
-    </div>
+    <ReferencePage
+      badge="Stage 1 · Extract"
+      title="batch_chunks_mp_api.py"
+      lead={lead}
+      primaryLink={{ label: 'Audit stage', to: '/coverage-audit' }}
+      options={options}
+      optionsHelp="python batch_chunks_mp_api.py --help"
+      examples={examples}
+      outputIntro={outputIntro}
+      outputs={outputs}
+    />
   )
 }

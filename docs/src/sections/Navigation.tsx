@@ -4,7 +4,9 @@ import { Github, Menu, X } from 'lucide-react'
 
 const pageLinks = [
   { label: 'Home', href: '/' },
-  { label: 'CLI Reference', href: '/cli-reference' },
+  { label: 'Extract', href: '/cli-reference' },
+  { label: 'Audit', href: '/coverage-audit' },
+  { label: 'Backfill', href: '/backfill' },
   { label: 'Helper Scripts', href: '/helper-scripts' },
 ]
 
