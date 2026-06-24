@@ -102,7 +102,7 @@ export default function CLIOptionsSection() {
         <p className="mt-4 text-[13px] text-[#6c757d]">
           For the complete CLI reference, run:{' '}
           <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
-            python batch_chunks_mp_api_v3.py --help
+            python batch_chunks_mp_api.py --help
           </code>
         </p>
       </div>

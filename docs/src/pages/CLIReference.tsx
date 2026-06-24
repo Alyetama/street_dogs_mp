@@ -33,37 +33,37 @@ const cliOptions = [
 const usageExamples = [
   {
     title: 'Run all regions in a CSV',
-    code: `python batch_chunks_mp_api_v3.py regions.csv`,
+    code: `python batch_chunks_mp_api.py regions.csv`,
   },
   {
     title: 'Run one specific row by index',
-    code: `python batch_chunks_mp_api_v3.py regions.csv --row-index 0`,
+    code: `python batch_chunks_mp_api.py regions.csv --row-index 0`,
   },
   {
     title: 'Fetch metadata without downloading images',
-    code: `python batch_chunks_mp_api_v3.py regions.csv --no-download-images`,
+    code: `python batch_chunks_mp_api.py regions.csv --no-download-images`,
   },
   {
     title: 'Download images later from existing Parquets',
-    code: `python batch_chunks_mp_api_v3.py regions.csv --download-only`,
+    code: `python batch_chunks_mp_api.py regions.csv --download-only`,
   },
   {
     title: 'Send images to a separate disk or mount',
-    code: `python batch_chunks_mp_api_v3.py regions.csv --image-dir /path/to/storage`,
+    code: `python batch_chunks_mp_api.py regions.csv --image-dir /path/to/storage`,
   },
   {
     title: 'Use an SSD as a write buffer for a slow HDD',
-    code: `python batch_chunks_mp_api_v3.py regions.csv \\
+    code: `python batch_chunks_mp_api.py regions.csv \\
   --image-dir /mnt/hdd/images \\
   --temp-dir /tmp/ssd_spool`,
   },
   {
     title: 'Backfill specific sub-grid indices',
-    code: `python batch_chunks_mp_api_v3.py regions.csv --sub-indices 4,12,15`,
+    code: `python batch_chunks_mp_api.py regions.csv --sub-indices 4,12,15`,
   },
   {
     title: 'SLURM array job example',
-    code: `python batch_chunks_mp_api_v3.py regions.csv \\
+    code: `python batch_chunks_mp_api.py regions.csv \\
   --slurm \\
   --search-max-workers "$((SLURM_CPUS_PER_TASK * 4))" \\
   --entity-max-workers "$((SLURM_CPUS_PER_TASK * 16))" \\
@@ -127,7 +127,7 @@ export default function CLIReference() {
             </span>
           </div>
           <h1 className="text-[clamp(2rem,4vw,3.5rem)] font-normal leading-[1.15] tracking-tight text-[#f8f9fa]">
-            <span className="text-[#e8a645]">batch_chunks_mp_api_v3.py</span>
+            <span className="text-[#e8a645]">batch_chunks_mp_api.py</span>
           </h1>
           <p className="mt-5 max-w-[720px] text-[15px] leading-[1.65] text-[#adb5bd]">
             The supported entry point for the pipeline. It processes a CSV of geographic regions through
@@ -204,7 +204,7 @@ export default function CLIReference() {
           <p className="mt-4 text-[13px] text-[#6c757d]">
             For the complete CLI reference, run:{' '}
             <code className="rounded bg-[#2c3034] px-1.5 py-0.5 font-mono text-[12px] text-[#e8a645]">
-              python batch_chunks_mp_api_v3.py --help
+              python batch_chunks_mp_api.py --help
             </code>
           </p>
         </section>
