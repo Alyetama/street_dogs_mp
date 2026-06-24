@@ -618,6 +618,24 @@ class TokenBudget:
             self._roll()
             return sum(1 for t in self.keys if t not in self.disabled)
 
+    def spent(self):
+        """Return total requests spent across all tokens today.
+
+        Returns:
+            The sum of per-token daily counts.
+        """
+        with self._lock:
+            self._roll()
+            return sum(self.counts.values())
+
+    def total_budget(self):
+        """Return the full daily ceiling across all tokens (limit * n_tokens).
+
+        Returns:
+            The maximum number of requests available in a day.
+        """
+        return self.limit * len(self.keys)
+
     def remaining(self, slot=None):
         """Return remaining daily budget, globally or for one worker slot.
 
@@ -1199,7 +1217,8 @@ def fetch_tiles(tiles,
                 imgmap=None,
                 failed=None,
                 save=None,
-                save_interval=SAVE_INTERVAL):
+                save_interval=SAVE_INTERVAL,
+                budget_task=None):
     """Fetch a list of z14 tiles via MVT for one region/worker slot.
 
     Spreads requests across the worker's slice of tokens/proxies. A tile that
@@ -1225,6 +1244,8 @@ def fetch_tiles(tiles,
         failed: Pre-seeded failed-tile list to extend, or None for a fresh list.
         save: Optional ``save(imgmap, failed, pending)`` checkpoint callback.
         save_interval: Minimum seconds between incremental saves.
+        budget_task: Optional progress task id for the live token-budget bar;
+            updated to ``budget.spent()`` after each chunk.
 
     Returns:
         ``(imgmap, failed_tiles, pending_tiles)`` where failed/pending tiles are
@@ -1283,6 +1304,8 @@ def fetch_tiles(tiles,
                         progress.advance(task)
                     del m
                 budget.flush()
+                if budget_task is not None:
+                    progress.update(budget_task, completed=budget.spent())
                 gc.collect()
                 if exhausted:
                     for t in remaining_after + requeue:
@@ -1447,6 +1470,7 @@ def cmd_enumerate(args, budget=None, proxypool=None):
     failures = {}
     flock = threading.Lock()
     progress = None
+    budget_task = None
 
     def handle(item, slot):
         """Enumerate one region (fresh or resumed) and checkpoint it.
@@ -1490,7 +1514,8 @@ def cmd_enumerate(args, budget=None, proxypool=None):
                                               save=save,
                                               save_interval=getattr(
                                                   args, 'save_interval',
-                                                  SAVE_INTERVAL))
+                                                  SAVE_INTERVAL),
+                                              budget_task=budget_task)
         write_coverage(args.data_dir, safe, imgmap, failed, pending)
         if failed:
             with flock:
@@ -1519,6 +1544,10 @@ def cmd_enumerate(args, budget=None, proxypool=None):
             f"(~{budget.limit:,}/token)")
         with make_progress() as progress:
             rtask = progress.add_task("[bold]Regions", total=len(todo))
+            budget_task = progress.add_task(
+                "[magenta]⛽ token budget[/]",
+                total=budget.total_budget(),
+                completed=budget.spent())
             stopped, _ = run_regions(todo, outer, progress, rtask, handle,
                                      lambda slot: budget.remaining(slot) > 0)
         if not stopped or SHUTDOWN.is_set():
@@ -1639,6 +1668,8 @@ def retry_core(args, failures, session, end_ms, budget, proxypool=None):
     outer, inner = plan_parallelism(args, budget, proxypool)
     still_failures, total = {}, 0
     slock = threading.Lock()
+    progress = None
+    budget_task = None
     console.print(
         f"[bold]retry[/] · {len(failures)} region(s) with failed tiles · "
         f"budget [cyan]{budget.remaining():,}[/] across {budget.n_active()} "
@@ -1664,7 +1695,8 @@ def retry_core(args, failures, session, end_ms, budget, proxypool=None):
                                                      progress,
                                                      f"{safe} retry-tiles",
                                                      proxypool=proxypool,
-                                                     slot=slot)
+                                                     slot=slot,
+                                                     budget_task=budget_task)
         still = new_failed + pending
         _, m = region_state(args.data_dir, safe)
         region_pending = m.get('pending_tiles', []) if m else []
@@ -1687,6 +1719,9 @@ def retry_core(args, failures, session, end_ms, budget, proxypool=None):
     items = sorted(failures.items())
     with make_progress() as progress:
         rtask = progress.add_task("[bold]Regions", total=len(failures))
+        budget_task = progress.add_task("[magenta]⛽ token budget[/]",
+                                        total=budget.total_budget(),
+                                        completed=budget.spent())
         _, leftover = run_regions(items, outer, progress, rtask, handle,
                                   lambda slot: budget.remaining(slot) > 0)
     for safe, failed in leftover:

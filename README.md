@@ -224,7 +224,131 @@ python browse.py --dirs grid_runs --port 8080 --host 0.0.0.0
 
 ---
 
+## Completeness audit & backfill
+
+A second pipeline verifies that the main extraction actually captured **every**
+Mapillary image (up to a cutoff date) for each grid region, lists what is
+missing, and backfills it. It enumerates via Mapillary's vector tiles rather
+than the `/images?bbox` search API, because the bbox API silently caps at ~2000
+results per query and returns HTTP 500 on dense city cells — making it unusable
+for a completeness guarantee. A single z14 vector tile returns every image point
+(id, sequence_id, captured_at) with neither limit.
+
+### `coverage_audit.py`
+
+The audit driver. Subcommands run in sequence (or all at once via `audit`):
+
+| Subcommand | Purpose |
+| --- | --- |
+| `audit GRID.csv --dirs ...` | One command: `enumerate → retry → diff → datefilter`. The normal entry point. |
+| `enumerate GRID.csv --dirs ...` | Fetch every z14 land tile of each region as a vector tile; write a per-region checkpoint (`coverage_checkpoint_<safe>.json.zst`) and tiny `coverage_meta_<safe>.json` sidecar. Resumable. |
+| `check` | Read only the meta sidecars (instant); report per-region image counts and failed-tile counts. |
+| `retry` | Re-fetch only the `failed_tiles` of each region and merge them in. Safe to run repeatedly. |
+| `diff GRID.csv --dirs ...` | `missing = coverage_ids − all_data_ids`. Writes per-parent-region Parquet shards of missing image_ids (carrying `captured_at`). |
+| `datefilter` | Keep missing rows captured on/before `--cutoff`. Local (no API) when `captured_at` is present; falls back to the Graph API only for rows lacking it. Writes `coverage_missing_inscope/<Parent>.parquet`. |
+
+```bash
+# Full audit of one parent region, reading data spread across several drives:
+python coverage_audit.py audit original_global_grid_5deg.csv \
+    --dirs grid_runs /mnt/hdd/grid_runs --region Europe
+
+# Individual stages:
+python coverage_audit.py enumerate original_global_grid_5deg.csv --region Europe -w 64
+python coverage_audit.py diff original_global_grid_5deg.csv --dirs grid_runs --region Europe
+python coverage_audit.py datefilter --cutoff 2026-05-31
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--region` | all | Restrict to one parent region. Accepts the original or sanitized name (`"Middle East"` or `Middle_East`). |
+| `--data-dir` | `.` | Where coverage checkpoints/meta and budget sidecar live (the parquet/data drive, not image drives). |
+| `--dirs` | — | Base dirs holding `all_data_*.parquet` (for `diff`). |
+| `-w` / `--workers` | `64` | Concurrent tile fetches. |
+| `--proxies` | unset | Rotating proxy list for tile/API requests (per-IP throttle aware). |
+| `--daily-tile-limit` | `50000` | Per-token daily tile cap. Requests round-robin across every `MLY_KEY*` token, each with its own budget (tracked in `.tile_request_budget.json`). |
+| `--wait` | `False` | When the daily budget is exhausted, probe and wait for it to reset, then resume (timezone-agnostic). |
+| `--wait-interval` | `1800` | Seconds between budget-reset probes. |
+
+**Daily limit:** `tiles.mapillary.com` allows ~50,000 requests/day per token, so
+16 tokens ≈ 800k tiles/day. A full continental enumeration spans multiple days —
+just re-run the same command (or pass `--wait`); completed regions are skipped
+and a region cut off mid-way resumes from its pending tiles.
+
+### `backfill_missing.py`
+
+Step 4 — fetches the in-scope missing set. For every image it gets metadata +
+detections in one Graph API call (`fields=…,detections.value`), writes
+append-only Parquet chunks matching the main pipeline schema, and downloads the
+ground-animal jpgs. It writes **both** an `all_data_*` parquet (every image, for
+later stats) and a `ground_animals_*` parquet (animals only).
+
+```bash
+python backfill_missing.py \
+    --inscope coverage_missing_inscope --region Europe \
+    --out-dir /mnt/weasel/grid_runs --image-dir /mnt/jpgs \
+    --processes 3 --entity-workers 520 --download-workers 10
+```
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--inscope` | `coverage_missing_inscope` | Datefilter output dir (or a single parquet). |
+| `--region` | all | Parent region; accepts the sanitized name. |
+| `--out-dir` | `grid_runs` | Where backfill parquets are written. |
+| `--image-dir` | = `--out-dir` | Separate drive for downloaded jpgs. |
+| `--no-download` | `False` | Write parquets only; download later. |
+| `--download-only` | `False` | Skip metadata; only download jpgs from existing `ground_animals_*` parquets. Pair with `--watch` to keep draining as new parquets appear. |
+| `--processes` | `1` | Fan out across N OS processes (`--shard I/N`), each with a disjoint slice of tokens/rows — needed to beat the single-process GIL/JSON-parse ceiling. |
+| `--entity-workers` | `520` | Threads for metadata/detection calls. Entity API is 60,000/min per token; requests round-robin and are rate-capped per token. |
+| `--download-workers` | `10` | Threads for image downloads. |
+| `--batch` | `50000` | Rows fetched per flush. |
+| `--proxies` | unset | Rotating proxies for metadata fetches. |
+
+Resumable: the in-scope parquet is processed sequentially with a per-parent row
+offset recorded in a `.backfill_progress*.json` sidecar; per-cell part numbers
+continue past existing `*_backfill_*.parquet`.
+
+### `validate_missing_sample.py`
+
+Before committing to a backfill, samples the in-scope set (every k-th row, so it
+spans all cells) and probes `/detections` to estimate how many images are still
+live vs gone (400/404) and what fraction are ground animals — then extrapolates
+to the full set so you can size the download volume.
+
+```bash
+python tools/coverage/validate_missing_sample.py --inscope coverage_missing_inscope \
+    --region Europe -n 2000 [--proxies proxies.txt]
+```
+
+### `convert_missing_csv_to_parquet.py` / `split_missing_from_csv.py`
+
+One-off bridges from the older CSV-based `diff` output to the current Parquet
+layout. `convert_missing_csv_to_parquet.py` streams a legacy `coverage_missing.csv`
+into per-parent `<out-dir>/<Parent>/from_csv.parquet`. `split_missing_from_csv.py`
+then splits one per-parent parquet into the per-grid-cell shards `diff` writes,
+so a later `audit` re-run recognizes those cells as already processed.
+
+```bash
+python tools/coverage/convert_missing_csv_to_parquet.py --csv data/manifests/coverage_missing.csv --out-dir coverage_missing
+python tools/coverage/split_missing_from_csv.py coverage_missing/Europe/from_csv.parquet
+```
+
+---
+
 ## Helper scripts
+
+Helper scripts are grouped by purpose. **Run them from the repository root** (their default paths are relative to the working directory):
+
+| Location | Contents |
+| --- | --- |
+| *(root)* | Core entry points: `batch_chunks_mp_api_v3.py`, `coverage_audit.py`, `backfill_missing.py`, plus `progress_tracker.py`, `browse.py`, `split_regions.py`, `generate_countries.py`. |
+| `tools/coverage/` | Completeness-audit helpers: `convert_missing_csv_to_parquet.py`, `split_missing_from_csv.py`, `validate_missing_sample.py`, `check_grid_data.py`. |
+| `tools/repair/` | Image-gap / manifest repair + maintenance: `diagnose_images.py`, `fetch_missing_images.py`, `rebuild_manifest_from_images.py`, `drop_dead_from_manifest.py`, `cleanup_offending_regions.py`, `deduplicate_parquets.py`. |
+| `runners/` | Convenience shell scripts: `monitor_and_verify.sh`, `pull_all.sh`. |
+| `data/` | Working artifacts (`dead_images.txt`, `dead_manifest_rows.parquet`, `rebuild_done_regions.txt`), plus `data/manifests/` (missing/orphan/dead manifest CSVs) and `data/grids/` (per-region input grid CSVs). |
+| `logs/` | Run logs from helper scripts (`*.log`). |
+| `archived/` | Superseded scripts kept for reference. |
+
+Kept at the repo root: the core scripts, configuration (`.env`, `proxies.txt`), the master grid `original_global_grid_5deg.csv`, and the live data directories (`grid_runs/`, `coverage_missing/`, `coverage_missing_inscope/`, `progress_files/`). `proxies.txt`, `original_global_grid_5deg.csv`, and `coverage_missing_inscope/` are read by long-running jobs, so they stay put.
 
 ### Grid preparation
 
@@ -379,6 +503,105 @@ python generate_rerun_commands.py regions.csv --substring "South America" --outp
 | `--substring` | unset | Filter to rows whose region name contains this string. |
 | `--sub-grid-step` | `1.0` | Must match the `--sub-grid-step` used in the main script. |
 | `--output-script` | `run_missing.sh` | Name of the generated bash script. |
+
+#### `check_grid_data.py`
+
+Reports which CSV row indices already have corresponding Parquet data on disk
+across one or more `--dirs`, so you can see at a glance which regions still need
+to be run.
+
+```bash
+python tools/coverage/check_grid_data.py regions/running/north_america.csv --dirs grid_runs /mnt/hdd/grid_runs
+```
+
+---
+
+### Image gap repair
+
+These scripts address the `% Images Downloaded` anomalies that arise when the
+on-disk jpgs and the `ground_animals_*.parquet` manifests drift out of sync —
+either because signed download URLs expired, or because parquet rows were lost
+while their images survived.
+
+#### `diagnose_images.py`
+
+Compares `ground_animals_*` parquet `image_id`s against the `.jpg` files on disk
+for each region, reporting **orphaned images** (file exists, not in any parquet)
+and **missing downloads** (in parquet, no file). Run it first to understand a
+region whose progress shows >100%.
+
+```bash
+python tools/repair/diagnose_images.py original_global_grid_5deg.csv \
+    --dirs grid_runs /mnt/hdd/grid_runs --region "South Asia"
+```
+
+#### `fetch_missing_images.py`
+
+Finds image_ids that are in a manifest but have no jpg on disk (the true missing
+set), then downloads them — trying the stored `thumb_original_url` first and, on
+failure, fetching a **fresh** signed URL from the Graph API (rotating across all
+`MLY_KEY*` tokens). Images the API reports gone (400/404) are recorded as
+permanently dead. Subcommands: `scan`, `download`, `all`.
+
+```bash
+python tools/repair/fetch_missing_images.py all original_global_grid_5deg.csv --dirs grid_runs ... \
+    --out data/manifests/missing_manifest.csv --proxy-file proxies.txt -w 24
+```
+
+#### `rebuild_manifest_from_images.py`
+
+Treats the **images as the source of truth** to fix the `% > 100` case (more jpgs
+on disk than manifest rows). For every orphan image_id it re-queries Mapillary
+detections, keeps only those still classified `animal--ground-animal`, and writes
+the reconstructed rows to `ground_animals_<region>_recovered_<NNN>.parquet` (reusing
+the all_data row verbatim when present, else re-fetching metadata), so the manifest
+count rises to match the images.
+
+#### `drop_dead_from_manifest.py`
+
+Removes permanently-dead image_ids (listed in `dead_images.txt`) from every
+`ground_animals_*` parquet so they stop inflating the missing gap. Archives the
+removed rows to `dead_manifest_rows.parquet` first (restorable), rewrites affected
+files atomically, and is idempotent. Default is dry-run; pass `--execute`.
+
+```bash
+python tools/repair/drop_dead_from_manifest.py --dirs grid_runs /mnt/hdd/grid_runs            # dry-run
+python tools/repair/drop_dead_from_manifest.py --dirs grid_runs /mnt/hdd/grid_runs --execute
+```
+
+#### `cleanup_offending_regions.py`
+
+Deletes parquet, checkpoint, and `.completed_/.empty_` marker files (but **keeps**
+downloaded images and the validated-images ledger) for a hard-coded list of region
+dirs with orphaned images, forcing a clean re-extraction of those regions. Default
+is dry-run; pass `--execute`.
+
+```bash
+python tools/repair/cleanup_offending_regions.py --dirs DIR1 DIR2 DIR3 --execute
+```
+
+#### `monitor_and_verify.sh`
+
+Waits for a running manifest rebuild to finish, then regenerates the
+`progress_tracker.py` report to confirm every region is back at ≤100%.
+
+```bash
+./runners/monitor_and_verify.sh
+```
+
+---
+
+### Data maintenance
+
+#### `deduplicate_parquets.py`
+
+Multiprocessed pass over every `*.parquet` that removes duplicate `image_id` rows
+(keeping the first occurrence) and rewrites only files that actually had
+duplicates, with zstd compression matching the main script.
+
+```bash
+python tools/repair/deduplicate_parquets.py --parent-dir grid_runs --substring North_America
+```
 
 ---
 
