@@ -36,10 +36,6 @@ const scripts = [
     description: 'Builds exclude ledgers to skip already-downloaded images.',
   },
   {
-    name: 'convert_to_zstd.py',
-    description: 'Converts .gz checkpoints to .zst with byte-level verification.',
-  },
-  {
     name: 'check_zst_health.py',
     description: 'Tests all .zst files with optional marker cleanup.',
   },

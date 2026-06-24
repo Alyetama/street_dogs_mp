@@ -30,31 +30,31 @@ MLY_KEY_1=your_first_token
 MLY_KEY_2=your_second_token
 
 # Select a numbered token with --token:
-python batch_chunks_mp_api_v3.py regions.csv --token 1`,
+python batch_chunks_mp_api.py regions.csv --token 1`,
   },
   run: {
     code: `# Run all regions in a CSV
-python batch_chunks_mp_api_v3.py regions.csv
+python batch_chunks_mp_api.py regions.csv
 
 # Run one specific row by index
-python batch_chunks_mp_api_v3.py regions.csv --row-index 0
+python batch_chunks_mp_api.py regions.csv --row-index 0
 
 # Fetch metadata without downloading images
-python batch_chunks_mp_api_v3.py regions.csv --no-download-images
+python batch_chunks_mp_api.py regions.csv --no-download-images
 
 # Download images later from existing Parquet files
-python batch_chunks_mp_api_v3.py regions.csv --download-only
+python batch_chunks_mp_api.py regions.csv --download-only
 
 # Use a separate disk for images
-python batch_chunks_mp_api_v3.py regions.csv --image-dir /path/to/storage
+python batch_chunks_mp_api.py regions.csv --image-dir /path/to/storage
 
 # Use SSD as write buffer for slow HDD
-python batch_chunks_mp_api_v3.py regions.csv \\
+python batch_chunks_mp_api.py regions.csv \\
   --image-dir /mnt/hdd/images \\
   --temp-dir /tmp/ssd_spool
 
 # Process specific sub-grid indices
-python batch_chunks_mp_api_v3.py regions.csv --sub-indices 4,12,15`,
+python batch_chunks_mp_api.py regions.csv --sub-indices 4,12,15`,
   },
   output: {
     html: `<div class="text-[#adb5bd] text-[13px] leading-[1.7] font-mono">

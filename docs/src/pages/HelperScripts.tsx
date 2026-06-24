@@ -23,7 +23,7 @@ const categories: { title: string; scripts: Script[] }[] = [
       {
         name: 'split_regions.py',
         description:
-          'Splits global_grid_5deg.csv into individual per-region CSV files placed under regions/pending/. Each file contains the rows for a single named region and is ready to pass directly to batch_chunks_mp_api_v3.py.',
+          'Splits global_grid_5deg.csv into individual per-region CSV files placed under regions/pending/. Each file contains the rows for a single named region and is ready to pass directly to batch_chunks_mp_api.py.',
         usage: 'python split_regions.py',
         examples: ['python split_regions.py'],
       },
@@ -102,24 +102,6 @@ const categories: { title: string; scripts: Script[] }[] = [
     title: 'Checkpoint Maintenance',
     scripts: [
       {
-        name: 'convert_to_zstd.py',
-        description:
-          'Converts .json.gz and .jsonl.gz checkpoint files to .zst format, with optional byte-level verification and automatic deletion of the original .gz files after a confirmed match.',
-        usage: 'python convert_to_zstd.py <regions.csv> --parent-dirs <dir> [<dir> ...] [options]',
-        examples: [
-          'python convert_to_zstd.py regions.csv --parent-dirs grid_runs /mnt/hdd/grid_runs',
-          'python convert_to_zstd.py regions.csv --parent-dirs grid_runs --compare --delete-gz',
-        ],
-        options: [
-          { option: '--parent-dirs', default: 'grid_runs', description: 'One or more directories to scan for .gz files.' },
-          { option: '--compare', default: 'False', description: 'Verify the decompressed .zst stream matches the original .gz byte-for-byte.' },
-          { option: '--delete-gz', default: 'False', description: 'Delete .gz files after processing (only after a verified match if --compare is set).' },
-          { option: '--overwrite', default: 'False', description: 'Re-convert even if a .zst file already exists.' },
-          { option: '--ram-gb', default: '8.0', description: 'Memory budget for read/write chunks.' },
-          { option: '--workers', default: 'all cores', description: 'Zstandard compression threads.' },
-        ],
-      },
-      {
         name: 'check_zst_health.py',
         description:
           'Tests all .zst files under the grid run directories using zstd -t. When --clear-completed is set, deletes the corresponding .completed_<sub_id> marker so the main script will re-process the affected sub-grid on the next run.',
@@ -166,7 +148,7 @@ const categories: { title: string; scripts: Script[] }[] = [
       {
         name: 'generate_rerun_commands.py',
         description:
-          'Reads a grid CSV and checks every region directory for missing .completed_* or .empty_* markers. For each region with incomplete sub-grids, it generates a ready-to-run batch_chunks_mp_api_v3.py command using --row-index and --sub-indices to target only the missing cells.',
+          'Reads a grid CSV and checks every region directory for missing .completed_* or .empty_* markers. For each region with incomplete sub-grids, it generates a ready-to-run batch_chunks_mp_api.py command using --row-index and --sub-indices to target only the missing cells.',
         usage: 'python generate_rerun_commands.py <regions.csv> [options]',
         examples: [
           'python generate_rerun_commands.py regions.csv',
@@ -174,9 +156,70 @@ const categories: { title: string; scripts: Script[] }[] = [
         ],
         options: [
           { option: '--parent-dir', default: 'grid_runs', description: 'Directory containing region output folders.' },
+          { option: '--image-dir', default: 'unset', description: 'Optional separate image directory to include in the generated commands.' },
           { option: '--substring', default: 'unset', description: 'Filter to rows whose region name contains this string.' },
           { option: '--sub-grid-step', default: '1.0', description: 'Must match the --sub-grid-step used in the main script.' },
           { option: '--output-script', default: 'run_missing.sh', description: 'Name of the generated bash script.' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'Coverage Audit & Image Repair',
+    scripts: [
+      {
+        name: 'tools/coverage/validate_missing_sample.py',
+        description:
+          'Samples the in-scope missing set (every k-th row, so it spans all cells) and probes /detections to estimate how many images are still live vs gone and what fraction are ground animals, then extrapolates to the full set so you can size the backfill download volume before committing to it.',
+        usage: 'python tools/coverage/validate_missing_sample.py --inscope <dir> [--region <name>] [-n <sample>]',
+        examples: [
+          'python tools/coverage/validate_missing_sample.py --inscope coverage_missing_inscope --region Europe -n 2000',
+        ],
+      },
+      {
+        name: 'tools/repair/diagnose_images.py',
+        description:
+          'Compares ground_animals_* parquet image_ids against the .jpg files on disk for each region, reporting orphaned images (file exists, not in any parquet) and missing downloads (in parquet, no file). Run this first to understand a region whose progress shows over 100%.',
+        usage: 'python tools/repair/diagnose_images.py <grid.csv> --dirs <dir> [<dir> ...] [--region <name>]',
+        examples: [
+          'python tools/repair/diagnose_images.py original_global_grid_5deg.csv --dirs grid_runs --region "South Asia"',
+        ],
+      },
+      {
+        name: 'tools/repair/fetch_missing_images.py',
+        description:
+          'Finds image_ids that are in a manifest but have no jpg on disk, then downloads them, trying the stored thumb_original_url first and, on failure, fetching a fresh signed URL from the Graph API (rotating across all MLY_KEY* tokens). Images the API reports gone are recorded as permanently dead. Subcommands: scan, download, all.',
+        usage: 'python tools/repair/fetch_missing_images.py {scan|download|all} <grid.csv> --dirs <dir> [...]',
+        examples: [
+          'python tools/repair/fetch_missing_images.py all original_global_grid_5deg.csv --dirs grid_runs --proxy-file proxies.txt -w 24',
+        ],
+      },
+      {
+        name: 'tools/repair/rebuild_manifest_from_images.py',
+        description:
+          'Treats images as the source of truth (the over-100% case): for every orphan image_id it re-queries Mapillary detections, keeps only those still classified animal--ground-animal, and writes reconstructed ground_animals_*_recovered_*.parquet rows so the manifest count rises to match the images on disk.',
+        usage: 'python tools/repair/rebuild_manifest_from_images.py {scan|rebuild|all} <grid.csv> --dirs <dir> [...]',
+        examples: [
+          'python tools/repair/rebuild_manifest_from_images.py all original_global_grid_5deg.csv --dirs grid_runs --region "South Asia" -w 24',
+        ],
+      },
+      {
+        name: 'tools/repair/drop_dead_from_manifest.py',
+        description:
+          'Removes permanently-dead image_ids (listed in data/dead_images.txt) from every ground_animals_* parquet so they stop inflating the missing gap. Archives the removed rows first (restorable), rewrites affected files atomically, and is idempotent. Dry-run by default; pass --execute to write.',
+        usage: 'python tools/repair/drop_dead_from_manifest.py --dirs <dir> [<dir> ...] [--execute]',
+        examples: [
+          'python tools/repair/drop_dead_from_manifest.py --dirs grid_runs /mnt/hdd/grid_runs',
+          'python tools/repair/drop_dead_from_manifest.py --dirs grid_runs /mnt/hdd/grid_runs --execute',
+        ],
+      },
+      {
+        name: 'tools/repair/deduplicate_parquets.py',
+        description:
+          'Multiprocessed pass over every *.parquet that removes duplicate image_id rows (keeping the first occurrence) and rewrites only files that actually had duplicates, with zstd compression matching the main script.',
+        usage: 'python tools/repair/deduplicate_parquets.py --parent-dir <dir> [--substring <s>]',
+        examples: [
+          'python tools/repair/deduplicate_parquets.py --parent-dir grid_runs --substring North_America',
         ],
       },
     ],
