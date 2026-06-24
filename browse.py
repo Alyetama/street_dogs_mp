@@ -159,7 +159,7 @@ def collect_files(folders: list[dict], data_type: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Location search helpers  (from find_location_folder.py)
+# Location search helpers  (from tools/progress/find_location_folder.py)
 # ---------------------------------------------------------------------------
 
 _BBOX_RE = re.compile(
