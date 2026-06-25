@@ -240,6 +240,23 @@ const categories: { title: string; scripts: Script[] }[] = [
     ],
   },
   {
+    title: 'Data Catalog',
+    scripts: [
+      {
+        name: 'tools/catalog/catalog.py',
+        description:
+          'A DuckDB-backed inventory of every Parquet file (and, optionally, every downloaded image) across all drives, so you can answer "what do we have, where, how much" instantly — even when a drive is unmounted. Reads only Parquet footers (row counts, never a full scan) and parses region + bounding box from each cell directory name; writes only its own catalog (data/catalog.duckdb + a catalog.parquet snapshot). Refresh is incremental and offline-drive aware.',
+        usage: 'python tools/catalog/catalog.py {refresh|images|summary|sql}',
+        examples: [
+          'python tools/catalog/catalog.py refresh',
+          'python tools/catalog/catalog.py images --with-size',
+          'python tools/catalog/catalog.py summary',
+          'python tools/catalog/catalog.py sql "SELECT region, sum(n_rows) AS n FROM files GROUP BY 1 ORDER BY n DESC"',
+        ],
+      },
+    ],
+  },
+  {
     title: 'Web Browser',
     scripts: [
       {

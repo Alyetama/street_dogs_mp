@@ -11,6 +11,7 @@ orjson
 orjsonl
 requests[socks]
 polars
+duckdb
 rich
 geopandas
 shapely

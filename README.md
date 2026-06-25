@@ -18,6 +18,7 @@ The work runs in **three independent stages**, each a standalone script:
 - [Stage 2 — Completeness audit](#stage-2--completeness-audit)
 - [Stage 3 — Backfill](#stage-3--backfill)
 - [Browsing results](#browsing-results)
+- [Data catalog](#data-catalog)
 - [Helper scripts](#helper-scripts)
 - [Troubleshooting](#troubleshooting)
 
@@ -55,6 +56,7 @@ The repo root holds only the three pipeline scripts (`batch_chunks_mp_api.py`, `
 | `tools/maintenance/` | Run integrity & ledgers: `audit_markers.py`, `audit_silent_skips.py`, `generate_rerun_commands.py`, `check_zst_health.py`, `generate_ledger.py`. |
 | `tools/coverage/` | Completeness-audit helpers: `convert_missing_csv_to_parquet.py`, `split_missing_from_csv.py`, `validate_missing_sample.py`, `check_grid_data.py`. |
 | `tools/repair/` | Image-gap / manifest repair: `diagnose_images.py`, `fetch_missing_images.py`, `rebuild_manifest_from_images.py`, `drop_dead_from_manifest.py`, `cleanup_offending_regions.py`, `deduplicate_parquets.py`. |
+| `tools/catalog/` | DuckDB inventory of every Parquet (and downloaded image) across all drives: `catalog.py`. |
 | `runners/` | Convenience shell scripts: `monitor_and_verify.sh`, `pull_all.sh`. |
 | `data/` | Working artifacts; `data/manifests/` (missing/orphan/dead manifest CSVs) and `data/grids/` (per-region input grid CSVs). |
 | `logs/` | Run logs from helper scripts. |
@@ -290,6 +292,24 @@ python browse.py --dirs grid_runs /mnt/hdd/grid_runs --port 8080 --host 0.0.0.0
 ```
 
 Features: a region sidebar; location search (geocodes a city/country via Nominatim and filters by bounding-box overlap); tabs for *All Data*, *Animal Detections*, and *Downloaded Images*; paginated listings; an image lightbox sortable by name or capture date; map/heatmap visualization of parquet coordinates on Leaflet; per-file download links; and session-based login (`ADMIN_USER` / `ADMIN_PASS` set in the script).
+
+---
+
+## Data catalog
+
+`tools/catalog/catalog.py` builds a [DuckDB](https://duckdb.org)-backed inventory of every Parquet file (and, optionally, every downloaded image) across all drives, so you can answer "what do we have, where, how much" instantly — even when a drive is unmounted — without re-globbing tens of thousands of files. It reads only Parquet **footers** (row counts; never a full scan) and parses each cell's region + bounding box from its directory name, so it never touches image data and writes only its own catalog (`data/catalog.duckdb` + a `catalog.parquet` snapshot).
+
+```bash
+python tools/catalog/catalog.py refresh     # build / update (incremental; skips unchanged files)
+python tools/catalog/catalog.py images       # inventory downloaded jpgs (add --with-size for bytes)
+python tools/catalog/catalog.py summary      # totals by drive / kind / region
+python tools/catalog/catalog.py sql "SELECT region, sum(n_rows) FILTER (WHERE kind='ground_animals') AS dogs FROM files GROUP BY 1 ORDER BY dogs DESC"
+# or open it directly:  duckdb data/catalog.duckdb
+```
+
+`refresh` is incremental (a file is re-read only when its size/mtime changes) and offline-drive aware (unmounted drives keep their rows, marked offline; files deleted from a mounted drive are pruned). The catalog files live under `data/` and are gitignored.
+
+Which roots to scan is **not hardcoded**: pass `--dirs <path> …`, or list your drives one-per-line in a gitignored `data/catalog_dirs.txt` (override with `--dirs-file`). The script's only built-in default is the generic `grid_runs`.
 
 ---
 
