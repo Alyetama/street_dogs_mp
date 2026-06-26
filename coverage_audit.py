@@ -961,7 +961,11 @@ def _mvt_value(buf):
         elif f == 3 and wire == 1:
             val = struct.unpack('<d', buf[pos:pos + 8])[0]
             pos += 8
-        elif f in (4, 5) and wire == 0:
+        elif f == 4 and wire == 0:            # int_value: signed int64 varint
+            val, pos = _mvt_varint(buf, pos)
+            if val >= (1 << 63):              # two's-complement -> signed
+                val -= (1 << 64)
+        elif f == 5 and wire == 0:            # uint_value
             val, pos = _mvt_varint(buf, pos)
         elif f == 6 and wire == 0:
             v, pos = _mvt_varint(buf, pos)
@@ -1907,6 +1911,23 @@ def _save_diff_progress(path, done):
     os.replace(tmp, path)
 
 
+def _captured_at_i64(v):
+    """Coerce a checkpoint ``captured_at`` into a valid signed int64.
+
+    Repairs values written by the pre-fix MVT decoder, which read ``int_value``
+    (a signed int64) as an unsigned varint -- so a negative captured_at came
+    back as its uint64 two's-complement (e.g. -1530619200000 ms ~ 1921 stored
+    as 1.84e19, which overflows ``pa.int64()``). Maps such values back to
+    signed and nulls anything still out of range. Lets the diff finish over
+    already-written checkpoints without re-enumerating.
+    """
+    if not isinstance(v, int):
+        return None
+    if v >= (1 << 63):
+        v -= (1 << 64)
+    return v if -(1 << 63) <= v < (1 << 63) else None
+
+
 def _write_missing_shard(path, imgmap, have, safe, region, chunk=2_000_000):
     """Write one region's missing images to a Parquet shard, incrementally.
 
@@ -1960,7 +1981,7 @@ def _write_missing_shard(path, imgmap, have, safe, region, chunk=2_000_000):
             seq_missing[seq] = seq_missing.get(seq, 0) + 1
             ids.append(iid)
             seqs.append(seq)
-            caps.append(cap)
+            caps.append(_captured_at_i64(cap))
             if len(ids) >= chunk:
                 flush()
         flush()
