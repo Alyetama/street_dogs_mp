@@ -35,6 +35,7 @@ Per-cell part numbers continue past existing `*_backfill_*.parquet`.
 """
 
 import argparse
+import functools
 import gc
 import glob
 import multiprocessing as mp
@@ -203,6 +204,28 @@ def resolve_files(inscope, region):
             if os.path.exists(f)]
 
 
+@functools.lru_cache(maxsize=128)
+def have_ids(have_dirs, cell):
+    """Image ids already downloaded for ``cell`` across other image roots.
+
+    ``have_dirs`` is a tuple of drive roots already holding jpgs (e.g. another
+    disk). Returns the set of ``<id>`` from each
+    ``<root>/<cell>/ground_animal_images/<id>.jpg`` so the same image is never
+    re-downloaded onto a new drive. Cached per (roots, cell).
+    """
+    ids = set()
+    for root in have_dirs:
+        d = os.path.join(root, cell, 'ground_animal_images')
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.name.endswith('.jpg'):
+                        ids.add(e.name[:-4])
+        except OSError:
+            pass
+    return ids
+
+
 def backfill_parent(parent,
                     inscope_file,
                     args,
@@ -291,10 +314,13 @@ def backfill_parent(parent,
             with open(ledger) as f:
                 vset = {ln.strip() for ln in f if ln.strip()}
         lock = threading.Lock()
+        have = have_ids(tuple(args.have_dir), cell)
         tasks = []
         for row in animals.iter_rows(named=True):
             url = row.get('thumb_original_url')
             if not url:
+                continue
+            if str(row['image_id']) in have:  # already on another drive
                 continue
             fp = os.path.join(img_dir, f"{row['image_id']}.jpg")
             if not bc.is_valid_image(fp, row['image_id'], vset, lock, ledger):
@@ -426,7 +452,10 @@ def download_only(args):
                     os.path.join(pq_root, '*',
                                  'ground_animals_*_backfill_*.parquet'))):
             cell = os.path.basename(os.path.dirname(pq))
+            if args.region and not cell.startswith(args.region + '_'):
+                continue
             img_dir = os.path.join(img_root, cell, 'ground_animal_images')
+            have = have_ids(tuple(args.have_dir), cell)
             try:
                 df = pl.read_parquet(
                     pq,
@@ -437,11 +466,13 @@ def download_only(args):
                 url = row.get('thumb_original_url')
                 if not url:
                     continue
-                fp = os.path.join(img_dir, f"{row['image_id']}.jpg")
+                iid = str(row['image_id'])
+                if iid in have:  # already on another drive
+                    continue
+                fp = os.path.join(img_dir, f"{iid}.jpg")
                 if os.path.exists(fp) and os.path.getsize(fp) > 100:
                     continue
-                tasks.append((cell, img_dir, str(row['image_id']), url,
-                              row.get('captured_at')))
+                tasks.append((cell, img_dir, iid, url, row.get('captured_at')))
         if not tasks:
             if args.watch and not ca.SHUTDOWN.is_set():
                 tqdm.write("download · nothing pending; watching…")
@@ -554,6 +585,14 @@ def main():
                     help='Separate root for downloaded jpgs '
                     '(<image-dir>/<cell>/ground_animal_images/). '
                     'Default: same as --out-dir.')
+    ap.add_argument('--have-dir',
+                    nargs='*',
+                    default=[],
+                    metavar='DIR',
+                    help='Extra image roots on OTHER drives already holding '
+                    'jpgs. Any <DIR>/<cell>/ground_animal_images/<id>.jpg is '
+                    'treated as already-downloaded and skipped, so images are '
+                    'never re-downloaded onto a new drive. Repeatable.')
     ap.add_argument('--no-download',
                     action='store_true',
                     help='Write parquets only; skip all image downloads.')
@@ -605,8 +644,12 @@ def main():
 
     if args.download_only:
         ca._install_sigint()
-        tqdm.write(f"download-only · {args.download_workers} workers · "
-                   f"images → {args.image_dir or args.out_dir}")
+        scope = f"region={args.region}" if args.region else "all regions"
+        extra = (f" · skipping ids already on {len(args.have_dir)} other "
+                 f"drive(s)" if args.have_dir else "")
+        tqdm.write(f"download-only · {scope} · {args.download_workers} "
+                   f"workers{extra} · images → "
+                   f"{args.image_dir or args.out_dir}")
         download_only(args)
         return
 
