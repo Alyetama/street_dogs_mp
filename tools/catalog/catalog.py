@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS drives (
 );
 CREATE TABLE IF NOT EXISTS images (
   cell VARCHAR, drive VARCHAR, region VARCHAR,
-  n_images BIGINT, bytes BIGINT, scanned_at TIMESTAMP,
+  n_images BIGINT, bytes BIGINT, scanned_at TIMESTAMP, mtime DOUBLE,
   PRIMARY KEY (cell, drive)
 );
 CREATE TABLE IF NOT EXISTS cell_images (
@@ -150,17 +150,33 @@ def scan_dir(base):
                 continue
 
 
-def scan_images(base, with_size):
-    """Yield ``(cell, n_images, bytes)`` for each cell's ground_animal_images dir.
+def scan_images(base, with_size, prev=None):
+    """Yield ``(cell, n_images, bytes, mtime)`` per cell's ground_animal_images.
 
-    Counting is readdir-only (fast even at tens of millions of files); byte
-    totals require a stat per file and are gathered only when ``with_size``.
+    Incremental: a cell whose ``ground_animal_images`` dir mtime matches its
+    previously-scanned mtime is reused without re-reading its files -- adding or
+    removing a jpg always bumps the dir mtime, so counts stay correct. This
+    turns a full tens-of-millions-of-files readdir into one ``stat`` per cell
+    plus a readdir of only the cells that changed. ``prev`` is
+    ``{cell: (n_images, bytes, mtime)}`` from the last scan.
+
+    Byte totals require a stat per file and are gathered only when ``with_size``.
     """
+    prev = prev or {}
     with os.scandir(base) as cells:
         for cell in cells:
             if not cell.is_dir():
                 continue
             imgdir = os.path.join(cell.path, 'ground_animal_images')
+            try:
+                mt = os.stat(imgdir).st_mtime
+            except OSError:
+                continue
+            p = prev.get(cell.name)
+            if p and p[2] == mt and (not with_size or p[1] is not None):
+                if p[0]:                       # unchanged since last scan -> reuse
+                    yield cell.name, p[0], p[1], mt
+                continue
             try:
                 n = b = 0
                 with os.scandir(imgdir) as it:
@@ -170,7 +186,7 @@ def scan_images(base, with_size):
                             if with_size:
                                 b += e.stat().st_size
                 if n:
-                    yield cell.name, n, b
+                    yield cell.name, n, (b if with_size else None), mt
             except OSError:
                 continue
 
@@ -281,30 +297,45 @@ def cmd_refresh(args):
 
 
 def cmd_images(args):
-    """Inventory downloaded jpgs per cell (counts; byte totals with --with-size)."""
+    """Inventory downloaded jpgs per cell (counts; byte totals with --with-size).
+
+    Incremental: cells whose image dir is unchanged since the last scan are
+    reused via their stored mtime, so a re-scan is seconds instead of minutes.
+    """
     dirs = resolve_dirs(args)
     con = duckdb.connect(args.db)
     con.execute(SCHEMA)
+    try:
+        con.execute("ALTER TABLE images ADD COLUMN IF NOT EXISTS mtime DOUBLE")
+    except Exception:
+        pass
     now = datetime.now()
     online_drives, seen = set(), set()
     for base in dirs:
         if not os.path.isdir(base):
             print(f"  ⦸ offline: {base}")
             continue
-        online_drives.add(drive_of(base))
+        d = drive_of(base)
+        online_drives.add(d)
+        prev = {r[0]: (r[1], r[2], r[3]) for r in con.execute(
+            "SELECT cell, n_images, bytes, mtime FROM images WHERE drive=?",
+            [d]).fetchall()}
         print(f"  scanning images under {base} ...")
-        recs, n = [], 0
-        for cell, cnt, b in scan_images(base, args.with_size):
+        recs, n, reused = [], 0, 0
+        for cell, cnt, b, mt in scan_images(base, args.with_size, prev):
             region = parse_cell(cell)[0]
-            recs.append((cell, drive_of(base), region, cnt,
-                         b if args.with_size else None, now))
-            seen.add((cell, drive_of(base)))
+            recs.append((cell, d, region, cnt, b, now, mt))
+            seen.add((cell, d))
             n += cnt
+            pc = prev.get(cell)
+            if pc and pc[2] == mt:
+                reused += 1
         if recs:
             con.executemany("DELETE FROM images WHERE cell=? AND drive=?",
                             [(r[0], r[1]) for r in recs])
-            con.executemany("INSERT INTO images VALUES (?,?,?,?,?,?)", recs)
-        print(f"    {len(recs):,} cells · {n:,} images")
+            con.executemany("INSERT INTO images VALUES (?,?,?,?,?,?,?)", recs)
+        rs = f" ({reused:,} reused via mtime)" if reused else ""
+        print(f"    {len(recs):,} cells · {n:,} images{rs}")
     if online_drives and seen:
         con.execute("CREATE OR REPLACE TEMP TABLE _seen(cell VARCHAR, drive VARCHAR)")
         con.executemany("INSERT INTO _seen VALUES (?,?)", list(seen))
