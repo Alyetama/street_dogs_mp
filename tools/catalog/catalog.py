@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS images (
   n_images BIGINT, bytes BIGINT, scanned_at TIMESTAMP,
   PRIMARY KEY (cell, drive)
 );
+CREATE TABLE IF NOT EXISTS cell_images (
+  cell VARCHAR PRIMARY KEY, region VARCHAR,
+  n_unique BIGINT, n_drives INT, deduped BOOLEAN, updated TIMESTAMP
+);
 """
 
 
@@ -308,6 +312,35 @@ def cmd_images(args):
         con.execute(
             f"DELETE FROM images WHERE drive IN ({ph}) AND (cell,drive) NOT IN "
             "(SELECT cell,drive FROM _seen)", list(online_drives))
+    # deduped per-cell totals: a cell's images can be split across drives
+    # (complementary backfill) or duplicated (subset re-download). Sum the
+    # per-drive counts, then correct any cell on >1 ONLINE drive by unioning
+    # its actual image IDs from disk (cheap — only a handful of cells collide).
+    root_by_drive = {drive_of(b): b for b in dirs if os.path.isdir(b)}
+    con.execute("DELETE FROM cell_images")
+    con.execute(
+        "INSERT INTO cell_images SELECT cell, any_value(region), "
+        "sum(n_images), count(*), count(*)=1, ? FROM images GROUP BY cell",
+        [now])
+    collided = con.execute("SELECT cell, list(drive) FROM images GROUP BY cell "
+                           "HAVING count(*) > 1").fetchall()
+    fixed = 0
+    for cell, drvs in collided:
+        if not all(d in root_by_drive for d in drvs):
+            continue  # an involved drive is offline; keep the summed estimate
+        ids = set()
+        for d in drvs:
+            p = os.path.join(root_by_drive[d], cell, 'ground_animal_images')
+            try:
+                ids |= {e.name for e in os.scandir(p) if e.name.endswith('.jpg')}
+            except OSError:
+                pass
+        con.execute("UPDATE cell_images SET n_unique=?, deduped=true "
+                    "WHERE cell=?", [len(ids), cell])
+        fixed += 1
+    if collided:
+        print(f"  deduped {fixed}/{len(collided)} cross-drive cells "
+              f"(union of image IDs)")
     tot = con.execute("SELECT count(*), coalesce(sum(n_images),0), "
                       "coalesce(sum(bytes),0) FROM images").fetchone()
     con.close()
@@ -339,7 +372,7 @@ def cmd_summary(args):
                            ).fetchone()[0]
     print(f"\n{nf:,} parquet files · {nr:,} rows · {nregions} regions")
     print(f"  all_data rows (every image): {ad:,}")
-    print(f"  ground_animals rows (dogs):  {ga:,}\n")
+    print(f"  ground_animals rows:         {ga:,}\n")
 
     fmt = lambda rows: [[f"{x:,}" if isinstance(x, int) else x for x in r]
                         for r in rows]
