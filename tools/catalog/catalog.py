@@ -81,8 +81,9 @@ def resolve_dirs(args):
     path = getattr(args, 'dirs_file', None)
     if path and os.path.exists(path):
         with open(path) as f:
-            dirs = [ln.strip() for ln in f
-                    if ln.strip() and not ln.startswith('#')]
+            dirs = [
+                ln.strip() for ln in f if ln.strip() and not ln.startswith('#')
+            ]
         if dirs:
             return dirs
     return DEFAULT_DIRS
@@ -117,8 +118,8 @@ def drive_of(path):
 
 def classify(fname):
     """Return ``(kind, variant)`` parsed from a Parquet file name."""
-    kind = ('all_data' if fname.startswith('all_data_') else
-            'ground_animals' if fname.startswith('ground_animals_') else 'other')
+    kind = ('all_data' if fname.startswith('all_data_') else 'ground_animals'
+            if fname.startswith('ground_animals_') else 'other')
     variant = ('backfill' if '_backfill_' in fname else
                'recovered' if '_recovered_' in fname else 'main')
     return kind, variant
@@ -174,7 +175,7 @@ def scan_images(base, with_size, prev=None):
                 continue
             p = prev.get(cell.name)
             if p and p[2] == mt and (not with_size or p[1] is not None):
-                if p[0]:                       # unchanged since last scan -> reuse
+                if p[0]:  # unchanged since last scan -> reuse
                     yield cell.name, p[0], p[1], mt
                 continue
             try:
@@ -198,10 +199,12 @@ def num_rows_batch(con, paths, chunk=4000):
         part = paths[i:i + chunk]
         for fn, nr in con.execute(
                 "SELECT file_name, num_rows FROM parquet_file_metadata(?)",
-                [part]).fetchall():
+            [part]).fetchall():
             out[fn] = nr
-        print(f"    read footers {min(i + chunk, len(paths)):,}/{len(paths):,}",
-              end='\r', flush=True)
+        print(
+            f"    read footers {min(i + chunk, len(paths)):,}/{len(paths):,}",
+            end='\r',
+            flush=True)
     if paths:
         print()
     return out
@@ -212,27 +215,30 @@ def cmd_refresh(args):
     dirs = resolve_dirs(args)
     con = duckdb.connect(args.db)
     con.execute(SCHEMA)
-    existing = {p: (s, m) for p, s, m in
-                con.execute("SELECT path, size_bytes, mtime FROM files")
-                .fetchall()}
+    existing = {
+        p: (s, m)
+        for p, s, m in con.execute(
+            "SELECT path, size_bytes, mtime FROM files").fetchall()
+    }
     seen, changed = set(), []
     online_drives = set()
     now = datetime.now()
 
     for base in dirs:
         if not os.path.isdir(base):
-            dr = (con.execute("SELECT any_value(drive) FROM files "
-                              "WHERE path LIKE ?", [base + '%']).fetchone()[0]
+            dr = (con.execute(
+                "SELECT any_value(drive) FROM files "
+                "WHERE path LIKE ?", [base + '%']).fetchone()[0]
                   or os.path.basename(base.rstrip('/')) or '?')
             print(f"  ⦸ offline: {base}")
-            con.execute(
-                "INSERT OR REPLACE INTO drives VALUES (?,?,?,?,?,?)",
-                [dr, base, False,
-                 con.execute("SELECT count(*) FROM files WHERE path LIKE ?",
-                             [base + '%']).fetchone()[0],
-                 con.execute("SELECT coalesce(sum(n_rows),0) FROM files "
-                             "WHERE path LIKE ?", [base + '%']).fetchone()[0],
-                 now])
+            con.execute("INSERT OR REPLACE INTO drives VALUES (?,?,?,?,?,?)", [
+                dr, base, False,
+                con.execute("SELECT count(*) FROM files WHERE path LIKE ?",
+                            [base + '%']).fetchone()[0],
+                con.execute(
+                    "SELECT coalesce(sum(n_rows),0) FROM files "
+                    "WHERE path LIKE ?", [base + '%']).fetchone()[0], now
+            ])
             continue
         dr = drive_of(base)
         online_drives.add(dr)
@@ -243,7 +249,9 @@ def cmd_refresh(args):
             n_here += 1
             if existing.get(path) != (size, mtime):
                 changed.append((path, size, mtime))
-        print(f"    {n_here:,} parquet files ({len(changed):,} new/changed so far)")
+        print(
+            f"    {n_here:,} parquet files ({len(changed):,} new/changed so far)"
+        )
 
     if changed:
         print(f"  reading footers for {len(changed):,} new/changed files ...")
@@ -254,17 +262,17 @@ def cmd_refresh(args):
             cell = os.path.basename(os.path.dirname(path))
             kind, variant = classify(fname)
             region, a, b, c, d = parse_cell(cell)
-            recs.append((path, drive_of(os.path.dirname(path)), kind, variant,
-                         region, cell, a, b, c, d, rows.get(path), size, mtime,
-                         now))
+            recs.append(
+                (path, drive_of(os.path.dirname(path)), kind, variant, region,
+                 cell, a, b, c, d, rows.get(path), size, mtime, now))
         con.executemany("DELETE FROM files WHERE path = ?",
-                        [(r[0],) for r in recs])
+                        [(r[0], ) for r in recs])
         con.executemany(
             "INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", recs)
 
     con.execute("CREATE OR REPLACE TEMP TABLE _seen(path VARCHAR)")
     if seen:
-        con.executemany("INSERT INTO _seen VALUES (?)", [(p,) for p in seen])
+        con.executemany("INSERT INTO _seen VALUES (?)", [(p, ) for p in seen])
     if online_drives:
         ph = ','.join('?' * len(online_drives))
         pruned = con.execute(
@@ -286,11 +294,11 @@ def cmd_refresh(args):
             con.execute("INSERT OR REPLACE INTO drives VALUES (?,?,?,?,?,?)",
                         [dr, base, True, nf, nr, now])
 
-    snap = os.path.join(os.path.dirname(os.path.abspath(args.db)) or '.',
-                        'catalog.parquet')
+    snap = os.path.join(
+        os.path.dirname(os.path.abspath(args.db)) or '.', 'catalog.parquet')
     con.execute(f"COPY (SELECT * FROM files) TO '{snap}' (FORMAT parquet)")
-    tot = con.execute("SELECT count(*), coalesce(sum(n_rows),0) FROM files"
-                      ).fetchone()
+    tot = con.execute(
+        "SELECT count(*), coalesce(sum(n_rows),0) FROM files").fetchone()
     con.close()
     print(f"\n✓ catalog: {tot[0]:,} files · {tot[1]:,} rows · {args.db} "
           f"(+ snapshot {snap})")
@@ -317,9 +325,12 @@ def cmd_images(args):
             continue
         d = drive_of(base)
         online_drives.add(d)
-        prev = {r[0]: (r[1], r[2], r[3]) for r in con.execute(
-            "SELECT cell, n_images, bytes, mtime FROM images WHERE drive=?",
-            [d]).fetchall()}
+        prev = {
+            r[0]: (r[1], r[2], r[3])
+            for r in con.execute(
+                "SELECT cell, n_images, bytes, mtime FROM images WHERE drive=?",
+                [d]).fetchall()
+        }
         print(f"  scanning images under {base} ...")
         recs, n, reused = [], 0, 0
         for cell, cnt, b, mt in scan_images(base, args.with_size, prev):
@@ -337,7 +348,8 @@ def cmd_images(args):
         rs = f" ({reused:,} reused via mtime)" if reused else ""
         print(f"    {len(recs):,} cells · {n:,} images{rs}")
     if online_drives and seen:
-        con.execute("CREATE OR REPLACE TEMP TABLE _seen(cell VARCHAR, drive VARCHAR)")
+        con.execute(
+            "CREATE OR REPLACE TEMP TABLE _seen(cell VARCHAR, drive VARCHAR)")
         con.executemany("INSERT INTO _seen VALUES (?,?)", list(seen))
         ph = ','.join('?' * len(online_drives))
         con.execute(
@@ -353,8 +365,9 @@ def cmd_images(args):
         "INSERT INTO cell_images SELECT cell, any_value(region), "
         "sum(n_images), count(*), count(*)=1, ? FROM images GROUP BY cell",
         [now])
-    collided = con.execute("SELECT cell, list(drive) FROM images GROUP BY cell "
-                           "HAVING count(*) > 1").fetchall()
+    collided = con.execute(
+        "SELECT cell, list(drive) FROM images GROUP BY cell "
+        "HAVING count(*) > 1").fetchall()
     fixed = 0
     for cell, drvs in collided:
         if not all(d in root_by_drive for d in drvs):
@@ -363,11 +376,15 @@ def cmd_images(args):
         for d in drvs:
             p = os.path.join(root_by_drive[d], cell, 'ground_animal_images')
             try:
-                ids |= {e.name for e in os.scandir(p) if e.name.endswith('.jpg')}
+                ids |= {
+                    e.name
+                    for e in os.scandir(p) if e.name.endswith('.jpg')
+                }
             except OSError:
                 pass
-        con.execute("UPDATE cell_images SET n_unique=?, deduped=true "
-                    "WHERE cell=?", [len(ids), cell])
+        con.execute(
+            "UPDATE cell_images SET n_unique=?, deduped=true "
+            "WHERE cell=?", [len(ids), cell])
         fixed += 1
     if collided:
         print(f"  deduped {fixed}/{len(collided)} cross-drive cells "
@@ -399,8 +416,8 @@ def cmd_summary(args):
                      "WHERE kind='all_data'").fetchone()[0]
     ga = con.execute("SELECT coalesce(sum(n_rows),0) FROM files "
                      "WHERE kind='ground_animals'").fetchone()[0]
-    nregions = con.execute("SELECT count(DISTINCT region) FROM files"
-                           ).fetchone()[0]
+    nregions = con.execute(
+        "SELECT count(DISTINCT region) FROM files").fetchone()[0]
     print(f"\n{nf:,} parquet files · {nr:,} rows · {nregions} regions")
     print(f"  all_data rows (every image): {ad:,}")
     print(f"  ground_animals rows:         {ga:,}\n")
@@ -409,26 +426,32 @@ def cmd_summary(args):
                         for r in rows]
 
     print("by drive:")
-    _table(fmt(con.execute(
-        "WITH ds AS (SELECT drive, bool_or(online) online FROM drives "
-        "GROUP BY drive) "
-        "SELECT f.drive, ds.online, count(*) files, sum(f.n_rows) total_rows "
-        "FROM files f LEFT JOIN ds USING(drive) "
-        "GROUP BY f.drive, ds.online ORDER BY total_rows DESC NULLS LAST"
-    ).fetchall()), ['drive', 'online', 'files', 'rows'])
+    _table(
+        fmt(
+            con.execute(
+                "WITH ds AS (SELECT drive, bool_or(online) online FROM drives "
+                "GROUP BY drive) "
+                "SELECT f.drive, ds.online, count(*) files, sum(f.n_rows) total_rows "
+                "FROM files f LEFT JOIN ds USING(drive) "
+                "GROUP BY f.drive, ds.online ORDER BY total_rows DESC NULLS LAST"
+            ).fetchall()), ['drive', 'online', 'files', 'rows'])
 
     print("\nby kind / variant:")
-    _table(fmt(con.execute(
-        "SELECT kind, variant, count(*) files, sum(n_rows) total_rows FROM files "
-        "GROUP BY 1,2 ORDER BY total_rows DESC NULLS LAST").fetchall()),
-        ['kind', 'variant', 'files', 'rows'])
+    _table(
+        fmt(
+            con.execute(
+                "SELECT kind, variant, count(*) files, sum(n_rows) total_rows FROM files "
+                "GROUP BY 1,2 ORDER BY total_rows DESC NULLS LAST").fetchall()
+        ), ['kind', 'variant', 'files', 'rows'])
 
     print(f"\ntop {args.top} regions by ground-animal rows:")
-    _table(fmt(con.execute(
-        "SELECT region, sum(n_rows) FILTER (WHERE kind='ground_animals') ga, "
-        "sum(n_rows) FILTER (WHERE kind='all_data') all_data, count(*) files "
-        "FROM files GROUP BY region ORDER BY ga DESC NULLS LAST LIMIT ?",
-        [args.top]).fetchall()),
+    _table(
+        fmt(
+            con.execute(
+                "SELECT region, sum(n_rows) FILTER (WHERE kind='ground_animals') ga, "
+                "sum(n_rows) FILTER (WHERE kind='all_data') all_data, count(*) files "
+                "FROM files GROUP BY region ORDER BY ga DESC NULLS LAST LIMIT ?",
+                [args.top]).fetchall()),
         ['region', 'ground_animals', 'all_data', 'files'])
 
     img = con.execute("SELECT count(*), coalesce(sum(n_images),0), "
@@ -437,9 +460,11 @@ def cmd_summary(args):
         sz = f" · {img[2]/1e12:.2f} TB" if img[2] else ""
         print(f"\ndownloaded images: {img[1]:,} jpgs across {img[0]:,} "
               f"cells{sz}")
-        _table(fmt(con.execute(
-            "SELECT drive, count(*) cells, sum(n_images) imgs FROM images "
-            "GROUP BY 1 ORDER BY imgs DESC").fetchall()),
+        _table(
+            fmt(
+                con.execute(
+                    "SELECT drive, count(*) cells, sum(n_images) imgs FROM images "
+                    "GROUP BY 1 ORDER BY imgs DESC").fetchall()),
             ['drive', 'cells', 'images'])
     con.close()
 
@@ -454,17 +479,22 @@ def cmd_sql(args):
 def main():
     """Parse the CLI and dispatch to refresh / summary / sql."""
     p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--db', default='data/catalog.duckdb',
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--db',
+                   default='data/catalog.duckdb',
                    help='Catalog DuckDB file (default: data/catalog.duckdb).')
     sub = p.add_subparsers(dest='cmd', required=True)
 
     def add_dirs(sp):
         """Add the shared --dirs / --dirs-file options to a subparser."""
-        sp.add_argument('--dirs', nargs='+', default=None,
+        sp.add_argument('--dirs',
+                        nargs='+',
+                        default=None,
                         help='grid_runs roots to scan. Default: lines of '
                         '--dirs-file if it exists, else "grid_runs".')
-        sp.add_argument('--dirs-file', default=DIRS_FILE,
+        sp.add_argument('--dirs-file',
+                        default=DIRS_FILE,
                         help=f'File of grid_runs roots, one per line '
                         f'(gitignored local config; default {DIRS_FILE}).')
 
@@ -474,7 +504,8 @@ def main():
 
     im = sub.add_parser('images', help='Inventory downloaded jpgs per cell.')
     add_dirs(im)
-    im.add_argument('--with-size', action='store_true',
+    im.add_argument('--with-size',
+                    action='store_true',
                     help='Also sum bytes (a stat per file; slower).')
     im.set_defaults(func=cmd_images)
 
