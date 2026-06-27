@@ -13,7 +13,6 @@ import argparse
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
 
 import polars as pl
 from rich.console import Console
@@ -45,8 +44,8 @@ def diagnose_region_row(row, dirs):
     for r_dir in region_dirs:
         try:
             for entry in os.scandir(r_dir):
-                if (entry.is_file()
-                        and entry.name.startswith(f'ground_animals_{safe_region_id}_')
+                if (entry.is_file() and entry.name.startswith(
+                        f'ground_animals_{safe_region_id}_')
                         and entry.name.endswith('.parquet')):
                     animal_files.append(entry.path)
         except Exception:
@@ -64,11 +63,8 @@ def diagnose_region_row(row, dirs):
     if animal_files:
         try:
             parquet_ids = set(
-                pl.scan_parquet(list(set(animal_files)))
-                .select('image_id')
-                .collect()['image_id']
-                .to_list()
-            )
+                pl.scan_parquet(list(set(animal_files))).select(
+                    'image_id').collect()['image_id'].to_list())
         except Exception as e:
             parquet_ids = set()
 
@@ -83,7 +79,7 @@ def diagnose_region_row(row, dirs):
             pass
 
     orphaned = disk_ids - parquet_ids  # on disk, not in parquet
-    missing = parquet_ids - disk_ids   # in parquet, no file
+    missing = parquet_ids - disk_ids  # in parquet, no file
 
     if len(disk_ids) == 0 and len(parquet_ids) == 0:
         return None
@@ -108,11 +104,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('grid_csv')
     parser.add_argument('--dirs', nargs='+', required=True)
-    parser.add_argument('--region', type=str, default=None,
-                        help='Filter to a specific parent region (e.g. "South Asia")')
-    parser.add_argument('--min-pct', type=float, default=100.1,
-                        help='Only show regions above this %% (default: 100.1)')
-    parser.add_argument('--top', type=int, default=20,
+    parser.add_argument(
+        '--region',
+        type=str,
+        default=None,
+        help='Filter to a specific parent region (e.g. "South Asia")')
+    parser.add_argument(
+        '--min-pct',
+        type=float,
+        default=100.1,
+        help='Only show regions above this %% (default: 100.1)')
+    parser.add_argument('--top',
+                        type=int,
+                        default=20,
                         help='Show top N worst offenders (default: 20)')
     parser.add_argument('-w', '--workers', type=int, default=16)
     args = parser.parse_args()
@@ -123,11 +127,15 @@ def main():
 
     if args.region:
         rows = [r for r in rows if r['region'] == args.region]
-        console.print(f"Filtered to {len(rows)} rows for region: [cyan]{args.region}[/]")
+        console.print(
+            f"Filtered to {len(rows)} rows for region: [cyan]{args.region}[/]")
 
     results = []
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(diagnose_region_row, row, args.dirs): row for row in rows}
+        futures = {
+            executor.submit(diagnose_region_row, row, args.dirs): row
+            for row in rows
+        }
         for future in as_completed(futures):
             r = future.result()
             if r is not None:
@@ -141,14 +149,20 @@ def main():
         console.print(f"\n[green]No regions above {args.min_pct}% found.[/]")
         return
 
-    console.print(f"\nFound [bold red]{len(over)}[/] regions above {args.min_pct}% - showing top {args.top}:\n")
+    console.print(
+        f"\nFound [bold red]{len(over)}[/] regions above {args.min_pct}% - showing top {args.top}:\n"
+    )
 
     table = Table(show_lines=True)
     table.add_column("Region ID", style="cyan", no_wrap=False, max_width=60)
     table.add_column("Parquet IDs", justify="right")
     table.add_column("Disk Files", justify="right")
-    table.add_column("Orphaned\n(disk, not parquet)", justify="right", style="red")
-    table.add_column("Missing\n(parquet, no file)", justify="right", style="yellow")
+    table.add_column("Orphaned\n(disk, not parquet)",
+                     justify="right",
+                     style="red")
+    table.add_column("Missing\n(parquet, no file)",
+                     justify="right",
+                     style="yellow")
     table.add_column("% Img", justify="right", style="magenta")
     table.add_column("Pq files", justify="right")
     table.add_column("Dirs found", justify="right")
@@ -170,8 +184,12 @@ def main():
     # Summary by orphaned vs missing
     total_orphaned = sum(r['orphaned'] for r in over)
     total_missing = sum(r['missing'] for r in over)
-    console.print(f"\nTotal orphaned images (file exists, not in parquet): [red]{total_orphaned:,}[/]")
-    console.print(f"Total missing downloads (parquet entry, no file):    [yellow]{total_missing:,}[/]")
+    console.print(
+        f"\nTotal orphaned images (file exists, not in parquet): [red]{total_orphaned:,}[/]"
+    )
+    console.print(
+        f"Total missing downloads (parquet entry, no file):    [yellow]{total_missing:,}[/]"
+    )
 
     # Show which dirs each top region is in
     if over:
