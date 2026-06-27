@@ -44,6 +44,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import duckdb
 import orjson
 import polars as pl
 from tqdm import tqdm
@@ -226,6 +227,34 @@ def have_ids(have_dirs, cell):
     return ids
 
 
+def already_extracted(inscope_file, parent, out_dir, want_set=False):
+    """In-scope 'missing' image ids that are ALREADY present in the region's
+    existing all_data parquets on out_dir. A large fraction means the inscope is
+    stale/inflated (e.g. an audit that didn't see the data drive) and the
+    backfill would otherwise re-fetch metadata you already have.
+
+    Returns (result, n_files): result is the matching id SET when want_set, else
+    just the COUNT; (set()/0, 0) when there is no extracted data to compare.
+    """
+    files = glob.glob(
+        os.path.join(out_dir, f'{parent}_*', f'all_data_{parent}_*.parquet'))
+    if not files:
+        return (set() if want_set else 0), 0
+    sel = 'DISTINCT CAST(i.image_id AS VARCHAR)' if want_set else 'count(*)'
+    con = duckdb.connect()
+    try:
+        rel = con.execute(
+            f"SELECT {sel} FROM read_parquet(?) i WHERE "
+            "CAST(i.image_id AS VARCHAR) IN "
+            "(SELECT CAST(image_id AS VARCHAR) FROM read_parquet(?))",
+            [inscope_file, files])
+        result = ({r[0]
+                   for r in rel.fetchall()} if want_set else rel.fetchone()[0])
+    finally:
+        con.close()
+    return result, len(files)
+
+
 def backfill_parent(parent,
                     inscope_file,
                     args,
@@ -254,6 +283,27 @@ def backfill_parent(parent,
         tqdm.write(f"✓ {pkey}: already complete.")
         return
     tqdm.write(f"{pkey} · rows [{start:,},{end:,}) · resuming at {offset:,}")
+    skip = None
+    try:
+        if args.skip_extracted:
+            skip, nf = already_extracted(inscope_file,
+                                         parent,
+                                         args.out_dir,
+                                         want_set=True)
+            done = len(skip)
+        else:
+            done, nf = already_extracted(inscope_file, parent, args.out_dir)
+        if nf:
+            pct = 100 * done / max(total, 1)
+            act = ' · skipping those' if (args.skip_extracted and done) else ''
+            warn = ('   [!] inscope looks stale/inflated -- re-run the audit'
+                    if pct >= 50 else '')
+            tqdm.write(
+                f"{pkey} · already extracted on disk: {done:,}/{total:,} "
+                f"({pct:.1f}%) · new to fetch: {total - done:,}{act}{warn}")
+    except Exception as e:  # never block the backfill on the diagnostic
+        skip = None
+        tqdm.write(f"{pkey} · (already-extracted check skipped: {e})")
 
     state = {
         'cell': None,
@@ -350,6 +400,12 @@ def backfill_parent(parent,
             rows = lf.slice(offset, n).collect().to_dicts()
             if not rows:
                 break
+            advance = len(
+                rows)  # advance offset by the full slice (resume safe)
+            if skip:  # drop already-extracted ids; never re-fetch what we have
+                rows = [r for r in rows if str(r['image_id']) not in skip]
+                if advance != len(rows):
+                    pbar.update(advance - len(rows))
             results = {}
             futs = [
                 ex.submit(fetch_meta, r['image_id'], limiter, meta_session,
@@ -379,7 +435,7 @@ def backfill_parent(parent,
                         state['animals'].add(rec['image_id'])
                     if len(state['buf']) >= PARQUET_CHUNK:
                         flush()
-            offset += len(rows)
+            offset += advance
             pbar.set_postfix_str(
                 f"GA {state['n_anim']:,} gone {state['gone']:,}",
                 refresh=False)
@@ -596,6 +652,13 @@ def main():
     ap.add_argument('--no-download',
                     action='store_true',
                     help='Write parquets only; skip all image downloads.')
+    ap.add_argument(
+        '--no-skip-extracted',
+        dest='skip_extracted',
+        action='store_false',
+        help='Re-fetch metadata even for images already in the '
+        'region\'s all_data parquets (default: skip them, so a '
+        'stale/inflated inscope never triggers a needless re-fetch).')
     ap.add_argument('--entity-workers',
                     type=int,
                     default=520,
