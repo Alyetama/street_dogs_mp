@@ -22,7 +22,8 @@ def has_image_file(region_path):
         for entry in os.scandir(region_path):
             if entry.is_file():
                 name_lower = entry.name.lower()
-                if name_lower.endswith(valid_exts) and not name_lower.endswith('_tiles.png'):
+                if name_lower.endswith(
+                        valid_exts) and not name_lower.endswith('_tiles.png'):
                     return True
             elif entry.is_dir():
                 if has_image_file(entry.path):
@@ -134,39 +135,36 @@ def main():
             print(f"  -> {c} region(s) have images inside: {d}")
 
     print(f"\n=======================================================")
-    print(f" OUTLIER DETECTION")
-    print(f"=======================================================")
+    print(f" PER-REGION LAYOUT  (data/images spanning drives is normal)")
+    print(f"=======================================================\n")
 
-    outliers = []
+    def drive_label(d):
+        """Short, recognizable drive name from a full grid_runs path."""
+        parts = d.rstrip('/').split('/')
+        try:
+            return parts[parts.index('biodiv') + 1]
+        except (ValueError, IndexError):
+            return os.path.basename(d.rstrip('/')) or d
+
     for region in sorted(all_regions):
-        d_locs = region_data_locs.get(region, [])
-        i_locs = region_image_locs.get(region, [])
+        d = ', '.join(
+            drive_label(x) for x in region_data_locs.get(region, [])) or '-'
+        i = ', '.join(
+            drive_label(x) for x in region_image_locs.get(region, [])) or '-'
+        print(f"  {region:<46} data: {d:<24} images: {i}")
 
-        if len(d_locs) > 1:
-            outliers.append(
-                f"[!] DUPLICATE: {region} has Data files in multiple directories: {d_locs}"
-            )
-        if len(i_locs) > 1:
-            outliers.append(
-                f"[!] DUPLICATE: {region} has Image files in multiple directories: {i_locs}"
-            )
-
-        if d_locs and primary_data_dir not in d_locs:
-            outliers.append(
-                f"[!] SPLIT: {region} Data is in {d_locs[0]} (Differs from recommended --parent-dir)"
-            )
-        if i_locs and primary_image_dir not in i_locs:
-            outliers.append(
-                f"[!] SPLIT: {region} Images are in {i_locs[0]} (Differs from recommended --image-dir)"
-            )
-
-    if not outliers:
-        print(
-            "  \u2713 Clean. All regions perfectly align with the recommended flags."
-        )
-    else:
-        for out in sorted(list(set(outliers))):
-            print(out)
+    # The one case still worth flagging: images present but NO data/manifest on
+    # any drive (genuine orphan images). Data on one drive + images on another
+    # is the normal multi-drive layout and is no longer treated as an outlier.
+    orphans = [
+        r for r in sorted(all_regions)
+        if region_image_locs.get(r) and not region_data_locs.get(r)
+    ]
+    if orphans:
+        print(f"\n  [!] {len(orphans)} region(s) have images but no manifest "
+              f"on any drive:")
+        for r in orphans:
+            print(f"      - {r}")
 
     print("")
 
