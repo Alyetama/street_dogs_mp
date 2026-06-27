@@ -6,7 +6,7 @@ Background
 Each region's `ground_animals_<region>_*.parquet` lists every animal image_id
 together with a `thumb_original_url`. Those URLs are *signed* fbcdn links that
 EXPIRE (note the `oe=` / `oh=` params). Once expired, a plain re-run of
-`batch_chunks_mp_api_v3.py` cannot re-download them, and because the regions are
+`batch_chunks_mp_api.py` cannot re-download them, and because the regions are
 already marked `.completed_/.empty_`, the main script skips them entirely - so
 the on-disk gaps never get filled. That is why "nothing new downloaded".
 
@@ -110,10 +110,12 @@ def load_proxies(proxy_file):
 
 def build_session():
     s = requests.Session()
-    retry = Retry(total=2, backoff_factor=0.3,
+    retry = Retry(total=2,
+                  backoff_factor=0.3,
                   status_forcelist=[429, 500, 502, 503, 504],
                   allowed_methods=['GET'])
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=50,
+    adapter = HTTPAdapter(max_retries=retry,
+                          pool_connections=50,
                           pool_maxsize=50)
     s.mount('http://', adapter)
     s.mount('https://', adapter)
@@ -152,8 +154,8 @@ def scan_region_row(row, dirs):
     for r_dir in region_dirs:
         try:
             for entry in os.scandir(r_dir):
-                if (entry.is_file()
-                        and entry.name.startswith(f'ground_animals_{safe_region_id}_')
+                if (entry.is_file() and entry.name.startswith(
+                        f'ground_animals_{safe_region_id}_')
                         and entry.name.endswith('.parquet')):
                     animal_files.append(entry.path)
         except Exception:
@@ -168,10 +170,9 @@ def scan_region_row(row, dirs):
     # Map of image_id -> stored thumb_original_url (last one wins)
     id_to_url = {}
     try:
-        df = (pl.scan_parquet(list(set(animal_files)))
-              .select(['image_id', 'thumb_original_url'])
-              .unique(subset=['image_id'], keep='last')
-              .collect())
+        df = (pl.scan_parquet(list(set(animal_files))).select(
+            ['image_id', 'thumb_original_url']).unique(subset=['image_id'],
+                                                       keep='last').collect())
         for iid, url in zip(df['image_id'].to_list(),
                             df['thumb_original_url'].to_list()):
             id_to_url[str(iid)] = url
@@ -222,7 +223,8 @@ def cmd_scan(args):
     per_region = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {ex.submit(scan_region_row, r, args.dirs): r for r in rows}
-        for fut in tqdm(as_completed(futures), total=len(futures),
+        for fut in tqdm(as_completed(futures),
+                        total=len(futures),
                         desc="Scanning regions"):
             res = fut.result()
             if res:
@@ -240,9 +242,11 @@ def cmd_scan(args):
         deduped.append(r)
 
     with open(args.out, 'w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, fieldnames=['image_id', 'parent_region',
-                                          'safe_region_id', 'target_dir',
-                                          'stored_url'])
+        w = csv.DictWriter(f,
+                           fieldnames=[
+                               'image_id', 'parent_region', 'safe_region_id',
+                               'target_dir', 'stored_url'
+                           ])
         w.writeheader()
         w.writerows(deduped)
 
@@ -258,6 +262,7 @@ def cmd_scan(args):
 # Phase 2: DOWNLOAD - stored URL first, then fresh URL from the Graph API
 # --------------------------------------------------------------------------- #
 class KeyRotator:
+
     def __init__(self, keys):
         self._cycle = itertools.cycle(keys) if keys else None
         self._lock = threading.Lock()
@@ -271,8 +276,9 @@ class KeyRotator:
 
 # Preference order: original first, then progressively smaller thumbs so we can
 # still recover an image when the original is no longer served.
-THUMB_FIELDS = ['thumb_original_url', 'thumb_2048_url', 'thumb_1024_url',
-                'thumb_256_url']
+THUMB_FIELDS = [
+    'thumb_original_url', 'thumb_2048_url', 'thumb_1024_url', 'thumb_256_url'
+]
 
 
 def fetch_fresh_url(image_id, session, key_rotator):
@@ -326,7 +332,8 @@ def download_one(task, session, proxies, key_rotator, dead_set, dead_lock):
                 p = random.choice(proxies)
                 proxy_dict = {'http': p, 'https': p}
             try:
-                resp = session.get(target_url, timeout=(5, 20),
+                resp = session.get(target_url,
+                                   timeout=(5, 20),
                                    proxies=proxy_dict)
                 resp.raise_for_status()
                 tmp = filepath + '.part'
@@ -388,8 +395,13 @@ def cmd_download(args, tasks=None):
         print(f"[download] loaded {len(dead_set):,} known-dead ids "
               f"(will be skipped).")
 
-    counts = {'stored': 0, 'recovered': 0, 'already_present': 0,
-              'dead': 0, 'failed': 0}
+    counts = {
+        'stored': 0,
+        'recovered': 0,
+        'already_present': 0,
+        'dead': 0,
+        'failed': 0
+    }
     failed_rows = []
     dead_fh = open(args.dead_out, 'a') if args.dead_out else None
 
@@ -409,7 +421,8 @@ def cmd_download(args, tasks=None):
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {ex.submit(work, t): t for t in tasks}
-        pbar = tqdm(as_completed(futures), total=len(futures),
+        pbar = tqdm(as_completed(futures),
+                    total=len(futures),
                     desc="Downloading")
         for fut in pbar:
             task = futures[fut]
@@ -423,7 +436,8 @@ def cmd_download(args, tasks=None):
             elif status == 'dead' and dead_fh:
                 dead_fh.write(f"{image_id}\n")
             pbar.set_postfix(ok=counts['stored'] + counts['recovered'],
-                             dead=counts['dead'], fail=counts['failed'])
+                             dead=counts['dead'],
+                             fail=counts['failed'])
 
     if dead_fh:
         dead_fh.close()
@@ -450,29 +464,35 @@ def cmd_download(args, tasks=None):
 # CLI
 # --------------------------------------------------------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='mode', required=True)
 
     def add_scan_args(p):
         p.add_argument('grid_csv')
         p.add_argument('--dirs', nargs='+', required=True)
-        p.add_argument('--region', default=None,
+        p.add_argument('--region',
+                       default=None,
                        help='Restrict to one parent region (e.g. "Europe").')
         p.add_argument('--out', default='data/manifests/missing_manifest.csv')
         p.add_argument('-w', '--workers', type=int, default=16)
 
     def add_dl_args(p):
         p.add_argument('--proxy-file', default=None)
-        p.add_argument('--dead-out', default='data/dead_images.txt',
+        p.add_argument('--dead-out',
+                       default='data/dead_images.txt',
                        help='Append-only log of permanently gone image_ids.')
-        p.add_argument('--failed-out', default='data/manifests/still_missing.csv',
+        p.add_argument('--failed-out',
+                       default='data/manifests/still_missing.csv',
                        help='Manifest of transiently failed images to retry.')
 
-    p_scan = sub.add_parser('scan', help='Find missing images, write manifest.')
+    p_scan = sub.add_parser('scan',
+                            help='Find missing images, write manifest.')
     add_scan_args(p_scan)
 
-    p_dl = sub.add_parser('download', help='Download from an existing manifest.')
+    p_dl = sub.add_parser('download',
+                          help='Download from an existing manifest.')
     p_dl.add_argument('--manifest', required=True)
     p_dl.add_argument('-w', '--workers', type=int, default=24)
     add_dl_args(p_dl)
