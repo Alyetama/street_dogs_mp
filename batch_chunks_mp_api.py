@@ -53,6 +53,7 @@ API_CHUNK_SIZE = 5000
 PARQUET_CHUNK_SIZE = 100000
 PROXY_LIST = []
 EXCLUDE_SET = set()
+HAVE_DIRS = []
 
 ZSTD_OPTIONS = {zstd.CompressionParameter.nb_workers: 2}
 
@@ -64,7 +65,7 @@ def init_worker(config, event):
     """Initializes worker processes with the parsed CLI config and shutdown event (Local MP Mode)."""
     global MLY_KEY, ZOOM_LEVEL, VISUALIZE, DOWNLOAD_IMAGES, DOWNLOAD_ONLY, DOWNLOAD_MAX_WORKERS
     global SEARCH_MAX_WORKERS, ENTITY_MAX_WORKERS, SUB_GRID_STEP, PARENT_DIR, IMAGE_DIR, TEMP_DIR
-    global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET, TARGET_SUB_INDICES
+    global API_CHUNK_SIZE, PARQUET_CHUNK_SIZE, PROXY_LIST, EXCLUDE_SET, TARGET_SUB_INDICES, HAVE_DIRS
     global shutdown_event
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -87,6 +88,7 @@ def init_worker(config, event):
     PARQUET_CHUNK_SIZE = config['PARQUET_CHUNK_SIZE']
     PROXY_LIST = config.get('PROXY_LIST', [])
     TARGET_SUB_INDICES = config.get('TARGET_SUB_INDICES')
+    HAVE_DIRS = config.get('HAVE_DIRS', [])
 
     ledger_path = config.get('EXCLUDE_LEDGER')
     if ledger_path and os.path.exists(ledger_path):
@@ -242,6 +244,26 @@ def is_valid_image(filepath, image_id, valid_set, lock, ledger_path):
         pass
 
     return False
+
+
+def have_ids(have_dirs, cell):
+    """Image ids already downloaded for ``cell`` across extra image roots.
+
+    Scans each ``<root>/<cell>/ground_animal_images/<id>.jpg`` so images already
+    present on another drive (passed via --have-dir) are treated as
+    already-downloaded and never fetched again -- no cross-drive duplicates.
+    """
+    ids = set()
+    for root in have_dirs:
+        d = os.path.join(root, cell, 'ground_animal_images')
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.name.endswith('.jpg'):
+                        ids.add(e.name[:-4])
+        except OSError:
+            pass
+    return ids
 
 
 def background_hdd_mover(move_queue):
@@ -828,6 +850,8 @@ def process_region(west,
     if os.path.exists(valid_ledger_path):
         with open(valid_ledger_path, 'r') as f:
             validated_set = {line.strip() for line in f if line.strip()}
+    if HAVE_DIRS:  # treat jpgs already on other drives as already-downloaded
+        validated_set |= have_ids(HAVE_DIRS, safe_region_id)
     valid_lock = threading.Lock()
 
     failed_tracker_path = os.path.join(
@@ -1446,6 +1470,22 @@ if __name__ == "__main__":
                         default=None,
                         help="Output directory specifically for images (HDD)")
     parser.add_argument(
+        '--have-dir',
+        type=str,
+        nargs='*',
+        default=[],
+        metavar='DIR',
+        help="Extra image roots on OTHER drives already holding jpgs. Any "
+        "<DIR>/<cell>/ground_animal_images/<id>.jpg is treated as already "
+        "downloaded and skipped, so images are never re-downloaded onto a new "
+        "drive. Repeatable.")
+    parser.add_argument(
+        '--region',
+        type=str,
+        default=None,
+        help="Process only the grid rows whose 'region' column equals this "
+        "(e.g. Greenland). Default: every region in the CSV.")
+    parser.add_argument(
         '--row-index',
         type=int,
         default=None,
@@ -1485,6 +1525,7 @@ if __name__ == "__main__":
     SUB_GRID_STEP = args.sub_grid_step
     PARENT_DIR = args.parent_dir
     IMAGE_DIR = args.image_dir
+    HAVE_DIRS = args.have_dir
     TEMP_DIR = args.temp_dir
     API_CHUNK_SIZE = args.api_chunk_size
     PARQUET_CHUNK_SIZE = args.parquet_chunk_size
@@ -1528,6 +1569,12 @@ if __name__ == "__main__":
     os.makedirs(PARENT_DIR, exist_ok=True)
 
     df_grid = pl.read_csv(GRID_CSV_FILE)
+    if args.region:
+        df_grid = df_grid.filter(pl.col('region') == args.region)
+        if df_grid.height == 0:
+            print(f"Error: no rows for region '{args.region}' in "
+                  f"{GRID_CSV_FILE}.")
+            exit(1)
     GLOBAL_RUN_NAME = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     if args.slurm:
@@ -1623,6 +1670,7 @@ if __name__ == "__main__":
                 'SUB_GRID_STEP': SUB_GRID_STEP,
                 'PARENT_DIR': PARENT_DIR,
                 'IMAGE_DIR': args.image_dir,
+                'HAVE_DIRS': args.have_dir,
                 'TEMP_DIR': args.temp_dir,
                 'API_CHUNK_SIZE': API_CHUNK_SIZE,
                 'PARQUET_CHUNK_SIZE': PARQUET_CHUNK_SIZE,
