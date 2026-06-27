@@ -49,12 +49,13 @@ Usage:
     python tools/catalog/consolidate_data.py \
         --dest /media/biodiv/weasel/street_dogs_mp_weasel/grid_runs \
         --region Europe
-    # review the plan, then move it:
+    # review the plan, then move it (each --execute run records the data-root
+    # catalogue, so region-by-region is fine -- no need for a full pass):
     python tools/catalog/consolidate_data.py \
         --dest /media/biodiv/weasel/street_dogs_mp_weasel/grid_runs \
         --region Europe --execute
 
-    # everything at once (also writes the data-root catalogue):
+    # or everything at once (when space allows):
     python tools/catalog/consolidate_data.py \
         --dest /media/biodiv/weasel/street_dogs_mp_weasel/grid_runs --execute
 """
@@ -556,27 +557,26 @@ def main():
         for path, why in err_list[:20]:
             print(f"    - {path}\n        {why}")
 
-    # The data-root catalogue asserts that ALL data lives on the destination,
-    # which only holds after a full run. For a per-region move it is left
-    # untouched so the generator is not pointed at a half-migrated drive.
-    if args.region:
-        print(
-            f"\n  partial move (region '{args.region}'): data-root catalogue "
-            f"NOT updated.\n  Run once without --region (after every region is "
-            f"moved) to write it -> {dest}")
-    else:
-        os.makedirs(os.path.dirname(os.path.abspath(args.catalogue)) or '.',
-                    exist_ok=True)
-        with open(args.catalogue, 'w') as f:
-            f.write(
-                "# Data-root catalogue written by "
-                "tools/catalog/consolidate_data.py\n"
-                "# All region DATA files (everything except ground_animal_images/)\n"
-                "# are consolidated under this single grid_runs directory.\n"
-                "# The dashboard command generator reads this to fill\n"
-                "# --parent-dir / --data-dir automatically.\n"
-                f"{dest}\n")
-        print(f"  data-root catalogue written: {args.catalogue} -> {dest}")
+    # Record the chosen data home so the dashboard generator points
+    # --parent-dir / --data-dir at it. This is the designated single data drive
+    # -- the catalogue records the DECISION, not that every region has finished
+    # moving -- so it is written on any --execute run, region-scoped or not.
+    # (The audit's --dirs still reads the live catalog, so any region not yet
+    # migrated is still found on its current drive in the meantime.)
+    os.makedirs(os.path.dirname(os.path.abspath(args.catalogue)) or '.',
+                exist_ok=True)
+    with open(args.catalogue, 'w') as f:
+        f.write(
+            "# Data-root catalogue written by "
+            "tools/catalog/consolidate_data.py\n"
+            "# The single grid_runs directory designated to hold all region\n"
+            "# DATA files (everything except ground_animal_images/). The\n"
+            "# dashboard command generator reads this to fill --parent-dir /\n"
+            "# --data-dir automatically.\n"
+            f"{dest}\n")
+    scope = f"region '{args.region}'" if args.region else "all regions"
+    print(f"  data-root catalogue -> {dest}  "
+          f"(data home recorded; this run moved {scope})")
 
 
 if __name__ == '__main__':
