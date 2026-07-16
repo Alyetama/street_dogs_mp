@@ -1570,7 +1570,12 @@ if __name__ == "__main__":
 
     df_grid = pl.read_csv(GRID_CSV_FILE)
     if args.region:
-        df_grid = df_grid.filter(pl.col('region') == args.region)
+        # Match on the sanitized name so the folder-style "Pacific_Ocean" and
+        # the CSV's raw "Pacific Ocean" both resolve (and "Middle East", etc.).
+        key = sanitize_folder_name(args.region)
+        df_grid = df_grid.filter(
+            pl.col('region').map_elements(sanitize_folder_name,
+                                          return_dtype=pl.String) == key)
         if df_grid.height == 0:
             print(f"Error: no rows for region '{args.region}' in "
                   f"{GRID_CSV_FILE}.")
