@@ -236,3 +236,17 @@ cells (M49: South Asia).
 No cell was renamed on the basis of recalled knowledge. Every assignment came
 from intersecting the cell with the Natural Earth polygons; the only human input
 is the documented mapping table.
+
+---
+
+# 2026-08-02 — cleanup + canonical doc
+
+- **Deleted `grid_runs/*/covered_countries.txt` on every root** (user request):
+  2,404 on crucial, 115 on weasel, 904 on capybara, 0 elsewhere — 3,423 files,
+  ~80 KB. One-line sidecars ("No countries found (Ocean/Sea)" etc.) from an old
+  step; verified zero remain on all six roots.
+- Added `docs/REGIONS.md` — canonical description of the grid, the assignment
+  logic, citations (Natural Earth v5.1.1 map_subunits; UN M49), the documented
+  departures, thresholds, and how to reproduce or challenge any assignment.
+- Independent verification workflow (UN-source cross-check, disk consistency,
+  point-lattice re-derivation, hostile code review) launched; results pending.
