@@ -273,8 +273,11 @@ async function t1() {
   ck(byId['pg'].textContent === 'Page 1 of 2', 't1: pg=' + byId['pg'].textContent);
   ck(byId['prev'].disabled === true, 't1: prev not disabled on page 1');
   ck(byId['next'].disabled === false, 't1: next disabled with 2 pages');
-  ck(API.st().sel === 0, 't1: selection not seeded at 0');
-  ck(cards[0].classList.contains('sel'), 't1: first tile not marked selected');
+  // nothing may be pre-selected: a highlighted first tile reads as a choice
+  // the user did not make
+  ck(API.st().sel === -1, 't1: something was pre-selected, sel=' + API.st().sel);
+  ck(!document.querySelectorAll('.card').some(c => c.classList.contains('sel')),
+     't1: a tile is marked selected on load');
   // the confidence rail must reflect conf, not be a constant
   const rails = document.querySelectorAll('.rail');
   ck(rails.length === 6, 't1: ' + rails.length + ' rails for 6 tiles');
@@ -399,6 +402,9 @@ async function t8() {
   COLS = 5;
   const last = API.st().items.length - 1;
   ck(API.cols() === 5, 't8: cols()=' + API.cols());
+  // first arrow from "nothing selected" lands on tile 0, not tile 1
+  ck(API.st().sel === -1, 't8: page did not open unselected');
+  key('ArrowRight'); ck(API.st().sel === 0, 't8: first arrow -> ' + API.st().sel);
   key('ArrowRight'); ck(API.st().sel === 1, 't8: right -> ' + API.st().sel);
   key('ArrowDown');  ck(API.st().sel === 6, 't8: down -> ' + API.st().sel + ', want 6');
   key('ArrowUp');    ck(API.st().sel === 1, 't8: up -> ' + API.st().sel);
@@ -460,7 +466,7 @@ async function t10() {
   await API.flag(0); await flush();
   ck(/Queue is clear/.test(byId['state'].innerHTML),
      't10: no empty state after the last crop was flagged');
-  ck(API.st().sel === 0, 't10: selection went negative -> ' + API.st().sel);
+  ck(API.st().sel === -1, 't10: sel should be -1 on an empty page, got ' + API.st().sel);
   // and undo must climb back out of the empty state
   await API.undo(); await flush();
   ck(API.st().items.length === 1, 't10: undo did not restore the last crop');
