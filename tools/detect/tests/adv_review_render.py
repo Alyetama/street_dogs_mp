@@ -501,8 +501,39 @@ async function t12() {
   ck(API.st().items.length === n, 't12: undo worked after the window closed');
 }
 
+// ── 13. flagging must not advance the selection on its own ───────────────
+async function t13() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6), CROPS.normal.slice(6, 9)),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  // MOUSE path: pressing the flag button must not select the tile, and after
+  // removal nothing may be selected -- otherwise the highlight lands on
+  // whatever slid into that index, which reads as an auto-advance
+  const card = document.querySelectorAll('.card')[1];
+  card.onmousedown({ target: { closest: sel => sel === '.fbtn' ? {} : null } });
+  ck(API.st().sel === -1, 't13: pressing the flag button selected the tile');
+  await API.flag(1); await flush();
+  ck(API.st().sel === -1,
+     't13: mouse flag left a selection (auto-advance), sel=' + API.st().sel);
+  ck(!document.querySelectorAll('.card').some(c => c.classList.contains('sel')),
+     't13: a tile is highlighted after a mouse flag');
+  // pressing elsewhere on the tile still selects it (needed for the lightbox)
+  const c2 = document.querySelectorAll('.card')[2];
+  c2.onmousedown({ target: { closest: () => null } });
+  ck(API.st().sel === 2, 't13: clicking the tile body no longer selects');
+  // KEYBOARD path: F keeps the position so the next crop can be judged.
+  // items.length does NOT drop -- the reserve backfills -- so assert on
+  // identity: the crop that was selected must be gone.
+  const gone = API.st().items[2].name;
+  key('f'); await flush();
+  ck(!API.st().items.some(c => c.name === gone),
+     't13: F did not flag the selected crop');
+  ck(API.st().sel === 2,
+     't13: F flow lost its position, sel=' + API.st().sel + ' want 2');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
