@@ -1,0 +1,103 @@
+{
+ "sources": {
+  "geometry": {
+   "name": "Natural Earth Admin 0 - Map Subunits, 1:50m Cultural Vectors",
+   "version": "5.1.1",
+   "license": "public domain",
+   "url": "https://www.naturalearthdata.com/downloads/50m-cultural-vectors/",
+   "file": "data/geo/ne_50m_admin_0_map_subunits.shp",
+   "fields_used": [
+    "geometry",
+    "CONTINENT",
+    "SUBREGION",
+    "SUBUNIT",
+    "ADM0_A3",
+    "ISO_A3"
+   ]
+  },
+  "taxonomy": {
+   "name": "UN M49 Standard Country or Area Codes for Statistical Use",
+   "publisher": "United Nations Statistics Division",
+   "url": "https://unstats.un.org/unsd/methodology/m49/",
+   "note": "encoded in Natural Earth's SUBREGION attribute"
+  }
+ },
+ "follows_m49": {
+  "Northern Africa": "Africa",
+  "Eastern Africa": "Africa",
+  "Middle Africa": "Africa",
+  "Southern Africa": "Africa",
+  "Western Africa": "Africa",
+  "Western Asia": "Middle East",
+  "Central Asia": "Central Asia",
+  "Southern Asia": "South Asia",
+  "Eastern Asia": "East Asia",
+  "South-Eastern Asia": "Southeast Asia",
+  "Eastern Europe": "Europe",
+  "Northern Europe": "Europe",
+  "Southern Europe": "Europe",
+  "Western Europe": "Europe",
+  "Northern America": "North America",
+  "Central America": "Central America & Caribbean",
+  "Caribbean": "Central America & Caribbean",
+  "South America": "South America",
+  "Australia and New Zealand": "Australia",
+  "Melanesia": "New Zealand & Pacific",
+  "Micronesia": "New Zealand & Pacific",
+  "Polynesia": "New Zealand & Pacific",
+  "Antarctica": "Antarctica"
+ },
+ "departs_from_m49": [
+  {
+   "entity": "Russia (all subunits)",
+   "m49": "Eastern Europe / Central Asia",
+   "used": "Russia & North Asia",
+   "reason": "project defines a dedicated Russia region; M49 would file Siberia as Central Asia",
+   "cells_affected": 7
+  },
+  {
+   "entity": "Iran",
+   "m49": "Southern Asia",
+   "used": "Middle East",
+   "reason": "project's original Middle East cells were lon 55-65 (Iran); conventional usage",
+   "cells_affected": 5
+  },
+  {
+   "entity": "Afghanistan",
+   "m49": "Southern Asia",
+   "used": "Central Asia",
+   "reason": "judgement call, contestable",
+   "cells_affected": 0
+  },
+  {
+   "entity": "Greenland",
+   "m49": "Northern America",
+   "used": "Greenland",
+   "reason": "project defines Greenland as its own region",
+   "cells_affected": 0
+  },
+  {
+   "entity": "New Zealand",
+   "m49": "Australia and New Zealand",
+   "used": "New Zealand & Pacific",
+   "reason": "project separates Australia from New Zealand & Pacific",
+   "cells_affected": 0
+  },
+  {
+   "entity": "Andaman & Nicobar Is.",
+   "m49": "South-Eastern Asia",
+   "used": "South Asia",
+   "reason": "Indian territory; project follows sovereignty for territories",
+   "cells_affected": 0
+  }
+ ],
+ "thresholds": {
+  "min_share": 0.6,
+  "min_land_km2": 100
+ },
+ "impact": {
+  "cells_renamed": 51,
+  "following_m49_exactly": 39,
+  "depending_on_departures": 12
+ }
+}

@@ -206,3 +206,33 @@ Region totals after: Middle East 12 → **30 cells / 26.5M rows**; Africa down t
 - `.backfill_progress.json` sidecars are keyed by parent region name — a
   backfill resumed against a renamed region will restart that region from
   offset 0 rather than lose anything.
+
+---
+
+# Provenance
+
+Asked whether the regions rest on a citable authority or on recalled knowledge.
+Answer, precisely:
+
+**External, citable:**
+- Geometry — *Natural Earth v5.1.1, Admin 0 Map Subunits, 1:50m Cultural
+  Vectors*, public domain. https://www.naturalearthdata.com/downloads/50m-cultural-vectors/
+- Taxonomy — *UN M49 Standard Country or Area Codes for Statistical Use*, UN
+  Statistics Division. https://unstats.un.org/unsd/methodology/m49/ (encoded in
+  Natural Earth's `SUBREGION` attribute).
+
+**Project-specific judgement:** this project's 19 regions are not an M49
+taxonomy — M49 has no "Middle East" (it has *Western Asia*), no
+"Russia & North Asia", no standalone "Greenland" — so a mapping requires
+choices. Every choice is now written down in `data/geo/REGION_MAPPING.md` and
+machine-readable in `data/geo/region_mapping.json`, including the ones that
+contradict M49 (Russia, Iran, Afghanistan, Greenland, New Zealand, Andaman &
+Nicobar) with the reason for each.
+
+**Measured impact:** of the 51 renamed cells, **39 follow UN M49 exactly**; 12
+depend on the departures — 7 European-Russia cells (M49: Europe) and 5 Iranian
+cells (M49: South Asia).
+
+No cell was renamed on the basis of recalled knowledge. Every assignment came
+from intersecting the cell with the Natural Earth polygons; the only human input
+is the documented mapping table.
