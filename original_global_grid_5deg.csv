@@ -1,0 +1,2593 @@
+sw_lon,sw_lat,ne_lon,ne_lat,region
+-180,-90,-175,-85,Antarctica
+-175,-90,-170,-85,Antarctica
+-170,-90,-165,-85,Antarctica
+-165,-90,-160,-85,Antarctica
+-160,-90,-155,-85,Antarctica
+-155,-90,-150,-85,Antarctica
+-150,-90,-145,-85,Antarctica
+-145,-90,-140,-85,Antarctica
+-140,-90,-135,-85,Antarctica
+-135,-90,-130,-85,Antarctica
+-130,-90,-125,-85,Antarctica
+-125,-90,-120,-85,Antarctica
+-120,-90,-115,-85,Antarctica
+-115,-90,-110,-85,Antarctica
+-110,-90,-105,-85,Antarctica
+-105,-90,-100,-85,Antarctica
+-100,-90,-95,-85,Antarctica
+-95,-90,-90,-85,Antarctica
+-90,-90,-85,-85,Antarctica
+-85,-90,-80,-85,Antarctica
+-80,-90,-75,-85,Antarctica
+-75,-90,-70,-85,Antarctica
+-70,-90,-65,-85,Antarctica
+-65,-90,-60,-85,Antarctica
+-60,-90,-55,-85,Antarctica
+-55,-90,-50,-85,Antarctica
+-50,-90,-45,-85,Antarctica
+-45,-90,-40,-85,Antarctica
+-40,-90,-35,-85,Antarctica
+-35,-90,-30,-85,Antarctica
+-30,-90,-25,-85,Antarctica
+-25,-90,-20,-85,Antarctica
+-20,-90,-15,-85,Antarctica
+-15,-90,-10,-85,Antarctica
+-10,-90,-5,-85,Antarctica
+-5,-90,0,-85,Antarctica
+0,-90,5,-85,Antarctica
+5,-90,10,-85,Antarctica
+10,-90,15,-85,Antarctica
+15,-90,20,-85,Antarctica
+20,-90,25,-85,Antarctica
+25,-90,30,-85,Antarctica
+30,-90,35,-85,Antarctica
+35,-90,40,-85,Antarctica
+40,-90,45,-85,Antarctica
+45,-90,50,-85,Antarctica
+50,-90,55,-85,Antarctica
+55,-90,60,-85,Antarctica
+60,-90,65,-85,Antarctica
+65,-90,70,-85,Antarctica
+70,-90,75,-85,Antarctica
+75,-90,80,-85,Antarctica
+80,-90,85,-85,Antarctica
+85,-90,90,-85,Antarctica
+90,-90,95,-85,Antarctica
+95,-90,100,-85,Antarctica
+100,-90,105,-85,Antarctica
+105,-90,110,-85,Antarctica
+110,-90,115,-85,Antarctica
+115,-90,120,-85,Antarctica
+120,-90,125,-85,Antarctica
+125,-90,130,-85,Antarctica
+130,-90,135,-85,Antarctica
+135,-90,140,-85,Antarctica
+140,-90,145,-85,Antarctica
+145,-90,150,-85,Antarctica
+150,-90,155,-85,Antarctica
+155,-90,160,-85,Antarctica
+160,-90,165,-85,Antarctica
+165,-90,170,-85,Antarctica
+170,-90,175,-85,Antarctica
+175,-90,180,-85,Antarctica
+-180,-85,-175,-80,Antarctica
+-175,-85,-170,-80,Antarctica
+-170,-85,-165,-80,Antarctica
+-165,-85,-160,-80,Antarctica
+-160,-85,-155,-80,Antarctica
+-155,-85,-150,-80,Antarctica
+-150,-85,-145,-80,Antarctica
+-145,-85,-140,-80,Antarctica
+-140,-85,-135,-80,Antarctica
+-135,-85,-130,-80,Antarctica
+-130,-85,-125,-80,Antarctica
+-125,-85,-120,-80,Antarctica
+-120,-85,-115,-80,Antarctica
+-115,-85,-110,-80,Antarctica
+-110,-85,-105,-80,Antarctica
+-105,-85,-100,-80,Antarctica
+-100,-85,-95,-80,Antarctica
+-95,-85,-90,-80,Antarctica
+-90,-85,-85,-80,Antarctica
+-85,-85,-80,-80,Antarctica
+-80,-85,-75,-80,Antarctica
+-75,-85,-70,-80,Antarctica
+-70,-85,-65,-80,Antarctica
+-65,-85,-60,-80,Antarctica
+-60,-85,-55,-80,Antarctica
+-55,-85,-50,-80,Antarctica
+-50,-85,-45,-80,Antarctica
+-45,-85,-40,-80,Antarctica
+-40,-85,-35,-80,Antarctica
+-35,-85,-30,-80,Antarctica
+-30,-85,-25,-80,Antarctica
+-25,-85,-20,-80,Antarctica
+-20,-85,-15,-80,Antarctica
+-15,-85,-10,-80,Antarctica
+-10,-85,-5,-80,Antarctica
+-5,-85,0,-80,Antarctica
+0,-85,5,-80,Antarctica
+5,-85,10,-80,Antarctica
+10,-85,15,-80,Antarctica
+15,-85,20,-80,Antarctica
+20,-85,25,-80,Antarctica
+25,-85,30,-80,Antarctica
+30,-85,35,-80,Antarctica
+35,-85,40,-80,Antarctica
+40,-85,45,-80,Antarctica
+45,-85,50,-80,Antarctica
+50,-85,55,-80,Antarctica
+55,-85,60,-80,Antarctica
+60,-85,65,-80,Antarctica
+65,-85,70,-80,Antarctica
+70,-85,75,-80,Antarctica
+75,-85,80,-80,Antarctica
+80,-85,85,-80,Antarctica
+85,-85,90,-80,Antarctica
+90,-85,95,-80,Antarctica
+95,-85,100,-80,Antarctica
+100,-85,105,-80,Antarctica
+105,-85,110,-80,Antarctica
+110,-85,115,-80,Antarctica
+115,-85,120,-80,Antarctica
+120,-85,125,-80,Antarctica
+125,-85,130,-80,Antarctica
+130,-85,135,-80,Antarctica
+135,-85,140,-80,Antarctica
+140,-85,145,-80,Antarctica
+145,-85,150,-80,Antarctica
+150,-85,155,-80,Antarctica
+155,-85,160,-80,Antarctica
+160,-85,165,-80,Antarctica
+165,-85,170,-80,Antarctica
+170,-85,175,-80,Antarctica
+175,-85,180,-80,Antarctica
+-180,-80,-175,-75,Antarctica
+-175,-80,-170,-75,Antarctica
+-170,-80,-165,-75,Antarctica
+-165,-80,-160,-75,Antarctica
+-160,-80,-155,-75,Antarctica
+-155,-80,-150,-75,Antarctica
+-150,-80,-145,-75,Antarctica
+-145,-80,-140,-75,Antarctica
+-140,-80,-135,-75,Antarctica
+-135,-80,-130,-75,Antarctica
+-130,-80,-125,-75,Antarctica
+-125,-80,-120,-75,Antarctica
+-120,-80,-115,-75,Antarctica
+-115,-80,-110,-75,Antarctica
+-110,-80,-105,-75,Antarctica
+-105,-80,-100,-75,Antarctica
+-100,-80,-95,-75,Antarctica
+-95,-80,-90,-75,Antarctica
+-90,-80,-85,-75,Antarctica
+-85,-80,-80,-75,Antarctica
+-80,-80,-75,-75,Antarctica
+-75,-80,-70,-75,Antarctica
+-70,-80,-65,-75,Antarctica
+-65,-80,-60,-75,Antarctica
+-60,-80,-55,-75,Antarctica
+-55,-80,-50,-75,Antarctica
+-50,-80,-45,-75,Antarctica
+-45,-80,-40,-75,Antarctica
+-40,-80,-35,-75,Antarctica
+-35,-80,-30,-75,Antarctica
+-30,-80,-25,-75,Antarctica
+-25,-80,-20,-75,Antarctica
+-20,-80,-15,-75,Antarctica
+-15,-80,-10,-75,Antarctica
+-10,-80,-5,-75,Antarctica
+-5,-80,0,-75,Antarctica
+0,-80,5,-75,Antarctica
+5,-80,10,-75,Antarctica
+10,-80,15,-75,Antarctica
+15,-80,20,-75,Antarctica
+20,-80,25,-75,Antarctica
+25,-80,30,-75,Antarctica
+30,-80,35,-75,Antarctica
+35,-80,40,-75,Antarctica
+40,-80,45,-75,Antarctica
+45,-80,50,-75,Antarctica
+50,-80,55,-75,Antarctica
+55,-80,60,-75,Antarctica
+60,-80,65,-75,Antarctica
+65,-80,70,-75,Antarctica
+70,-80,75,-75,Antarctica
+75,-80,80,-75,Antarctica
+80,-80,85,-75,Antarctica
+85,-80,90,-75,Antarctica
+90,-80,95,-75,Antarctica
+95,-80,100,-75,Antarctica
+100,-80,105,-75,Antarctica
+105,-80,110,-75,Antarctica
+110,-80,115,-75,Antarctica
+115,-80,120,-75,Antarctica
+120,-80,125,-75,Antarctica
+125,-80,130,-75,Antarctica
+130,-80,135,-75,Antarctica
+135,-80,140,-75,Antarctica
+140,-80,145,-75,Antarctica
+145,-80,150,-75,Antarctica
+150,-80,155,-75,Antarctica
+155,-80,160,-75,Antarctica
+160,-80,165,-75,Antarctica
+165,-80,170,-75,Antarctica
+170,-80,175,-75,Antarctica
+175,-80,180,-75,Antarctica
+-180,-75,-175,-70,Antarctica
+-175,-75,-170,-70,Antarctica
+-170,-75,-165,-70,Antarctica
+-165,-75,-160,-70,Antarctica
+-160,-75,-155,-70,Antarctica
+-155,-75,-150,-70,Antarctica
+-150,-75,-145,-70,Antarctica
+-145,-75,-140,-70,Antarctica
+-140,-75,-135,-70,Antarctica
+-135,-75,-130,-70,Antarctica
+-130,-75,-125,-70,Antarctica
+-125,-75,-120,-70,Antarctica
+-120,-75,-115,-70,Antarctica
+-115,-75,-110,-70,Antarctica
+-110,-75,-105,-70,Antarctica
+-105,-75,-100,-70,Antarctica
+-100,-75,-95,-70,Antarctica
+-95,-75,-90,-70,Antarctica
+-90,-75,-85,-70,Antarctica
+-85,-75,-80,-70,Antarctica
+-80,-75,-75,-70,Antarctica
+-75,-75,-70,-70,Antarctica
+-70,-75,-65,-70,Antarctica
+-65,-75,-60,-70,Antarctica
+-60,-75,-55,-70,Antarctica
+-55,-75,-50,-70,Antarctica
+-50,-75,-45,-70,Antarctica
+-45,-75,-40,-70,Antarctica
+-40,-75,-35,-70,Antarctica
+-35,-75,-30,-70,Antarctica
+-30,-75,-25,-70,Antarctica
+-25,-75,-20,-70,Antarctica
+-20,-75,-15,-70,Antarctica
+-15,-75,-10,-70,Antarctica
+-10,-75,-5,-70,Antarctica
+-5,-75,0,-70,Antarctica
+0,-75,5,-70,Antarctica
+5,-75,10,-70,Antarctica
+10,-75,15,-70,Antarctica
+15,-75,20,-70,Antarctica
+20,-75,25,-70,Antarctica
+25,-75,30,-70,Antarctica
+30,-75,35,-70,Antarctica
+35,-75,40,-70,Antarctica
+40,-75,45,-70,Antarctica
+45,-75,50,-70,Antarctica
+50,-75,55,-70,Antarctica
+55,-75,60,-70,Antarctica
+60,-75,65,-70,Antarctica
+65,-75,70,-70,Antarctica
+70,-75,75,-70,Antarctica
+75,-75,80,-70,Antarctica
+80,-75,85,-70,Antarctica
+85,-75,90,-70,Antarctica
+90,-75,95,-70,Antarctica
+95,-75,100,-70,Antarctica
+100,-75,105,-70,Antarctica
+105,-75,110,-70,Antarctica
+110,-75,115,-70,Antarctica
+115,-75,120,-70,Antarctica
+120,-75,125,-70,Antarctica
+125,-75,130,-70,Antarctica
+130,-75,135,-70,Antarctica
+135,-75,140,-70,Antarctica
+140,-75,145,-70,Antarctica
+145,-75,150,-70,Antarctica
+150,-75,155,-70,Antarctica
+155,-75,160,-70,Antarctica
+160,-75,165,-70,Antarctica
+165,-75,170,-70,Antarctica
+170,-75,175,-70,Antarctica
+175,-75,180,-70,Antarctica
+-180,-70,-175,-65,Antarctica
+-175,-70,-170,-65,Antarctica
+-170,-70,-165,-65,Antarctica
+-165,-70,-160,-65,Antarctica
+-160,-70,-155,-65,Antarctica
+-155,-70,-150,-65,Antarctica
+-150,-70,-145,-65,Antarctica
+-145,-70,-140,-65,Antarctica
+-140,-70,-135,-65,Antarctica
+-135,-70,-130,-65,Antarctica
+-130,-70,-125,-65,Antarctica
+-125,-70,-120,-65,Antarctica
+-120,-70,-115,-65,Antarctica
+-115,-70,-110,-65,Antarctica
+-110,-70,-105,-65,Antarctica
+-105,-70,-100,-65,Antarctica
+-100,-70,-95,-65,Antarctica
+-95,-70,-90,-65,Antarctica
+-90,-70,-85,-65,Antarctica
+-85,-70,-80,-65,Antarctica
+-80,-70,-75,-65,Antarctica
+-75,-70,-70,-65,Antarctica
+-70,-70,-65,-65,Antarctica
+-65,-70,-60,-65,Antarctica
+-60,-70,-55,-65,Antarctica
+-55,-70,-50,-65,Antarctica
+-50,-70,-45,-65,Antarctica
+-45,-70,-40,-65,Antarctica
+-40,-70,-35,-65,Antarctica
+-35,-70,-30,-65,Antarctica
+-30,-70,-25,-65,Antarctica
+-25,-70,-20,-65,Antarctica
+-20,-70,-15,-65,Antarctica
+-15,-70,-10,-65,Antarctica
+-10,-70,-5,-65,Antarctica
+-5,-70,0,-65,Antarctica
+0,-70,5,-65,Antarctica
+5,-70,10,-65,Antarctica
+10,-70,15,-65,Antarctica
+15,-70,20,-65,Antarctica
+20,-70,25,-65,Antarctica
+25,-70,30,-65,Antarctica
+30,-70,35,-65,Antarctica
+35,-70,40,-65,Antarctica
+40,-70,45,-65,Antarctica
+45,-70,50,-65,Antarctica
+50,-70,55,-65,Antarctica
+55,-70,60,-65,Antarctica
+60,-70,65,-65,Antarctica
+65,-70,70,-65,Antarctica
+70,-70,75,-65,Antarctica
+75,-70,80,-65,Antarctica
+80,-70,85,-65,Antarctica
+85,-70,90,-65,Antarctica
+90,-70,95,-65,Antarctica
+95,-70,100,-65,Antarctica
+100,-70,105,-65,Antarctica
+105,-70,110,-65,Antarctica
+110,-70,115,-65,Antarctica
+115,-70,120,-65,Antarctica
+120,-70,125,-65,Antarctica
+125,-70,130,-65,Antarctica
+130,-70,135,-65,Antarctica
+135,-70,140,-65,Antarctica
+140,-70,145,-65,Antarctica
+145,-70,150,-65,Antarctica
+150,-70,155,-65,Antarctica
+155,-70,160,-65,Antarctica
+160,-70,165,-65,Antarctica
+165,-70,170,-65,Antarctica
+170,-70,175,-65,Antarctica
+175,-70,180,-65,Antarctica
+-180,-65,-175,-60,Antarctica
+-175,-65,-170,-60,Antarctica
+-170,-65,-165,-60,Antarctica
+-165,-65,-160,-60,Antarctica
+-160,-65,-155,-60,Antarctica
+-155,-65,-150,-60,Antarctica
+-150,-65,-145,-60,Antarctica
+-145,-65,-140,-60,Antarctica
+-140,-65,-135,-60,Antarctica
+-135,-65,-130,-60,Antarctica
+-130,-65,-125,-60,Antarctica
+-125,-65,-120,-60,Antarctica
+-120,-65,-115,-60,Antarctica
+-115,-65,-110,-60,Antarctica
+-110,-65,-105,-60,Antarctica
+-105,-65,-100,-60,Antarctica
+-100,-65,-95,-60,Antarctica
+-95,-65,-90,-60,Antarctica
+-90,-65,-85,-60,Antarctica
+-85,-65,-80,-60,Antarctica
+-80,-65,-75,-60,Antarctica
+-75,-65,-70,-60,Antarctica
+-70,-65,-65,-60,Antarctica
+-65,-65,-60,-60,Antarctica
+-60,-65,-55,-60,Antarctica
+-55,-65,-50,-60,Antarctica
+-50,-65,-45,-60,Antarctica
+-45,-65,-40,-60,Antarctica
+-40,-65,-35,-60,Antarctica
+-35,-65,-30,-60,Antarctica
+-30,-65,-25,-60,Antarctica
+-25,-65,-20,-60,Antarctica
+-20,-65,-15,-60,Antarctica
+-15,-65,-10,-60,Antarctica
+-10,-65,-5,-60,Antarctica
+-5,-65,0,-60,Antarctica
+0,-65,5,-60,Antarctica
+5,-65,10,-60,Antarctica
+10,-65,15,-60,Antarctica
+15,-65,20,-60,Antarctica
+20,-65,25,-60,Antarctica
+25,-65,30,-60,Antarctica
+30,-65,35,-60,Antarctica
+35,-65,40,-60,Antarctica
+40,-65,45,-60,Antarctica
+45,-65,50,-60,Antarctica
+50,-65,55,-60,Antarctica
+55,-65,60,-60,Antarctica
+60,-65,65,-60,Antarctica
+65,-65,70,-60,Antarctica
+70,-65,75,-60,Antarctica
+75,-65,80,-60,Antarctica
+80,-65,85,-60,Antarctica
+85,-65,90,-60,Antarctica
+90,-65,95,-60,Antarctica
+95,-65,100,-60,Antarctica
+100,-65,105,-60,Antarctica
+105,-65,110,-60,Antarctica
+110,-65,115,-60,Antarctica
+115,-65,120,-60,Antarctica
+120,-65,125,-60,Antarctica
+125,-65,130,-60,Antarctica
+130,-65,135,-60,Antarctica
+135,-65,140,-60,Antarctica
+140,-65,145,-60,Antarctica
+145,-65,150,-60,Antarctica
+150,-65,155,-60,Antarctica
+155,-65,160,-60,Antarctica
+160,-65,165,-60,Antarctica
+165,-65,170,-60,Antarctica
+170,-65,175,-60,Antarctica
+175,-65,180,-60,Antarctica
+-180,-60,-175,-55,Pacific Ocean
+-175,-60,-170,-55,Pacific Ocean
+-170,-60,-165,-55,Pacific Ocean
+-165,-60,-160,-55,Pacific Ocean
+-160,-60,-155,-55,Pacific Ocean
+-155,-60,-150,-55,Pacific Ocean
+-150,-60,-145,-55,Pacific Ocean
+-145,-60,-140,-55,Pacific Ocean
+-140,-60,-135,-55,Pacific Ocean
+-135,-60,-130,-55,Pacific Ocean
+-130,-60,-125,-55,Pacific Ocean
+-125,-60,-120,-55,Pacific Ocean
+-120,-60,-115,-55,Pacific Ocean
+-115,-60,-110,-55,Pacific Ocean
+-110,-60,-105,-55,Pacific Ocean
+-105,-60,-100,-55,Pacific Ocean
+-100,-60,-95,-55,Pacific Ocean
+-95,-60,-90,-55,Pacific Ocean
+-90,-60,-85,-55,Atlantic Ocean
+-85,-60,-80,-55,South America
+-80,-60,-75,-55,South America
+-75,-60,-70,-55,South America
+-70,-60,-65,-55,South America
+-65,-60,-60,-55,South America
+-60,-60,-55,-55,South America
+-55,-60,-50,-55,South America
+-50,-60,-45,-55,South America
+-45,-60,-40,-55,South America
+-40,-60,-35,-55,South America
+-35,-60,-30,-55,South America
+-30,-60,-25,-55,Atlantic Ocean
+-25,-60,-20,-55,Atlantic Ocean
+-20,-60,-15,-55,Atlantic Ocean
+-15,-60,-10,-55,Atlantic Ocean
+-10,-60,-5,-55,Atlantic Ocean
+-5,-60,0,-55,Atlantic Ocean
+0,-60,5,-55,Atlantic Ocean
+5,-60,10,-55,Atlantic Ocean
+10,-60,15,-55,Atlantic Ocean
+15,-60,20,-55,Atlantic Ocean
+20,-60,25,-55,Atlantic Ocean
+25,-60,30,-55,Indian Ocean
+30,-60,35,-55,Indian Ocean
+35,-60,40,-55,Indian Ocean
+40,-60,45,-55,Indian Ocean
+45,-60,50,-55,Indian Ocean
+50,-60,55,-55,Indian Ocean
+55,-60,60,-55,Indian Ocean
+60,-60,65,-55,Indian Ocean
+65,-60,70,-55,Indian Ocean
+70,-60,75,-55,Indian Ocean
+75,-60,80,-55,Indian Ocean
+80,-60,85,-55,Pacific Ocean
+85,-60,90,-55,Pacific Ocean
+90,-60,95,-55,Pacific Ocean
+95,-60,100,-55,Pacific Ocean
+100,-60,105,-55,Pacific Ocean
+105,-60,110,-55,Pacific Ocean
+110,-60,115,-55,Pacific Ocean
+115,-60,120,-55,Pacific Ocean
+120,-60,125,-55,Pacific Ocean
+125,-60,130,-55,Pacific Ocean
+130,-60,135,-55,Pacific Ocean
+135,-60,140,-55,Pacific Ocean
+140,-60,145,-55,Pacific Ocean
+145,-60,150,-55,Pacific Ocean
+150,-60,155,-55,Pacific Ocean
+155,-60,160,-55,Pacific Ocean
+160,-60,165,-55,Pacific Ocean
+165,-60,170,-55,Pacific Ocean
+170,-60,175,-55,Pacific Ocean
+175,-60,180,-55,Pacific Ocean
+-180,-55,-175,-50,Pacific Ocean
+-175,-55,-170,-50,Pacific Ocean
+-170,-55,-165,-50,Pacific Ocean
+-165,-55,-160,-50,Pacific Ocean
+-160,-55,-155,-50,Pacific Ocean
+-155,-55,-150,-50,Pacific Ocean
+-150,-55,-145,-50,Pacific Ocean
+-145,-55,-140,-50,Pacific Ocean
+-140,-55,-135,-50,Pacific Ocean
+-135,-55,-130,-50,Pacific Ocean
+-130,-55,-125,-50,Pacific Ocean
+-125,-55,-120,-50,Pacific Ocean
+-120,-55,-115,-50,Pacific Ocean
+-115,-55,-110,-50,Pacific Ocean
+-110,-55,-105,-50,Pacific Ocean
+-105,-55,-100,-50,Pacific Ocean
+-100,-55,-95,-50,Pacific Ocean
+-95,-55,-90,-50,Pacific Ocean
+-90,-55,-85,-50,Atlantic Ocean
+-85,-55,-80,-50,South America
+-80,-55,-75,-50,South America
+-75,-55,-70,-50,South America
+-70,-55,-65,-50,South America
+-65,-55,-60,-50,South America
+-60,-55,-55,-50,South America
+-55,-55,-50,-50,South America
+-50,-55,-45,-50,South America
+-45,-55,-40,-50,South America
+-40,-55,-35,-50,South America
+-35,-55,-30,-50,South America
+-30,-55,-25,-50,Atlantic Ocean
+-25,-55,-20,-50,Atlantic Ocean
+-20,-55,-15,-50,Atlantic Ocean
+-15,-55,-10,-50,Atlantic Ocean
+-10,-55,-5,-50,Atlantic Ocean
+-5,-55,0,-50,Atlantic Ocean
+0,-55,5,-50,Atlantic Ocean
+5,-55,10,-50,Atlantic Ocean
+10,-55,15,-50,Atlantic Ocean
+15,-55,20,-50,Atlantic Ocean
+20,-55,25,-50,Atlantic Ocean
+25,-55,30,-50,Indian Ocean
+30,-55,35,-50,Indian Ocean
+35,-55,40,-50,Indian Ocean
+40,-55,45,-50,Indian Ocean
+45,-55,50,-50,Indian Ocean
+50,-55,55,-50,Indian Ocean
+55,-55,60,-50,Indian Ocean
+60,-55,65,-50,Indian Ocean
+65,-55,70,-50,Indian Ocean
+70,-55,75,-50,Indian Ocean
+75,-55,80,-50,Indian Ocean
+80,-55,85,-50,Pacific Ocean
+85,-55,90,-50,Pacific Ocean
+90,-55,95,-50,Pacific Ocean
+95,-55,100,-50,Pacific Ocean
+100,-55,105,-50,Pacific Ocean
+105,-55,110,-50,Pacific Ocean
+110,-55,115,-50,Pacific Ocean
+115,-55,120,-50,Pacific Ocean
+120,-55,125,-50,Pacific Ocean
+125,-55,130,-50,Pacific Ocean
+130,-55,135,-50,Pacific Ocean
+135,-55,140,-50,Pacific Ocean
+140,-55,145,-50,Pacific Ocean
+145,-55,150,-50,Pacific Ocean
+150,-55,155,-50,Pacific Ocean
+155,-55,160,-50,Pacific Ocean
+160,-55,165,-50,Pacific Ocean
+165,-55,170,-50,Pacific Ocean
+170,-55,175,-50,Pacific Ocean
+175,-55,180,-50,Pacific Ocean
+-180,-50,-175,-45,Pacific Ocean
+-175,-50,-170,-45,Pacific Ocean
+-170,-50,-165,-45,Pacific Ocean
+-165,-50,-160,-45,Pacific Ocean
+-160,-50,-155,-45,Pacific Ocean
+-155,-50,-150,-45,Pacific Ocean
+-150,-50,-145,-45,Pacific Ocean
+-145,-50,-140,-45,Pacific Ocean
+-140,-50,-135,-45,Pacific Ocean
+-135,-50,-130,-45,Pacific Ocean
+-130,-50,-125,-45,Pacific Ocean
+-125,-50,-120,-45,Pacific Ocean
+-120,-50,-115,-45,Pacific Ocean
+-115,-50,-110,-45,Pacific Ocean
+-110,-50,-105,-45,Pacific Ocean
+-105,-50,-100,-45,Pacific Ocean
+-100,-50,-95,-45,Pacific Ocean
+-95,-50,-90,-45,Pacific Ocean
+-90,-50,-85,-45,Atlantic Ocean
+-85,-50,-80,-45,South America
+-80,-50,-75,-45,South America
+-75,-50,-70,-45,South America
+-70,-50,-65,-45,South America
+-65,-50,-60,-45,South America
+-60,-50,-55,-45,South America
+-55,-50,-50,-45,South America
+-50,-50,-45,-45,South America
+-45,-50,-40,-45,South America
+-40,-50,-35,-45,South America
+-35,-50,-30,-45,South America
+-30,-50,-25,-45,Atlantic Ocean
+-25,-50,-20,-45,Atlantic Ocean
+-20,-50,-15,-45,Atlantic Ocean
+-15,-50,-10,-45,Atlantic Ocean
+-10,-50,-5,-45,Atlantic Ocean
+-5,-50,0,-45,Atlantic Ocean
+0,-50,5,-45,Atlantic Ocean
+5,-50,10,-45,Atlantic Ocean
+10,-50,15,-45,Atlantic Ocean
+15,-50,20,-45,Atlantic Ocean
+20,-50,25,-45,Atlantic Ocean
+25,-50,30,-45,Indian Ocean
+30,-50,35,-45,Indian Ocean
+35,-50,40,-45,Indian Ocean
+40,-50,45,-45,Indian Ocean
+45,-50,50,-45,Indian Ocean
+50,-50,55,-45,Indian Ocean
+55,-50,60,-45,Indian Ocean
+60,-50,65,-45,Indian Ocean
+65,-50,70,-45,Indian Ocean
+70,-50,75,-45,Indian Ocean
+75,-50,80,-45,Indian Ocean
+80,-50,85,-45,Pacific Ocean
+85,-50,90,-45,Pacific Ocean
+90,-50,95,-45,Pacific Ocean
+95,-50,100,-45,Pacific Ocean
+100,-50,105,-45,Pacific Ocean
+105,-50,110,-45,Pacific Ocean
+110,-50,115,-45,Pacific Ocean
+115,-50,120,-45,Pacific Ocean
+120,-50,125,-45,Pacific Ocean
+125,-50,130,-45,Pacific Ocean
+130,-50,135,-45,Pacific Ocean
+135,-50,140,-45,Pacific Ocean
+140,-50,145,-45,Pacific Ocean
+145,-50,150,-45,Pacific Ocean
+150,-50,155,-45,Pacific Ocean
+155,-50,160,-45,Pacific Ocean
+160,-50,165,-45,New Zealand & Pacific
+165,-50,170,-45,New Zealand & Pacific
+170,-50,175,-45,New Zealand & Pacific
+175,-50,180,-45,New Zealand & Pacific
+-180,-45,-175,-40,Pacific Ocean
+-175,-45,-170,-40,Pacific Ocean
+-170,-45,-165,-40,Pacific Ocean
+-165,-45,-160,-40,Pacific Ocean
+-160,-45,-155,-40,Pacific Ocean
+-155,-45,-150,-40,Pacific Ocean
+-150,-45,-145,-40,Pacific Ocean
+-145,-45,-140,-40,Pacific Ocean
+-140,-45,-135,-40,Pacific Ocean
+-135,-45,-130,-40,Pacific Ocean
+-130,-45,-125,-40,Pacific Ocean
+-125,-45,-120,-40,Pacific Ocean
+-120,-45,-115,-40,Pacific Ocean
+-115,-45,-110,-40,Pacific Ocean
+-110,-45,-105,-40,Pacific Ocean
+-105,-45,-100,-40,Pacific Ocean
+-100,-45,-95,-40,Pacific Ocean
+-95,-45,-90,-40,Pacific Ocean
+-90,-45,-85,-40,Atlantic Ocean
+-85,-45,-80,-40,South America
+-80,-45,-75,-40,South America
+-75,-45,-70,-40,South America
+-70,-45,-65,-40,South America
+-65,-45,-60,-40,South America
+-60,-45,-55,-40,South America
+-55,-45,-50,-40,South America
+-50,-45,-45,-40,South America
+-45,-45,-40,-40,South America
+-40,-45,-35,-40,South America
+-35,-45,-30,-40,South America
+-30,-45,-25,-40,Atlantic Ocean
+-25,-45,-20,-40,Atlantic Ocean
+-20,-45,-15,-40,Atlantic Ocean
+-15,-45,-10,-40,Atlantic Ocean
+-10,-45,-5,-40,Atlantic Ocean
+-5,-45,0,-40,Atlantic Ocean
+0,-45,5,-40,Atlantic Ocean
+5,-45,10,-40,Atlantic Ocean
+10,-45,15,-40,Atlantic Ocean
+15,-45,20,-40,Atlantic Ocean
+20,-45,25,-40,Atlantic Ocean
+25,-45,30,-40,Indian Ocean
+30,-45,35,-40,Indian Ocean
+35,-45,40,-40,Indian Ocean
+40,-45,45,-40,Indian Ocean
+45,-45,50,-40,Indian Ocean
+50,-45,55,-40,Indian Ocean
+55,-45,60,-40,Indian Ocean
+60,-45,65,-40,Indian Ocean
+65,-45,70,-40,Indian Ocean
+70,-45,75,-40,Indian Ocean
+75,-45,80,-40,Indian Ocean
+80,-45,85,-40,Pacific Ocean
+85,-45,90,-40,Pacific Ocean
+90,-45,95,-40,Pacific Ocean
+95,-45,100,-40,Pacific Ocean
+100,-45,105,-40,Pacific Ocean
+105,-45,110,-40,Pacific Ocean
+110,-45,115,-40,Australia
+115,-45,120,-40,Australia
+120,-45,125,-40,Australia
+125,-45,130,-40,Australia
+130,-45,135,-40,Australia
+135,-45,140,-40,Australia
+140,-45,145,-40,Australia
+145,-45,150,-40,Australia
+150,-45,155,-40,Australia
+155,-45,160,-40,Pacific Ocean
+160,-45,165,-40,New Zealand & Pacific
+165,-45,170,-40,New Zealand & Pacific
+170,-45,175,-40,New Zealand & Pacific
+175,-45,180,-40,New Zealand & Pacific
+-180,-40,-175,-35,Pacific Ocean
+-175,-40,-170,-35,Pacific Ocean
+-170,-40,-165,-35,Pacific Ocean
+-165,-40,-160,-35,Pacific Ocean
+-160,-40,-155,-35,Pacific Ocean
+-155,-40,-150,-35,Pacific Ocean
+-150,-40,-145,-35,Pacific Ocean
+-145,-40,-140,-35,Pacific Ocean
+-140,-40,-135,-35,Pacific Ocean
+-135,-40,-130,-35,Pacific Ocean
+-130,-40,-125,-35,Pacific Ocean
+-125,-40,-120,-35,Pacific Ocean
+-120,-40,-115,-35,Pacific Ocean
+-115,-40,-110,-35,Pacific Ocean
+-110,-40,-105,-35,Pacific Ocean
+-105,-40,-100,-35,Pacific Ocean
+-100,-40,-95,-35,Pacific Ocean
+-95,-40,-90,-35,Pacific Ocean
+-90,-40,-85,-35,Atlantic Ocean
+-85,-40,-80,-35,South America
+-80,-40,-75,-35,South America
+-75,-40,-70,-35,South America
+-70,-40,-65,-35,South America
+-65,-40,-60,-35,South America
+-60,-40,-55,-35,South America
+-55,-40,-50,-35,South America
+-50,-40,-45,-35,South America
+-45,-40,-40,-35,South America
+-40,-40,-35,-35,South America
+-35,-40,-30,-35,South America
+-30,-40,-25,-35,Atlantic Ocean
+-25,-40,-20,-35,Atlantic Ocean
+-20,-40,-15,-35,Africa
+-15,-40,-10,-35,Africa
+-10,-40,-5,-35,Africa
+-5,-40,0,-35,Africa
+0,-40,5,-35,Africa
+5,-40,10,-35,Africa
+10,-40,15,-35,Africa
+15,-40,20,-35,Africa
+20,-40,25,-35,Africa
+25,-40,30,-35,Africa
+30,-40,35,-35,Africa
+35,-40,40,-35,Africa
+40,-40,45,-35,Africa
+45,-40,50,-35,Africa
+50,-40,55,-35,Africa
+55,-40,60,-35,Indian Ocean
+60,-40,65,-35,Indian Ocean
+65,-40,70,-35,Indian Ocean
+70,-40,75,-35,Indian Ocean
+75,-40,80,-35,Indian Ocean
+80,-40,85,-35,Pacific Ocean
+85,-40,90,-35,Pacific Ocean
+90,-40,95,-35,Pacific Ocean
+95,-40,100,-35,Pacific Ocean
+100,-40,105,-35,Pacific Ocean
+105,-40,110,-35,Pacific Ocean
+110,-40,115,-35,Australia
+115,-40,120,-35,Australia
+120,-40,125,-35,Australia
+125,-40,130,-35,Australia
+130,-40,135,-35,Australia
+135,-40,140,-35,Australia
+140,-40,145,-35,Australia
+145,-40,150,-35,Australia
+150,-40,155,-35,Australia
+155,-40,160,-35,Pacific Ocean
+160,-40,165,-35,New Zealand & Pacific
+165,-40,170,-35,New Zealand & Pacific
+170,-40,175,-35,New Zealand & Pacific
+175,-40,180,-35,New Zealand & Pacific
+-180,-35,-175,-30,Pacific Ocean
+-175,-35,-170,-30,Pacific Ocean
+-170,-35,-165,-30,Pacific Ocean
+-165,-35,-160,-30,Pacific Ocean
+-160,-35,-155,-30,Pacific Ocean
+-155,-35,-150,-30,Pacific Ocean
+-150,-35,-145,-30,Pacific Ocean
+-145,-35,-140,-30,Pacific Ocean
+-140,-35,-135,-30,Pacific Ocean
+-135,-35,-130,-30,Pacific Ocean
+-130,-35,-125,-30,Pacific Ocean
+-125,-35,-120,-30,Pacific Ocean
+-120,-35,-115,-30,Pacific Ocean
+-115,-35,-110,-30,Pacific Ocean
+-110,-35,-105,-30,Pacific Ocean
+-105,-35,-100,-30,Pacific Ocean
+-100,-35,-95,-30,Pacific Ocean
+-95,-35,-90,-30,Pacific Ocean
+-90,-35,-85,-30,Atlantic Ocean
+-85,-35,-80,-30,South America
+-80,-35,-75,-30,South America
+-75,-35,-70,-30,South America
+-70,-35,-65,-30,South America
+-65,-35,-60,-30,South America
+-60,-35,-55,-30,South America
+-55,-35,-50,-30,South America
+-50,-35,-45,-30,South America
+-45,-35,-40,-30,South America
+-40,-35,-35,-30,South America
+-35,-35,-30,-30,South America
+-30,-35,-25,-30,Atlantic Ocean
+-25,-35,-20,-30,Atlantic Ocean
+-20,-35,-15,-30,Africa
+-15,-35,-10,-30,Africa
+-10,-35,-5,-30,Africa
+-5,-35,0,-30,Africa
+0,-35,5,-30,Africa
+5,-35,10,-30,Africa
+10,-35,15,-30,Africa
+15,-35,20,-30,Africa
+20,-35,25,-30,Africa
+25,-35,30,-30,Africa
+30,-35,35,-30,Africa
+35,-35,40,-30,Africa
+40,-35,45,-30,Africa
+45,-35,50,-30,Africa
+50,-35,55,-30,Africa
+55,-35,60,-30,Indian Ocean
+60,-35,65,-30,Indian Ocean
+65,-35,70,-30,Indian Ocean
+70,-35,75,-30,Indian Ocean
+75,-35,80,-30,Indian Ocean
+80,-35,85,-30,Pacific Ocean
+85,-35,90,-30,Pacific Ocean
+90,-35,95,-30,Pacific Ocean
+95,-35,100,-30,Pacific Ocean
+100,-35,105,-30,Pacific Ocean
+105,-35,110,-30,Pacific Ocean
+110,-35,115,-30,Australia
+115,-35,120,-30,Australia
+120,-35,125,-30,Australia
+125,-35,130,-30,Australia
+130,-35,135,-30,Australia
+135,-35,140,-30,Australia
+140,-35,145,-30,Australia
+145,-35,150,-30,Australia
+150,-35,155,-30,Australia
+155,-35,160,-30,Pacific Ocean
+160,-35,165,-30,New Zealand & Pacific
+165,-35,170,-30,New Zealand & Pacific
+170,-35,175,-30,New Zealand & Pacific
+175,-35,180,-30,New Zealand & Pacific
+-180,-30,-175,-25,Pacific Ocean
+-175,-30,-170,-25,Pacific Ocean
+-170,-30,-165,-25,Pacific Ocean
+-165,-30,-160,-25,Pacific Ocean
+-160,-30,-155,-25,Pacific Ocean
+-155,-30,-150,-25,Pacific Ocean
+-150,-30,-145,-25,Pacific Ocean
+-145,-30,-140,-25,Pacific Ocean
+-140,-30,-135,-25,Pacific Ocean
+-135,-30,-130,-25,Pacific Ocean
+-130,-30,-125,-25,Pacific Ocean
+-125,-30,-120,-25,Pacific Ocean
+-120,-30,-115,-25,Pacific Ocean
+-115,-30,-110,-25,Pacific Ocean
+-110,-30,-105,-25,Pacific Ocean
+-105,-30,-100,-25,Pacific Ocean
+-100,-30,-95,-25,Pacific Ocean
+-95,-30,-90,-25,Pacific Ocean
+-90,-30,-85,-25,Atlantic Ocean
+-85,-30,-80,-25,South America
+-80,-30,-75,-25,South America
+-75,-30,-70,-25,South America
+-70,-30,-65,-25,South America
+-65,-30,-60,-25,South America
+-60,-30,-55,-25,South America
+-55,-30,-50,-25,South America
+-50,-30,-45,-25,South America
+-45,-30,-40,-25,South America
+-40,-30,-35,-25,South America
+-35,-30,-30,-25,South America
+-30,-30,-25,-25,Atlantic Ocean
+-25,-30,-20,-25,Atlantic Ocean
+-20,-30,-15,-25,Africa
+-15,-30,-10,-25,Africa
+-10,-30,-5,-25,Africa
+-5,-30,0,-25,Africa
+0,-30,5,-25,Africa
+5,-30,10,-25,Africa
+10,-30,15,-25,Africa
+15,-30,20,-25,Africa
+20,-30,25,-25,Africa
+25,-30,30,-25,Africa
+30,-30,35,-25,Africa
+35,-30,40,-25,Africa
+40,-30,45,-25,Africa
+45,-30,50,-25,Africa
+50,-30,55,-25,Africa
+55,-30,60,-25,Indian Ocean
+60,-30,65,-25,Indian Ocean
+65,-30,70,-25,Indian Ocean
+70,-30,75,-25,Indian Ocean
+75,-30,80,-25,Indian Ocean
+80,-30,85,-25,Pacific Ocean
+85,-30,90,-25,Pacific Ocean
+90,-30,95,-25,Pacific Ocean
+95,-30,100,-25,Pacific Ocean
+100,-30,105,-25,Pacific Ocean
+105,-30,110,-25,Pacific Ocean
+110,-30,115,-25,Australia
+115,-30,120,-25,Australia
+120,-30,125,-25,Australia
+125,-30,130,-25,Australia
+130,-30,135,-25,Australia
+135,-30,140,-25,Australia
+140,-30,145,-25,Australia
+145,-30,150,-25,Australia
+150,-30,155,-25,Australia
+155,-30,160,-25,New Zealand & Pacific
+160,-30,165,-25,New Zealand & Pacific
+165,-30,170,-25,New Zealand & Pacific
+170,-30,175,-25,New Zealand & Pacific
+175,-30,180,-25,New Zealand & Pacific
+-180,-25,-175,-20,Pacific Ocean
+-175,-25,-170,-20,Pacific Ocean
+-170,-25,-165,-20,Pacific Ocean
+-165,-25,-160,-20,Pacific Ocean
+-160,-25,-155,-20,Pacific Ocean
+-155,-25,-150,-20,Pacific Ocean
+-150,-25,-145,-20,Pacific Ocean
+-145,-25,-140,-20,Pacific Ocean
+-140,-25,-135,-20,Pacific Ocean
+-135,-25,-130,-20,Pacific Ocean
+-130,-25,-125,-20,Pacific Ocean
+-125,-25,-120,-20,Pacific Ocean
+-120,-25,-115,-20,Pacific Ocean
+-115,-25,-110,-20,Pacific Ocean
+-110,-25,-105,-20,Pacific Ocean
+-105,-25,-100,-20,Pacific Ocean
+-100,-25,-95,-20,Pacific Ocean
+-95,-25,-90,-20,Pacific Ocean
+-90,-25,-85,-20,Atlantic Ocean
+-85,-25,-80,-20,South America
+-80,-25,-75,-20,South America
+-75,-25,-70,-20,South America
+-70,-25,-65,-20,South America
+-65,-25,-60,-20,South America
+-60,-25,-55,-20,South America
+-55,-25,-50,-20,South America
+-50,-25,-45,-20,South America
+-45,-25,-40,-20,South America
+-40,-25,-35,-20,South America
+-35,-25,-30,-20,South America
+-30,-25,-25,-20,Atlantic Ocean
+-25,-25,-20,-20,Atlantic Ocean
+-20,-25,-15,-20,Africa
+-15,-25,-10,-20,Africa
+-10,-25,-5,-20,Africa
+-5,-25,0,-20,Africa
+0,-25,5,-20,Africa
+5,-25,10,-20,Africa
+10,-25,15,-20,Africa
+15,-25,20,-20,Africa
+20,-25,25,-20,Africa
+25,-25,30,-20,Africa
+30,-25,35,-20,Africa
+35,-25,40,-20,Africa
+40,-25,45,-20,Africa
+45,-25,50,-20,Africa
+50,-25,55,-20,Africa
+55,-25,60,-20,Indian Ocean
+60,-25,65,-20,Indian Ocean
+65,-25,70,-20,Indian Ocean
+70,-25,75,-20,Indian Ocean
+75,-25,80,-20,Indian Ocean
+80,-25,85,-20,Pacific Ocean
+85,-25,90,-20,Pacific Ocean
+90,-25,95,-20,Pacific Ocean
+95,-25,100,-20,Pacific Ocean
+100,-25,105,-20,Pacific Ocean
+105,-25,110,-20,Pacific Ocean
+110,-25,115,-20,Australia
+115,-25,120,-20,Australia
+120,-25,125,-20,Australia
+125,-25,130,-20,Australia
+130,-25,135,-20,Australia
+135,-25,140,-20,Australia
+140,-25,145,-20,Australia
+145,-25,150,-20,Australia
+150,-25,155,-20,Australia
+155,-25,160,-20,New Zealand & Pacific
+160,-25,165,-20,New Zealand & Pacific
+165,-25,170,-20,New Zealand & Pacific
+170,-25,175,-20,New Zealand & Pacific
+175,-25,180,-20,New Zealand & Pacific
+-180,-20,-175,-15,Pacific Ocean
+-175,-20,-170,-15,Pacific Ocean
+-170,-20,-165,-15,Pacific Ocean
+-165,-20,-160,-15,Pacific Ocean
+-160,-20,-155,-15,Pacific Ocean
+-155,-20,-150,-15,Pacific Ocean
+-150,-20,-145,-15,Pacific Ocean
+-145,-20,-140,-15,Pacific Ocean
+-140,-20,-135,-15,Pacific Ocean
+-135,-20,-130,-15,Pacific Ocean
+-130,-20,-125,-15,Pacific Ocean
+-125,-20,-120,-15,Pacific Ocean
+-120,-20,-115,-15,Pacific Ocean
+-115,-20,-110,-15,Pacific Ocean
+-110,-20,-105,-15,Pacific Ocean
+-105,-20,-100,-15,Pacific Ocean
+-100,-20,-95,-15,Pacific Ocean
+-95,-20,-90,-15,Pacific Ocean
+-90,-20,-85,-15,Atlantic Ocean
+-85,-20,-80,-15,South America
+-80,-20,-75,-15,South America
+-75,-20,-70,-15,South America
+-70,-20,-65,-15,South America
+-65,-20,-60,-15,South America
+-60,-20,-55,-15,South America
+-55,-20,-50,-15,South America
+-50,-20,-45,-15,South America
+-45,-20,-40,-15,South America
+-40,-20,-35,-15,South America
+-35,-20,-30,-15,South America
+-30,-20,-25,-15,Atlantic Ocean
+-25,-20,-20,-15,Atlantic Ocean
+-20,-20,-15,-15,Africa
+-15,-20,-10,-15,Africa
+-10,-20,-5,-15,Africa
+-5,-20,0,-15,Africa
+0,-20,5,-15,Africa
+5,-20,10,-15,Africa
+10,-20,15,-15,Africa
+15,-20,20,-15,Africa
+20,-20,25,-15,Africa
+25,-20,30,-15,Africa
+30,-20,35,-15,Africa
+35,-20,40,-15,Africa
+40,-20,45,-15,Africa
+45,-20,50,-15,Africa
+50,-20,55,-15,Africa
+55,-20,60,-15,Indian Ocean
+60,-20,65,-15,Indian Ocean
+65,-20,70,-15,Indian Ocean
+70,-20,75,-15,Indian Ocean
+75,-20,80,-15,Indian Ocean
+80,-20,85,-15,Pacific Ocean
+85,-20,90,-15,Pacific Ocean
+90,-20,95,-15,Pacific Ocean
+95,-20,100,-15,Pacific Ocean
+100,-20,105,-15,Pacific Ocean
+105,-20,110,-15,Pacific Ocean
+110,-20,115,-15,Australia
+115,-20,120,-15,Australia
+120,-20,125,-15,Australia
+125,-20,130,-15,Australia
+130,-20,135,-15,Australia
+135,-20,140,-15,Australia
+140,-20,145,-15,Australia
+145,-20,150,-15,Australia
+150,-20,155,-15,Australia
+155,-20,160,-15,New Zealand & Pacific
+160,-20,165,-15,New Zealand & Pacific
+165,-20,170,-15,New Zealand & Pacific
+170,-20,175,-15,New Zealand & Pacific
+175,-20,180,-15,New Zealand & Pacific
+-180,-15,-175,-10,Pacific Ocean
+-175,-15,-170,-10,Pacific Ocean
+-170,-15,-165,-10,Pacific Ocean
+-165,-15,-160,-10,Pacific Ocean
+-160,-15,-155,-10,Pacific Ocean
+-155,-15,-150,-10,Pacific Ocean
+-150,-15,-145,-10,Pacific Ocean
+-145,-15,-140,-10,Pacific Ocean
+-140,-15,-135,-10,Pacific Ocean
+-135,-15,-130,-10,Pacific Ocean
+-130,-15,-125,-10,Pacific Ocean
+-125,-15,-120,-10,Pacific Ocean
+-120,-15,-115,-10,Pacific Ocean
+-115,-15,-110,-10,Pacific Ocean
+-110,-15,-105,-10,Pacific Ocean
+-105,-15,-100,-10,Pacific Ocean
+-100,-15,-95,-10,Pacific Ocean
+-95,-15,-90,-10,Pacific Ocean
+-90,-15,-85,-10,Atlantic Ocean
+-85,-15,-80,-10,South America
+-80,-15,-75,-10,South America
+-75,-15,-70,-10,South America
+-70,-15,-65,-10,South America
+-65,-15,-60,-10,South America
+-60,-15,-55,-10,South America
+-55,-15,-50,-10,South America
+-50,-15,-45,-10,South America
+-45,-15,-40,-10,South America
+-40,-15,-35,-10,South America
+-35,-15,-30,-10,South America
+-30,-15,-25,-10,Atlantic Ocean
+-25,-15,-20,-10,Atlantic Ocean
+-20,-15,-15,-10,Africa
+-15,-15,-10,-10,Africa
+-10,-15,-5,-10,Africa
+-5,-15,0,-10,Africa
+0,-15,5,-10,Africa
+5,-15,10,-10,Africa
+10,-15,15,-10,Africa
+15,-15,20,-10,Africa
+20,-15,25,-10,Africa
+25,-15,30,-10,Africa
+30,-15,35,-10,Africa
+35,-15,40,-10,Africa
+40,-15,45,-10,Africa
+45,-15,50,-10,Africa
+50,-15,55,-10,Africa
+55,-15,60,-10,Indian Ocean
+60,-15,65,-10,Indian Ocean
+65,-15,70,-10,Indian Ocean
+70,-15,75,-10,Indian Ocean
+75,-15,80,-10,Indian Ocean
+80,-15,85,-10,Pacific Ocean
+85,-15,90,-10,Pacific Ocean
+90,-15,95,-10,Pacific Ocean
+95,-15,100,-10,Pacific Ocean
+100,-15,105,-10,Pacific Ocean
+105,-15,110,-10,Pacific Ocean
+110,-15,115,-10,Australia
+115,-15,120,-10,Southeast Asia
+120,-15,125,-10,Southeast Asia
+125,-15,130,-10,Australia
+130,-15,135,-10,Australia
+135,-15,140,-10,Australia
+140,-15,145,-10,Australia
+145,-15,150,-10,Australia
+150,-15,155,-10,Australia
+155,-15,160,-10,New Zealand & Pacific
+160,-15,165,-10,New Zealand & Pacific
+165,-15,170,-10,New Zealand & Pacific
+170,-15,175,-10,New Zealand & Pacific
+175,-15,180,-10,New Zealand & Pacific
+-180,-10,-175,-5,Pacific Ocean
+-175,-10,-170,-5,Pacific Ocean
+-170,-10,-165,-5,Pacific Ocean
+-165,-10,-160,-5,Pacific Ocean
+-160,-10,-155,-5,Pacific Ocean
+-155,-10,-150,-5,Pacific Ocean
+-150,-10,-145,-5,Pacific Ocean
+-145,-10,-140,-5,Pacific Ocean
+-140,-10,-135,-5,Pacific Ocean
+-135,-10,-130,-5,Pacific Ocean
+-130,-10,-125,-5,Pacific Ocean
+-125,-10,-120,-5,Pacific Ocean
+-120,-10,-115,-5,Pacific Ocean
+-115,-10,-110,-5,Pacific Ocean
+-110,-10,-105,-5,Pacific Ocean
+-105,-10,-100,-5,Pacific Ocean
+-100,-10,-95,-5,Pacific Ocean
+-95,-10,-90,-5,Pacific Ocean
+-90,-10,-85,-5,Atlantic Ocean
+-85,-10,-80,-5,South America
+-80,-10,-75,-5,South America
+-75,-10,-70,-5,South America
+-70,-10,-65,-5,South America
+-65,-10,-60,-5,South America
+-60,-10,-55,-5,South America
+-55,-10,-50,-5,South America
+-50,-10,-45,-5,South America
+-45,-10,-40,-5,South America
+-40,-10,-35,-5,South America
+-35,-10,-30,-5,South America
+-30,-10,-25,-5,Atlantic Ocean
+-25,-10,-20,-5,Atlantic Ocean
+-20,-10,-15,-5,Africa
+-15,-10,-10,-5,Africa
+-10,-10,-5,-5,Africa
+-5,-10,0,-5,Africa
+0,-10,5,-5,Africa
+5,-10,10,-5,Africa
+10,-10,15,-5,Africa
+15,-10,20,-5,Africa
+20,-10,25,-5,Africa
+25,-10,30,-5,Africa
+30,-10,35,-5,Africa
+35,-10,40,-5,Africa
+40,-10,45,-5,Africa
+45,-10,50,-5,Africa
+50,-10,55,-5,Africa
+55,-10,60,-5,Indian Ocean
+60,-10,65,-5,Indian Ocean
+65,-10,70,-5,Indian Ocean
+70,-10,75,-5,Indian Ocean
+75,-10,80,-5,Indian Ocean
+80,-10,85,-5,Pacific Ocean
+85,-10,90,-5,Pacific Ocean
+90,-10,95,-5,Southeast Asia
+95,-10,100,-5,Southeast Asia
+100,-10,105,-5,Southeast Asia
+105,-10,110,-5,Southeast Asia
+110,-10,115,-5,Southeast Asia
+115,-10,120,-5,Southeast Asia
+120,-10,125,-5,Southeast Asia
+125,-10,130,-5,Southeast Asia
+130,-10,135,-5,Southeast Asia
+135,-10,140,-5,Southeast Asia
+140,-10,145,-5,New Zealand & Pacific
+145,-10,150,-5,New Zealand & Pacific
+150,-10,155,-5,New Zealand & Pacific
+155,-10,160,-5,New Zealand & Pacific
+160,-10,165,-5,New Zealand & Pacific
+165,-10,170,-5,New Zealand & Pacific
+170,-10,175,-5,New Zealand & Pacific
+175,-10,180,-5,New Zealand & Pacific
+-180,-5,-175,0,Pacific Ocean
+-175,-5,-170,0,Pacific Ocean
+-170,-5,-165,0,Pacific Ocean
+-165,-5,-160,0,Pacific Ocean
+-160,-5,-155,0,Pacific Ocean
+-155,-5,-150,0,Pacific Ocean
+-150,-5,-145,0,Pacific Ocean
+-145,-5,-140,0,Pacific Ocean
+-140,-5,-135,0,Pacific Ocean
+-135,-5,-130,0,Pacific Ocean
+-130,-5,-125,0,Pacific Ocean
+-125,-5,-120,0,Pacific Ocean
+-120,-5,-115,0,Pacific Ocean
+-115,-5,-110,0,Pacific Ocean
+-110,-5,-105,0,Pacific Ocean
+-105,-5,-100,0,Pacific Ocean
+-100,-5,-95,0,Pacific Ocean
+-95,-5,-90,0,Pacific Ocean
+-90,-5,-85,0,Atlantic Ocean
+-85,-5,-80,0,South America
+-80,-5,-75,0,South America
+-75,-5,-70,0,South America
+-70,-5,-65,0,South America
+-65,-5,-60,0,South America
+-60,-5,-55,0,South America
+-55,-5,-50,0,South America
+-50,-5,-45,0,South America
+-45,-5,-40,0,South America
+-40,-5,-35,0,South America
+-35,-5,-30,0,South America
+-30,-5,-25,0,Atlantic Ocean
+-25,-5,-20,0,Atlantic Ocean
+-20,-5,-15,0,Africa
+-15,-5,-10,0,Africa
+-10,-5,-5,0,Africa
+-5,-5,0,0,Africa
+0,-5,5,0,Africa
+5,-5,10,0,Africa
+10,-5,15,0,Africa
+15,-5,20,0,Africa
+20,-5,25,0,Africa
+25,-5,30,0,Africa
+30,-5,35,0,Africa
+35,-5,40,0,Africa
+40,-5,45,0,Africa
+45,-5,50,0,Africa
+50,-5,55,0,Africa
+55,-5,60,0,Indian Ocean
+60,-5,65,0,Indian Ocean
+65,-5,70,0,Indian Ocean
+70,-5,75,0,Indian Ocean
+75,-5,80,0,Indian Ocean
+80,-5,85,0,Pacific Ocean
+85,-5,90,0,Pacific Ocean
+90,-5,95,0,Southeast Asia
+95,-5,100,0,Southeast Asia
+100,-5,105,0,Southeast Asia
+105,-5,110,0,Southeast Asia
+110,-5,115,0,Southeast Asia
+115,-5,120,0,Southeast Asia
+120,-5,125,0,Southeast Asia
+125,-5,130,0,Southeast Asia
+130,-5,135,0,Southeast Asia
+135,-5,140,0,Southeast Asia
+140,-5,145,0,New Zealand & Pacific
+145,-5,150,0,New Zealand & Pacific
+150,-5,155,0,New Zealand & Pacific
+155,-5,160,0,New Zealand & Pacific
+160,-5,165,0,New Zealand & Pacific
+165,-5,170,0,New Zealand & Pacific
+170,-5,175,0,New Zealand & Pacific
+175,-5,180,0,New Zealand & Pacific
+-180,0,-175,5,Pacific Ocean
+-175,0,-170,5,Pacific Ocean
+-170,0,-165,5,Pacific Ocean
+-165,0,-160,5,Pacific Ocean
+-160,0,-155,5,Pacific Ocean
+-155,0,-150,5,Pacific Ocean
+-150,0,-145,5,Pacific Ocean
+-145,0,-140,5,Pacific Ocean
+-140,0,-135,5,Pacific Ocean
+-135,0,-130,5,Pacific Ocean
+-130,0,-125,5,Pacific Ocean
+-125,0,-120,5,Pacific Ocean
+-120,0,-115,5,Pacific Ocean
+-115,0,-110,5,Pacific Ocean
+-110,0,-105,5,Pacific Ocean
+-105,0,-100,5,Pacific Ocean
+-100,0,-95,5,Pacific Ocean
+-95,0,-90,5,Pacific Ocean
+-90,0,-85,5,Atlantic Ocean
+-85,0,-80,5,South America
+-80,0,-75,5,South America
+-75,0,-70,5,South America
+-70,0,-65,5,South America
+-65,0,-60,5,South America
+-60,0,-55,5,South America
+-55,0,-50,5,South America
+-50,0,-45,5,South America
+-45,0,-40,5,South America
+-40,0,-35,5,South America
+-35,0,-30,5,South America
+-30,0,-25,5,Atlantic Ocean
+-25,0,-20,5,Atlantic Ocean
+-20,0,-15,5,Africa
+-15,0,-10,5,Africa
+-10,0,-5,5,Africa
+-5,0,0,5,Africa
+0,0,5,5,Africa
+5,0,10,5,Africa
+10,0,15,5,Africa
+15,0,20,5,Africa
+20,0,25,5,Africa
+25,0,30,5,Africa
+30,0,35,5,Africa
+35,0,40,5,Africa
+40,0,45,5,Africa
+45,0,50,5,Africa
+50,0,55,5,Africa
+55,0,60,5,Indian Ocean
+60,0,65,5,Indian Ocean
+65,0,70,5,Indian Ocean
+70,0,75,5,Indian Ocean
+75,0,80,5,Indian Ocean
+80,0,85,5,Pacific Ocean
+85,0,90,5,Pacific Ocean
+90,0,95,5,Southeast Asia
+95,0,100,5,Southeast Asia
+100,0,105,5,Southeast Asia
+105,0,110,5,Southeast Asia
+110,0,115,5,Southeast Asia
+115,0,120,5,Southeast Asia
+120,0,125,5,Southeast Asia
+125,0,130,5,Southeast Asia
+130,0,135,5,New Zealand & Pacific
+135,0,140,5,Southeast Asia
+140,0,145,5,Southeast Asia
+145,0,150,5,New Zealand & Pacific
+150,0,155,5,New Zealand & Pacific
+155,0,160,5,New Zealand & Pacific
+160,0,165,5,New Zealand & Pacific
+165,0,170,5,New Zealand & Pacific
+170,0,175,5,New Zealand & Pacific
+175,0,180,5,New Zealand & Pacific
+-180,5,-175,10,Pacific Ocean
+-175,5,-170,10,Pacific Ocean
+-170,5,-165,10,Pacific Ocean
+-165,5,-160,10,Pacific Ocean
+-160,5,-155,10,Pacific Ocean
+-155,5,-150,10,Pacific Ocean
+-150,5,-145,10,Pacific Ocean
+-145,5,-140,10,Pacific Ocean
+-140,5,-135,10,Pacific Ocean
+-135,5,-130,10,Pacific Ocean
+-130,5,-125,10,Pacific Ocean
+-125,5,-120,10,Pacific Ocean
+-120,5,-115,10,Central America & Caribbean
+-115,5,-110,10,Central America & Caribbean
+-110,5,-105,10,Central America & Caribbean
+-105,5,-100,10,Central America & Caribbean
+-100,5,-95,10,Central America & Caribbean
+-95,5,-90,10,Central America & Caribbean
+-90,5,-85,10,Central America & Caribbean
+-85,5,-80,10,Central America & Caribbean
+-80,5,-75,10,South America
+-75,5,-70,10,South America
+-70,5,-65,10,South America
+-65,5,-60,10,South America
+-60,5,-55,10,South America
+-55,5,-50,10,South America
+-50,5,-45,10,South America
+-45,5,-40,10,South America
+-40,5,-35,10,South America
+-35,5,-30,10,South America
+-30,5,-25,10,Atlantic Ocean
+-25,5,-20,10,Atlantic Ocean
+-20,5,-15,10,Africa
+-15,5,-10,10,Africa
+-10,5,-5,10,Africa
+-5,5,0,10,Africa
+0,5,5,10,Africa
+5,5,10,10,Africa
+10,5,15,10,Africa
+15,5,20,10,Africa
+20,5,25,10,Africa
+25,5,30,10,Africa
+30,5,35,10,Africa
+35,5,40,10,Africa
+40,5,45,10,Africa
+45,5,50,10,Africa
+50,5,55,10,Africa
+55,5,60,10,Indian Ocean
+60,5,65,10,South Asia
+65,5,70,10,South Asia
+70,5,75,10,South Asia
+75,5,80,10,South Asia
+80,5,85,10,South Asia
+85,5,90,10,South Asia
+90,5,95,10,South Asia
+95,5,100,10,South Asia
+100,5,105,10,Southeast Asia
+105,5,110,10,Southeast Asia
+110,5,115,10,Southeast Asia
+115,5,120,10,Southeast Asia
+120,5,125,10,Southeast Asia
+125,5,130,10,Southeast Asia
+130,5,135,10,New Zealand & Pacific
+135,5,140,10,New Zealand & Pacific
+140,5,145,10,Southeast Asia
+145,5,150,10,New Zealand & Pacific
+150,5,155,10,New Zealand & Pacific
+155,5,160,10,New Zealand & Pacific
+160,5,165,10,New Zealand & Pacific
+165,5,170,10,New Zealand & Pacific
+170,5,175,10,New Zealand & Pacific
+175,5,180,10,New Zealand & Pacific
+-180,10,-175,15,Pacific Ocean
+-175,10,-170,15,Pacific Ocean
+-170,10,-165,15,Pacific Ocean
+-165,10,-160,15,Pacific Ocean
+-160,10,-155,15,Pacific Ocean
+-155,10,-150,15,Pacific Ocean
+-150,10,-145,15,Pacific Ocean
+-145,10,-140,15,Pacific Ocean
+-140,10,-135,15,Pacific Ocean
+-135,10,-130,15,Pacific Ocean
+-130,10,-125,15,Pacific Ocean
+-125,10,-120,15,Pacific Ocean
+-120,10,-115,15,Central America & Caribbean
+-115,10,-110,15,Central America & Caribbean
+-110,10,-105,15,Central America & Caribbean
+-105,10,-100,15,Central America & Caribbean
+-100,10,-95,15,Central America & Caribbean
+-95,10,-90,15,Central America & Caribbean
+-90,10,-85,15,Central America & Caribbean
+-85,10,-80,15,Central America & Caribbean
+-80,10,-75,15,South America
+-75,10,-70,15,South America
+-70,10,-65,15,South America
+-65,10,-60,15,South America
+-60,10,-55,15,Central America & Caribbean
+-55,10,-50,15,South America
+-50,10,-45,15,South America
+-45,10,-40,15,South America
+-40,10,-35,15,South America
+-35,10,-30,15,South America
+-30,10,-25,15,Atlantic Ocean
+-25,10,-20,15,Atlantic Ocean
+-20,10,-15,15,Africa
+-15,10,-10,15,Africa
+-10,10,-5,15,Africa
+-5,10,0,15,Africa
+0,10,5,15,Africa
+5,10,10,15,Africa
+10,10,15,15,Africa
+15,10,20,15,Africa
+20,10,25,15,Africa
+25,10,30,15,Africa
+30,10,35,15,Africa
+35,10,40,15,Africa
+40,10,45,15,Africa
+45,10,50,15,Africa
+50,10,55,15,Africa
+55,10,60,15,Middle East
+60,10,65,15,Middle East
+65,10,70,15,South Asia
+70,10,75,15,South Asia
+75,10,80,15,South Asia
+80,10,85,15,South Asia
+85,10,90,15,South Asia
+90,10,95,15,South Asia
+95,10,100,15,South Asia
+100,10,105,15,Southeast Asia
+105,10,110,15,Southeast Asia
+110,10,115,15,Southeast Asia
+115,10,120,15,Southeast Asia
+120,10,125,15,Southeast Asia
+125,10,130,15,Southeast Asia
+130,10,135,15,Southeast Asia
+135,10,140,15,Southeast Asia
+140,10,145,15,New Zealand & Pacific
+145,10,150,15,New Zealand & Pacific
+150,10,155,15,New Zealand & Pacific
+155,10,160,15,New Zealand & Pacific
+160,10,165,15,New Zealand & Pacific
+165,10,170,15,New Zealand & Pacific
+170,10,175,15,New Zealand & Pacific
+175,10,180,15,New Zealand & Pacific
+-180,15,-175,20,Pacific Ocean
+-175,15,-170,20,Pacific Ocean
+-170,15,-165,20,Pacific Ocean
+-165,15,-160,20,Pacific Ocean
+-160,15,-155,20,Pacific Ocean
+-155,15,-150,20,Pacific Ocean
+-150,15,-145,20,Pacific Ocean
+-145,15,-140,20,Pacific Ocean
+-140,15,-135,20,Pacific Ocean
+-135,15,-130,20,Pacific Ocean
+-130,15,-125,20,Pacific Ocean
+-125,15,-120,20,Pacific Ocean
+-120,15,-115,20,Central America & Caribbean
+-115,15,-110,20,Central America & Caribbean
+-110,15,-105,20,Central America & Caribbean
+-105,15,-100,20,Central America & Caribbean
+-100,15,-95,20,Central America & Caribbean
+-95,15,-90,20,Central America & Caribbean
+-90,15,-85,20,Central America & Caribbean
+-85,15,-80,20,Central America & Caribbean
+-80,15,-75,20,Central America & Caribbean
+-75,15,-70,20,Central America & Caribbean
+-70,15,-65,20,Central America & Caribbean
+-65,15,-60,20,Central America & Caribbean
+-60,15,-55,20,Central America & Caribbean
+-55,15,-50,20,Atlantic Ocean
+-50,15,-45,20,Atlantic Ocean
+-45,15,-40,20,Atlantic Ocean
+-40,15,-35,20,Atlantic Ocean
+-35,15,-30,20,Atlantic Ocean
+-30,15,-25,20,Atlantic Ocean
+-25,15,-20,20,Atlantic Ocean
+-20,15,-15,20,Africa
+-15,15,-10,20,Africa
+-10,15,-5,20,Africa
+-5,15,0,20,Africa
+0,15,5,20,Africa
+5,15,10,20,Africa
+10,15,15,20,Africa
+15,15,20,20,Africa
+20,15,25,20,Africa
+25,15,30,20,Africa
+30,15,35,20,Africa
+35,15,40,20,Africa
+40,15,45,20,Middle East
+45,15,50,20,Middle East
+50,15,55,20,Middle East
+55,15,60,20,Middle East
+60,15,65,20,Middle East
+65,15,70,20,South Asia
+70,15,75,20,South Asia
+75,15,80,20,South Asia
+80,15,85,20,South Asia
+85,15,90,20,South Asia
+90,15,95,20,South Asia
+95,15,100,20,South Asia
+100,15,105,20,Southeast Asia
+105,15,110,20,Southeast Asia
+110,15,115,20,Southeast Asia
+115,15,120,20,Southeast Asia
+120,15,125,20,Southeast Asia
+125,15,130,20,Southeast Asia
+130,15,135,20,Southeast Asia
+135,15,140,20,Southeast Asia
+140,15,145,20,Southeast Asia
+145,15,150,20,New Zealand & Pacific
+150,15,155,20,New Zealand & Pacific
+155,15,160,20,New Zealand & Pacific
+160,15,165,20,New Zealand & Pacific
+165,15,170,20,New Zealand & Pacific
+170,15,175,20,New Zealand & Pacific
+175,15,180,20,New Zealand & Pacific
+-180,20,-175,25,Pacific Ocean
+-175,20,-170,25,Pacific Ocean
+-170,20,-165,25,Pacific Ocean
+-165,20,-160,25,Pacific Ocean
+-160,20,-155,25,Pacific Ocean
+-155,20,-150,25,Pacific Ocean
+-150,20,-145,25,Pacific Ocean
+-145,20,-140,25,Pacific Ocean
+-140,20,-135,25,Pacific Ocean
+-135,20,-130,25,Pacific Ocean
+-130,20,-125,25,Pacific Ocean
+-125,20,-120,25,Pacific Ocean
+-120,20,-115,25,Central America & Caribbean
+-115,20,-110,25,Central America & Caribbean
+-110,20,-105,25,Central America & Caribbean
+-105,20,-100,25,Central America & Caribbean
+-100,20,-95,25,Central America & Caribbean
+-95,20,-90,25,Central America & Caribbean
+-90,20,-85,25,Central America & Caribbean
+-85,20,-80,25,Central America & Caribbean
+-80,20,-75,25,Central America & Caribbean
+-75,20,-70,25,Central America & Caribbean
+-70,20,-65,25,Central America & Caribbean
+-65,20,-60,25,Central America & Caribbean
+-60,20,-55,25,Central America & Caribbean
+-55,20,-50,25,Atlantic Ocean
+-50,20,-45,25,Atlantic Ocean
+-45,20,-40,25,Atlantic Ocean
+-40,20,-35,25,Atlantic Ocean
+-35,20,-30,25,Atlantic Ocean
+-30,20,-25,25,Atlantic Ocean
+-25,20,-20,25,Atlantic Ocean
+-20,20,-15,25,Africa
+-15,20,-10,25,Africa
+-10,20,-5,25,Africa
+-5,20,0,25,Africa
+0,20,5,25,Africa
+5,20,10,25,Africa
+10,20,15,25,Africa
+15,20,20,25,Africa
+20,20,25,25,Africa
+25,20,30,25,Africa
+30,20,35,25,Africa
+35,20,40,25,Africa
+40,20,45,25,Middle East
+45,20,50,25,Middle East
+50,20,55,25,Middle East
+55,20,60,25,Middle East
+60,20,65,25,Middle East
+65,20,70,25,South Asia
+70,20,75,25,South Asia
+75,20,80,25,South Asia
+80,20,85,25,South Asia
+85,20,90,25,South Asia
+90,20,95,25,South Asia
+95,20,100,25,South Asia
+100,20,105,25,Southeast Asia
+105,20,110,25,Southeast Asia
+110,20,115,25,Southeast Asia
+115,20,120,25,Southeast Asia
+120,20,125,25,Southeast Asia
+125,20,130,25,Southeast Asia
+130,20,135,25,Southeast Asia
+135,20,140,25,Southeast Asia
+140,20,145,25,Southeast Asia
+145,20,150,25,New Zealand & Pacific
+150,20,155,25,New Zealand & Pacific
+155,20,160,25,New Zealand & Pacific
+160,20,165,25,New Zealand & Pacific
+165,20,170,25,New Zealand & Pacific
+170,20,175,25,New Zealand & Pacific
+175,20,180,25,New Zealand & Pacific
+-180,25,-175,30,Pacific Ocean
+-175,25,-170,30,Pacific Ocean
+-170,25,-165,30,North America
+-165,25,-160,30,North America
+-160,25,-155,30,North America
+-155,25,-150,30,North America
+-150,25,-145,30,North America
+-145,25,-140,30,North America
+-140,25,-135,30,North America
+-135,25,-130,30,North America
+-130,25,-125,30,North America
+-125,25,-120,30,North America
+-120,25,-115,30,North America
+-115,25,-110,30,North America
+-110,25,-105,30,North America
+-105,25,-100,30,North America
+-100,25,-95,30,North America
+-95,25,-90,30,North America
+-90,25,-85,30,North America
+-85,25,-80,30,North America
+-80,25,-75,30,North America
+-75,25,-70,30,North America
+-70,25,-65,30,North America
+-65,25,-60,30,North America
+-60,25,-55,30,North America
+-55,25,-50,30,North America
+-50,25,-45,30,Atlantic Ocean
+-45,25,-40,30,Atlantic Ocean
+-40,25,-35,30,Atlantic Ocean
+-35,25,-30,30,Atlantic Ocean
+-30,25,-25,30,Atlantic Ocean
+-25,25,-20,30,Atlantic Ocean
+-20,25,-15,30,Africa
+-15,25,-10,30,Africa
+-10,25,-5,30,Africa
+-5,25,0,30,Africa
+0,25,5,30,Africa
+5,25,10,30,Africa
+10,25,15,30,Africa
+15,25,20,30,Africa
+20,25,25,30,Africa
+25,25,30,30,Africa
+30,25,35,30,Africa
+35,25,40,30,Middle East
+40,25,45,30,Middle East
+45,25,50,30,Middle East
+50,25,55,30,Middle East
+55,25,60,30,Middle East
+60,25,65,30,Middle East
+65,25,70,30,South Asia
+70,25,75,30,South Asia
+75,25,80,30,South Asia
+80,25,85,30,South Asia
+85,25,90,30,South Asia
+90,25,95,30,South Asia
+95,25,100,30,South Asia
+100,25,105,30,East Asia
+105,25,110,30,East Asia
+110,25,115,30,East Asia
+115,25,120,30,East Asia
+120,25,125,30,East Asia
+125,25,130,30,East Asia
+130,25,135,30,East Asia
+135,25,140,30,East Asia
+140,25,145,30,East Asia
+145,25,150,30,East Asia
+150,25,155,30,Pacific Ocean
+155,25,160,30,Pacific Ocean
+160,25,165,30,Pacific Ocean
+165,25,170,30,Pacific Ocean
+170,25,175,30,Pacific Ocean
+175,25,180,30,Pacific Ocean
+-180,30,-175,35,Pacific Ocean
+-175,30,-170,35,Pacific Ocean
+-170,30,-165,35,North America
+-165,30,-160,35,North America
+-160,30,-155,35,North America
+-155,30,-150,35,North America
+-150,30,-145,35,North America
+-145,30,-140,35,North America
+-140,30,-135,35,North America
+-135,30,-130,35,North America
+-130,30,-125,35,North America
+-125,30,-120,35,North America
+-120,30,-115,35,North America
+-115,30,-110,35,North America
+-110,30,-105,35,North America
+-105,30,-100,35,North America
+-100,30,-95,35,North America
+-95,30,-90,35,North America
+-90,30,-85,35,North America
+-85,30,-80,35,North America
+-80,30,-75,35,North America
+-75,30,-70,35,North America
+-70,30,-65,35,North America
+-65,30,-60,35,North America
+-60,30,-55,35,North America
+-55,30,-50,35,North America
+-50,30,-45,35,Atlantic Ocean
+-45,30,-40,35,Atlantic Ocean
+-40,30,-35,35,Atlantic Ocean
+-35,30,-30,35,Atlantic Ocean
+-30,30,-25,35,Atlantic Ocean
+-25,30,-20,35,Atlantic Ocean
+-20,30,-15,35,Africa
+-15,30,-10,35,Africa
+-10,30,-5,35,Africa
+-5,30,0,35,Africa
+0,30,5,35,Africa
+5,30,10,35,Africa
+10,30,15,35,Africa
+15,30,20,35,Africa
+20,30,25,35,Africa
+25,30,30,35,Africa
+30,30,35,35,Africa
+35,30,40,35,Middle East
+40,30,45,35,Middle East
+45,30,50,35,Middle East
+50,30,55,35,Middle East
+55,30,60,35,Middle East
+60,30,65,35,Middle East
+65,30,70,35,South Asia
+70,30,75,35,South Asia
+75,30,80,35,South Asia
+80,30,85,35,South Asia
+85,30,90,35,South Asia
+90,30,95,35,South Asia
+95,30,100,35,South Asia
+100,30,105,35,East Asia
+105,30,110,35,East Asia
+110,30,115,35,East Asia
+115,30,120,35,East Asia
+120,30,125,35,East Asia
+125,30,130,35,East Asia
+130,30,135,35,East Asia
+135,30,140,35,East Asia
+140,30,145,35,East Asia
+145,30,150,35,East Asia
+150,30,155,35,Pacific Ocean
+155,30,160,35,Pacific Ocean
+160,30,165,35,Pacific Ocean
+165,30,170,35,Pacific Ocean
+170,30,175,35,Pacific Ocean
+175,30,180,35,Pacific Ocean
+-180,35,-175,40,Pacific Ocean
+-175,35,-170,40,Pacific Ocean
+-170,35,-165,40,North America
+-165,35,-160,40,North America
+-160,35,-155,40,North America
+-155,35,-150,40,North America
+-150,35,-145,40,North America
+-145,35,-140,40,North America
+-140,35,-135,40,North America
+-135,35,-130,40,North America
+-130,35,-125,40,North America
+-125,35,-120,40,North America
+-120,35,-115,40,North America
+-115,35,-110,40,North America
+-110,35,-105,40,North America
+-105,35,-100,40,North America
+-100,35,-95,40,North America
+-95,35,-90,40,North America
+-90,35,-85,40,North America
+-85,35,-80,40,North America
+-80,35,-75,40,North America
+-75,35,-70,40,North America
+-70,35,-65,40,North America
+-65,35,-60,40,North America
+-60,35,-55,40,North America
+-55,35,-50,40,North America
+-50,35,-45,40,Atlantic Ocean
+-45,35,-40,40,Atlantic Ocean
+-40,35,-35,40,Atlantic Ocean
+-35,35,-30,40,Atlantic Ocean
+-30,35,-25,40,Atlantic Ocean
+-25,35,-20,40,Europe
+-20,35,-15,40,Europe
+-15,35,-10,40,Europe
+-10,35,-5,40,Europe
+-5,35,0,40,Europe
+0,35,5,40,Africa
+5,35,10,40,Africa
+10,35,15,40,Europe
+15,35,20,40,Europe
+20,35,25,40,Europe
+25,35,30,40,Middle East
+30,35,35,40,Middle East
+35,35,40,40,Middle East
+40,35,45,40,Middle East
+45,35,50,40,Middle East
+50,35,55,40,Middle East
+55,35,60,40,Middle East
+60,35,65,40,Middle East
+65,35,70,40,Central Asia
+70,35,75,40,Central Asia
+75,35,80,40,Central Asia
+80,35,85,40,Central Asia
+85,35,90,40,Central Asia
+90,35,95,40,Pacific Ocean
+95,35,100,40,Pacific Ocean
+100,35,105,40,East Asia
+105,35,110,40,East Asia
+110,35,115,40,East Asia
+115,35,120,40,East Asia
+120,35,125,40,East Asia
+125,35,130,40,East Asia
+130,35,135,40,East Asia
+135,35,140,40,East Asia
+140,35,145,40,East Asia
+145,35,150,40,East Asia
+150,35,155,40,Pacific Ocean
+155,35,160,40,Pacific Ocean
+160,35,165,40,Pacific Ocean
+165,35,170,40,Pacific Ocean
+170,35,175,40,Pacific Ocean
+175,35,180,40,Pacific Ocean
+-180,40,-175,45,Pacific Ocean
+-175,40,-170,45,Pacific Ocean
+-170,40,-165,45,North America
+-165,40,-160,45,North America
+-160,40,-155,45,North America
+-155,40,-150,45,North America
+-150,40,-145,45,North America
+-145,40,-140,45,North America
+-140,40,-135,45,North America
+-135,40,-130,45,North America
+-130,40,-125,45,North America
+-125,40,-120,45,North America
+-120,40,-115,45,North America
+-115,40,-110,45,North America
+-110,40,-105,45,North America
+-105,40,-100,45,North America
+-100,40,-95,45,North America
+-95,40,-90,45,North America
+-90,40,-85,45,North America
+-85,40,-80,45,North America
+-80,40,-75,45,North America
+-75,40,-70,45,North America
+-70,40,-65,45,North America
+-65,40,-60,45,North America
+-60,40,-55,45,North America
+-55,40,-50,45,North America
+-50,40,-45,45,Atlantic Ocean
+-45,40,-40,45,Atlantic Ocean
+-40,40,-35,45,Atlantic Ocean
+-35,40,-30,45,Atlantic Ocean
+-30,40,-25,45,Atlantic Ocean
+-25,40,-20,45,Europe
+-20,40,-15,45,Europe
+-15,40,-10,45,Europe
+-10,40,-5,45,Europe
+-5,40,0,45,Europe
+0,40,5,45,Europe
+5,40,10,45,Europe
+10,40,15,45,Europe
+15,40,20,45,Europe
+20,40,25,45,Europe
+25,40,30,45,Europe
+30,40,35,45,Middle East
+35,40,40,45,Middle East
+40,40,45,45,Indian Ocean
+45,40,50,45,Central Asia
+50,40,55,45,Central Asia
+55,40,60,45,Central Asia
+60,40,65,45,Central Asia
+65,40,70,45,Central Asia
+70,40,75,45,Central Asia
+75,40,80,45,Central Asia
+80,40,85,45,Central Asia
+85,40,90,45,Central Asia
+90,40,95,45,Pacific Ocean
+95,40,100,45,Pacific Ocean
+100,40,105,45,East Asia
+105,40,110,45,East Asia
+110,40,115,45,East Asia
+115,40,120,45,East Asia
+120,40,125,45,East Asia
+125,40,130,45,East Asia
+130,40,135,45,East Asia
+135,40,140,45,East Asia
+140,40,145,45,East Asia
+145,40,150,45,East Asia
+150,40,155,45,Pacific Ocean
+155,40,160,45,Pacific Ocean
+160,40,165,45,Pacific Ocean
+165,40,170,45,Pacific Ocean
+170,40,175,45,Pacific Ocean
+175,40,180,45,Pacific Ocean
+-180,45,-175,50,Pacific Ocean
+-175,45,-170,50,Pacific Ocean
+-170,45,-165,50,North America
+-165,45,-160,50,North America
+-160,45,-155,50,North America
+-155,45,-150,50,North America
+-150,45,-145,50,North America
+-145,45,-140,50,North America
+-140,45,-135,50,North America
+-135,45,-130,50,North America
+-130,45,-125,50,North America
+-125,45,-120,50,North America
+-120,45,-115,50,North America
+-115,45,-110,50,North America
+-110,45,-105,50,North America
+-105,45,-100,50,North America
+-100,45,-95,50,North America
+-95,45,-90,50,North America
+-90,45,-85,50,North America
+-85,45,-80,50,North America
+-80,45,-75,50,North America
+-75,45,-70,50,North America
+-70,45,-65,50,North America
+-65,45,-60,50,North America
+-60,45,-55,50,North America
+-55,45,-50,50,North America
+-50,45,-45,50,Atlantic Ocean
+-45,45,-40,50,Atlantic Ocean
+-40,45,-35,50,Atlantic Ocean
+-35,45,-30,50,Atlantic Ocean
+-30,45,-25,50,Atlantic Ocean
+-25,45,-20,50,Europe
+-20,45,-15,50,Europe
+-15,45,-10,50,Europe
+-10,45,-5,50,Europe
+-5,45,0,50,Europe
+0,45,5,50,Europe
+5,45,10,50,Europe
+10,45,15,50,Europe
+15,45,20,50,Europe
+20,45,25,50,Europe
+25,45,30,50,Europe
+30,45,35,50,Europe
+35,45,40,50,Europe
+40,45,45,50,Indian Ocean
+45,45,50,50,Russia & North Asia
+50,45,55,50,Central Asia
+55,45,60,50,Central Asia
+60,45,65,50,Central Asia
+65,45,70,50,Central Asia
+70,45,75,50,Central Asia
+75,45,80,50,Central Asia
+80,45,85,50,Central Asia
+85,45,90,50,Central Asia
+90,45,95,50,Pacific Ocean
+95,45,100,50,Pacific Ocean
+100,45,105,50,East Asia
+105,45,110,50,East Asia
+110,45,115,50,East Asia
+115,45,120,50,East Asia
+120,45,125,50,East Asia
+125,45,130,50,East Asia
+130,45,135,50,East Asia
+135,45,140,50,East Asia
+140,45,145,50,East Asia
+145,45,150,50,East Asia
+150,45,155,50,Pacific Ocean
+155,45,160,50,Pacific Ocean
+160,45,165,50,Pacific Ocean
+165,45,170,50,Pacific Ocean
+170,45,175,50,Pacific Ocean
+175,45,180,50,Pacific Ocean
+-180,50,-175,55,Pacific Ocean
+-175,50,-170,55,Pacific Ocean
+-170,50,-165,55,North America
+-165,50,-160,55,North America
+-160,50,-155,55,North America
+-155,50,-150,55,North America
+-150,50,-145,55,North America
+-145,50,-140,55,North America
+-140,50,-135,55,North America
+-135,50,-130,55,North America
+-130,50,-125,55,North America
+-125,50,-120,55,North America
+-120,50,-115,55,North America
+-115,50,-110,55,North America
+-110,50,-105,55,North America
+-105,50,-100,55,North America
+-100,50,-95,55,North America
+-95,50,-90,55,North America
+-90,50,-85,55,North America
+-85,50,-80,55,North America
+-80,50,-75,55,North America
+-75,50,-70,55,North America
+-70,50,-65,55,North America
+-65,50,-60,55,North America
+-60,50,-55,55,North America
+-55,50,-50,55,North America
+-50,50,-45,55,Atlantic Ocean
+-45,50,-40,55,Atlantic Ocean
+-40,50,-35,55,Atlantic Ocean
+-35,50,-30,55,Atlantic Ocean
+-30,50,-25,55,Atlantic Ocean
+-25,50,-20,55,Europe
+-20,50,-15,55,Europe
+-15,50,-10,55,Europe
+-10,50,-5,55,Europe
+-5,50,0,55,Europe
+0,50,5,55,Europe
+5,50,10,55,Europe
+10,50,15,55,Europe
+15,50,20,55,Europe
+20,50,25,55,Europe
+25,50,30,55,Europe
+30,50,35,55,Europe
+35,50,40,55,Europe
+40,50,45,55,Indian Ocean
+45,50,50,55,Russia & North Asia
+50,50,55,55,Russia & North Asia
+55,50,60,55,Russia & North Asia
+60,50,65,55,Central Asia
+65,50,70,55,Central Asia
+70,50,75,55,Central Asia
+75,50,80,55,Central Asia
+80,50,85,55,Central Asia
+85,50,90,55,Central Asia
+90,50,95,55,Pacific Ocean
+95,50,100,55,Pacific Ocean
+100,50,105,55,East Asia
+105,50,110,55,East Asia
+110,50,115,55,East Asia
+115,50,120,55,East Asia
+120,50,125,55,East Asia
+125,50,130,55,East Asia
+130,50,135,55,East Asia
+135,50,140,55,East Asia
+140,50,145,55,East Asia
+145,50,150,55,East Asia
+150,50,155,55,Pacific Ocean
+155,50,160,55,Pacific Ocean
+160,50,165,55,Pacific Ocean
+165,50,170,55,Pacific Ocean
+170,50,175,55,Pacific Ocean
+175,50,180,55,Pacific Ocean
+-180,55,-175,60,Pacific Ocean
+-175,55,-170,60,Pacific Ocean
+-170,55,-165,60,North America
+-165,55,-160,60,North America
+-160,55,-155,60,North America
+-155,55,-150,60,North America
+-150,55,-145,60,North America
+-145,55,-140,60,North America
+-140,55,-135,60,North America
+-135,55,-130,60,North America
+-130,55,-125,60,North America
+-125,55,-120,60,North America
+-120,55,-115,60,North America
+-115,55,-110,60,North America
+-110,55,-105,60,North America
+-105,55,-100,60,North America
+-100,55,-95,60,North America
+-95,55,-90,60,North America
+-90,55,-85,60,North America
+-85,55,-80,60,North America
+-80,55,-75,60,North America
+-75,55,-70,60,North America
+-70,55,-65,60,North America
+-65,55,-60,60,North America
+-60,55,-55,60,North America
+-55,55,-50,60,North America
+-50,55,-45,60,Atlantic Ocean
+-45,55,-40,60,Atlantic Ocean
+-40,55,-35,60,Atlantic Ocean
+-35,55,-30,60,Atlantic Ocean
+-30,55,-25,60,Atlantic Ocean
+-25,55,-20,60,Europe
+-20,55,-15,60,Europe
+-15,55,-10,60,Europe
+-10,55,-5,60,Europe
+-5,55,0,60,Europe
+0,55,5,60,Europe
+5,55,10,60,Europe
+10,55,15,60,Europe
+15,55,20,60,Europe
+20,55,25,60,Europe
+25,55,30,60,Europe
+30,55,35,60,Europe
+35,55,40,60,Europe
+40,55,45,60,Indian Ocean
+45,55,50,60,Russia & North Asia
+50,55,55,60,Russia & North Asia
+55,55,60,60,Russia & North Asia
+60,55,65,60,Central Asia
+65,55,70,60,Central Asia
+70,55,75,60,Central Asia
+75,55,80,60,Central Asia
+80,55,85,60,Central Asia
+85,55,90,60,Central Asia
+90,55,95,60,Pacific Ocean
+95,55,100,60,Pacific Ocean
+100,55,105,60,East Asia
+105,55,110,60,East Asia
+110,55,115,60,East Asia
+115,55,120,60,East Asia
+120,55,125,60,East Asia
+125,55,130,60,East Asia
+130,55,135,60,East Asia
+135,55,140,60,East Asia
+140,55,145,60,East Asia
+145,55,150,60,East Asia
+150,55,155,60,Pacific Ocean
+155,55,160,60,Pacific Ocean
+160,55,165,60,Pacific Ocean
+165,55,170,60,Pacific Ocean
+170,55,175,60,Pacific Ocean
+175,55,180,60,Pacific Ocean
+-180,60,-175,65,Pacific Ocean
+-175,60,-170,65,Pacific Ocean
+-170,60,-165,65,North America
+-165,60,-160,65,North America
+-160,60,-155,65,North America
+-155,60,-150,65,North America
+-150,60,-145,65,North America
+-145,60,-140,65,North America
+-140,60,-135,65,North America
+-135,60,-130,65,North America
+-130,60,-125,65,North America
+-125,60,-120,65,North America
+-120,60,-115,65,North America
+-115,60,-110,65,North America
+-110,60,-105,65,North America
+-105,60,-100,65,North America
+-100,60,-95,65,North America
+-95,60,-90,65,North America
+-90,60,-85,65,North America
+-85,60,-80,65,North America
+-80,60,-75,65,North America
+-75,60,-70,65,North America
+-70,60,-65,65,North America
+-65,60,-60,65,North America
+-60,60,-55,65,Greenland
+-55,60,-50,65,Greenland
+-50,60,-45,65,Greenland
+-45,60,-40,65,Greenland
+-40,60,-35,65,Greenland
+-35,60,-30,65,Greenland
+-30,60,-25,65,Greenland
+-25,60,-20,65,Europe
+-20,60,-15,65,Europe
+-15,60,-10,65,Europe
+-10,60,-5,65,Europe
+-5,60,0,65,Europe
+0,60,5,65,Europe
+5,60,10,65,Europe
+10,60,15,65,Europe
+15,60,20,65,Europe
+20,60,25,65,Europe
+25,60,30,65,Europe
+30,60,35,65,Europe
+35,60,40,65,Europe
+40,60,45,65,Russia & North Asia
+45,60,50,65,Russia & North Asia
+50,60,55,65,Russia & North Asia
+55,60,60,65,Russia & North Asia
+60,60,65,65,Russia & North Asia
+65,60,70,65,Russia & North Asia
+70,60,75,65,Russia & North Asia
+75,60,80,65,Russia & North Asia
+80,60,85,65,Russia & North Asia
+85,60,90,65,Russia & North Asia
+90,60,95,65,Russia & North Asia
+95,60,100,65,Russia & North Asia
+100,60,105,65,Russia & North Asia
+105,60,110,65,Russia & North Asia
+110,60,115,65,Russia & North Asia
+115,60,120,65,Russia & North Asia
+120,60,125,65,Russia & North Asia
+125,60,130,65,Russia & North Asia
+130,60,135,65,Russia & North Asia
+135,60,140,65,Russia & North Asia
+140,60,145,65,Russia & North Asia
+145,60,150,65,Russia & North Asia
+150,60,155,65,Russia & North Asia
+155,60,160,65,Russia & North Asia
+160,60,165,65,Russia & North Asia
+165,60,170,65,Russia & North Asia
+170,60,175,65,Russia & North Asia
+175,60,180,65,Russia & North Asia
+-180,65,-175,70,Pacific Ocean
+-175,65,-170,70,Pacific Ocean
+-170,65,-165,70,North America
+-165,65,-160,70,North America
+-160,65,-155,70,North America
+-155,65,-150,70,North America
+-150,65,-145,70,North America
+-145,65,-140,70,North America
+-140,65,-135,70,North America
+-135,65,-130,70,North America
+-130,65,-125,70,North America
+-125,65,-120,70,North America
+-120,65,-115,70,North America
+-115,65,-110,70,North America
+-110,65,-105,70,North America
+-105,65,-100,70,North America
+-100,65,-95,70,North America
+-95,65,-90,70,North America
+-90,65,-85,70,North America
+-85,65,-80,70,North America
+-80,65,-75,70,North America
+-75,65,-70,70,North America
+-70,65,-65,70,North America
+-65,65,-60,70,North America
+-60,65,-55,70,Greenland
+-55,65,-50,70,Greenland
+-50,65,-45,70,Greenland
+-45,65,-40,70,Greenland
+-40,65,-35,70,Greenland
+-35,65,-30,70,Greenland
+-30,65,-25,70,Greenland
+-25,65,-20,70,Europe
+-20,65,-15,70,Europe
+-15,65,-10,70,Europe
+-10,65,-5,70,Europe
+-5,65,0,70,Europe
+0,65,5,70,Europe
+5,65,10,70,Europe
+10,65,15,70,Europe
+15,65,20,70,Europe
+20,65,25,70,Europe
+25,65,30,70,Europe
+30,65,35,70,Europe
+35,65,40,70,Europe
+40,65,45,70,Russia & North Asia
+45,65,50,70,Russia & North Asia
+50,65,55,70,Russia & North Asia
+55,65,60,70,Russia & North Asia
+60,65,65,70,Russia & North Asia
+65,65,70,70,Russia & North Asia
+70,65,75,70,Russia & North Asia
+75,65,80,70,Russia & North Asia
+80,65,85,70,Russia & North Asia
+85,65,90,70,Russia & North Asia
+90,65,95,70,Russia & North Asia
+95,65,100,70,Russia & North Asia
+100,65,105,70,Russia & North Asia
+105,65,110,70,Russia & North Asia
+110,65,115,70,Russia & North Asia
+115,65,120,70,Russia & North Asia
+120,65,125,70,Russia & North Asia
+125,65,130,70,Russia & North Asia
+130,65,135,70,Russia & North Asia
+135,65,140,70,Russia & North Asia
+140,65,145,70,Russia & North Asia
+145,65,150,70,Russia & North Asia
+150,65,155,70,Russia & North Asia
+155,65,160,70,Russia & North Asia
+160,65,165,70,Russia & North Asia
+165,65,170,70,Russia & North Asia
+170,65,175,70,Russia & North Asia
+175,65,180,70,Russia & North Asia
+-180,70,-175,75,Pacific Ocean
+-175,70,-170,75,Pacific Ocean
+-170,70,-165,75,North America
+-165,70,-160,75,North America
+-160,70,-155,75,North America
+-155,70,-150,75,North America
+-150,70,-145,75,North America
+-145,70,-140,75,North America
+-140,70,-135,75,North America
+-135,70,-130,75,North America
+-130,70,-125,75,North America
+-125,70,-120,75,North America
+-120,70,-115,75,North America
+-115,70,-110,75,North America
+-110,70,-105,75,North America
+-105,70,-100,75,North America
+-100,70,-95,75,North America
+-95,70,-90,75,North America
+-90,70,-85,75,North America
+-85,70,-80,75,North America
+-80,70,-75,75,North America
+-75,70,-70,75,North America
+-70,70,-65,75,North America
+-65,70,-60,75,North America
+-60,70,-55,75,Greenland
+-55,70,-50,75,Greenland
+-50,70,-45,75,Greenland
+-45,70,-40,75,Greenland
+-40,70,-35,75,Greenland
+-35,70,-30,75,Greenland
+-30,70,-25,75,Greenland
+-25,70,-20,75,Greenland
+-20,70,-15,75,Greenland
+-15,70,-10,75,Greenland
+-10,70,-5,75,Europe
+-5,70,0,75,Europe
+0,70,5,75,Europe
+5,70,10,75,Europe
+10,70,15,75,Europe
+15,70,20,75,Europe
+20,70,25,75,Europe
+25,70,30,75,Europe
+30,70,35,75,Europe
+35,70,40,75,Europe
+40,70,45,75,Russia & North Asia
+45,70,50,75,Russia & North Asia
+50,70,55,75,Russia & North Asia
+55,70,60,75,Russia & North Asia
+60,70,65,75,Russia & North Asia
+65,70,70,75,Russia & North Asia
+70,70,75,75,Russia & North Asia
+75,70,80,75,Russia & North Asia
+80,70,85,75,Russia & North Asia
+85,70,90,75,Russia & North Asia
+90,70,95,75,Russia & North Asia
+95,70,100,75,Russia & North Asia
+100,70,105,75,Russia & North Asia
+105,70,110,75,Russia & North Asia
+110,70,115,75,Russia & North Asia
+115,70,120,75,Russia & North Asia
+120,70,125,75,Russia & North Asia
+125,70,130,75,Russia & North Asia
+130,70,135,75,Russia & North Asia
+135,70,140,75,Russia & North Asia
+140,70,145,75,Russia & North Asia
+145,70,150,75,Russia & North Asia
+150,70,155,75,Russia & North Asia
+155,70,160,75,Russia & North Asia
+160,70,165,75,Russia & North Asia
+165,70,170,75,Russia & North Asia
+170,70,175,75,Russia & North Asia
+175,70,180,75,Russia & North Asia
+-180,75,-175,80,Pacific Ocean
+-175,75,-170,80,Pacific Ocean
+-170,75,-165,80,North America
+-165,75,-160,80,North America
+-160,75,-155,80,North America
+-155,75,-150,80,North America
+-150,75,-145,80,North America
+-145,75,-140,80,North America
+-140,75,-135,80,North America
+-135,75,-130,80,North America
+-130,75,-125,80,North America
+-125,75,-120,80,North America
+-120,75,-115,80,North America
+-115,75,-110,80,North America
+-110,75,-105,80,North America
+-105,75,-100,80,North America
+-100,75,-95,80,North America
+-95,75,-90,80,North America
+-90,75,-85,80,North America
+-85,75,-80,80,North America
+-80,75,-75,80,North America
+-75,75,-70,80,North America
+-70,75,-65,80,North America
+-65,75,-60,80,North America
+-60,75,-55,80,Greenland
+-55,75,-50,80,Greenland
+-50,75,-45,80,Greenland
+-45,75,-40,80,Greenland
+-40,75,-35,80,Greenland
+-35,75,-30,80,Greenland
+-30,75,-25,80,Greenland
+-25,75,-20,80,Greenland
+-20,75,-15,80,Greenland
+-15,75,-10,80,Greenland
+-10,75,-5,80,Atlantic Ocean
+-5,75,0,80,Atlantic Ocean
+0,75,5,80,Atlantic Ocean
+5,75,10,80,Atlantic Ocean
+10,75,15,80,Atlantic Ocean
+15,75,20,80,Atlantic Ocean
+20,75,25,80,Atlantic Ocean
+25,75,30,80,Russia & North Asia
+30,75,35,80,Russia & North Asia
+35,75,40,80,Russia & North Asia
+40,75,45,80,Russia & North Asia
+45,75,50,80,Russia & North Asia
+50,75,55,80,Russia & North Asia
+55,75,60,80,Russia & North Asia
+60,75,65,80,Russia & North Asia
+65,75,70,80,Russia & North Asia
+70,75,75,80,Russia & North Asia
+75,75,80,80,Russia & North Asia
+80,75,85,80,Russia & North Asia
+85,75,90,80,Russia & North Asia
+90,75,95,80,Russia & North Asia
+95,75,100,80,Russia & North Asia
+100,75,105,80,Russia & North Asia
+105,75,110,80,Russia & North Asia
+110,75,115,80,Russia & North Asia
+115,75,120,80,Russia & North Asia
+120,75,125,80,Russia & North Asia
+125,75,130,80,Russia & North Asia
+130,75,135,80,Russia & North Asia
+135,75,140,80,Russia & North Asia
+140,75,145,80,Russia & North Asia
+145,75,150,80,Russia & North Asia
+150,75,155,80,Russia & North Asia
+155,75,160,80,Russia & North Asia
+160,75,165,80,Russia & North Asia
+165,75,170,80,Russia & North Asia
+170,75,175,80,Russia & North Asia
+175,75,180,80,Russia & North Asia
+-180,80,-175,85,Arctic
+-175,80,-170,85,Arctic
+-170,80,-165,85,Arctic
+-165,80,-160,85,Arctic
+-160,80,-155,85,Arctic
+-155,80,-150,85,Arctic
+-150,80,-145,85,Arctic
+-145,80,-140,85,Arctic
+-140,80,-135,85,Arctic
+-135,80,-130,85,Arctic
+-130,80,-125,85,Arctic
+-125,80,-120,85,Arctic
+-120,80,-115,85,Arctic
+-115,80,-110,85,Arctic
+-110,80,-105,85,Arctic
+-105,80,-100,85,Arctic
+-100,80,-95,85,Arctic
+-95,80,-90,85,Arctic
+-90,80,-85,85,Arctic
+-85,80,-80,85,Arctic
+-80,80,-75,85,Arctic
+-75,80,-70,85,Arctic
+-70,80,-65,85,Arctic
+-65,80,-60,85,Arctic
+-60,80,-55,85,Arctic
+-55,80,-50,85,Arctic
+-50,80,-45,85,Arctic
+-45,80,-40,85,Arctic
+-40,80,-35,85,Arctic
+-35,80,-30,85,Arctic
+-30,80,-25,85,Arctic
+-25,80,-20,85,Arctic
+-20,80,-15,85,Arctic
+-15,80,-10,85,Arctic
+-10,80,-5,85,Arctic
+-5,80,0,85,Arctic
+0,80,5,85,Arctic
+5,80,10,85,Arctic
+10,80,15,85,Arctic
+15,80,20,85,Arctic
+20,80,25,85,Arctic
+25,80,30,85,Arctic
+30,80,35,85,Arctic
+35,80,40,85,Arctic
+40,80,45,85,Arctic
+45,80,50,85,Arctic
+50,80,55,85,Arctic
+55,80,60,85,Arctic
+60,80,65,85,Arctic
+65,80,70,85,Arctic
+70,80,75,85,Arctic
+75,80,80,85,Arctic
+80,80,85,85,Arctic
+85,80,90,85,Arctic
+90,80,95,85,Arctic
+95,80,100,85,Arctic
+100,80,105,85,Arctic
+105,80,110,85,Arctic
+110,80,115,85,Arctic
+115,80,120,85,Arctic
+120,80,125,85,Arctic
+125,80,130,85,Arctic
+130,80,135,85,Arctic
+135,80,140,85,Arctic
+140,80,145,85,Arctic
+145,80,150,85,Arctic
+150,80,155,85,Arctic
+155,80,160,85,Arctic
+160,80,165,85,Arctic
+165,80,170,85,Arctic
+170,80,175,85,Arctic
+175,80,180,85,Arctic
+-180,85,-175,90,Arctic
+-175,85,-170,90,Arctic
+-170,85,-165,90,Arctic
+-165,85,-160,90,Arctic
+-160,85,-155,90,Arctic
+-155,85,-150,90,Arctic
+-150,85,-145,90,Arctic
+-145,85,-140,90,Arctic
+-140,85,-135,90,Arctic
+-135,85,-130,90,Arctic
+-130,85,-125,90,Arctic
+-125,85,-120,90,Arctic
+-120,85,-115,90,Arctic
+-115,85,-110,90,Arctic
+-110,85,-105,90,Arctic
+-105,85,-100,90,Arctic
+-100,85,-95,90,Arctic
+-95,85,-90,90,Arctic
+-90,85,-85,90,Arctic
+-85,85,-80,90,Arctic
+-80,85,-75,90,Arctic
+-75,85,-70,90,Arctic
+-70,85,-65,90,Arctic
+-65,85,-60,90,Arctic
+-60,85,-55,90,Arctic
+-55,85,-50,90,Arctic
+-50,85,-45,90,Arctic
+-45,85,-40,90,Arctic
+-40,85,-35,90,Arctic
+-35,85,-30,90,Arctic
+-30,85,-25,90,Arctic
+-25,85,-20,90,Arctic
+-20,85,-15,90,Arctic
+-15,85,-10,90,Arctic
+-10,85,-5,90,Arctic
+-5,85,0,90,Arctic
+0,85,5,90,Arctic
+5,85,10,90,Arctic
+10,85,15,90,Arctic
+15,85,20,90,Arctic
+20,85,25,90,Arctic
+25,85,30,90,Arctic
+30,85,35,90,Arctic
+35,85,40,90,Arctic
+40,85,45,90,Arctic
+45,85,50,90,Arctic
+50,85,55,90,Arctic
+55,85,60,90,Arctic
+60,85,65,90,Arctic
+65,85,70,90,Arctic
+70,85,75,90,Arctic
+75,85,80,90,Arctic
+80,85,85,90,Arctic
+85,85,90,90,Arctic
+90,85,95,90,Arctic
+95,85,100,90,Arctic
+100,85,105,90,Arctic
+105,85,110,90,Arctic
+110,85,115,90,Arctic
+115,85,120,90,Arctic
+120,85,125,90,Arctic
+125,85,130,90,Arctic
+130,85,135,90,Arctic
+135,85,140,90,Arctic
+140,85,145,90,Arctic
+145,85,150,90,Arctic
+150,85,155,90,Arctic
+155,85,160,90,Arctic
+160,85,165,90,Arctic
+165,85,170,90,Arctic
+170,85,175,90,Arctic
+175,85,180,90,Arctic
