@@ -146,11 +146,14 @@ trusting the aggregate:
 3. **Andaman and Nicobar Islands are Indian territory** but Natural Earth tags
    them `SUBREGION='South-Eastern Asia'`. That would have renamed two Indian
    cells to Southeast Asia. Added `SUBUNIT_OVERRIDE` keeping them South Asia.
-4. **Three cells were essentially all ocean** — `Australia_115_-15_120_-10` had
-   *10 km²* of land (a scrap of Indonesia) deciding its label, and two others
-   were similar with zero harvested data. Renaming on that evidence is not
-   accuracy, it is noise. `fix_grid_regions.py --min-land-km2` (default 100)
-   now skips them.
+4. **Three cells were skipped by the land guard** — `Australia_115_-15_120_-10`
+   had *10 km²* of land (a scrap of Indonesia) deciding its label. CORRECTION
+   (2026-08-02 verification): one of the three, `Southeast_Asia_135_5_140_10`
+   (Palau, ~120 km²), was above the documented 100 km² threshold and held
+   25,530 rows / 172 jpgs — it was skipped only because the guard read a
+   3-decimal-rounded land_frac that rounded 120 km² to zero. The guard now
+   reads an unrounded equal-area land_km2 column, and the cell has since been
+   renamed (2026-08-02 section below).
 
 Final change set: **51 cells** (down from the 56 the raw audit proposed).
 
@@ -250,3 +253,70 @@ is the documented mapping table.
   departures, thresholds, and how to reproduce or challenge any assignment.
 - Independent verification workflow (UN-source cross-check, disk consistency,
   point-lattice re-derivation, hostile code review) launched; results pending.
+
+---
+
+# 2026-08-02 — adversarial verification, and the fixes it forced
+
+Four independent agents attacked the executed migration: (1) cross-check of
+Natural Earth's SUBREGION against the UN's own M49 table, (2) disk↔CSV
+consistency sweep over all six roots (8,641 dirs / 204,658 files), (3) an
+independent re-derivation of all 2,592 cells by 0.2° point-lattice sampling +
+an EPSG:6933 equal-area recomputation, (4) hostile review of both tools.
+Verdict: **every one of the 51 executed renames was independently confirmed
+correct** — but the surrounding machinery had real defects.
+
+## Defects found and fixed
+
+1. **CSV/disk divergence (critical).** The aug01 run relabelled 54 CSV rows but
+   renamed only 51 cells' dirs: the land guard applied to the dir plan, not the
+   CSV rewrite. 3 cells diverged; one (Palau) held real data. Fixed structurally
+   — `eligible()` now computes the acted-on set once and both consumers use it —
+   and healed on disk with the new `--reconcile` mode (9 dirs, journal
+   `region_fix_aug02_reconcile.json`).
+2. **Ocean-label blind spot (critical).** The audit's OCEAN_LABELS short-circuit
+   ran before any land test, so an ocean-labelled cell was never audited even at
+   100% land — the same error class the migration existed to fix, structurally
+   invisible to it. The gate is now `ocean label AND land_frac < 0.60`.
+   Re-audit surfaced **20 hidden misassignments** (23.2M rows, 48,476 jpgs):
+   the Volga cell as *Indian Ocean* (18.3M rows), the Caucasus as Indian Ocean
+   (35,524 jpgs), a 10-cell Siberia/Tibet block as *Pacific Ocean*, six
+   all-land Arctic cells (N. Greenland / Ellesmere). All renamed
+   (75 dirs / 2,006 files, journal `region_fix_aug02.json`). Hawaii (~3% land)
+   and Svalbard (<60%) correctly keep their basin labels.
+3. **land_frac rounding (major).** The guard reconstructed km² from a 3-decimal
+   land_frac; 100 km² ≡ 0.000325 always rounded to zero. Audit now emits an
+   unrounded equal-area `land_km2` column; the guard consumes it directly.
+4. **Areas now equal-area (EPSG:6933)** instead of raw degrees.
+5. **Undo hardened:** CSV row changes are journalled (write-ahead, before any
+   rename executes) and restored by `--undo`; undo reports reversed vs skipped
+   honestly. Proven live: a botched invocation (zsh passed six roots as one
+   string → CSV-only change) was fully reverted by `--undo` before the correct
+   re-run.
+6. **NE↔M49 divergences neutralized:** 16/297 subunits where NE's SUBREGION
+   contradicts the UN table now carry explicit M49-siding overrides (Hawaii →
+   North America, Easter I. → South America, Christmas/Cocos → Australia, the
+   eight "Seven seas" subunits by administering state). None decides a cell's
+   dominant land today; the chain can no longer silently drop land
+   (country_region() returning None is now impossible for real land).
+7. **Verdict ordering:** a cell whose assigned region owns none of its land is
+   MISASSIGNED even below the 0.60 dominance threshold (this is what caught the
+   Caucasus cell at 57.7% dominance).
+
+## Evidence preservation
+
+- `data/geo/region_audit_prefix.csv` — the pre-fix audit, regenerated
+  byte-reproducibly from `original_global_grid_5deg.csv.bak` (54 MISASSIGNED).
+- `data/geo/region_audit_aug01_postfix.csv` — the state between migrations.
+- `data/geo/region_audit.csv` — current (0 MISASSIGNED).
+
+## Final state
+
+- Audit: **0 MISASSIGNED**, 76 taxonomy, 7 straddles, 178 ocean-label-kept.
+- `--reconcile` dry-run: **zero** disk↔CSV drift across all six roots.
+- Catalog integrity across all three migrations: identical
+  (68,384 files · 3,048,780,701 rows · 32,582,319 jpgs).
+- Totals: 74 cells relabelled (54 aug01 CSV / 51 dirs + 20 aug02 + 3 reconciled).
+- Still stale by design: `coverage_missing*` shards and `data/missing_worklist/`
+  are keyed by old cell names in file names AND `safe_region_id` row values —
+  regenerate before next use.

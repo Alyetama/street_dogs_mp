@@ -19,7 +19,7 @@
    "name": "UN M49 Standard Country or Area Codes for Statistical Use",
    "publisher": "United Nations Statistics Division",
    "url": "https://unstats.un.org/unsd/methodology/m49/",
-   "note": "encoded in Natural Earth's SUBREGION attribute"
+   "note": "approximated by Natural Earth SUBREGION; 16/297 subunit deviations from the UN table are neutralized by overrides or verified impact-free"
   }
  },
  "follows_m49": {
@@ -96,8 +96,33 @@
   "min_land_km2": 100
  },
  "impact": {
-  "cells_renamed": 51,
-  "following_m49_exactly": 39,
-  "depending_on_departures": 12
+  "migrations": {
+   "aug01": {
+    "cells_dir_renamed": 51,
+    "csv_rows_relabelled": 54
+   },
+   "aug02": {
+    "cells_dir_renamed": 20,
+    "csv_rows_relabelled": 20,
+    "cells_reconciled": 3
+   }
+  },
+  "total_cells_relabelled": 74,
+  "following_m49_exactly": 62,
+  "depending_on_documented_departures": 12,
+  "verification": "4-agent adversarial pass 2026-08-02: UN-source cross-check, disk consistency, point-lattice re-derivation, hostile code review"
+ },
+ "ne_m49_divergence_overrides": {
+  "Hawaii": "North America",
+  "Easter Island": "South America",
+  "Isla Sala y Gomez": "South America",
+  "IOA (Christmas/Cocos)": "Australia",
+  "SGS": "South America",
+  "IOT": "Africa",
+  "SHN": "Africa",
+  "ZAF Prince Edward": "Africa",
+  "ATF": "Africa",
+  "HMD": "Australia",
+  "ATA S. Orkney": "Antarctica"
  }
 }

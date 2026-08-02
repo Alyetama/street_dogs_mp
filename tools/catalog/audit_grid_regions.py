@@ -20,9 +20,16 @@ split by the Red Sea. No single label is right there. Rather than silently
 picking one, every cell reports ``share`` (the dominant region's fraction of the
 cell's land), so ambiguous cells are visible and can be judged separately.
 
-*Ocean cells.* Cells with no land keep whatever the CSV says. The ocean/polar
-labels encode a basin convention this audit has no opinion about, and rewriting
-them from country polygons would be nonsense.
+*Ocean cells.* Mostly-water cells keep whatever the CSV says: basin labels
+(Pacific/Atlantic/Indian Ocean, Arctic) are a convention this audit has no
+opinion about. But an ocean LABEL is not proof of ocean: the original grid filed
+the 100%-land Volga cell as Indian Ocean. So the pass-through applies only while
+the cell's land fraction is below --ocean-land-frac (default 0.60); a
+mostly-land cell is audited like any other regardless of its label.
+
+*Areas are equal-area.* All areas are computed in EPSG:6933 (km2), not in raw
+degrees -- a degree of longitude shrinks toward the poles, and degree-area was
+within rounding distance of flipping near-threshold verdicts at high latitude.
 
 READ-ONLY: reads the grid CSV, the shapefile and (optionally) the catalog; the
 only thing it writes is its own report.
@@ -40,7 +47,19 @@ from collections import defaultdict
 
 import geopandas as gpd
 import pandas as pd
+import pyproj
 from shapely.geometry import box
+from shapely.ops import transform as shp_transform
+
+# Equal-area projection for all area arithmetic (km2). Raw EPSG:4326 degree
+# areas overweight low latitudes and nearly flipped near-threshold verdicts.
+_TO_EA = pyproj.Transformer.from_crs(4326, 6933, always_xy=True).transform
+
+
+def area_km2(geom):
+    """Geometry area in km2, computed in EPSG:6933."""
+    return shp_transform(_TO_EA, geom).area / 1e6
+
 
 # Country ISO_A3 -> project region, for cases the UN subregion gets wrong for
 # this project's taxonomy. Everything else falls through to SUBREGION_MAP.
@@ -59,18 +78,39 @@ COUNTRY_OVERRIDE = {
     'AFG': 'Central Asia',
     'AUS': 'Australia',
     'NZL': 'New Zealand & Pacific',
-    # Turkey and Cyprus straddle the Europe/Asia line; the grid already labels
-    # Istanbul's cell Europe, so keep them with Europe rather than churn.
+    # M49 files Turkey and Cyprus under Western Asia -> Middle East already;
+    # these entries are redundant belt-and-braces, kept for explicitness.
     'TUR': 'Middle East',
     'CYP': 'Middle East',
+    # Christmas Island and Cocos (Keeling): NE tags them South-Eastern Asia
+    # (geography); UN M49 files both under "Australia and New Zealand". The
+    # project follows M49/sovereignty for territories (as with Andaman).
+    'IOA': 'Australia',
 }
 
 # Subunit-level fixes where Natural Earth's SUBREGION follows geography but the
 # territory's administration (and this project's taxonomy) follows the sovereign.
 SUBUNIT_OVERRIDE = {
-    'Andaman Is.':
-    'South Asia',  # Indian territory, NE says South-Eastern Asia
+    # Cases where NE's SUBREGION follows geography but M49 (and the project,
+    # which follows sovereignty for territories) files them with the sovereign.
+    'Andaman Is.': 'South Asia',  # India; NE says South-Eastern Asia
     'Nicobar Is.': 'South Asia',  # ditto
+    'Hawaii': 'North America',  # USA; NE says Polynesia; M49: N. America
+    'Easter Island': 'South America',  # Chile; NE says Polynesia
+    'Isla Sala y Gomez': 'South America',  # Chile
+}
+
+# NE tags a handful of remote islands SUBREGION='Seven seas (open ocean)', a
+# label with no M49 counterpart. Mapped per M49 by their administering state so
+# country_region() can never silently return None for real land.
+SEVEN_SEAS_BY_ADM0 = {
+    'SGS': 'South America',  # South Georgia & S. Sandwich (M49: South America)
+    'IOT': 'Africa',  # British Indian Ocean Territory (M49: E. Africa)
+    'SHN': 'Africa',  # Ascension / St Helena (M49: W. Africa)
+    'ZAF': 'Africa',  # Prince Edward Islands (South Africa)
+    'ATF': 'Africa',  # French Southern Territories (M49: E. Africa)
+    'HMD': 'Australia',  # Heard & McDonald (M49: Australia and NZ)
+    'ATA': 'Antarctica',  # South Orkney Is.
 }
 
 SUBREGION_MAP = {
@@ -138,6 +178,8 @@ def country_region(row):
         iso = row.get('ADM0_A3')
     if iso in COUNTRY_OVERRIDE:
         return COUNTRY_OVERRIDE[iso]
+    if row.get('SUBREGION') == 'Seven seas (open ocean)':
+        return SEVEN_SEAS_BY_ADM0.get(row.get('ADM0_A3'))
     sub = SUBREGION_MAP.get(row.get('SUBREGION'))
     if sub:
         return sub
@@ -172,6 +214,12 @@ def main():
                    help='Below this dominant-region land share a cell is '
                    'reported as straddling rather than mis-assigned '
                    '(default 0.60).')
+    p.add_argument('--ocean-land-frac',
+                   type=float,
+                   default=0.60,
+                   help='An ocean/polar label is kept only while the cell is '
+                   'less than this fraction land; a mostly-land cell is '
+                   'audited like any other (default 0.60).')
     p.add_argument(
         '--catalog',
         default='data/catalog.duckdb',
@@ -197,9 +245,11 @@ def main():
             except Exception:
                 continue
             if not inter.is_empty:
-                by[c['proj_region']] += inter.area
-                bycont[c['CONTINENT']] += inter.area
+                a = area_km2(inter)
+                by[c['proj_region']] += a
+                bycont[c['CONTINENT']] += a
         land = sum(by.values())
+        cell_km2 = area_km2(cell)
         name = (f"{g.region.replace('&', 'and').replace(' ', '_')}"
                 f"_{g.sw_lon}_{g.sw_lat}_{g.ne_lon}_{g.ne_lat}")
         if land <= 0:
@@ -209,17 +259,24 @@ def main():
                      dominant='',
                      share=0.0,
                      land_frac=0.0,
+                     land_km2=0.0,
                      verdict='ocean-no-land',
                      breakdown=''))
             continue
         dom, dom_area = max(by.items(), key=lambda kv: kv[1])
         share = dom_area / land
+        land_frac = land / cell_km2
+        assigned_share = by.get(g.region, 0.0) / land
         domcont = max(bycont.items(), key=lambda kv: kv[1])[0]
         ok_conts = REGION_CONTINENT.get(g.region, set())
-        if g.region in OCEAN_LABELS:
+        if g.region in OCEAN_LABELS and land_frac < args.ocean_land_frac:
             verdict = 'ocean-label-kept'
         elif dom == g.region:
             verdict = 'ok'
+        elif domcont not in ok_conts and assigned_share < 1e-9:
+            # The assigned region owns NONE of the land and the land is on the
+            # wrong continent: an error even when no region clears min_share.
+            verdict = 'MISASSIGNED'
         elif share < args.min_share:
             verdict = 'straddles'
         elif domcont not in ok_conts:
@@ -232,7 +289,8 @@ def main():
                  dominant=dom,
                  continent=domcont,
                  share=round(share, 3),
-                 land_frac=round(land / cell.area, 3),
+                 land_frac=round(land_frac, 6),
+                 land_km2=round(land, 1),
                  verdict=verdict,
                  breakdown='; '.join(
                      f'{k} {v / land:.0%}'

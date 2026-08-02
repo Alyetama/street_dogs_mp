@@ -1853,8 +1853,8 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 75,35,80,40,Central Asia
 80,35,85,40,Central Asia
 85,35,90,40,Central Asia
-90,35,95,40,Pacific Ocean
-95,35,100,40,Pacific Ocean
+90,35,95,40,East Asia
+95,35,100,40,East Asia
 100,35,105,40,East Asia
 105,35,110,40,East Asia
 110,35,115,40,East Asia
@@ -1915,7 +1915,7 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 25,40,30,45,Europe
 30,40,35,45,Middle East
 35,40,40,45,Middle East
-40,40,45,45,Indian Ocean
+40,40,45,45,Middle East
 45,40,50,45,Central Asia
 50,40,55,45,Central Asia
 55,40,60,45,Central Asia
@@ -1925,8 +1925,8 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 75,40,80,45,Central Asia
 80,40,85,45,Central Asia
 85,40,90,45,Central Asia
-90,40,95,45,Pacific Ocean
-95,40,100,45,Pacific Ocean
+90,40,95,45,East Asia
+95,40,100,45,East Asia
 100,40,105,45,East Asia
 105,40,110,45,East Asia
 110,40,115,45,East Asia
@@ -1987,7 +1987,7 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 25,45,30,50,Europe
 30,45,35,50,Europe
 35,45,40,50,Europe
-40,45,45,50,Indian Ocean
+40,45,45,50,Russia & North Asia
 45,45,50,50,Russia & North Asia
 50,45,55,50,Central Asia
 55,45,60,50,Central Asia
@@ -1997,8 +1997,8 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 75,45,80,50,Central Asia
 80,45,85,50,Central Asia
 85,45,90,50,Central Asia
-90,45,95,50,Pacific Ocean
-95,45,100,50,Pacific Ocean
+90,45,95,50,East Asia
+95,45,100,50,East Asia
 100,45,105,50,East Asia
 105,45,110,50,East Asia
 110,45,115,50,East Asia
@@ -2059,7 +2059,7 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 25,50,30,55,Europe
 30,50,35,55,Europe
 35,50,40,55,Europe
-40,50,45,55,Indian Ocean
+40,50,45,55,Russia & North Asia
 45,50,50,55,Russia & North Asia
 50,50,55,55,Russia & North Asia
 55,50,60,55,Russia & North Asia
@@ -2069,8 +2069,8 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 75,50,80,55,Central Asia
 80,50,85,55,Central Asia
 85,50,90,55,Central Asia
-90,50,95,55,Pacific Ocean
-95,50,100,55,Pacific Ocean
+90,50,95,55,Russia & North Asia
+95,50,100,55,Russia & North Asia
 100,50,105,55,East Asia
 105,50,110,55,East Asia
 110,50,115,55,East Asia
@@ -2131,7 +2131,7 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 25,55,30,60,Europe
 30,55,35,60,Europe
 35,55,40,60,Europe
-40,55,45,60,Indian Ocean
+40,55,45,60,Russia & North Asia
 45,55,50,60,Russia & North Asia
 50,55,55,60,Russia & North Asia
 55,55,60,60,Russia & North Asia
@@ -2141,8 +2141,8 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 75,55,80,60,Central Asia
 80,55,85,60,Central Asia
 85,55,90,60,Central Asia
-90,55,95,60,Pacific Ocean
-95,55,100,60,Pacific Ocean
+90,55,95,60,Russia & North Asia
+95,55,100,60,Russia & North Asia
 100,55,105,60,East Asia
 105,55,110,60,East Asia
 110,55,115,60,East Asia
@@ -2467,17 +2467,17 @@ sw_lon,sw_lat,ne_lon,ne_lat,region
 -95,80,-90,85,Arctic
 -90,80,-85,85,Arctic
 -85,80,-80,85,Arctic
--80,80,-75,85,Arctic
--75,80,-70,85,Arctic
+-80,80,-75,85,North America
+-75,80,-70,85,North America
 -70,80,-65,85,Arctic
 -65,80,-60,85,Arctic
 -60,80,-55,85,Arctic
 -55,80,-50,85,Arctic
 -50,80,-45,85,Arctic
--45,80,-40,85,Arctic
--40,80,-35,85,Arctic
--35,80,-30,85,Arctic
--30,80,-25,85,Arctic
+-45,80,-40,85,Greenland
+-40,80,-35,85,Greenland
+-35,80,-30,85,Greenland
+-30,80,-25,85,Greenland
 -25,80,-20,85,Arctic
 -20,80,-15,85,Arctic
 -15,80,-10,85,Arctic

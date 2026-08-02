@@ -86,12 +86,23 @@ with these guards:
 |---|---|---|
 | dominant share < 0.60 | verdict `straddles`, cell left as-is | at 5° a cell can genuinely contain two continents (e.g. 45–50E / 10–15N is 53% Middle East, 47% Africa across the Red Sea); no single label is correct, so the incumbent label stands |
 | land < 100 km² in the cell | not relabelled | a label should not be decided by a sliver of reef in an otherwise open-ocean cell |
-| no land at all | CSV label kept | ocean/polar labels (Pacific/Atlantic/Indian Ocean, Arctic, Antarctica) encode a basin convention that country polygons cannot speak to |
+| ocean/polar label, land fraction < 0.60 | label kept | basin labels (Pacific/Atlantic/Indian Ocean, Arctic, Antarctica) are a convention for mostly-water cells — but a label is not proof of ocean: the original grid filed the 100%-land Volga cell as *Indian Ocean*, so a mostly-land cell is audited like any other regardless of its label (Hawaii at ~3% land keeps Pacific Ocean; the Volga cell did not keep Indian Ocean) |
 | wrong sub-label, same continent | verdict `taxonomy`, left as-is | e.g. European Russia as *Europe* vs *Russia & North Asia* is a naming convention, not an error; only cross-continent disagreements were treated as mistakes |
 
+All areas are computed in an equal-area projection (EPSG:6933) — raw degree
+areas overweight low latitudes and sat within rounding distance of flipping
+near-threshold verdicts.
+
 Applied 2026-08-01: 51 cells relabelled (5,961 renames across 6 drives,
-journalled in `runs/region_fix_aug01.json`, reversible with `--undo`).
-Post-fix audit: **0 misassigned**, 76 `taxonomy`, 7 `straddles`.
+journal `runs/region_fix_aug01.json`). Applied 2026-08-02 after independent
+adversarial verification: 20 further cells that had been hidden behind ocean
+labels (incl. the Volga cell as *Indian Ocean*, 18.3M rows; the Caucasus; a
+Siberia/Tibet block as *Pacific Ocean*; six all-land Arctic cells) plus 3 cells
+reconciled from an earlier CSV/disk divergence (journals
+`runs/region_fix_aug02*.json`). Post-fix audit: **0 misassigned**,
+76 `taxonomy`, 7 `straddles`; disk↔CSV reconcile reports zero drift; catalog
+integrity identical before/after every migration (68,384 files ·
+3,048,780,701 rows · 32,582,319 jpgs).
 
 ## 3. The mapping, and its authorities
 
@@ -116,10 +127,14 @@ whole cells. Subunits separate territories and split Russia at the Urals.
 > https://unstats.un.org/unsd/methodology/m49/
 
 M49 reaches the pipeline through Natural Earth's `SUBREGION` attribute, which
-encodes it. (Caveat: NE's copy deviates from the UN table in at least one known
-place — it tags Asian Russia `Central Asia`, which M49 does not; the Russia
-override below neutralizes that instance. An adversarial cross-check of NE's
-`SUBREGION` against the UN's own table is part of the standing verification.)
+**approximates** it: an adversarial cross-check against the UN's own table
+found 16 of 297 joinable subunits where NE disagrees with M49 (Asian Russia
+tagged `Central Asia`; Hawaii `Polynesia` vs M49 Northern America; Easter I.,
+Christmas I., Cocos, Corsica, Chatham, Andaman/Nicobar; plus eight "Seven seas
+(open ocean)" subunits with no M49 counterpart at all). Every divergence is
+neutralized by an explicit override (below) or verified to affect no cell's
+dominant land; the overrides side with **M49/sovereignty**, matching the
+project's convention for territories.
 
 ### 3.2 M49 sub-region → project region (follows the standard)
 
@@ -156,6 +171,15 @@ overrides exist. These are choices, recorded so they can be challenged:
 | Greenland | Northern America | Greenland | dedicated region | 0 |
 | New Zealand | Australia and New Zealand | New Zealand & Pacific | project splits what M49 groups | 0 |
 | Andaman & Nicobar Is. | South-Eastern Asia | South Asia | Indian territory; project follows sovereignty for territories | 0 |
+
+Corrections **toward** M49 where Natural Earth deviates from it (not
+departures): Hawaii → North America, Easter I. / Isla Sala y Gomez → South
+America, Christmas I. / Cocos → Australia, and the eight "Seven seas" subunits
+mapped by administering state (South Georgia & S. Sandwich → South America;
+BIOT, St Helena/Ascension, Prince Edward, French Southern Territories →
+Africa; Heard & McDonald → Australia; S. Orkney → Antarctica). None currently
+decides a cell's dominant land; they exist so the chain can never silently
+drop land or follow NE against the UN table.
 
 **39 of the 51 relabelled cells follow M49 exactly; 12 rest on the Russia and
 Iran rows above.** Strict M49 compliance is recoverable: delete the overrides

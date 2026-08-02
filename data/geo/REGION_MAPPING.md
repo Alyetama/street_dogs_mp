@@ -28,7 +28,15 @@ polygon and an Asia-tagged eastern one.
 > Statistical Use (Series M, No. 49)* — the "M49" geoscheme.
 > https://unstats.un.org/unsd/methodology/m49/
 
-Natural Earth's `SUBREGION` field encodes M49, so M49 is applied via that field.
+Natural Earth's `SUBREGION` field **approximates** M49 — 16 of 297 joinable
+subunits deviate from the UN table (verified against
+https://unstats.un.org/unsd/methodology/m49/ on 2026-08-01/02). Every deviation
+is either neutralized by an explicit override siding with M49 (Hawaii, Easter
+I., Christmas I., Cocos, the "Seven seas" subunits, Russia, Andaman/Nicobar) or
+verified to decide no cell's dominant land. The column below headed "M49
+sub-region" uses NE's SUBREGION vocabulary, which mixes M49 sub-region and
+intermediate-region names (e.g. `Caribbean`, `Eastern Africa`) and NE spelling
+(`South-Eastern Asia` vs UN `South-eastern Asia`).
 
 ## Where the two disagree with this project
 
