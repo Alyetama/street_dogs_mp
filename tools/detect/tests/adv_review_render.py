@@ -219,7 +219,7 @@ function fetch(url, opts) {
 }
 
 // ── the page's own element graph (built from the real markup ids) ───────────
-for (const id of ['left','done','mfill','pg','pg2','prev','prev2','next','next2',
+for (const id of ['left','done','pg','pg2','prev','prev2','next','next2',
                   'foot','grid','state','sort','size','reload']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
@@ -269,8 +269,7 @@ async function t1() {
   const cards = document.querySelectorAll('.card');
   ck(cards.length === 6, 't1: rendered ' + cards.length + ' tiles, want 6');
   ck(byId['left'].textContent === '120', 't1: left=' + byId['left'].textContent);
-  ck(byId['done'].textContent === '30 flagged', 't1: done=' + byId['done'].textContent);
-  ck(/^20\.0%$/.test(byId['mfill'].style.width), 't1: meter=' + byId['mfill'].style.width);
+  ck(byId['done'].textContent === '30', 't1: done=' + byId['done'].textContent);
   ck(byId['pg'].textContent === 'Page 1 of 2', 't1: pg=' + byId['pg'].textContent);
   ck(byId['prev'].disabled === true, 't1: prev not disabled on page 1');
   ck(byId['next'].disabled === false, 't1: next disabled with 2 pages');
@@ -297,7 +296,7 @@ async function t2() {
   ck(document.querySelectorAll('.card').length === 6,
      't2: DOM has ' + document.querySelectorAll('.card').length + ' tiles');
   ck(byId['left'].textContent === '119', 't2: left=' + byId['left'].textContent);
-  ck(byId['done'].textContent === '31 flagged', 't2: done=' + byId['done'].textContent);
+  ck(byId['done'].textContent === '31', 't2: done=' + byId['done'].textContent);
   const post = CALLS[CALLS.length - 1];
   ck(post.body && post.body.name === before[2] && post.body.label === 'false_positive',
      't2: wrong flag POST body: ' + JSON.stringify(post.body));
@@ -322,7 +321,7 @@ async function t3() {
   ck(after[2] === before[2], 't3: undo put the crop at index ' +
      after.indexOf(before[2]) + ', want 2');
   ck(byId['left'].textContent === '120', 't3: left=' + byId['left'].textContent);
-  ck(byId['done'].textContent === '30 flagged', 't3: done=' + byId['done'].textContent);
+  ck(byId['done'].textContent === '30', 't3: done=' + byId['done'].textContent);
   ck(API.st().session === s0, 't3: session counter not decremented');
   const dom = document.querySelectorAll('.card').map(e => e.dataset.name);
   ck(JSON.stringify(dom) === JSON.stringify(after), 't3: DOM order wrong after undo');
@@ -368,7 +367,8 @@ async function t6() {
   await API.load(); await flush();
   ck(/Queue is clear/.test(byId['state'].innerHTML), 't6: no empty state');
   ck(!!byId['rl2'], 't6: no way to re-check from the empty state');
-  ck(byId['mfill'].style.width === '100.0%', 't6: meter=' + byId['mfill'].style.width);
+  ck(byId['left'].textContent === '0', 't6: left=' + byId['left'].textContent);
+  ck(byId['done'].textContent === '500', 't6: done=' + byId['done'].textContent);
   ck(byId['foot'].hidden === true, 't6: pager shown for a single page');
 }
 
