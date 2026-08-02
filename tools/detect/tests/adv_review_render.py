@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""
+Adversarial test for the /review bulk-flagging page's client JS.
+
+``node --check`` only proves the script parses. This EXECUTES the script
+extracted from dashboard.REVIEW_HTML under node against a stub DOM and drives
+the real user path: load, flag, backfill, undo, paginate, keyboard, lightbox.
+
+The stub DOM is deliberately small but honest about the three things this page
+actually leans on:
+
+  * ``innerHTML`` assignment creates queryable children AND registers their
+    ids, because tile()/showUndo()/openLb() all build markup that way and then
+    immediately look the pieces back up.
+  * ``querySelector('.card[data-name="..."]')`` -- the page addresses tiles by
+    crop name, not index, so a stale index can never flag the wrong image.
+  * ``getComputedStyle(grid).gridTemplateColumns`` -- arrow-key up/down needs
+    the live column count.
+
+Cases cover the normal payload, a flag that the server REFUSES (must roll
+back, not silently drop the tile), undo restoring position, a fetch that
+fails, the empty queue, quote/tag injection in image_id, and every keyboard
+binding. A ReferenceError, a TypeError or any other throw fails the test.
+
+Requires node on PATH; skips (exit 0, loud message) if absent.
+"""
+
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
+
+
+def load_dashboard():
+    spec = importlib.util.spec_from_file_location('dash_under_test', DASH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def crop(i, conf=0.5, full=True, iid=None):
+    return {'name': '%d_%s_%03d.jpg' % (1_700_000_000_000 + i,
+                                        iid or ('img%d' % i),
+                                        int(round(conf * 100))),
+            'image_id': iid or ('img%d' % i),
+            'ts': 1_700_000_000_000 + i,
+            'conf': conf,
+            'has_full': full}
+
+
+HARNESS = r"""
+// ── stub DOM ────────────────────────────────────────────────────────────────
+const failures = [];
+let COLS = 5;
+
+function parseKids(html) {
+  // shallow: every tag with a class= and/or id= becomes one child node
+  const out = [];
+  const re = /<(\w+)([^>]*)>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const attrs = m[2];
+    const cm = /class="([^"]*)"/.exec(attrs);
+    const im = /id="([^"]*)"/.exec(attrs);
+    const sm = /src="([^"]*)"/.exec(attrs);
+    if (!cm && !im) continue;
+    const el = new El(m[1]);
+    if (cm) el.className = cm[1];
+    if (im) { el.id = im[1]; byId[im[1]] = el; }
+    if (sm) el.src = sm[1];
+    out.push(el);
+  }
+  return out;
+}
+
+const byId = {};
+const allEls = [];
+
+// what a browser's textContent -> innerHTML round trip actually escapes.
+// NOT quotes -- which is exactly why the page needs att() for title="".
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;');
+}
+
+class El {
+  constructor(tag) {
+    this.tagName = (tag || 'div').toUpperCase();
+    this.className = ''; this._id = ''; this.dataset = {}; this.style = {};
+    this.children = []; this.parentNode = null; this._text = '';
+    this.hidden = false; this.disabled = false; this.src = '';
+    this._html = ''; this.onclick = null; this.onchange = null;
+    this.onmousedown = null; this.value = ''; this._listeners = {};
+    allEls.push(this);
+  }
+  // assigning .id must make the node findable, exactly as in a real document
+  // (showUndo() builds the toast with `t.id='tbox'` and later looks it up)
+  set id(v) { this._id = v; if (v) byId[v] = this; }
+  get id() { return this._id; }
+  set innerHTML(v) {
+    this._html = v; this._text = '';
+    for (const c of this.children) {
+      const k = allEls.indexOf(c); if (k >= 0) allEls.splice(k, 1);
+    }
+    this.children = parseKids(v);
+    for (const c of this.children) c.parentNode = this;
+  }
+  get innerHTML() { return this._html; }
+  // esc() in the page is `d.textContent = t; return d.innerHTML` -- model it
+  set textContent(v) { this._text = String(v); this._html = escHtml(v);
+                       this.children = []; }
+  get textContent() { return this._text; }
+  get classList() {
+    const self = this;
+    return {
+      add(c) { if (!self.className.split(' ').includes(c))
+                 self.className = (self.className + ' ' + c).trim(); },
+      remove(c) { self.className = self.className.split(' ')
+                    .filter(x => x && x !== c).join(' '); },
+      contains(c) { return self.className.split(' ').includes(c); },
+      toggle(c, on) { on ? this.add(c) : this.remove(c); },
+    };
+  }
+  appendChild(n) {
+    if (n && n.__frag) { for (const c of n.children) this.appendChild(c); return n; }
+    n.parentNode = this; this.children.push(n); return n;
+  }
+  insertBefore(n, ref) {
+    n.parentNode = this;
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i < 0) this.children.push(n); else this.children.splice(i, 0, n);
+    return n;
+  }
+  removeChild(n) {
+    const i = this.children.indexOf(n);
+    if (i >= 0) this.children.splice(i, 1);
+    n.parentNode = null; return n;
+  }
+  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+  addEventListener(t, f) { (this._listeners[t] = this._listeners[t] || []).push(f); }
+  focus() {}
+  scrollIntoView() {}
+  matches(sel) { return matchSel(this, sel); }
+  querySelector(sel) { return descendants(this).find(e => matchSel(e, sel)) || null; }
+  querySelectorAll(sel) { return descendants(this).filter(e => matchSel(e, sel)); }
+  getAttribute(k) { return k === 'data-name' ? this.dataset.name : null; }
+}
+
+function descendants(root) {
+  const out = [];
+  (function walk(n) { for (const c of n.children) { out.push(c); walk(c); } })(root);
+  return out;
+}
+function matchSel(el, sel) {
+  // supports ".cls", ".cls[attr="v"]", "#id"
+  const am = /^\.([\w-]+)\[([\w-]+)="(.*)"\]$/.exec(sel);
+  if (am) {
+    if (!el.classList.contains(am[1])) return false;
+    const key = am[2].replace(/^data-/, '');
+    return String(el.dataset[key]) === am[3].replace(/\\(.)/g, '$1');
+  }
+  if (sel[0] === '.') return el.classList.contains(sel.slice(1));
+  if (sel[0] === '#') return el.id === sel.slice(1);
+  return el.tagName === sel.toUpperCase();
+}
+
+const root = new El('body');
+// getElementById only sees attached nodes -- otherwise a removed toast stays
+// "findable" and the page silently reuses a detached element forever
+function attached(el) {
+  for (let n = el; n; n = n.parentNode) if (n === root) return true;
+  return false;
+}
+const document = {
+  body: root,
+  createElement: t => new El(t),
+  createDocumentFragment: () => { const f = new El('frag'); f.__frag = true; return f; },
+  getElementById: id => {
+    const e = byId[id];
+    return e && (attached(e) || e.__page) ? e : null;
+  },
+  querySelector: s => descendants(root).find(e => matchSel(e, s)) || null,
+  querySelectorAll: s => descendants(root).filter(e => matchSel(e, s)),
+  addEventListener: (t, f) => (docL[t] = docL[t] || []).push(f),
+};
+const docL = {};
+const CSS = { escape: s => String(s).replace(/([^\w-])/g, '\\$1') };
+const window = { matchMedia: () => ({ matches: false }) };
+function getComputedStyle() {
+  return { gridTemplateColumns: new Array(COLS).fill('100px').join(' ') };
+}
+function requestAnimationFrame(f) { f(); }
+function setTimeout(f, ms) { timers.push({ f, ms }); return timers.length; }
+function clearTimeout(h) { if (h) timers[h - 1] = null; }
+const timers = [];
+function runTimers() { const t = timers.slice(); timers.length = 0;
+                       for (const x of t) if (x) x.f(); }
+
+// ── controllable fetch ──────────────────────────────────────────────────────
+let RESP = {};           // url-substring -> () => value | 'reject'
+const CALLS = [];
+function fetch(url, opts) {
+  CALLS.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+  for (const k of Object.keys(RESP)) {
+    if (String(url).includes(k)) {
+      const v = RESP[k](url, opts);
+      if (v === 'reject') return Promise.reject(new Error('boom'));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(v) });
+    }
+  }
+  return Promise.reject(new Error('unstubbed ' + url));
+}
+
+// ── the page's own element graph (built from the real markup ids) ───────────
+for (const id of ['left','done','mfill','pg','pg2','prev','prev2','next','next2',
+                  'foot','grid','state','sort','size','reload']) {
+  const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
+  e.id = id; e.__page = true; root.appendChild(e);
+}
+byId['sort'].value = 'conf';
+byId['size'].value = '50';
+
+// ── run the page script ─────────────────────────────────────────────────────
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+let API;
+try {
+  API = new Function('document','window','CSS','fetch','getComputedStyle',
+    'requestAnimationFrame','setTimeout','clearTimeout','docL',
+    src + '\nreturn {load,render,flag,undo,openLb,closeLb,stepLb,tile,score,'
+        + 'idx,mark,cols,hideToast,showUndo,'
+        + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
+        + 'session,lastUndo,lb})};')(
+    document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
+    setTimeout, clearTimeout, docL);
+} catch (e) {
+  console.log('FAIL: could not evaluate the review script: ' + e);
+  process.exit(1);
+}
+
+const CROPS = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+function payload(items, reserve, extra) {
+  return Object.assign({ items, reserve: reserve || [], page: 0, pages: 2,
+                         size: 50, sort: 'conf',
+                         total_unflagged: 120, flagged_total: 30 }, extra || {});
+}
+function key(k) {
+  for (const f of (docL['keydown'] || []))
+    f({ key: k, preventDefault(){}, target: { tagName: 'BODY' } });
+}
+function ck(cond, msg) { if (!cond) failures.push(msg); }
+// keydown handlers fire flag()/undo() without awaiting; drain the microtask
+// queue deep enough that their fetch chains have settled
+async function flush(n) { for (let i = 0; i < (n || 12); i++) await Promise.resolve(); }
+function toastUp() { return root.children.some(c => c.id === 'tbox'); }
+
+// ── 1. load + render ────────────────────────────────────────────────────────
+async function t1() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6),
+                                        CROPS.normal.slice(6, 9)) };
+  await API.load(); await flush();
+  const cards = document.querySelectorAll('.card');
+  ck(cards.length === 6, 't1: rendered ' + cards.length + ' tiles, want 6');
+  ck(byId['left'].textContent === '120', 't1: left=' + byId['left'].textContent);
+  ck(byId['done'].textContent === '30 flagged', 't1: done=' + byId['done'].textContent);
+  ck(/^20\.0%$/.test(byId['mfill'].style.width), 't1: meter=' + byId['mfill'].style.width);
+  ck(byId['pg'].textContent === 'Page 1 of 2', 't1: pg=' + byId['pg'].textContent);
+  ck(byId['prev'].disabled === true, 't1: prev not disabled on page 1');
+  ck(byId['next'].disabled === false, 't1: next disabled with 2 pages');
+  ck(API.st().sel === 0, 't1: selection not seeded at 0');
+  ck(cards[0].classList.contains('sel'), 't1: first tile not marked selected');
+  // the confidence rail must reflect conf, not be a constant
+  const rails = document.querySelectorAll('.rail');
+  ck(rails.length === 6, 't1: ' + rails.length + ' rails for 6 tiles');
+}
+
+// ── 2. flag: surgical removal + backfill from reserve ───────────────────────
+async function t2() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6),
+                                        CROPS.normal.slice(6, 9)),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  const before = API.st().items.map(c => c.name);
+  await API.flag(2); await flush();
+  const after = API.st().items.map(c => c.name);
+  ck(!after.includes(before[2]), 't2: flagged crop still in items');
+  ck(after.length === 6, 't2: grid shrank to ' + after.length + ', want backfill to 6');
+  ck(after[5] === CROPS.normal[6].name, 't2: backfilled with the wrong crop');
+  ck(API.st().reserve.length === 2, 't2: reserve not consumed');
+  ck(document.querySelectorAll('.card').length === 6,
+     't2: DOM has ' + document.querySelectorAll('.card').length + ' tiles');
+  ck(byId['left'].textContent === '119', 't2: left=' + byId['left'].textContent);
+  ck(byId['done'].textContent === '31 flagged', 't2: done=' + byId['done'].textContent);
+  const post = CALLS[CALLS.length - 1];
+  ck(post.body && post.body.name === before[2] && post.body.label === 'false_positive',
+     't2: wrong flag POST body: ' + JSON.stringify(post.body));
+  ck(!!byId['undoB'], 't2: no undo control in the toast');
+  // DOM order must still track items order, or arrow keys select the wrong tile
+  const dom = document.querySelectorAll('.card').map(e => e.dataset.name);
+  ck(JSON.stringify(dom) === JSON.stringify(after),
+     't2: DOM order diverged from items order');
+}
+
+// ── 3. undo restores the crop AT ITS OLD INDEX ─────────────────────────────
+async function t3() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6),
+                                        CROPS.normal.slice(6, 9)),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  const before = API.st().items.map(c => c.name);
+  const s0 = API.st().session;
+  await API.flag(2); await flush();
+  await API.undo(); await flush();
+  const after = API.st().items.map(c => c.name);
+  ck(after[2] === before[2], 't3: undo put the crop at index ' +
+     after.indexOf(before[2]) + ', want 2');
+  ck(byId['left'].textContent === '120', 't3: left=' + byId['left'].textContent);
+  ck(byId['done'].textContent === '30 flagged', 't3: done=' + byId['done'].textContent);
+  ck(API.st().session === s0, 't3: session counter not decremented');
+  const dom = document.querySelectorAll('.card').map(e => e.dataset.name);
+  ck(JSON.stringify(dom) === JSON.stringify(after), 't3: DOM order wrong after undo');
+  ck(!toastUp(), 't3: toast still present after undo');
+  // a flag pulls one crop out of `reserve`; undo must hand it back, or
+  // repeated flag/undo cycles grow the page without bound
+  ck(after.length === before.length,
+     't3: page length drifted ' + before.length + ' -> ' + after.length);
+  ck(API.st().reserve.length === 3, 't3: reserve not restored, has ' +
+     API.st().reserve.length + ' want 3');
+}
+
+// ── 4. a REFUSED flag must roll back, never drop the tile ──────────────────
+async function t4() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6), []),
+           '/api/detect/flag': () => ({ ok: false, error: 'nope' }) };
+  await API.load(); await flush();
+  const n = API.st().items.length;
+  const name = API.st().items[1].name;
+  await API.flag(1); await flush();
+  ck(API.st().items.length === n, 't4: refused flag still removed the crop');
+  ck(API.st().items[1].name === name, 't4: refused flag reordered items');
+  const card = document.querySelector('.card[data-name="' + name + '"]');
+  ck(card && !card.classList.contains('go'),
+     't4: tile left in the exiting state after a refusal');
+  ck(byId['left'].textContent === '120', 't4: counters moved on a refusal');
+}
+
+// ── 5. fetch failure -> error state with a retry, not a blank page ─────────
+async function t5() {
+  RESP = { '/api/review': () => 'reject' };
+  await API.load(); await flush(); await Promise.resolve();
+  ck(/Could not reach/.test(byId['state'].innerHTML), 't5: no error state shown');
+  ck(!!byId['retry'], 't5: no retry control');
+  ck(byId['foot'].hidden === true, 't5: pager left visible over an error');
+  ck(document.querySelectorAll('.card').length === 0, 't5: stale tiles kept');
+}
+
+// ── 6. empty queue -> an invitation, not a void ────────────────────────────
+async function t6() {
+  RESP = { '/api/review': () => payload([], [], { total_unflagged: 0,
+                                                  flagged_total: 500, pages: 1 }) };
+  await API.load(); await flush();
+  ck(/Queue is clear/.test(byId['state'].innerHTML), 't6: no empty state');
+  ck(!!byId['rl2'], 't6: no way to re-check from the empty state');
+  ck(byId['mfill'].style.width === '100.0%', 't6: meter=' + byId['mfill'].style.width);
+  ck(byId['foot'].hidden === true, 't6: pager shown for a single page');
+}
+
+// ── 7. injection in image_id must not reach markup unescaped ───────────────
+async function t7() {
+  RESP = { '/api/review': () => payload(CROPS.hostile, []) };
+  await API.load(); await flush();
+  const h = byId['grid'].children.map(c => c.innerHTML).join('');
+  // no raw tag may appear that we did not write ourselves
+  ck(!/<script/i.test(h), 't7: <script survived into tile markup');
+  ck(!/<img\s+src=x/i.test(h), 't7: <img src=x survived into tile markup');
+  ck(h.includes('&lt;'), 't7: nothing was escaped at all');
+  // The id also lands in a title="". esc() does NOT touch quotes, so a bare
+  // esc() there lets `"><script>` close the attribute AND the tag. Assert the
+  // exact fully-escaped attribute value rather than hunting for fragments.
+  ck(h.includes('title="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"'),
+     't7: title="" not fully escaped -- got ' +
+     String((/title="([^"]*)"/.exec(h) || [])[1]));
+  const src = byId['grid'].children[0].querySelector('.thumb').src;
+  ck(!src.includes('"') && !src.includes('<'), 't7: thumb src not URL-encoded: ' + src);
+}
+
+// ── 8. keyboard: arrows honour the column count, F/U/Enter/Esc all bound ───
+async function t8() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 12), []),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  COLS = 5;
+  const last = API.st().items.length - 1;
+  ck(API.cols() === 5, 't8: cols()=' + API.cols());
+  key('ArrowRight'); ck(API.st().sel === 1, 't8: right -> ' + API.st().sel);
+  key('ArrowDown');  ck(API.st().sel === 6, 't8: down -> ' + API.st().sel + ', want 6');
+  key('ArrowUp');    ck(API.st().sel === 1, 't8: up -> ' + API.st().sel);
+  key('ArrowLeft');  ck(API.st().sel === 0, 't8: left -> ' + API.st().sel);
+  key('ArrowLeft');  ck(API.st().sel === 0, 't8: left ran past 0');
+  for (let i = 0; i < 40; i++) key('ArrowDown');
+  ck(API.st().sel === last, 't8: down ran past the end -> ' + API.st().sel +
+     ', last is ' + last);
+  for (let i = 0; i < 40; i++) key('ArrowUp');
+  ck(API.st().sel === 0, 't8: up ran past 0 -> ' + API.st().sel);
+  // Enter opens the lightbox on a crop that has a full frame
+  key('Enter');
+  ck(!!API.st().lb, 't8: Enter did not open the lightbox');
+  key('Escape'); ck(!API.st().lb, 't8: Escape did not close the lightbox');
+  // F flags the selection
+  const n0 = API.st().items.length;
+  key('f'); await flush();
+  ck(API.st().items.length === n0 - 1, 't8: F did not flag the selection');
+  // U undoes it
+  key('u'); await flush();
+  ck(API.st().items.length === n0, 't8: U did not undo');
+  // typing in a control must not steal the key
+  const sel0 = API.st().sel, n1 = API.st().items.length;
+  for (const f of (docL['keydown'] || []))
+    f({ key: 'f', preventDefault(){}, target: { tagName: 'SELECT' } });
+  await flush();
+  ck(API.st().items.length === n1 && API.st().sel === sel0,
+     't8: F fired while focus was in a <select>');
+}
+
+// ── 9. lightbox: only steps to crops that HAVE a full frame ───────────────
+async function t9() {
+  RESP = { '/api/review': () => payload(CROPS.mixed, []) };
+  await API.load(); await flush();
+  // index 0 has no full frame -> must not open
+  API.openLb(0);
+  ck(!API.st().lb, 't9: opened a lightbox for a crop with no full frame');
+  API.openLb(1);
+  ck(!!API.st().lb, 't9: did not open on a crop that has a full frame');
+  ck(String(byId['lbi'].src).startsWith('/recent_crops/full/'),
+     't9: bad lightbox src: ' + byId['lbi'].src);
+  ck(API.st().sel === 1, 't9: opening did not move the selection');
+  const first = byId['lbi'].src;
+  API.stepLb(1);
+  ck(byId['lbi'].src !== first, 't9: step(1) did not advance');
+  ck(CROPS.mixed[API.st().sel].has_full, 't9: stepped onto a crop with no full frame');
+  API.stepLb(1); API.stepLb(1); API.stepLb(1);
+  ck(!!API.st().lb, 't9: stepping past the end closed the lightbox');
+  ck(CROPS.mixed[API.st().sel].has_full, 't9: landed on a frameless crop');
+  API.closeLb(); ck(!API.st().lb, 't9: closeLb left the overlay up');
+  ck(document.body.style.overflow === '', 't9: page scroll not restored');
+}
+
+// ── 10. flagging the LAST crop falls into the empty state ─────────────────
+async function t10() {
+  RESP = { '/api/review': () => payload([CROPS.normal[0]], []),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  await API.flag(0); await flush();
+  ck(/Queue is clear/.test(byId['state'].innerHTML),
+     't10: no empty state after the last crop was flagged');
+  ck(API.st().sel === 0, 't10: selection went negative -> ' + API.st().sel);
+  // and undo must climb back out of the empty state
+  await API.undo(); await flush();
+  ck(API.st().items.length === 1, 't10: undo did not restore the last crop');
+  ck(document.querySelectorAll('.card').length === 1,
+     't10: undo restored state but not the tile');
+}
+
+// ── 11. double-flag of the same crop must not double-post ─────────────────
+async function t11() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 4), []),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  CALLS.length = 0;
+  const p1 = API.flag(1), p2 = API.flag(1);
+  await p1; await p2; await Promise.resolve(); await Promise.resolve();
+  const posts = CALLS.filter(c => String(c.url).includes('/api/detect/flag'));
+  ck(posts.length === 1, 't11: ' + posts.length + ' POSTs for one crop');
+  ck(API.st().items.length === 3, 't11: items=' + API.st().items.length);
+}
+
+// ── 12. the 5 s undo window really expires ────────────────────────────────
+async function t12() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 4), []),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  await API.flag(0); await flush();
+  ck(!!API.st().lastUndo, 't12: nothing staged for undo right after a flag');
+  runTimers();
+  ck(!API.st().lastUndo, 't12: undo still live after the timer fired');
+  const n = API.st().items.length;
+  await API.undo(); await Promise.resolve();
+  ck(API.st().items.length === n, 't12: undo worked after the window closed');
+}
+
+(async () => {
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12];
+  for (const t of tests) {
+    try { await t(); console.log('ok   ' + t.name); }
+    catch (e) {
+      failures.push(t.name + ': THREW ' + (e && e.stack || e));
+      console.log('FAIL ' + t.name + ' — ' + e);
+    }
+  }
+  if (failures.length) {
+    console.log('FAILURES: ' + failures.join(' | '));
+    process.exit(1);
+  }
+  console.log('all review cases passed');
+})();
+"""
+
+
+def main():
+    if not shutil.which('node'):
+        print('SKIP: node not on PATH — cannot execute the review page JS')
+        return 0
+    mod = load_dashboard()
+    html = mod.REVIEW_HTML
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+
+    # parse the whole block first: one syntax error kills every handler, and
+    # driving the functions below would report a confusing cascade instead
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as f:
+        f.write(script)
+        probe = f.name
+    try:
+        p = subprocess.run(['node', '--check', probe],
+                           capture_output=True, text=True)
+    finally:
+        os.unlink(probe)
+    if p.returncode:
+        print('FAIL: /review script does not parse:\n' + p.stderr.strip()[:900])
+        return 1
+    print('ok   whole review script parses (%d chars)' % len(script))
+
+    fixtures = {
+        'normal': [crop(i, conf=round(0.95 - i * 0.05, 2)) for i in range(9)],
+        'mixed': [crop(0, full=False), crop(1, full=True), crop(2, full=False),
+                  crop(3, full=True), crop(4, full=True)],
+        'hostile': [{
+            'name': '1700000000000_x_090.jpg',
+            'image_id': '"><script>alert(1)</script>',
+            'ts': 1_700_000_000_000, 'conf': 0.9, 'has_full': True,
+        }, {
+            'name': '1700000000001_y_080.jpg',
+            'image_id': '<img src=x onerror=alert(1)>',
+            'ts': 1_700_000_000_001, 'conf': 0.8, 'has_full': False,
+        }],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'review.js')
+        fx = os.path.join(tmp, 'crops.json')
+        run = os.path.join(tmp, 'run.js')
+        with open(js, 'w') as f:
+            f.write(script)
+        with open(fx, 'w') as f:
+            json.dump(fixtures, f)
+        with open(run, 'w') as f:
+            f.write(HARNESS)
+        p = subprocess.run(['node', run, js, fx],
+                           capture_output=True, text=True)
+    sys.stdout.write(p.stdout)
+    if p.stderr.strip():
+        sys.stderr.write(p.stderr)
+    return p.returncode
+
+
+if __name__ == '__main__':
+    sys.exit(main())
