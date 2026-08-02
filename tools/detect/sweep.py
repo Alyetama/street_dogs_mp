@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+Sweep orchestrator: worklist gen -> per-drive lanes -> engine -> parquet store.
+Spec: DETECTION_RUN_STRATEGY.md section 6 (+4.6 config, 5.2 layout).
+
+    sweep.py run    --gen 1 [--max-images N] [--drives d1 d2] [--rate-cap x]
+    sweep.py status
+    sweep.py unit                # print a systemd user unit
+    sweep.py verify | invariants | compact --gen N
+
+Run under the yolo env. Single instance enforced with fcntl locks (released
+by the kernel on SIGKILL, section 6.7). Ctrl+C = graceful: readers stop,
+queues drain, the partial batch flushes through the ring's written==expected
+gate, and every open shard commits its contiguous prefix -- the next run
+resumes from the committed tiles (store.tiling_resume).
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import queue
+import signal
+import sys
+import threading
+import time
+from collections import defaultdict
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import engine  # noqa: E402
+import store  # noqa: E402
+from status import StatusWriter, read_status  # noqa: E402
+
+REPO = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SHARD = 4000  # images per shard (section 6.1)
+# Measured per-drive read capacities img/s (section 2.2); pacing recomputes
+# rates every 60 s from live remaining counts (closed-loop waterfill, §6.5).
+CAP = {'lynx': 71.0, 'capybara': 71.1, 'jackal': 32.5, 'bobcat': 22.9}
+READERS = {'lynx': 1, 'capybara': 1, 'jackal': 1, 'bobcat': 8}
+RAW_BYTES = 4 << 30
+
+
+def load_cfg():
+    p = os.path.join(REPO, 'tools', 'detect', 'detect.config.json')
+    cfg = {}
+    if os.path.exists(p):
+        cfg = json.load(open(p))
+    cfg.setdefault(
+        'engine',
+        os.path.join(REPO, 'data', 'engines', 'yolo26x_train30.engine'))
+    cfg.setdefault('conf', 0.05)
+    cfg.setdefault('iou', 0.90)
+    cfg.setdefault('max_det', 256)  # det_idx is UINT8 (store intake guard)
+    return cfg
+
+
+def lane_plan(detect_root, gen):
+    """[(pair, shards)] per drive; pair = dict from _dirs.json, shards =
+    [(shard_idx, start, end, remaining_ranges)] from the frozen ids + store."""
+    gd = os.path.join(detect_root, 'worklist', 'gen=%04d' % gen)
+    dirs = json.load(open(os.path.join(gd, '_dirs.json')))
+    lanes = defaultdict(list)
+    sidx = 0
+    for pr in dirs:
+        ids = np.load(os.path.join(gd, pr['cell'], pr['drive'] + '.ids.npy'),
+                      mmap_mode='r')
+        n = len(ids)
+        shards = []
+        for st in range(0, n, SHARD):
+            en = min(st + SHARD, n)
+            sd = store.pair_dir(detect_root, gen, pr['region'], pr['cell'],
+                                pr['drive'])
+            committed, done = store.tiling_resume(sd, en - st, shard_idx=sidx) \
+                if os.path.isdir(sd) else ([], False)
+            if not done:
+                shards.append((sidx, st, en, committed))
+            sidx += 1
+        if shards:
+            lanes[pr['drive']].append((pr, ids, shards))
+        else:
+            sidx = sidx  # fully done pair
+    return lanes
+
+
+class ShardCollector:
+    """Routes out-of-order per-image results back to their shard; commits a
+    shard when all its positions have landed (or its contiguous prefix at
+    graceful stop). Every enqueued position produces exactly one row, so a
+    committed prefix can never contain a hole."""
+
+    def __init__(self, writer, gen, status):
+        self.w = writer
+        self.gen = gen
+        self.status = status
+        self.lock = threading.Lock()
+        self.sh = {}  # key -> dict(rows={pos:(img,dets)}, ...)
+        self.done_imgs = 0
+        self.drive_done = defaultdict(int)
+        self.region_done = defaultdict(int)
+        self.boxes = 0
+        self.positives = 0
+        self.errors = defaultdict(int)
+
+    def open(self, key, pr, shard_idx, start, end):
+        with self.lock:
+            self.sh[key] = dict(pr=pr,
+                                shard_idx=shard_idx,
+                                start=start,
+                                end=end,
+                                rows={},
+                                committed=start)
+
+    def add(self, key, pos, img_row, det_rows):
+        with self.lock:
+            s = self.sh[key]
+            s['rows'][pos] = (img_row, det_rows)
+            self.done_imgs += 1
+            self.drive_done[s['pr']['drive']] += 1
+            self.region_done[s['pr']['region']] += 1
+            n = img_row['n_det']
+            self.boxes += n
+            if img_row['status'] == 0 and n > 0:
+                self.positives += 1
+            if img_row['status'] != 0:
+                k = {
+                    1: 'read',
+                    2: 'decode',
+                    3: 'missing',
+                    4: 'infer',
+                    5: 'mount_lost'
+                }[img_row['status']]
+                self.errors[k] += 1
+            full = len(s['rows']) == s['end'] - s['start']
+        if full:
+            self._commit(key, s['end'])
+
+    def _commit(self, key, upto):
+        with self.lock:
+            s = self.sh[key]
+            pr = s['pr']
+            rows = s['rows']
+            sw = self.w.open_shard(self.gen, pr['region'], pr['cell'],
+                                   pr['drive'], s['shard_idx'], s['start'],
+                                   s['end'])
+            for pos in range(s['committed'], upto):
+                img, dets = rows[pos]
+                sw.add_image(img)
+                if dets:
+                    sw.add_detections(dets)
+            sw.commit(upto)
+            s['committed'] = upto
+            if upto == s['end']:
+                del self.sh[key]
+        self.status.update(imgs_done=self.done_imgs,
+                           boxes_total=self.boxes,
+                           positives=self.positives,
+                           drive_done=dict(self.drive_done),
+                           region_done=dict(self.region_done),
+                           errors=dict(self.errors))
+
+    def flush_prefixes(self):
+        """Graceful stop: commit each open shard's contiguous prefix."""
+        with self.lock:
+            keys = list(self.sh)
+        for key in keys:
+            with self.lock:
+                s = self.sh.get(key)
+                if s is None:
+                    continue
+                pos = s['committed']
+                while pos in s['rows'] or pos < s['committed']:
+                    pos += 1
+            if pos > s['committed']:
+                self._commit(key, pos)
+
+
+def cmd_run(args):
+    cfg = load_cfg()
+    import torch
+    detect_root = store.get_detect_root()
+    store.ensure_bootstrap(detect_root)
+    run_dir = os.path.join(detect_root, 'runs', 'gen=%04d' % args.gen)
+    os.makedirs(run_dir, exist_ok=True)
+    lockf = open(os.path.join(run_dir, '.lock'), 'w')
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print('another sweep holds the lock -- refusing (section 6.7)',
+              file=sys.stderr)
+        return 1
+
+    lanes = lane_plan(detect_root, args.gen)
+    if args.drives:
+        lanes = {d: v for d, v in lanes.items() if d in args.drives}
+    todo = {
+        d:
+        sum((sh[2] - sh[1]) - sum(e - s for s, e in sh[3])
+            for _, _, shards in v for sh in shards)
+        for d, v in lanes.items()
+    }
+    total = sum(todo.values())
+    if args.max_images:
+        total = min(total, args.max_images)
+    print('lanes:', {
+        d: f'{n:,}'
+        for d, n in todo.items()
+    }, f'-> {total:,} images this run')
+    if not total:
+        print('nothing to do')
+        return 0
+
+    run_id = int(time.time()) & 0xFFFF
+    epoch = time.time()
+    status = StatusWriter(run_id,
+                          args.gen,
+                          total,
+                          drive_totals=todo,
+                          region_totals={})
+    status.start()
+    writer = store.Writer(detect_root)
+    coll = ShardCollector(writer, args.gen, status)
+    ring = engine.BatchRing(torch)
+    stop_ev = threading.Event()
+    signal.signal(signal.SIGINT, lambda *a: stop_ev.set())
+    signal.signal(signal.SIGTERM, lambda *a: stop_ev.set())
+
+    def sink(m, st, boxes, confs):
+        n = len(confs)
+        img = dict(image_id=m['image_id'],
+                   drive=m['drive_code'],
+                   status=st,
+                   n_det=n,
+                   max_conf=float(confs.max()) if n else None,
+                   orig_w=m.get('w0', 0),
+                   orig_h=m.get('h0', 0),
+                   reduce=m.get('reduce', 0),
+                   guards=0,
+                   ts_off=int(time.time() - epoch),
+                   run_id=run_id)
+        dets = [
+            dict(image_id=m['image_id'],
+                 det_idx=i,
+                 conf=float(confs[i]),
+                 x1=float(boxes[i][0]),
+                 y1=float(boxes[i][1]),
+                 x2=float(boxes[i][2]),
+                 y2=float(boxes[i][3]),
+                 run_id=run_id) for i in range(n)
+        ]
+        coll.add(m['key'], m['pos'], img, dets)
+
+    consumer = engine.Consumer(cfg['engine'],
+                               ring,
+                               sink,
+                               conf=cfg['conf'],
+                               iou=cfg['iou'],
+                               max_det=cfg['max_det'])
+    ct = threading.Thread(target=consumer.run, daemon=True)
+    ct.start()
+
+    rawqs = {d: queue.Queue() for d in lanes}
+    budgets = {d: engine.ByteBudget(RAW_BYTES) for d in lanes}
+    dts = [
+        threading.Thread(target=engine.decoder_loop,
+                         args=(ring, rawqs, budgets, stop_ev, sink),
+                         daemon=True) for _ in range(4)
+    ]
+    for t in dts:
+        t.start()
+
+    drive_codes = {d: i for i, d in enumerate(sorted(CAP))}
+    buckets = {d: engine.TokenBucket() for d in lanes}
+    issued = [0]
+    issued_lock = threading.Lock()
+
+    def lane_work(drive, items):
+        """Yield (meta, path) in strict positional order for this lane."""
+        for pr, ids, shards in items:
+            base = os.path.join(pr['root'], pr['cell'], 'ground_animal_images')
+            for sidx, st, en, committed in shards:
+                key = (pr['cell'], pr['drive'], sidx)
+                coll.open(key, pr, sidx, st, en)
+                have = set()
+                for s0, e0 in committed:
+                    have.update(range(s0, e0))
+                for pos in range(st, en):
+                    if pos in have:  # already committed in a prior run
+                        continue
+                    with issued_lock:
+                        if args.max_images and issued[0] >= args.max_images:
+                            return
+                        issued[0] += 1
+                    iid = int(ids[pos])
+                    yield (dict(image_id=iid,
+                                key=key,
+                                pos=pos,
+                                drive=drive,
+                                drive_code=drive_codes.get(drive, 255)),
+                           os.path.join(base, f'{iid}.jpg'))
+
+    rthreads = []
+    for d, items in lanes.items():
+        work = lane_work(d, items)
+        wlock = threading.Lock()
+
+        def locked(work=work, wlock=wlock):
+            while True:
+                with wlock:
+                    try:
+                        yield next(work)
+                    except StopIteration:
+                        return
+
+        for _ in range(READERS.get(d, 1)):
+            r = engine.DriveReader(d,
+                                   locked(),
+                                   rawqs[d],
+                                   budgets[d],
+                                   sink,
+                                   stop_ev,
+                                   pace=buckets[d])
+            t = threading.Thread(target=r.run, daemon=True)
+            t.start()
+            rthreads.append(t)
+
+    def pacer():
+        while not stop_ev.is_set():
+            rem = {
+                d: max(1, todo[d] - coll.drive_done.get(d, 0))
+                for d in lanes
+            }
+            t_fin = max(rem[d] / CAP.get(d, 50.0) for d in lanes)
+            for d in lanes:
+                buckets[d].set_rate(args.rate_cap or rem[d] / t_fin)
+            time.sleep(60)
+
+    threading.Thread(target=pacer, daemon=True).start()
+
+    for t in rthreads:
+        t.join()
+    stop_ev.set()
+    for t in dts:
+        t.join()
+    ring.flush_partial()
+    deadline = time.time() + 120
+    while not ring.batq.empty() and time.time() < deadline:
+        time.sleep(0.1)
+    consumer.stopping.set()
+    ct.join(timeout=60)
+    coll.flush_prefixes()
+    status.stop(state='stopped' if stop_ev.is_set() else 'done')
+    print(f'run finished: {coll.done_imgs:,} images, {coll.boxes:,} boxes, '
+          f'{coll.positives:,} positives, errors={dict(coll.errors)}')
+    return 0
+
+
+UNIT = """[Unit]
+Description=street_dogs detection sweep (gen %(gen)s)
+[Service]
+Type=simple
+WorkingDirectory=%(repo)s
+ExecStart=%(py)s tools/detect/sweep.py run --gen %(gen)s
+Restart=on-failure
+RestartSec=60
+MemoryMax=40G
+MemorySwapMax=0
+[Install]
+WantedBy=default.target
+"""
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest='cmd', required=True)
+    r = sub.add_parser('run')
+    r.add_argument('--gen', type=int, default=1)
+    r.add_argument('--max-images', type=int)
+    r.add_argument('--drives', nargs='+')
+    r.add_argument('--rate-cap', type=float)
+    r.set_defaults(func=cmd_run)
+    s = sub.add_parser('status')
+    s.set_defaults(func=lambda a: print(json.dumps(read_status(), indent=1)))
+    u = sub.add_parser('unit')
+    u.add_argument('--gen', type=int, default=1)
+    u.set_defaults(func=lambda a: print(UNIT % dict(
+        gen=a.gen,
+        repo=REPO,
+        py='<home>/miniforge3/envs/yolo/bin/python')))
+    for name, fn in (('verify', store.verify), ('invariants',
+                                                store.invariants)):
+        c = sub.add_parser(name)
+        c.set_defaults(func=lambda a, fn=fn: print(fn()))
+    args = p.parse_args()
+    rc = args.func(args)
+    sys.exit(rc or 0)
+
+
+if __name__ == '__main__':
+    main()
