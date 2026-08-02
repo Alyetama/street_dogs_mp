@@ -32,8 +32,10 @@ Natural Earth's `SUBREGION` field **approximates** M49 — 16 of 297 joinable
 subunits deviate from the UN table (verified against
 https://unstats.un.org/unsd/methodology/m49/ on 2026-08-01/02). Every deviation
 is either neutralized by an explicit override siding with M49 (Hawaii, Easter
-I., Christmas I., Cocos, the "Seven seas" subunits, Russia, Andaman/Nicobar) or
-verified to decide no cell's dominant land. The column below headed "M49
+I., Christmas I., Cocos, the "Seven seas" subunits, Andaman/Nicobar) or
+verified to decide no cell's dominant land. Russia's override is NOT
+M49-siding — it implements the project's own Russia & North Asia region and is
+the largest documented departure (14 cells). The column below headed "M49
 sub-region" uses NE's SUBREGION vocabulary, which mixes M49 sub-region and
 intermediate-region names (e.g. `Caribbean`, `Eastern Africa`) and NE spelling
 (`South-Eastern Asia` vs UN `South-eastern Asia`).
@@ -70,25 +72,30 @@ which maps to Middle East.
 
 | entity | M49 says | used here | why |
 |---|---|---|---|
-| Russia (all subunits) | Eastern Europe / Central Asia | **Russia & North Asia** | The project defines a dedicated Russia region; leaving it to M49 would put European Russia in Europe and, worse, file Siberia as *Central Asia* (an artefact of how NE tags the Asian subunit). |
+| Russia (all subunits) | Eastern Europe | **Russia & North Asia** | The project defines a dedicated Russia region; M49 files the whole Russian Federation under Eastern Europe. (NE's *Central Asia* tag on Siberia is Natural Earth's artefact, not M49's, and is neutralized separately.) |
 | Iran | Southern Asia | **Middle East** | The project's original Middle East cells sat at lon 55–65, i.e. Iran — the intent was evidently Iran = Middle East. Conventional usage also places Iran in the Middle East. |
 | Afghanistan | Southern Asia | **Central Asia** | Judgement call; contestable. |
 | Greenland | Northern America | **Greenland** | The project defines Greenland as its own region. |
 | New Zealand | Australia and New Zealand | **New Zealand & Pacific** | The project separates Australia from New Zealand & Pacific; M49 groups them. |
-| Andaman & Nicobar Is. | South-Eastern Asia | **South Asia** | Indian territory. M49 classifies them geographically; the project's regions otherwise follow sovereignty for territories. |
+
+Andaman & Nicobar were previously mislisted here: M49 files India (including
+these territories) under *Southern Asia* → South Asia, so the project
+**conforms** to M49; the "South-Eastern Asia" label was Natural Earth's tag,
+corrected by a SUBUNIT override.
 
 ### Thresholds — arbitrary, chosen here
 
 | parameter | value | meaning |
 |---|---|---|
 | `--min-share` | 0.60 | below this the dominant region holds too little of the cell's land to call it; reported as `straddles` instead of an error |
-| `--min-land-km2` | 100 | cells with less land than this are not renamed — the "dominant region" would rest on a sliver of reef |
+| `--min-land-km2` | 100 | cells with less land than this are not renamed by the audit path — the "dominant region" would rest on a sliver of reef. `--reconcile` intentionally ignores it: disk↔CSV coherence outranks the guard (affected 2 zero-data cells) |
 
 ## Impact of the judgement calls
 
 Measured against the **UN M49 table itself** (not Natural Earth's copy of it),
-joined by ISO alpha-3 — `data/geo/un_m49.csv`, 249 entries, 300 of 308 NE
-subunits resolved:
+joined by ISO alpha-3 — `data/geo/un_m49.csv`, 249 entries; 301 of 308 NE subunits join by ISO code, 297 carry a usable M49
+sub-region (the comparison denominator), and the project mapping resolves all
+308:
 
 Of the **74 cells relabelled** across the three migrations, **51 match UN M49
 exactly**. The other **23** rest on the documented departures above:

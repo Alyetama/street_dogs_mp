@@ -56,10 +56,10 @@
  "departs_from_m49": [
   {
    "entity": "Russia (all subunits)",
-   "m49": "Eastern Europe / Central Asia",
+   "m49": "Eastern Europe",
    "used": "Russia & North Asia",
-   "reason": "project defines a dedicated Russia region; M49 would file Siberia as Central Asia",
-   "cells_affected": 7
+   "reason": "project defines a dedicated Russia region; M49 files the whole Russian Federation under Eastern Europe (the \"Central Asia\" tag on Siberia is Natural Earth's, not M49's)",
+   "cells_affected": 14
   },
   {
    "entity": "Iran",
@@ -80,20 +80,13 @@
    "m49": "Northern America",
    "used": "Greenland",
    "reason": "project defines Greenland as its own region",
-   "cells_affected": 0
+   "cells_affected": 4
   },
   {
    "entity": "New Zealand",
    "m49": "Australia and New Zealand",
    "used": "New Zealand & Pacific",
    "reason": "project separates Australia from New Zealand & Pacific",
-   "cells_affected": 0
-  },
-  {
-   "entity": "Andaman & Nicobar Is.",
-   "m49": "South-Eastern Asia",
-   "used": "South Asia",
-   "reason": "Indian territory; project follows sovereignty for territories",
    "cells_affected": 0
   }
  ],
@@ -137,6 +130,7 @@
   "ZAF Prince Edward": "Africa",
   "ATF": "Africa",
   "HMD": "Australia",
-  "ATA S. Orkney": "Antarctica"
+  "ATA S. Orkney": "Antarctica",
+  "Andaman/Nicobar Is.": "South Asia"
  }
 }

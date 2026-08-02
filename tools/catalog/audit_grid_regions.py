@@ -85,7 +85,10 @@ COUNTRY_OVERRIDE = {
     # Christmas Island and Cocos (Keeling): NE tags them South-Eastern Asia
     # (geography); UN M49 files both under "Australia and New Zealand". The
     # project follows M49/sovereignty for territories (as with Andaman).
-    'IOA': 'Australia',
+    # Keyed by ISO_A3 -- their ISO codes are valid ('CXR'/'CCK'), so an
+    # ADM0_A3 key ('IOA') would never be consulted and was dead code.
+    'CXR': 'Australia',
+    'CCK': 'Australia',
 }
 
 # Subunit-level fixes where Natural Earth's SUBREGION follows geography but the

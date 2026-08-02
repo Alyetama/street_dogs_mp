@@ -85,8 +85,8 @@ with these guards:
 
 | rule | value | rationale |
 |---|---|---|
-| dominant share < 0.60 | verdict `straddles`, cell left as-is | at 5° a cell can genuinely contain two continents (e.g. 45–50E / 10–15N is 53% Middle East, 47% Africa across the Red Sea); no single label is correct, so the incumbent label stands |
-| land < 100 km² in the cell | not relabelled | a label should not be decided by a sliver of reef in an otherwise open-ocean cell |
+| dominant share < 0.60 | verdict `straddles`, cell left as-is | at 5° a cell can genuinely contain two continents (e.g. 45–50E / 10–15N is 52% Middle East, 48% Africa across the Red Sea); no single label is correct, so the incumbent label stands |
+| land < 100 km² in the cell | not relabelled by the audit path | a label should not be decided by a sliver of reef in an otherwise open-ocean cell. Exception: `--reconcile` aligns disk to the CSV unconditionally — coherence outranks the guard — so 2 sub-guard cells relabelled in the CSV before the guard existed (9.6 and 17.2 km², zero data, geographically correct labels) were aligned rather than reverted |
 | ocean/polar label, land fraction < 0.60 | label kept | basin labels (Pacific/Atlantic/Indian Ocean, Arctic, Antarctica) are a convention for mostly-water cells — but a label is not proof of ocean: the original grid filed the 100%-land Volga cell as *Indian Ocean*, so a mostly-land cell is audited like any other regardless of its label (Hawaii at ~3% land keeps Pacific Ocean; the Volga cell did not keep Indian Ocean) |
 | wrong sub-label, same continent | verdict `taxonomy`, left as-is | e.g. European Russia as *Europe* vs *Russia & North Asia* is a naming convention, not an error; only cross-continent disagreements were treated as mistakes |
 
@@ -98,7 +98,7 @@ Applied 2026-08-01: 51 cells relabelled (5,961 renames across 6 drives,
 journal `runs/region_fix_aug01.json`). Applied 2026-08-02 after independent
 adversarial verification: 20 further cells that had been hidden behind ocean
 labels (incl. the Volga cell as *Indian Ocean*, 18.3M rows; the Caucasus; a
-Siberia/Tibet block as *Pacific Ocean*; six all-land Arctic cells) plus 3 cells
+Siberia/Tibet block as *Pacific Ocean*; six mostly-land (62–78%) Arctic cells) plus 3 cells
 reconciled from an earlier CSV/disk divergence (journals
 `runs/region_fix_aug02*.json`). Post-fix audit: **0 misassigned**,
 76 `taxonomy`, 7 `straddles`; disk↔CSV reconcile reports zero drift; catalog
@@ -129,13 +129,16 @@ whole cells. Subunits separate territories and split Russia at the Urals.
 
 M49 reaches the pipeline through Natural Earth's `SUBREGION` attribute, which
 **approximates** it: an adversarial cross-check against the UN's own table
-found 16 of 297 joinable subunits where NE disagrees with M49 (Asian Russia
+found 16 of 297 comparable subunits where NE disagrees with M49 (Asian Russia
 tagged `Central Asia`; Hawaii `Polynesia` vs M49 Northern America; Easter I.,
-Christmas I., Cocos, Corsica, Chatham, Andaman/Nicobar; plus eight "Seven seas
-(open ocean)" subunits with no M49 counterpart at all). Every divergence is
-neutralized by an explicit override (below) or verified to affect no cell's
-dominant land; the overrides side with **M49/sovereignty**, matching the
-project's convention for territories.
+Christmas I., Cocos, Corsica, Chatham, Andaman/Nicobar; plus seven "Seven seas
+(open ocean)" subunits — those have no direct M49 row of their own and are
+mapped via their administering state's M49 entry; an eighth, South Orkney, has
+no M49 counterpart on either side and maps to Antarctica). Every divergence is
+neutralized by an explicit override or by the standard mapping (Chatham needs
+none: Melanesia → New Zealand & Pacific coincides with the NZ rule), or is
+verified to affect no cell's dominant land; where overrides exist they side
+with **M49/sovereignty**, the project's convention for territories.
 
 ### 3.2 M49 sub-region → project region (follows the standard)
 
@@ -166,12 +169,15 @@ overrides exist. These are choices, recorded so they can be challenged:
 
 | entity | M49 says | project uses | why | renamed cells that rest on it |
 |---|---|---|---|---|
-| Russia (all subunits) | Eastern Europe | Russia & North Asia | dedicated Russia region; also neutralizes NE's "Central Asia" tag on Siberia | 7 |
+| Russia (all subunits) | Eastern Europe | Russia & North Asia | dedicated Russia region; also neutralizes NE's "Central Asia" tag on Siberia | 14 |
 | Iran | Southern Asia | Middle East | the original grid's Middle East cells sat at lon 55–65 — i.e. Iran; matches common usage | 5 |
 | Afghanistan | Southern Asia | Central Asia | judgement call, contestable | 0 |
-| Greenland | Northern America | Greenland | dedicated region | 0 |
+| Greenland | Northern America | Greenland | dedicated region | 4 |
 | New Zealand | Australia and New Zealand | New Zealand & Pacific | project splits what M49 groups | 0 |
-| Andaman & Nicobar Is. | South-Eastern Asia | South Asia | Indian territory; project follows sovereignty for territories | 0 |
+Andaman & Nicobar were previously mislisted here as a departure: UN M49 files
+India (including these territories) under *Southern Asia* → South Asia, so the
+project **conforms**; "South-Eastern Asia" is Natural Earth's tag, corrected
+below.
 
 Corrections **toward** M49 where Natural Earth deviates from it (not
 departures): Hawaii → North America, Easter I. / Isla Sala y Gomez → South

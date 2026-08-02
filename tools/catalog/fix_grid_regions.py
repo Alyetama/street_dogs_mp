@@ -20,7 +20,7 @@ because the land-area guard was applied to the dir plan and NOT to the CSV
 rewrite -- leaving 3 cells where tools deriving dir names from the CSV missed
 the data on disk (one of those cells held 25,530 rows and 172 jpgs; the guard
 skipped it only through a rounding bug, since fixed). Now ``eligible()``
-computes the acted-on set ONCE, from the audit's unrounded equal-area
+computes the acted-on set ONCE, from the audit's full-precision equal-area
 ``land_km2`` column, and both the dir plan and the CSV rewrite consume that
 same set.
 
@@ -81,7 +81,7 @@ def target_cell(old_cell, new_region):
 def eligible(audit_csv, min_land_km2):
     """The acted-on set: MISASSIGNED rows passing the land guard.
 
-    Uses the audit's unrounded, equal-area ``land_km2`` column. (The previous
+    Uses the audit's equal-area ``land_km2`` column (0.1 km2 precision). (The previous
     version reconstructed km2 from a 3-decimal ``land_frac``, which rounded a
     120 km2 cell to zero and silently skipped it.) Both the dir plan and the
     CSV rewrite must consume THIS set and nothing else.
@@ -149,10 +149,19 @@ def reconcile_renames(grid_csv, roots):
 
 
 def journal_flush(path, done):
+    """Atomic AND durable: fsync file and directory so the write-ahead entry
+    cannot be reordered after its rename by a power loss."""
     tmp = path + '.tmp'
     with open(tmp, 'w') as fh:
         json.dump(done, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    dfd = os.open(os.path.dirname(os.path.abspath(path)) or '.', os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def apply_steps(steps, csv_changes, grid_path, journal_path, execute):

@@ -90,7 +90,7 @@ Verdicts are split so naming conventions are not confused with errors:
   label is correct at 5° resolution.
 - `ocean-*` — no land, or an ocean/polar label the audit will not second-guess.
 
-## Results
+## Results *(superseded — pre-equal-area tool output; current figures in the 2026-08-02 sections)*
 
 | verdict | cells |
 |---|---|
@@ -155,7 +155,7 @@ trusting the aggregate:
    reads an unrounded equal-area land_km2 column, and the cell has since been
    renamed (2026-08-02 section below).
 
-Final change set: **51 cells** (down from the 56 the raw audit proposed).
+Final change set: **51 cells** (of the 54 the audit proposed; 3 guard-skipped).
 
 ## What ran
 
@@ -197,7 +197,7 @@ Region totals after: Middle East 12 → **30 cells / 26.5M rows**; Africa down t
   to pick; renaming them would churn 76 cells for no gain in accuracy.
 - **7 `straddles` cells** — two continents in one 5° box, e.g.
   `Africa_45_10_50_15` at 53% Middle East / 47% Africa. No label is right.
-- **3 near-landless cells**, per the guard above.
+- **3 near-landless cells**, per the guard above. *(Correction 2026-08-02: 2 of these were later dir-renamed by `--reconcile` to match their aug01 CSV relabels — coherence outranks the guard; zero data, labels geographically correct.)*
 - **Ocean and polar labels** — country polygons cannot speak to basin
   conventions.
 
@@ -232,8 +232,10 @@ machine-readable in `data/geo/region_mapping.json`, including the ones that
 contradict M49 (Russia, Iran, Afghanistan, Greenland, New Zealand, Andaman &
 Nicobar) with the reason for each.
 
-**Measured impact:** of the 51 renamed cells, **39 follow UN M49 exactly**; 12
-depend on the departures — 7 European-Russia cells (M49: Europe) and 5 Iranian
+**Measured impact** *(superseded — aug01 scope only; final: 74 cells, 51
+M49-exact, 23 departures = 14 Russia + 5 Iran + 4 Greenland; see the
+2026-08-02 self-review section)*: of the 51 renamed cells, 39 follow UN M49
+exactly; 12 depend on the departures — 7 European-Russia cells (M49: Europe) and 5 Iranian
 cells (M49: South Asia).
 
 No cell was renamed on the basis of recalled knowledge. Every assignment came
@@ -305,8 +307,10 @@ correct** — but the surrounding machinery had real defects.
 
 ## Evidence preservation
 
-- `data/geo/region_audit_prefix.csv` — the pre-fix audit, regenerated
-  byte-reproducibly from `original_global_grid_5deg.csv.bak` (54 MISASSIGNED).
+- `data/geo/region_audit_prefix.csv` — the pre-fix audit as the aug01-era tool
+  produced it (54 MISASSIGNED), frozen. The CURRENT tool on the `.bak` grid
+  yields 74 MISASSIGNED (it also sees the ocean-label blind spot) — equal to
+  the final relabel set exactly, a stronger confirmation than byte-identity.
 - `data/geo/region_audit_aug01_postfix.csv` — the state between migrations.
 - `data/geo/region_audit.csv` — current (0 MISASSIGNED).
 
@@ -320,3 +324,51 @@ correct** — but the surrounding machinery had real defects.
 - Still stale by design: `coverage_missing*` shards and `data/missing_worklist/`
   are keyed by old cell names in file names AND `safe_region_id` row values —
   regenerate before next use.
+
+---
+
+# 2026-08-02 (later) — self-review corrections
+
+A second hostile review (3 agents) fact-checked every claim in the four docs
+against the artifacts and attacked the conformance method. The data layer held:
+all 74 relabels reproduce from scratch and none needs reverting. Defects were
+in documentation and two code paths; fixed:
+
+- **`run_missing_downloads.sh` rewritten to loop over `data/missing_worklist/`**
+  instead of a hardcoded region list, which had silently stranded the 734
+  Middle East images (no `Middle_East` invocation existed) and kept three dead
+  `Indian_Ocean` calls.
+- **Stale departure counts corrected everywhere** (7/5/0 and 39-of-51/12 →
+  final 14 Russia / 5 Iran / 4 Greenland = 23 of 74, 51 M49-exact), including
+  machine-readable `region_mapping.json`, whose `cells_affected` fields a
+  consumer would have summed to 12.
+- **Christmas/Cocos override was dead code** — keyed `'IOA'` (ADM0) but both
+  islands carry valid ISO codes (`CXR`/`CCK`), so the code actually sided with
+  Natural Earth against M49; contained only by the ocean gate. Re-keyed; audit
+  verdicts unchanged (both cells ocean-gated at ~0.04% land).
+- **`runs/region_fix_aug01.json` carried no CSV entries** (CSV journalling
+  postdates it) — the advertised `--undo` would have reversed 5,961 renames
+  while leaving 54 CSV rows on new labels, recreating the drift the saga
+  fixed. The 54 entries were reconstructed from `region_audit_prefix.csv` and
+  appended. Undo order across journals: reconcile → aug02 → aug01.
+- **Andaman & Nicobar removed from the departures list** — M49 files India
+  under Southern Asia → South Asia, so the project conforms; the deviation was
+  Natural Earth's tag.
+- **Russia's M49 position corrected** to "Eastern Europe" (the *Central Asia*
+  tag on Siberia is NE's artefact, not M49's) and Russia removed from the
+  "M49-siding overrides" list — it is the largest documented departure.
+- **"Byte-reproducibly" corrected** for `region_audit_prefix.csv`: it is the
+  aug01-era tool's frozen output; the current tool on the `.bak` yields 74
+  (= the final relabel set).
+- Wording: "six all-land Arctic cells" → mostly-land (62–78%); the Red Sea
+  straddle example updated to equal-area figures (52/48); "56" → 54;
+  `journal_flush` now fsyncs file and directory (power-loss durability);
+  `data/geo/region_audit.csv` committed alongside the two snapshots.
+- Known-latent, accepted: REGION_CONTINENT keys on NE's CONTINENT field with no
+  'Seven seas' entry (no live effect — every affected cell audits
+  ok/ocean-kept); `undo()` resolves the journal's relative grid path against
+  the CWD — run it from the repo root; the 0.60 ocean gate leaves 5 contiguous
+  Greenland-coast cells (0.42–0.56 land, dominant Greenland) labelled Arctic
+  beside 4 renamed ones — a threshold consequence, disclosed; parked worklist
+  copies at `data/missing_worklist_stale_aug02/` and
+  `data/missing_worklist_after/`.
