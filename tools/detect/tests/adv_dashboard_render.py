@@ -41,7 +41,8 @@ def real_payload(tmp):
         'r-render', 7, 32_542_334, status_path=path,
         drive_totals={'lynx': 9e6, 'bobcat': 8e6, 'capybara': 9e6,
                       'jackal': 6.5e6},
-        region_totals={'South_Asia': 7e6, 'Europe': 5e6, 'Africa': 4e6},
+        region_totals={'South_Asia': 7e6, 'Europe': 5e6, 'Africa': 4e6,
+                       'Oceania': 3e6},   # untouched -> must render muted 0%
         gpu_fn=lambda: {'util': 97, 'mem_used_mb': 23888,
                         'mem_total_mb': 24564, 'temp': 83})
     w.update(imgs_done=1_234_567, boxes_total=120_000, positives=99_000,
@@ -127,28 +128,46 @@ try {
 }
 
 for (const [name, p] of Object.entries(payloads)) {
-  els['detKpis'] && (els['detKpis']._innerHTML = '');
+  for (const id of ['detDrives', 'detRegions', 'detHealth', 'detErrs', 'detMeta'])
+    els[id] && (els[id]._innerHTML = '');
   try {
     render(p);
     const on = els['detOn'], off = els['detOff'];
     if (p && p.running) {
       if (on.style.display !== '') failures.push(name + ': on-panel hidden');
-      if (!els['detKpis']._innerHTML.includes('kpi'))
-        failures.push(name + ': KPIs empty');
+      const head = ['dhPct', 'dhEta', 'dhNow', 'dhSus', 'dhCount']
+        .map(i => String(els[i].textContent)).join(' | ');
+      if (!head.replace(/[ |]/g, '') || /undefined|NaN|null/.test(head))
+        failures.push(name + ': junk in headline: ' + head);
       if (!els['detDrives']._innerHTML)
         failures.push(name + ': drives empty');
-      if (!els['detHealth']._innerHTML.includes('dband'))
-        failures.push(name + ': health gauge missing');
-      const h = els['detHealth']._innerHTML + els['detKpis']._innerHTML;
+      if ((p.crops_classified || 0) > 0) {
+        if (!els['detHealth']._innerHTML.includes('dband'))
+          failures.push(name + ': health gauge missing');
+      } else if (!els['detHealth']._innerHTML.includes('classifier not wired'))
+        failures.push(name + ': classifier-absent line missing');
+      if (!els['detErrs']._innerHTML)
+        failures.push(name + ': errors line empty');
+      const h = els['detHealth']._innerHTML + els['detErrs']._innerHTML
+        + els['detMeta']._innerHTML;
       if (h.includes('<img'))
         failures.push(name + ': last_error not HTML-escaped (XSS)');
       if (/undefined%|NaN%|null%/.test(els['detRegions']._innerHTML))
         failures.push(name + ': junk value rendered in regions');
+      if (p.regions && Object.keys(p.regions).length) {
+        const rows = (els['detRegions']._innerHTML.match(/class="drow/g) || []).length;
+        if (rows !== Object.keys(p.regions).length)
+          failures.push(name + ': region list not complete (' + rows + ' of '
+            + Object.keys(p.regions).length + ' rendered)');
+        if (Object.values(p.regions).some(v => !v)
+            && !els['detRegions']._innerHTML.includes('dmut'))
+          failures.push(name + ': untouched region not muted');
+      }
     } else {
       if (off.style.display !== '')
         failures.push(name + ': off-panel not shown');
-      if (!off.textContent.includes('not running'))
-        failures.push(name + ': missing not-running text: ' + off.textContent);
+      if (!off.textContent.includes('sweep idle'))
+        failures.push(name + ': missing idle text: ' + off.textContent);
     }
     console.log('ok   ' + name);
   } catch (e) {

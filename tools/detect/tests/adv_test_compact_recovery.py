@@ -137,7 +137,7 @@ def test_refuses_stale_compact():
     assert os.path.exists(new_img) and os.path.exists(new_det)
     cell_dir = os.path.dirname(
         store.pair_dir(ROOT, GEN, REGION, CELL, 'lynx'))
-    assert os.path.exists(os.path.join(cell_dir, 'compact.img.parquet'))
+    assert os.path.exists(os.path.join(cell_dir, 'drive=_merged', 'compact.img.parquet'))
     # Clean up the extra part so later checks see a consistent store.
     os.remove(new_img)
     os.remove(new_det)

@@ -76,7 +76,13 @@ def lane_plan(detect_root, gen):
             committed, done = store.tiling_resume(sd, en - st, shard_idx=sidx) \
                 if os.path.isdir(sd) else ([], False)
             if not done:
-                shards.append((sidx, st, en, committed))
+                # tiling_resume speaks SHARD-RELATIVE [0, len); everything in
+                # this file is absolute positions into the pair's ids array.
+                # Passing relative ranges through unconverted made resume
+                # re-process every shard with st>0 (351 duplicate image_ids
+                # in the first pilot -- caught by store.invariants).
+                shards.append(
+                    (sidx, st, en, [(st + a, st + b) for a, b in committed]))
             sidx += 1
         if shards:
             lanes[pr['drive']].append((pr, ids, shards))
@@ -104,14 +110,20 @@ class ShardCollector:
         self.positives = 0
         self.errors = defaultdict(int)
 
-    def open(self, key, pr, shard_idx, start, end):
+    def open(self, key, pr, shard_idx, start, end, committed_upto=None):
+        """``committed_upto`` (absolute) = end of the store's already-durable
+        contiguous prefix from a previous run. Without it a resumed shard's
+        prefix scan starts at a position this run never re-issues, and every
+        row the run produced for that shard is silently discarded at stop
+        (26% of issued work in the 3-run smoke)."""
         with self.lock:
             self.sh[key] = dict(pr=pr,
                                 shard_idx=shard_idx,
                                 start=start,
                                 end=end,
                                 rows={},
-                                committed=start)
+                                committed=committed_upto
+                                if committed_upto is not None else start)
 
     def add(self, key, pos, img_row, det_rows):
         with self.lock:
@@ -133,7 +145,19 @@ class ShardCollector:
                     5: 'mount_lost'
                 }[img_row['status']]
                 self.errors[k] += 1
-            full = len(s['rows']) == s['end'] - s['start']
+            full = s['committed'] - s['start'] + len(s['rows']) \
+                == s['end'] - s['start']
+            # Push live counters every 100 images, not only at shard commit:
+            # a 4,000-image shard takes minutes on the slow drives, and the
+            # dashboard's 30 s stalled badge fired falsely in the gaps.
+            push = self.done_imgs % 100 == 0
+        if push:
+            self.status.update(imgs_done=self.done_imgs,
+                               boxes_total=self.boxes,
+                               positives=self.positives,
+                               drive_done=dict(self.drive_done),
+                               region_done=dict(self.region_done),
+                               errors=dict(self.errors))
         if full:
             self._commit(key, s['end'])
 
@@ -142,15 +166,18 @@ class ShardCollector:
             s = self.sh[key]
             pr = s['pr']
             rows = s['rows']
+            # Part bounds are SHARD-RELATIVE (store convention, section 5.2:
+            # s00007.p000000_004000); collector state is absolute.
+            base = s['start']
             sw = self.w.open_shard(self.gen, pr['region'], pr['cell'],
-                                   pr['drive'], s['shard_idx'], s['start'],
-                                   s['end'])
+                                   pr['drive'], s['shard_idx'],
+                                   s['committed'] - base, upto - base)
             for pos in range(s['committed'], upto):
                 img, dets = rows[pos]
                 sw.add_image(img)
                 if dets:
                     sw.add_detections(dets)
-            sw.commit(upto)
+            sw.commit(upto - base)
             s['committed'] = upto
             if upto == s['end']:
                 del self.sh[key]
@@ -282,10 +309,13 @@ def cmd_run(args):
             base = os.path.join(pr['root'], pr['cell'], 'ground_animal_images')
             for sidx, st, en, committed in shards:
                 key = (pr['cell'], pr['drive'], sidx)
-                coll.open(key, pr, sidx, st, en)
                 have = set()
-                for s0, e0 in committed:
+                pe = st  # contiguous committed prefix end
+                for s0, e0 in sorted(committed):
                     have.update(range(s0, e0))
+                    if s0 <= pe:
+                        pe = max(pe, e0)
+                coll.open(key, pr, sidx, st, en, committed_upto=pe)
                 for pos in range(st, en):
                     if pos in have:  # already committed in a prior run
                         continue
@@ -345,9 +375,10 @@ def cmd_run(args):
     for t in dts:
         t.join()
     ring.flush_partial()
-    deadline = time.time() + 120
-    while not ring.batq.empty() and time.time() < deadline:
-        time.sleep(0.1)
+    # batq.join() (consumer calls task_done per batch) guarantees the final
+    # batches' sink() calls have LANDED before prefixes are flushed -- an
+    # empty-queue check races the consumer's in-flight NMS/sink work.
+    ring.batq.join()
     consumer.stopping.set()
     ct.join(timeout=60)
     coll.flush_prefixes()

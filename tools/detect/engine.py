@@ -329,6 +329,7 @@ class Consumer:
                     return
                 continue
             if s is None:  # poison pill
+                self.ring.batq.task_done()
                 return
             with torch.cuda.stream(self.copy_stream):
                 self.dst[s].copy_(self.ring.pin[s], non_blocking=True)
@@ -346,6 +347,7 @@ class Consumer:
                 for m in metas[:n]:
                     self.sink(m, 4, np.empty((0, 4), np.float32),
                               np.empty(0, np.float32))
+                self.ring.batq.task_done()
                 continue
             # section 4.6: max_time_img pinned huge; if ultralytics ever
             # prints its time-limit warning the run must die, not degrade.
@@ -366,6 +368,7 @@ class Consumer:
                 boxes = boxes_to_original(d[:, :4], m)
                 self.sink(m, 0, boxes, d[:, 4].astype(np.float32))
             self.batches += 1
+            self.ring.batq.task_done()  # after every sink for this batch
 
 
 # ── readers (section 4.1: 1 thread/drive except bobcat 8) ───────────────────
