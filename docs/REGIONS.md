@@ -16,7 +16,8 @@ Related files:
 | `data/geo/region_audit.csv` | per-cell audit: dominant land region, share, verdict, full breakdown |
 | `tools/catalog/audit_grid_regions.py` | recomputes the audit from the polygons |
 | `tools/catalog/fix_grid_regions.py` | applies audit verdicts to disk + CSV (journalled, undoable) |
-| `docs/CHANGELOG_REGION_AUDIT.md` | full history of the 2026-08-01 correction |
+| `docs/CHANGELOG_REGION_AUDIT.md` | full history of the 2026-08-01/02 corrections |
+| `data/geo/un_m49.csv` | UN M49 + ISO 3166 table, used to verify NE and measure conformance |
 
 ---
 
@@ -181,9 +182,11 @@ Africa; Heard & McDonald → Australia; S. Orkney → Antarctica). None currentl
 decides a cell's dominant land; they exist so the chain can never silently
 drop land or follow NE against the UN table.
 
-**39 of the 51 relabelled cells follow M49 exactly; 12 rest on the Russia and
-Iran rows above.** Strict M49 compliance is recoverable: delete the overrides
-in `audit_grid_regions.py` and re-run.
+**Of the 74 relabelled cells, 51 match UN M49 exactly; 23 rest on the
+departures above** — 14 Russian, 5 Iranian, 4 Greenlandic. Measured against the
+UN table itself (`data/geo/un_m49.csv`), not Natural Earth's copy. No cell
+depends on an undocumented departure. Strict M49 compliance is recoverable:
+delete the overrides in `audit_grid_regions.py` and re-run.
 
 ## 4. Reproducing and challenging
 

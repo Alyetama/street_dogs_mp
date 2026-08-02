@@ -86,18 +86,26 @@ which maps to Middle East.
 
 ## Impact of the judgement calls
 
-Of the **51 cells renamed**, **39 follow UN M49 exactly**. The remaining **12**
-depend on the departures above:
+Measured against the **UN M49 table itself** (not Natural Earth's copy of it),
+joined by ISO alpha-3 — `data/geo/un_m49.csv`, 249 entries, 300 of 308 NE
+subunits resolved:
 
-| cells | used here | strict M49 would say |
+Of the **74 cells relabelled** across the three migrations, **51 match UN M49
+exactly**. The other **23** rest on the documented departures above:
+
+| cells | used here | UN M49 says |
 |---|---|---|
-| 7 | Russia & North Asia | Europe |
+| 14 | Russia & North Asia | Europe |
 | 5 | Middle East | South Asia |
+| 4 | Greenland | North America |
 
-The 7 are cells of European Russia (the Volga region, ~63.2M rows); the 5 are
-Iranian cells. Both are reversible — `runs/region_fix_aug01.json` journals every
-rename, and re-running the audit with the overrides removed produces the strict
-M49 assignment.
+No relabelled cell depends on an *undocumented* departure. The 14 are Russian
+cells (M49 files the Russian Federation under Eastern Europe); the 5 are
+Iranian; the 4 are Greenlandic. All are reversible — the journals
+`runs/region_fix_aug01.json`, `runs/region_fix_aug02.json` and
+`runs/region_fix_aug02_reconcile.json` record every rename and every CSV row
+change, and removing the overrides from `audit_grid_regions.py` reproduces the
+strict-M49 assignment.
 
 **No cell's renaming was decided by recalled knowledge.** Every assignment comes
 from intersecting the cell with the Natural Earth polygons above; the only human

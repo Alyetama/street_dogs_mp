@@ -20,6 +20,12 @@
    "publisher": "United Nations Statistics Division",
    "url": "https://unstats.un.org/unsd/methodology/m49/",
    "note": "approximated by Natural Earth SUBREGION; 16/297 subunit deviations from the UN table are neutralized by overrides or verified impact-free"
+  },
+  "m49_table": {
+   "file": "data/geo/un_m49.csv",
+   "rows": 249,
+   "note": "UN M49 + ISO 3166 joined table (community mirror of the UN geoscheme), used to verify NE SUBREGION and to measure M49 conformance",
+   "url": "https://raw.githubusercontent.com/lukes/ISO-3166-Countries-with-Regional-Codes/master/all/all.csv"
   }
  },
  "follows_m49": {
@@ -101,16 +107,24 @@
     "cells_dir_renamed": 51,
     "csv_rows_relabelled": 54
    },
-   "aug02": {
+   "aug02_ocean": {
     "cells_dir_renamed": 20,
-    "csv_rows_relabelled": 20,
-    "cells_reconciled": 3
+    "csv_rows_relabelled": 20
+   },
+   "aug02_reconcile": {
+    "cells_dir_renamed": 3
    }
   },
   "total_cells_relabelled": 74,
-  "following_m49_exactly": 62,
-  "depending_on_documented_departures": 12,
-  "verification": "4-agent adversarial pass 2026-08-02: UN-source cross-check, disk consistency, point-lattice re-derivation, hostile code review"
+  "match_un_m49_exactly": 51,
+  "rest_on_documented_departures": 23,
+  "departure_breakdown": {
+   "Russia & North Asia vs M49 Europe": 14,
+   "Middle East vs M49 South Asia (Iran)": 5,
+   "Greenland vs M49 North America": 4
+  },
+  "undocumented_departures": 0,
+  "verification": "4-agent adversarial pass 2026-08-02 (UN-source cross-check, disk consistency, point-lattice re-derivation, hostile code review); conformance recomputed against data/geo/un_m49.csv"
  },
  "ne_m49_divergence_overrides": {
   "Hawaii": "North America",
