@@ -841,9 +841,41 @@ def _store_globs(detect_root, kind):
 def _sql_src(globs):
     paths = ', '.join("'" + g.replace("'", "''") + "'" for g in globs)
     # hive_partitioning exposes gen/region/cell/drive from the path -- the
-    # invariants key on (image_id, cell, drive) because cell-boundary twins
-    # (same image stored in two adjacent cells) are corpus-legitimate.
+    # invariants key on (image_id, cell, drive) because cell twins (the same
+    # image stored under more than one cell) are corpus-legitimate. See
+    # unique_src() before computing any PER-IMAGE statistic off this.
     return f'read_parquet([{paths}], hive_partitioning=1)'
+
+
+def unique_src(detect_root=None, kind='img'):
+    """SQL source with exactly ONE row per image_id -- cell twins collapsed.
+
+    The harvest wrote some images into several cells, so the worklist (which
+    dedups per cell across drives, never ACROSS cells) hands the same jpg to
+    the detector once per cell it landed in, and the store keeps one row per
+    (image_id, cell, drive).
+
+    Measured on the live sweep at ~2% progress: 10,254 images duplicated
+    across 2-6 cells each, ~1.5% of rows. Three properties were checked
+    before writing this helper, and they are what make collapsing safe:
+
+      * the repeated passes are bit-identical -- same n_det, same orig_w/h,
+        and identical box geometry for every image that had detections, so
+        picking any one row loses nothing;
+      * every duplicated image stays inside a SINGLE region, so region
+        attribution is unaffected by which row survives;
+      * the twins are NOT adjacent-cell neighbours (observed spanning 20 deg
+        of longitude), so this is harvest-side cell attribution, not a
+        boundary rounding effect -- do not "fix" it by nudging cell bounds.
+
+    Use this for any per-image count, rate or join. Use _sql_src() when you
+    genuinely want per-(image, cell) rows, e.g. drive/cell throughput.
+    """
+    detect_root = detect_root or get_detect_root()
+    src = _sql_src(_store_globs(detect_root, kind))
+    # deterministic survivor so repeated runs agree: lowest (cell, drive)
+    return (f'(SELECT * FROM {src} QUALIFY row_number() OVER '
+            f'(PARTITION BY image_id ORDER BY cell, drive) = 1)')
 
 
 # Helper program for environments without an importable duckdb (dnd has

@@ -49,6 +49,14 @@ cross-drive duplicate ids                    39,985 (0.12%), in 16 cells    [M]
 
 Per-drive, raw: capybara 14,841,591 (45.6%) / jackal 10,043,204 (30.8%) / bobcat 4,043,431 (12.4%) / lynx 3,654,093 (11.2%) `[M]`. Post-dedup ≈ capybara 14.82M, jackal 10.02M, bobcat and lynx unchanged `[E]`; the authoritative figure is written by `enumerate` into `worklist/gen=NNNN/_meta.json` and asserted against 32,542,334.
 
+**Cross-CELL duplication is a second, larger effect that the above does not cover** `[M, measured on the live sweep at ~2.2%]`. The 39,985 figure counts ids shared by two *drives* within one cell. Separately, the harvest wrote some images under **several different cells**, and the worklist never dedups across cells — so the detector processes those jpgs once per cell. At 735,080 image rows the store held 720,387 distinct ids: **14,693 redundant rows, 2.0%**, from 10,254 images appearing in 2–6 cells each. Three properties were checked, and they are why this is tolerated rather than fixed mid-run:
+
+- the repeats are **bit-identical** — same `n_det`, same `orig_w/orig_h`, identical box geometry for every image that had detections `[M]`;
+- every duplicated image stays inside a **single region**, so region attribution is unaffected `[M]`;
+- the twins are **not adjacent-cell neighbours** — observed spanning 20° of longitude within one region (`Africa_-5_10_0_15` + `Africa_10_10_15_15` + `Africa_0_10_5_15` for one id) `[M]`. This is harvest-side cell attribution, almost certainly the `/images?bbox` endpoint returning out-of-bbox results; **do not try to fix it by nudging cell bounds.**
+
+Cost is ~2% of GPU time (≈ 3.7 h of a 7.7-day run). Rebuilding the worklist with a global cross-cell dedup would change shard boundaries and so invalidate the tiling resume, costing far more than it saves. **Decision: leave the sweep alone; collapse at read time via `store.unique_src()`, which is lossless by the three properties above.** Use `_sql_src()` only for per-(image, cell) work such as drive/cell throughput.
+
 Weighted mean JPEG 1.26 MB `[M, 2,000-file sample]` → **~41 TB to read, not 52 TB**.
 
 ### 2.2 Storage hardware — the shape of the whole schedule
@@ -116,7 +124,9 @@ Two disagreeing samples: 0.129 boxes/img and 11.2% positive at conf 0.05 `[M, 84
 
 16 threads / 8 physical cores (Ryzen 7 9800X3D), 60 GB RAM with **12 GB of swap already in use and kswapd/kcompactd active** `[M]`, RTX 5080 16,303 MiB, driver 570.211.01, CUDA 12.8. crucial: 3.6 T total, 158 G free, 96% full `[M]`.
 
-Streaming 41 TB through the page cache on this box for 3.5 days would churn reclaim continuously. Because dedup guarantees **no image is ever read twice**, page cache has literally zero value here — `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` after every read is three lines and the single highest-leverage memory action in the whole design.
+Streaming 41 TB through the page cache on this box for 3.5 days would churn reclaim continuously. Page cache has essentially zero value here — `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` after every read is three lines and the single highest-leverage memory action in the whole design.
+
+> **Correction.** This paragraph originally justified the above with "dedup guarantees **no image is ever read twice**". That is false, and measurement says so: cross-cell twins are re-read (§2.1, 2.0% of rows `[M]`). The conclusion survives intact — the twins are 253–1204 s apart (median 713 s `[M]`), so 41 TB of unrelated traffic evicts them long before the second read, and a 2% re-read rate could not pay for the cache anyway. The action stays; only its stated premise was wrong.
 
 ---
 
@@ -772,7 +782,22 @@ disagree, this addendum wins.
 `yolo26x-cls` at imgsz 640 classifies each detected crop. It was a two-class
 model (`leashed` / `unleashed`); it is being retrained to three
 (`leashed` / `unleashed` / `not_a_dog`) on `leash_3class_v2`, built by
-`build_leash3_dataset.py` in the dogs_detection repo.
+`build_crop_dataset.py` in the dogs_detection repo.
+
+**Update (2026-08-02): the single 3-class classifier was retired.** Measured on
+its own clean val set it called 15.5% of real dogs `not_a_dog` at a mean
+confidence of 0.870 -- confidently wrong, so no confidence filter rescues it,
+and at 9.34M crops that is ~1.4M dogs discarded with no way to recover them
+short of a re-run. The cause is structural: argmax over three classes offers no
+operating point to tune, and the errors here are wildly asymmetric (a dropped
+dog is unrecoverable; an admitted non-dog is filterable later).
+
+The shipped architecture is therefore two stages: a **binary dog gate**
+(`--binary`, thresholded for ~97% dog recall) followed by the **existing
+2-class leash model**, which was never the weak link -- it was 95.1% accurate
+at leashed-vs-unleashed whenever it did say "dog". The gate's negatives are fed
+by dashboard-flagged false positives, harvested automatically at full
+resolution (`tools/detect/harvest_flagged.py`).
 
 **Why a third class.** 562 detector-flagged images that annotators then labelled
 give the detector's real precision: **84.2% contain a dog, 15.8% do not** `[M]`
