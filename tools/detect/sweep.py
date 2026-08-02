@@ -35,6 +35,17 @@ from status import StatusWriter, read_status  # noqa: E402
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Live preview crops land under the dashboard's static dir, so the existing
+# file server serves them at /recent_crops/<name> with no new plumbing.
+CROP_DIR = os.path.join(REPO, 'data', 'dashboard', 'recent_crops')
+# The panel samples from the newest 100 crops, so retention is by COUNT, not
+# time: a wall-clock TTL emptied the grid whenever positives were sparse.
+# Retention is by COUNT, not time: a wall-clock TTL emptied the grid whenever
+# positives were sparse. The pool doubles as the review queue for the flagging
+# page, so it is sized for bulk review (3000 crops ~105 MB + full frames
+# ~300 MB), not just the 24-tile live grid.
+CROP_TTL = 86400.0  # upper bound only; CROP_MAX does the real work
+CROP_MAX = 3000
 SHARD = 4000  # images per shard (section 6.1)
 # Measured per-drive read capacities img/s (section 2.2); pacing recomputes
 # rates every 60 s from live remaining counts (closed-loop waterfill, §6.5).
@@ -59,15 +70,25 @@ def load_cfg():
 
 def lane_plan(detect_root, gen):
     """[(pair, shards)] per drive; pair = dict from _dirs.json, shards =
-    [(shard_idx, start, end, remaining_ranges)] from the frozen ids + store."""
+    [(shard_idx, start, end, remaining_ranges)] from the frozen ids + store.
+
+    Returns ``(lanes, corpus, region_corpus)``. The region totals are built
+    here for the same reason the drive totals are: they are the DENOMINATOR of
+    the panel's per-region bars, and without them every region renders 0.0%
+    forever no matter how much work lands.
+    """
     gd = os.path.join(detect_root, 'worklist', 'gen=%04d' % gen)
     dirs = json.load(open(os.path.join(gd, '_dirs.json')))
     lanes = defaultdict(list)
+    corpus = defaultdict(int)  # full per-drive totals, done or not
+    region_corpus = defaultdict(int)  # same, keyed by region
     sidx = 0
     for pr in dirs:
         ids = np.load(os.path.join(gd, pr['cell'], pr['drive'] + '.ids.npy'),
                       mmap_mode='r')
         n = len(ids)
+        corpus[pr['drive']] += n
+        region_corpus[pr['region']] += n
         shards = []
         for st in range(0, n, SHARD):
             en = min(st + SHARD, n)
@@ -86,9 +107,7 @@ def lane_plan(detect_root, gen):
             sidx += 1
         if shards:
             lanes[pr['drive']].append((pr, ids, shards))
-        else:
-            sidx = sidx  # fully done pair
-    return lanes
+    return lanes, dict(corpus), dict(region_corpus)
 
 
 class ShardCollector:
@@ -97,10 +116,21 @@ class ShardCollector:
     graceful stop). Every enqueued position produces exactly one row, so a
     committed prefix can never contain a hole."""
 
-    def __init__(self, writer, gen, status):
+    def __init__(self,
+                 writer,
+                 gen,
+                 status,
+                 base_done=None,
+                 base_drive=None,
+                 base_region=None):
         self.w = writer
         self.gen = gen
         self.status = status
+        # Progress is GLOBAL: seeded with what previous runs already
+        # committed, so restarts accumulate instead of appearing to reset.
+        self.base_done = int(base_done or 0)
+        self.base_drive = dict(base_drive or {})
+        self.base_region = dict(base_region or {})
         self.lock = threading.Lock()
         self.sh = {}  # key -> dict(rows={pos:(img,dets)}, ...)
         self.done_imgs = 0
@@ -152,12 +182,7 @@ class ShardCollector:
             # dashboard's 30 s stalled badge fired falsely in the gaps.
             push = self.done_imgs % 100 == 0
         if push:
-            self.status.update(imgs_done=self.done_imgs,
-                               boxes_total=self.boxes,
-                               positives=self.positives,
-                               drive_done=dict(self.drive_done),
-                               region_done=dict(self.region_done),
-                               errors=dict(self.errors))
+            self._publish()
         if full:
             self._commit(key, s['end'])
 
@@ -181,11 +206,21 @@ class ShardCollector:
             s['committed'] = upto
             if upto == s['end']:
                 del self.sh[key]
-        self.status.update(imgs_done=self.done_imgs,
+        self._publish()
+
+    def _publish(self):
+        drv = dict(self.base_drive)
+        for k, v in self.drive_done.items():
+            drv[k] = drv.get(k, 0) + v
+        reg = dict(self.base_region)
+        for k, v in self.region_done.items():
+            reg[k] = reg.get(k, 0) + v
+        self.status.update(imgs_done=self.base_done + self.done_imgs,
+                           run_imgs_done=self.done_imgs,
                            boxes_total=self.boxes,
                            positives=self.positives,
-                           drive_done=dict(self.drive_done),
-                           region_done=dict(self.region_done),
+                           drive_done=drv,
+                           region_done=reg,
                            errors=dict(self.errors))
 
     def flush_prefixes(self):
@@ -204,6 +239,111 @@ class ShardCollector:
                 self._commit(key, pos)
 
 
+class PreviewWriter:
+    """Rolling window of recent positive detections as small jpgs.
+
+    Runs on the GPU consumer thread, so it must stay cheap: it crops the
+    already-decoded letterboxed row (net space, no re-read, no re-decode),
+    encodes at ~160px, and writes at most `per_sec` files a second. Old
+    files are unlinked on a slow cadence, never inside the hot path.
+    """
+
+    def __init__(self,
+                 out_dir=CROP_DIR,
+                 per_sec=2.0,
+                 ttl=CROP_TTL,
+                 cap=CROP_MAX):
+        import cv2
+        self.cv2 = cv2
+        self.dir = out_dir
+        # full frames live in a SUBDIR so the panel's listdir of the crop dir
+        # never mistakes them for crops
+        self.full_dir = os.path.join(out_dir, 'full')
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(self.full_dir, exist_ok=True)
+        self.min_gap = 1.0 / max(per_sec, 0.1)
+        self.ttl = ttl
+        self.cap = cap
+        self._last = 0.0
+        self._last_sweep = 0.0
+        self._lock = threading.Lock()
+
+    def __call__(self, m, row, net_box, conf):
+        now = time.time()
+        with self._lock:
+            if now - self._last < self.min_gap:
+                return
+            self._last = now
+        x1, y1, x2, y2 = (int(v) for v in net_box)
+        pad = int(0.12 * max(x2 - x1, y2 - y1)) + 4
+        h, w = row.shape[:2]
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(w, x2 + pad)
+        y2 = min(h, y2 + pad)
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return
+        crop = row[y1:y2, x1:x2].copy()  # copy: slot is released after
+        side = max(crop.shape[:2])
+        if side > 160:
+            sc = 160.0 / side
+            crop = self.cv2.resize(crop, (max(1, int(
+                crop.shape[1] * sc)), max(1, int(crop.shape[0] * sc))),
+                                   interpolation=self.cv2.INTER_AREA)
+        name = '%d_%s_%03d.jpg' % (int(
+            now * 1000), m['image_id'], int(round(conf * 100)))
+        tmp = os.path.join(self.dir, '.' + name)
+        if self.cv2.imwrite(tmp, crop,
+                            [int(self.cv2.IMWRITE_JPEG_QUALITY), 80]):
+            os.replace(tmp, os.path.join(self.dir, name))
+        # Full frame with the box drawn, for the click-through. Rendered from
+        # the letterboxed row ALREADY IN RAM -- re-reading the 1.6 MB original
+        # would steal I/O from the drives, which are the sweep's bottleneck.
+        try:
+            frame = row.copy()
+            self.cv2.rectangle(frame, (int(net_box[0]), int(net_box[1])),
+                               (int(net_box[2]), int(net_box[3])),
+                               (0, 200, 255), 3)
+            nw = int(round(m['wd'] * m['s']))
+            nh = int(round(m['hd'] * m['s']))
+            t, l = m['top'], m['left']
+            frame = frame[t:t + nh, l:l + nw]  # strip letterbox padding
+            ftmp = os.path.join(self.full_dir, '.' + name)
+            if self.cv2.imwrite(ftmp, frame,
+                                [int(self.cv2.IMWRITE_JPEG_QUALITY), 78]):
+                os.replace(ftmp, os.path.join(self.full_dir, name))
+        except Exception:
+            pass
+        if now - self._last_sweep > 15:
+            self._last_sweep = now
+            self._prune(now)
+
+    def _prune(self, now):
+        try:
+            names = sorted(n for n in os.listdir(self.dir)
+                           if n.endswith('.jpg'))
+        except OSError:
+            return
+        for n in names:
+            try:
+                ts = int(n.split('_', 1)[0]) / 1000.0
+            except ValueError:
+                continue
+            if now - ts > self.ttl:
+                try:
+                    os.remove(os.path.join(self.dir, n))
+                    os.remove(os.path.join(self.full_dir, n))
+                except OSError:
+                    pass
+        if len(names) > self.cap:
+            for n in names[:len(names) - self.cap]:
+                try:
+                    os.remove(os.path.join(self.dir, n))
+                    os.remove(os.path.join(self.full_dir, n))
+                except OSError:
+                    pass
+
+
 def cmd_run(args):
     cfg = load_cfg()
     import torch
@@ -219,7 +359,7 @@ def cmd_run(args):
               file=sys.stderr)
         return 1
 
-    lanes = lane_plan(detect_root, args.gen)
+    lanes, corpus, region_corpus = lane_plan(detect_root, args.gen)
     if args.drives:
         lanes = {d: v for d, v in lanes.items() if d in args.drives}
     todo = {
@@ -228,9 +368,29 @@ def cmd_run(args):
             for _, _, shards in v for sh in shards)
         for d, v in lanes.items()
     }
+    todo_region = defaultdict(int)
+    for v in lanes.values():
+        for pr, _, shards in v:
+            todo_region[pr['region']] += sum(
+                (sh[2] - sh[1]) - sum(e - s for s, e in sh[3]) for sh in shards)
+    # GLOBAL denominators/numerators: the panel tracks the whole corpus, not
+    # this invocation. base_* is what previous runs already committed.
+    corpus_total = sum(corpus.values())
+    base_drive = {d: corpus.get(d, 0) - todo.get(d, 0) for d in corpus}
+    # Same shape for regions. With --drives the excluded lanes contribute no
+    # todo, so their regions read as complete -- exactly how base_drive already
+    # behaves, and the panel is approximate under --drives either way.
+    base_region = {
+        r: region_corpus.get(r, 0) - todo_region.get(r, 0)
+        for r in region_corpus
+    }
+    base_done = corpus_total - sum(todo.values())
     total = sum(todo.values())
     if args.max_images:
         total = min(total, args.max_images)
+    print('already committed: %s of %s (%.2f%%)' %
+          (f'{base_done:,}', f'{corpus_total:,}',
+           100.0 * base_done / max(corpus_total, 1)))
     print('lanes:', {
         d: f'{n:,}'
         for d, n in todo.items()
@@ -243,12 +403,17 @@ def cmd_run(args):
     epoch = time.time()
     status = StatusWriter(run_id,
                           args.gen,
-                          total,
-                          drive_totals=todo,
-                          region_totals={})
+                          corpus_total,
+                          drive_totals=corpus,
+                          region_totals=region_corpus)
     status.start()
     writer = store.Writer(detect_root)
-    coll = ShardCollector(writer, args.gen, status)
+    coll = ShardCollector(writer,
+                          args.gen,
+                          status,
+                          base_done=base_done,
+                          base_drive=base_drive,
+                          base_region=base_region)
     ring = engine.BatchRing(torch)
     stop_ev = threading.Event()
     signal.signal(signal.SIGINT, lambda *a: stop_ev.set())
@@ -279,12 +444,14 @@ def cmd_run(args):
         ]
         coll.add(m['key'], m['pos'], img, dets)
 
+    preview = None if args.no_preview else PreviewWriter()
     consumer = engine.Consumer(cfg['engine'],
                                ring,
                                sink,
                                conf=cfg['conf'],
                                iou=cfg['iou'],
-                               max_det=cfg['max_det'])
+                               max_det=cfg['max_det'],
+                               preview_fn=preview)
     ct = threading.Thread(target=consumer.run, daemon=True)
     ct.start()
 
@@ -411,6 +578,9 @@ def main():
     r.add_argument('--max-images', type=int)
     r.add_argument('--drives', nargs='+')
     r.add_argument('--rate-cap', type=float)
+    r.add_argument('--no-preview',
+                   action='store_true',
+                   help='disable the live detection-crop preview')
     r.set_defaults(func=cmd_run)
     s = sub.add_parser('status')
     s.set_defaults(func=lambda a: print(json.dumps(read_status(), indent=1)))
