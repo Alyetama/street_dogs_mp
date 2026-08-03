@@ -239,12 +239,13 @@ function fetch(url, opts) {
 
 // ── the page's own element graph (built from the real markup ids) ───────────
 for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','prev','prev2','next','next2',
-                  'foot','grid','state','sort','size','reload']) {
+                  'foot','grid','state','sort','size','reload','country']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
 byId['sort'].value = 'conf';
 byId['size'].value = '50';
+byId['country'].value = '';
 
 // ── run the page script ─────────────────────────────────────────────────────
 const fs = require('fs');
@@ -808,8 +809,46 @@ async function t19() {
      't19: non-numeric when the server omits collapsed: ' + byId['dups'].textContent);
 }
 
+// ── 20. the country filter reaches the server and repaints its options ──
+async function t20() {
+  const LIST = [{iso:'DEU',name:'Germany',n:904},{iso:'JPN',name:'Japan',n:838}];
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+                                        {countries: LIST, country: ''}),
+           '/api/review/seen': () => ({ ok: true, seen_total: 1 }) };
+  await API.load(); await flush();
+  const opts = byId['country'].innerHTML;
+  ck(/All countries/.test(opts), 't20: no "All countries" option');
+  ck(/Germany \(904\)/.test(opts), 't20: option text lacks name+count: ' + opts);
+  ck(/value="DEU"/.test(opts), 't20: option value is not the ISO code');
+
+  // choosing one must send ?country= and reset to page 0
+  CALLS.length = 0;
+  byId['country'].value = 'DEU';
+  await byId['country'].onchange.call(byId['country']);
+  await flush(); await flush();
+  const req = CALLS.map(c => c.url).filter(u => /\/api\/review\?/.test(u)).pop();
+  ck(/country=DEU/.test(req || ''), 't20: filter not sent, url=' + req);
+  ck(/page=0/.test(req || ''), 't20: filter did not reset to page 1: ' + req);
+
+  // an unchanged option set must NOT be rewritten -- doing so on every page
+  // turn drops an open dropdown mid-click
+  const before = byId['country'].innerHTML;
+  byId['country'].innerHTML = before + '<!--sentinel-->';
+  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 3), [],
+                                      {countries: LIST, country: 'DEU'});
+  await API.load(); await flush();
+  ck(/sentinel/.test(byId['country'].innerHTML),
+     't20: options rebuilt although the list was identical');
+
+  // a payload with no countries key must not blow up or wipe the control
+  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 3), []);
+  await API.load(); await flush();
+  ck(byId['country'].innerHTML.length > 0, 't20: control emptied when the '
+     + 'server omitted countries');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

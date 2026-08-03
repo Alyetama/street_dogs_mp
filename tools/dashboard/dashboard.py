@@ -1405,6 +1405,12 @@ min-width:44px;text-align:center}
       <option value="new">Newest first</option>
       <option value="low">Least confident first</option>
     </select>
+    <!-- Populated from /api/review, which lists only countries the sweep has
+         actually produced crops for, with counts. Rebuilt hourly alongside the
+         dashboard refresh, so newly swept ground appears on its own. -->
+    <select id="country" title="only review crops from one country">
+      <option value="">All countries</option>
+    </select>
     <select id="size"><option value="50">50 per page</option>
       <option value="100">100 per page</option></select>
     <button class="rbtn quiet" id="reload" title="pull in detections found since this page loaded">&#8635; Refresh pool</button>
@@ -1455,7 +1461,7 @@ min-width:44px;text-align:center}
 /* sel = -1 means NOTHING is selected. The page opens that way on purpose:
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
-var page=0,size=50,sort='conf',items=[],reserve=[],pages=1,sel=-1,
+var page=0,size=50,sort='conf',country='',items=[],reserve=[],pages=1,sel=-1,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1484,7 +1490,8 @@ function load(){
   skeleton();
   /* returns the promise: callers (and the test harness) can await a settled
      grid instead of guessing at microtask depth */
-  return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort)
+  return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort+
+               '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
     if(j.error)throw 0;
@@ -1493,6 +1500,7 @@ function load(){
     if(j.seen_total!=null)seenN=j.seen_total;
     if(j.positive_total!=null)posN=j.positive_total;
     if(j.collapsed!=null)dupN=j.collapsed;
+    paintCountries(j.countries,j.country);
     score();
     var lab='Page '+(page+1)+' of '+pages;
     $('pg').textContent=lab;$('pg2').textContent=lab;
@@ -2118,6 +2126,27 @@ $('sort').onchange=function(){var v=this.value;markSeen().then(function(){
   sort=v;page=0;sel=-1;load()})};
 $('size').onchange=function(){var v=parseInt(this.value,10)||50;
   markSeen().then(function(){size=v;page=0;sel=-1;load()})};
+/* Rebuilt from every response so the hourly refresh reaches an open tab, but
+   only when the option set actually CHANGED -- rewriting the <select> on each
+   page turn would drop the open dropdown and reset the caret mid-click. */
+var countrySig='';
+function paintCountries(list,cur){
+  if(!list)return;
+  var sig=list.map(function(c){return c.iso+':'+c.n}).join(',');
+  if(sig!==countrySig){
+    countrySig=sig;
+    var el=$('country');
+    var html='<option value="">All countries</option>';
+    for(var i=0;i<list.length;i++){
+      var c=list[i];
+      html+='<option value="'+att(c.iso)+'">'+esc(c.name)+' ('+n(c.n)+')</option>';
+    }
+    el.innerHTML=html;
+  }
+  if(cur!=null)$('country').value=cur;
+}
+$('country').onchange=function(){var v=this.value;
+  markSeen().then(function(){country=v;page=0;sel=-1;load()})};
 load();loadBal();
 </script></body></html>"""
 
@@ -2910,6 +2939,40 @@ def _reserved_count():
         return 0
 
 
+# ── country filter ──────────────────────────────────────────────────────────
+COUNTRY_INDEX = os.path.join(OUT, 'countries.json')
+_country_cache = {'mtime': None, 'doc': {'by_image': {}, 'counts': {},
+                                         'names': {}}}
+
+
+def country_index():
+    """Reloaded on mtime, like load_cfg -- the hourly rebuild has to reach a
+    server that has been up for days, which an lru_cache would prevent."""
+    try:
+        mtime = os.path.getmtime(COUNTRY_INDEX)
+    except OSError:
+        return _country_cache['doc']
+    if _country_cache['mtime'] != mtime:
+        try:
+            with open(COUNTRY_INDEX) as fh:
+                doc = json.load(fh)
+            _country_cache.update(mtime=mtime, doc=doc)
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f'warning: bad {COUNTRY_INDEX}: {e}\n')
+    return _country_cache['doc']
+
+
+def refresh_countries():
+    """Rebuild the index in-process. Failure is never fatal: the filter is a
+    convenience and the queue must stay reviewable without it."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import country_index as ci
+        ci.build(REPO, COUNTRY_INDEX)
+    except Exception as e:                       # geopandas missing, lock, ...
+        sys.stderr.write(f'country index refresh failed: {e}\n')
+
+
 REVIEW_SORTS = {
     'new': lambda c: -c['ts'],
     'conf': lambda c: (-c['conf'], -c['ts']),
@@ -2917,7 +2980,7 @@ REVIEW_SORTS = {
 }
 
 
-def review_payload(page=0, size=REVIEW_PAGE, sort='new'):
+def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
@@ -2945,9 +3008,18 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new'):
         positives = set(_flag_names(POS_LABEL))
         judged_ids = _all_flagged_ids()
         n_pos = len(positives)
+    # the empty payload carries the dropdown too, or a reviewer who filters
+    # down to zero crops loses the control that would let them filter back out
+    _cd = country_index()
     empty = {'items': [], 'reserve': [], 'page': 0, 'size': size, 'sort': sort,
              'total_unflagged': 0, 'flagged_total': len(flagged), 'pages': 0,
-             'positive_total': n_pos, 'seen_total': 0}
+             'positive_total': n_pos, 'seen_total': 0,
+             'country': (country or '').upper(),
+             'countries': [{'iso': i, 'name': _cd.get('names', {}).get(i, i),
+                            'n': n}
+                           for i, n in sorted((_cd.get('counts') or {}).items(),
+                                              key=lambda kv: (-kv[1], kv[0]))],
+             'countries_generated': _cd.get('generated')}
     try:
         names = os.listdir(CROPS)
     except OSError:
@@ -2969,6 +3041,14 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new'):
         seen_ids = set(_seen_ids())
     # either verdict, or a pass, takes the image out of the queue
     judged = judged_ids | seen_ids
+    # The country of each crop, by point-in-polygon on the image's real
+    # lat/lon (see country_index.py). '' means the lookup found no coordinates
+    # or the point fell outside every polygon -- at sea, usually. Those crops
+    # stay in the unfiltered queue; hiding them would silently shrink the
+    # reviewable pool.
+    cdoc = country_index()
+    by_country = cdoc.get('by_image') or {}
+    want = (country or '').upper()
     cands = []
     for name in names:
         m = _CROP_RE.match(name)
@@ -2977,9 +3057,13 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new'):
         iid = m.group(2)
         if iid in judged:      # flagged, or already looked at and kept
             continue
+        iso = by_country.get(iid, '')
+        if want and iso != want:
+            continue
         cands.append({'name': name, 'image_id': iid,
                       'ts': int(m.group(1)),
                       'conf': round(int(m.group(3)) / 100.0, 2),
+                      'country': iso,
                       'has_full': name in full})
     cands.sort(key=key)          # sort first: the survivor is the best copy
     # NB: not `seen_ids` -- that name holds the reviewed-and-kept ledger above,
@@ -3050,7 +3134,17 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new'):
             # total_unflagged and the two sum to a meaningful denominator
             'pages': pages, 'flagged_total': len(flagged_ids),
             'positive_total': n_pos, 'seen_total': len(seen_ids),
-            'collapsed': collapsed}
+            'collapsed': collapsed,
+            # the dropdown's options, rebuilt hourly. Only countries the sweep
+            # has reached appear -- the counts come from crops that exist, so
+            # an option can never lead to an empty page.
+            'country': want,
+            'countries': [{'iso': i, 'name': cdoc.get('names', {}).get(i, i),
+                           'n': n}
+                          for i, n in sorted(
+                              (cdoc.get('counts') or {}).items(),
+                              key=lambda kv: (-kv[1], kv[0]))],
+            'countries_generated': cdoc.get('generated')}
 
 
 def sweep_pids():
@@ -3148,7 +3242,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                          parse_qs(self.path.split('?', 1)[1]).items()}
                 self._json(review_payload(int(q.get('page', 0)),
                                           int(q.get('size', REVIEW_PAGE)),
-                                          str(q.get('sort', 'new'))))
+                                          str(q.get('sort', 'new')),
+                                          str(q.get('country', ''))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
@@ -3408,7 +3503,12 @@ def serve(args):
                 argparse.Namespace(db=args.db,
                                    no_refresh=False,
                                    images=(cyc % args.images_every == 0)))
+            refresh_countries()
             cyc += 1
+
+    # once at startup too: a server started after new cells were swept would
+    # otherwise offer a stale country list until the first interval elapsed
+    threading.Thread(target=refresh_countries, daemon=True).start()
 
     threading.Thread(target=loop, daemon=True).start()
     BoardHandler.db = args.db
