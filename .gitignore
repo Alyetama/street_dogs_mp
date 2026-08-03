@@ -210,3 +210,7 @@ data/missing_unrecoverable/
 runs/*.json
 # the dnd env was abandoned for yolo; its lockfile documents nothing live
 data/dnd_env_lock.txt
+
+# generated review thumbnails (rebuilt on demand from the originals)
+data/dashboard/hq_crops/
+data/dashboard/sequence_cache.json
