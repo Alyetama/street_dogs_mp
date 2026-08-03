@@ -101,6 +101,7 @@ class El {
     this.onload = null; this.naturalWidth = 0; this.naturalHeight = 0;
     this.clientWidth = 0; this.clientHeight = 0;
     this.offsetLeft = 0; this.offsetTop = 0;
+    this.scrollLeft = 0; this.scrollTop = 0;
     allEls.push(this);
   }
   // assigning .id must make the node findable, exactly as in a real document
@@ -150,6 +151,8 @@ class El {
   addEventListener(t, f) { (this._listeners[t] = this._listeners[t] || []).push(f); }
   focus() {}
   scrollIntoView() {}
+  getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth,
+                                     height: this.clientHeight }; }
   matches(sel) { return matchSel(this, sel); }
   querySelector(sel) { return descendants(this).find(e => matchSel(e, sel)) || null; }
   querySelectorAll(sel) { return descendants(this).filter(e => matchSel(e, sel)); }
@@ -252,7 +255,7 @@ try {
     'requestAnimationFrame','setTimeout','clearTimeout','docL','navigator','Blob',
     src + '\nreturn {load,render,flag,undo,openLb,closeLb,stepLb,tile,score,'
         + 'idx,mark,cols,hideToast,showUndo,'
-        + 'markSeen,imgScale,saveBox,paintBox,'
+        + 'markSeen,imgScale,saveBox,paintBox,fitBox,fitImage,zoomBy,'
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
         + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
@@ -671,8 +674,8 @@ async function t17() {
     API.openLb(0); await flush();
     const im = byId['lbi'];
     im.naturalWidth = 4000; im.naturalHeight = 3000;
-    im.clientWidth = 800;  im.clientHeight = 600;
-    API.paintBox();
+    byId['lbw'].clientWidth = 800; byId['lbw'].clientHeight = 600;
+    API.fitImage();            // 800/4000 == 600/3000 == 0.2
   }
   await open0();
   ck(byId['lbbox'].hidden === false, 't17: box overlay never shown');
@@ -719,6 +722,30 @@ async function t17() {
      JSON.stringify(posted.box));
   ck(posted.box[2] <= 4000 && posted.box[3] <= 3000,
      't17: saved past the image bounds');
+
+  // a SMALL object must open zoomed in, not fitted to the whole frame --
+  // a 30px box on a 4000px image is 6 screen px at fit, which is the
+  // complaint this whole zoom model exists to answer
+  BOX.boxes = [{det_idx: 0, x1: 2000, y1: 1500, x2: 2030, y2: 1530, conf: 0.5}];
+  await open0();
+  API.fitBox();
+  const zBox = API.imgScale(), zFit = 0.2;
+  ck(zBox > zFit * 5, 't17: fitBox barely zoomed: ' + zBox + ' vs fit ' + zFit);
+  const px = 30 * zBox;
+  ck(px > 150, 't17: a 30px object renders at only ' + Math.round(px) +
+     ' screen px after Fit box');
+  // and the handles must NOT have grown with it -- they are plain px in CSS,
+  // so assert the box itself is what scaled
+  ck(byId['lbbox'].style.width === px + 'px',
+     't17: box width ' + byId['lbbox'].style.width + ' want ' + px + 'px');
+  // one-pixel nudge stays one ORIGINAL pixel however deep the zoom
+  const x0 = 2000;
+  for (const f of (docL['keydown'] || []))
+    f({ key: 'ArrowRight', shiftKey: true, preventDefault(){},
+        target: { tagName: 'BODY' } });
+  await API.saveBox(); await flush();
+  ck(Math.round(posted.box[0]) === x0 + 1,
+     't17: Shift+Arrow moved ' + (posted.box[0] - x0) + 'px, want exactly 1');
 }
 function crop0(){ return CROPS.normal[0]; }
 
