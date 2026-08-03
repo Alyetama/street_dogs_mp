@@ -21,6 +21,7 @@ The work runs in **three independent stages**, each a standalone script:
 - [Data catalog](#data-catalog)
 - [Helper scripts](#helper-scripts)
 - [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ## Setup
 
@@ -405,3 +406,11 @@ python tools/repair/deduplicate_parquets.py --parent-dir grid_runs --substring N
 | **Interrupted run** | Re-run the same command — checkpoints, Parquet, and markers resume the work. |
 
 </details>
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+One vendored component keeps its own license: `tools/dashboard/echarts.min.js`
+is Apache ECharts 5.6.0, under Apache-2.0. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
