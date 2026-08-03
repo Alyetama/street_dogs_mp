@@ -1391,7 +1391,7 @@ min-width:44px;text-align:center}
          (crops age out after 24 h / 3000), "flagged" is cumulative all-time.
          A bar dividing one by the other would be a made-up percentage. -->
     <div class="score">
-      <b id="left">&mdash;</b><span>left to review</span>
+      <b id="left">&mdash;</b><span id="leftlab">left to review</span>
       <span class="sep"></span>
       <b class="sec" id="done">&mdash;</b><span>flagged</span>
       <b class="sec pos" id="pos">&mdash;</b><span>marked dog</span>
@@ -1461,7 +1461,7 @@ min-width:44px;text-align:center}
 /* sel = -1 means NOTHING is selected. The page opens that way on purpose:
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
-var page=0,size=50,sort='conf',country='',items=[],reserve=[],pages=1,sel=-1,
+var page=0,size=50,sort='conf',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1528,6 +1528,12 @@ function load(){
    so a flag and a reload can never disagree */
 function score(){
   $('left').textContent=n(todoN);
+  /* 'left to review' and 'repeats hidden' are scoped to the active country
+     filter; 'flagged', 'marked dog' and 'kept' are all-time global. Sitting
+     side by side with no marker, 198 next to 1,166 reads as "198 left in
+     total". Say which country the 198 belongs to. */
+  var lb=$('leftlab');
+  if(lb)lb.textContent=countryName?('left in '+countryName):'left to review';
   $('done').textContent=n(flaggedN);
   var s=$('seen');if(s)s.textContent=n(seenN);
   var pz=$('pos');if(pz)pz.textContent=n(posN);
@@ -2133,6 +2139,8 @@ var countrySig='';
 function paintCountries(list,cur){
   if(!list)return;
   var sig=list.map(function(c){return c.iso+':'+c.n}).join(',');
+  countryName='';
+  for(var q=0;q<list.length;q++)if(list[q].iso===cur)countryName=list[q].name;
   if(sig!==countrySig){
     countrySig=sig;
     var el=$('country');
@@ -2928,15 +2936,31 @@ def dataset_balance():
     }
 
 
-@functools.lru_cache(maxsize=1)
+_reserved_cache = {'mtime': None, 'n': 0}
+
+
 def _reserved_count():
-    """How many flagged ids are withheld as the acceptance set."""
+    """How many flagged ids are withheld as the acceptance set.
+
+    mtime-keyed, NOT lru_cache. reserve_acceptance_set.py --force rewrites this
+    file, and a process-lifetime cache would leave a server that has been up
+    for days quoting the old reservation forever -- the same staleness that
+    made the review panel count 641 already-built flags as pending.
+    """
+    p = os.path.join(REPO, 'data', 'dogbin_acceptance_set.json')
     try:
-        with open(os.path.join(REPO, 'data',
-                               'dogbin_acceptance_set.json')) as fh:
-            return len(json.load(fh).get('image_ids') or [])
-    except (OSError, ValueError):
+        mtime = os.path.getmtime(p)
+    except OSError:
+        _reserved_cache.update(mtime=None, n=0)
         return 0
+    if _reserved_cache['mtime'] != mtime:
+        try:
+            with open(p) as fh:
+                n = len(json.load(fh).get('image_ids') or [])
+        except (OSError, ValueError):
+            n = 0
+        _reserved_cache.update(mtime=mtime, n=n)
+    return _reserved_cache['n']
 
 
 # ── country filter ──────────────────────────────────────────────────────────

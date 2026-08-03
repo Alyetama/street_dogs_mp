@@ -239,7 +239,7 @@ function fetch(url, opts) {
 
 // ── the page's own element graph (built from the real markup ids) ───────────
 for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','prev','prev2','next','next2',
-                  'foot','grid','state','sort','size','reload','country']) {
+                  'foot','grid','state','sort','size','reload','country','leftlab']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -847,8 +847,41 @@ async function t20() {
      + 'server omitted countries');
 }
 
+// ── 21. a filtered count must not read as a global one ──────────────────
+// 'left to review' is scoped to the country filter while 'flagged' and 'kept'
+// stay all-time. Side by side with no marker, 198 next to 1,166 reads as
+// "198 left in total".
+async function t21() {
+  const LIST = [{iso:'DEU',name:'Germany',n:904},{iso:'JPN',name:'Japan',n:838}];
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+             {countries: LIST, country: '', total_unflagged: 2100,
+              flagged_total: 1166}),
+           '/api/review/seen': () => ({ ok: true, seen_total: 1 }) };
+  await API.load(); await flush();
+  ck(byId['leftlab'].textContent === 'left to review',
+     't21: unfiltered label changed: ' + byId['leftlab'].textContent);
+
+  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 3), [],
+        {countries: LIST, country: 'DEU', total_unflagged: 198,
+         flagged_total: 1166});
+  await API.load(); await flush();
+  ck(byId['left'].textContent === '198', 't21: left=' + byId['left'].textContent);
+  ck(/Germany/.test(byId['leftlab'].textContent),
+     't21: filtered count not scoped to the country, label=' +
+     byId['leftlab'].textContent);
+  ck(byId['done'].textContent === '1,166',
+     't21: global flagged count changed under a filter: ' + byId['done'].textContent);
+
+  // clearing the filter restores the global wording
+  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 3), [],
+        {countries: LIST, country: '', total_unflagged: 2100});
+  await API.load(); await flush();
+  ck(byId['leftlab'].textContent === 'left to review',
+     't21: label stuck on a country after clearing: ' + byId['leftlab'].textContent);
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
