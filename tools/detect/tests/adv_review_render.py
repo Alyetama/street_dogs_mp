@@ -238,7 +238,7 @@ function fetch(url, opts) {
 }
 
 // ── the page's own element graph (built from the real markup ids) ───────────
-for (const id of ['left','done','seen','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','prev','prev2','next','next2',
+for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','prev','prev2','next','next2',
                   'foot','grid','state','sort','size','reload']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
@@ -793,8 +793,23 @@ async function t18() {
   ck(order[0] === 'box', 't18: stepping away dropped the pending edit');
 }
 
+// ── 19. the collapse count is surfaced, not silently swallowed ──────────
+async function t19() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 4), [],
+                                        {collapsed: 669, total_unflagged: 1881}) };
+  await API.load(); await flush();
+  ck(byId['dups'].textContent === '669',
+     't19: hidden-repeat count not shown, got ' + byId['dups'].textContent);
+  ck(byId['left'].textContent === '1,881', 't19: left=' + byId['left'].textContent);
+  // a payload without the field must not print undefined/NaN
+  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 4), []);
+  await API.load(); await flush();
+  ck(/^[0-9,]+$/.test(byId['dups'].textContent),
+     't19: non-numeric when the server omits collapsed: ' + byId['dups'].textContent);
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
