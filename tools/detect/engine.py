@@ -286,7 +286,8 @@ class Consumer:
                  sink,
                  conf=0.05,
                  iou=0.90,
-                 max_det=300):
+                 max_det=300,
+                 preview_fn=None):
         import torch
         from ultralytics.utils import ops
         self.torch = torch
@@ -318,6 +319,10 @@ class Consumer:
         self.exec_stream = torch.cuda.Stream()
         self.stopping = threading.Event()
         self.batches = 0
+        # Optional live-preview hook, called with (meta, letterboxed pinned
+        # row, net-space box, conf) for each positive image BEFORE its ring
+        # slot is released. Must be cheap: it runs on the GPU consumer thread.
+        self.preview_fn = preview_fn
 
     def run(self):
         torch, ops = self.torch, self.ops
@@ -342,11 +347,14 @@ class Consumer:
                     self.exec_stream.cuda_stream)
                 pred = self.out.clone()  # detach from TRT buffer
             self.exec_stream.synchronize()
-            self.ring.release(s)  # slot reusable immediately
+            if self.preview_fn is None:
+                self.ring.release(s)  # slot reusable immediately
             if not ok_exec:
                 for m in metas[:n]:
                     self.sink(m, 4, np.empty((0, 4), np.float32),
                               np.empty(0, np.float32))
+                if self.preview_fn is not None:
+                    self.ring.release(s)
                 self.ring.batq.task_done()
                 continue
             # section 4.6: max_time_img pinned huge; if ultralytics ever
@@ -367,6 +375,14 @@ class Consumer:
                 d = d.float().cpu().numpy()
                 boxes = boxes_to_original(d[:, :4], m)
                 self.sink(m, 0, boxes, d[:, 4].astype(np.float32))
+                if self.preview_fn is not None:
+                    try:
+                        self.preview_fn(m, self.ring.pin_np[s][j], d[0, :4],
+                                        float(d[0, 4]))
+                    except Exception:
+                        pass  # a preview must never break the sweep
+            if self.preview_fn is not None:
+                self.ring.release(s)  # held until crops were copied out
             self.batches += 1
             self.ring.batq.task_done()  # after every sink for this batch
 
