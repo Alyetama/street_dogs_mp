@@ -98,6 +98,9 @@ class El {
     this.hidden = false; this.disabled = false; this.src = '';
     this._html = ''; this.onclick = null; this.onchange = null;
     this.onmousedown = null; this.value = ''; this._listeners = {};
+    this.onload = null; this.naturalWidth = 0; this.naturalHeight = 0;
+    this.clientWidth = 0; this.clientHeight = 0;
+    this.offsetLeft = 0; this.offsetTop = 0;
     allEls.push(this);
   }
   // assigning .id must make the node findable, exactly as in a real document
@@ -249,7 +252,7 @@ try {
     'requestAnimationFrame','setTimeout','clearTimeout','docL','navigator','Blob',
     src + '\nreturn {load,render,flag,undo,openLb,closeLb,stepLb,tile,score,'
         + 'idx,mark,cols,hideToast,showUndo,'
-        + 'markSeen,'
+        + 'markSeen,imgScale,saveBox,paintBox,'
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
         + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
@@ -453,21 +456,23 @@ async function t8() {
 async function t9() {
   RESP = { '/api/review': () => payload(CROPS.mixed, []) };
   await API.load(); await flush();
-  // index 0 has no full frame -> must not open
+  // has_full only says whether a burned-in PREVIEW was saved; the editor
+  // reads the original jpg, so every crop opens
   API.openLb(0);
-  ck(!API.st().lb, 't9: opened a lightbox for a crop with no full frame');
+  ck(!!API.st().lb, 't9: refused a crop with no preview frame');
+  ck(String(byId['lbi'].src).startsWith('/orig?name='),
+     't9: lightbox did not load the ORIGINAL (needed to edit): ' + byId['lbi'].src);
+  ck(!String(byId['lbi'].src).includes(' '),
+     't9: lightbox src not URL-encoded: ' + byId['lbi'].src);
   API.openLb(1);
-  ck(!!API.st().lb, 't9: did not open on a crop that has a full frame');
-  ck(String(byId['lbi'].src).startsWith('/recent_crops/full/'),
-     't9: bad lightbox src: ' + byId['lbi'].src);
   ck(API.st().sel === 1, 't9: opening did not move the selection');
   const first = byId['lbi'].src;
   API.stepLb(1);
   ck(byId['lbi'].src !== first, 't9: step(1) did not advance');
-  ck(CROPS.mixed[API.st().sel].has_full, 't9: stepped onto a crop with no full frame');
   API.stepLb(1); API.stepLb(1); API.stepLb(1);
   ck(!!API.st().lb, 't9: stepping past the end closed the lightbox');
-  ck(CROPS.mixed[API.st().sel].has_full, 't9: landed on a frameless crop');
+  ck(API.st().sel >= 0 && API.st().sel < CROPS.mixed.length,
+     't9: stepped outside the page, sel=' + API.st().sel);
   API.closeLb(); ck(!API.st().lb, 't9: closeLb left the overlay up');
   ck(document.body.style.overflow === '', 't9: page scroll not restored');
 }
@@ -648,8 +653,77 @@ async function t16() {
   ck(scrolls.length === 0, 't16: an undo scrolled the page');
 }
 
+// ── 17. box editing keeps ORIGINAL pixels, whatever the render scale ─────
+async function t17() {
+  let posted = null;
+  const BOX = { ok: true, image_id: 'img1', w: 4000, h: 3000, has_file: true,
+                boxes: [{det_idx: 0, x1: 1000, y1: 800, x2: 1400, y2: 1200,
+                         conf: 0.5}], saved: null };
+  RESP = { '/api/review/box': (u, o) => { if (o) { posted = JSON.parse(o.body);
+                                                   return { ok: true }; }
+                                          return BOX; },
+           '/api/review': () => payload([crop0()], []),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  // openLb rebuilds the overlay, so size the <img> AFTER it exists:
+  // a 4000px image rendered at 800px is scale 0.2
+  async function open0(){
+    API.openLb(0); await flush();
+    const im = byId['lbi'];
+    im.naturalWidth = 4000; im.naturalHeight = 3000;
+    im.clientWidth = 800;  im.clientHeight = 600;
+    API.paintBox();
+  }
+  await open0();
+  ck(byId['lbbox'].hidden === false, 't17: box overlay never shown');
+  ck(Math.abs(API.imgScale() - 0.2) < 1e-9, 't17: scale=' + API.imgScale());
+  // overlay is placed in DISPLAY px
+  ck(byId['lbbox'].style.left === '200px',
+     't17: left=' + byId['lbbox'].style.left + ' want 200px (1000*0.2)');
+  ck(byId['lbbox'].style.width === '80px',
+     't17: width=' + byId['lbbox'].style.width + ' want 80px (400*0.2)');
+
+  // drag the whole box 100 display px right = 500 ORIGINAL px
+  byId['lbbox']._listeners.mousedown[0]({ target: { getAttribute: () => null },
+    clientX: 0, clientY: 0, preventDefault(){}, stopPropagation(){} });
+  for (const f of (docL['mousemove'] || [])) f({ clientX: 100, clientY: 0 });
+  for (const f of (docL['mouseup'] || [])) f({});
+  await API.saveBox(); await flush();
+  ck(posted && Math.round(posted.box[0]) === 1500,
+     't17: moved box x1=' + (posted && posted.box[0]) + ' want 1500 ORIGINAL px');
+  ck(Math.round(posted.box[2]) === 1900, 't17: x2=' + posted.box[2]);
+  ck(Math.round(posted.box[1]) === 800 && Math.round(posted.box[3]) === 1200,
+     't17: vertical drifted on a horizontal drag');
+  ck(posted.det_idx === 0, 't17: wrong det_idx ' + posted.det_idx);
+
+  // resizing by a corner must move only that corner
+  await open0();
+  byId['lbbox']._listeners.mousedown[0]({ target: { getAttribute: () => 'se' },
+    clientX: 0, clientY: 0, preventDefault(){}, stopPropagation(){} });
+  for (const f of (docL['mousemove'] || [])) f({ clientX: 20, clientY: 20 });
+  for (const f of (docL['mouseup'] || [])) f({});
+  await API.saveBox(); await flush();
+  ck(Math.round(posted.box[0]) === 1000 && Math.round(posted.box[1]) === 800,
+     't17: SE handle moved the NW corner');
+  ck(Math.round(posted.box[2]) === 1500 && Math.round(posted.box[3]) === 1300,
+     't17: SE corner went to ' + posted.box[2] + ',' + posted.box[3]);
+
+  // dragging far off-image must clamp inside the picture, not save negatives
+  await open0();
+  byId['lbbox']._listeners.mousedown[0]({ target: { getAttribute: () => null },
+    clientX: 0, clientY: 0, preventDefault(){}, stopPropagation(){} });
+  for (const f of (docL['mousemove'] || [])) f({ clientX: -99999, clientY: -99999 });
+  for (const f of (docL['mouseup'] || [])) f({});
+  await API.saveBox(); await flush();
+  ck(posted.box.every(v => v >= 0), 't17: saved a negative coordinate: ' +
+     JSON.stringify(posted.box));
+  ck(posted.box[2] <= 4000 && posted.box[3] <= 3000,
+     't17: saved past the image bounds');
+}
+function crop0(){ return CROPS.normal[0]; }
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

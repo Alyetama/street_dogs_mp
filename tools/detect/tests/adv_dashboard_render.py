@@ -196,7 +196,10 @@ def check_markup(html):
              'must sit top-LEFT, clear of the bottom-right conf badge'),
             ('@media(hover:none){.dcrop .fx{opacity:1}}', 'flag button always '
              'visible without hover (touch)'),
-            ('.dcrop.fl{border-color:#d8743a}', 'flagged tile border'),
+            # colour is a design choice, not a contract -- assert the RULE
+            # exists so a flagged tile stays visually distinct, and let the
+            # palette move without breaking the suite
+            ('.dcrop.fl{border-color:', 'flagged tile border'),
             ('flagged as false positive', 'flagged title/undo copy'),
             ('stopPropagation', 'flag click must not open the lightbox')):
         if frag not in html:
