@@ -100,9 +100,18 @@ con.execute("CREATE TEMP TABLE want(image_id VARCHAR)")
 con.executemany("INSERT INTO want VALUES (?)", [(i,) for i in spec["ids"]])
 src = "read_parquet([" + ",".join(
     "'" + p.replace("'", "''") + "'" for p in paths) + "])"
+# min(), not the last row the JOIN happens to emit. The manifests carry
+# duplicate rows (3.4% corpus-wide), so an image_id can come back more than
+# once -- and at least one comes back with a real sequence AND a NULL. A dict
+# comprehension over the raw rows keeps whichever landed last, which a
+# parallel query does not fix in place: the same id flipped sequence between
+# runs, moving its whole group across the train/val boundary and with it 353
+# crops. NULLs are dropped rather than ranked; absence of a sequence is not a
+# sequence, and the caller already pins unresolved ids to train.
 rows = con.execute(
-    "SELECT CAST(p.image_id AS VARCHAR), CAST(p.sequence AS VARCHAR) FROM "
-    + src + " p JOIN want w ON CAST(p.image_id AS VARCHAR)=w.image_id"
+    "SELECT CAST(p.image_id AS VARCHAR) i, min(CAST(p.sequence AS VARCHAR)) s "
+    "FROM " + src + " p JOIN want w ON CAST(p.image_id AS VARCHAR)=w.image_id "
+    "WHERE p.sequence IS NOT NULL GROUP BY 1"
 ).fetchall()
 json.dump({i: s for i, s in rows}, open(spec["out"], "w"))
 '''
@@ -247,9 +256,11 @@ def main():
             print(f'no acceptance set at {args.exclude_ids} -- nothing held out')
         except ValueError as e:
             raise SystemExit(f'{args.exclude_ids} is not readable JSON: {e}')
+    n_before_hold, n_held_removed = len(items), 0
     if held:
         n0 = len(items)
         items = [it for it in items if image_id_of(it[2]) not in held]
+        n_held_removed = n0 - len(items)
         print(f'acceptance set: {len(held):,} reserved image_ids, '
               f'{n0 - len(items):,} crops removed -> {len(items):,} trainable')
         if n0 == len(items):
@@ -323,7 +334,10 @@ def main():
         per_seq = collections.defaultdict(list)
         for path, fname in survivors:
             per_seq[seq_of(fname)].append((path, fname))
-        for s, lst2 in per_seq.items():
+        # sorted for the same reason as the split below: which crops survive
+        # the cap must not depend on the order duckdb happened to return rows
+        for s in sorted(per_seq):
+            lst2 = sorted(per_seq[s])
             rng.shuffle(lst2)
             if len(lst2) > args.max_per_sequence:
                 dropped_cap[cls] += len(lst2) - args.max_per_sequence
@@ -349,8 +363,16 @@ def main():
     # val would leak exactly what this tool exists to prevent. Pin all of them
     # to train: unresolved ids are a handful, and a slightly larger train set
     # is harmless where a contaminated val set is not.
-    seqs = [s for s in seq_items if not s.startswith(('noseq:', 'nofile:'))]
-    pinned = [s for s in seq_items if s.startswith(('noseq:', 'nofile:'))]
+    # sorted() before shuffle, or --seed means nothing. seq_items is insertion
+    # ordered from `keep`, which inherits the row order of a duckdb JOIN inside
+    # resolve_sequences -- and a parallel query does not promise one. Two runs
+    # with identical inputs and the same seed selected the identical 2,436
+    # crops but moved 353 of them between train and val, because shuffling a
+    # differently-ordered list with the same seed is a different shuffle.
+    seqs = sorted(s for s in seq_items
+                  if not s.startswith(('noseq:', 'nofile:')))
+    pinned = sorted(s for s in seq_items
+                    if s.startswith(('noseq:', 'nofile:')))
     if pinned:
         print(f'  {sum(len(seq_items[s]) for s in pinned):,} crops with no '
               f'resolvable sequence -> pinned to train (cannot verify they '
@@ -400,10 +422,20 @@ def main():
     man = {
         'src': args.src,
         'extra_negatives': args.extra_negatives,
+        'extra_positives': args.extra_positives,
         'max_per_sequence': args.max_per_sequence,
         'hamming': args.hamming,
+        # Which crops were withheld for accepting the model, and how the
+        # duplicates were found. Without these two the manifest cannot answer
+        # "was this model tested on data it trained on?", which is the exact
+        # question dogbin_v3's manifest could not answer.
+        'acceptance_set_file': args.exclude_ids or None,
+        'acceptance_set_ids': len(held),
+        'acceptance_set_crops_removed': n_held_removed,
+        'dup_clusters_file': args.dup_clusters,
         'val_frac': args.val_frac,
         'seed': args.seed,
+        'source_crops_before_acceptance_removal': n_before_hold,
         'source_crops': len(items),
         'near_duplicates_collapsed': dict(dropped_dup),
         'over_sequence_cap': dict(dropped_cap),
