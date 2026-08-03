@@ -244,8 +244,38 @@ def hbytes(n):
     return f"{n} B"
 
 
+class CatalogMissing(Exception):
+    """The DuckDB catalog has not been built yet.
+
+    Deliberately NOT a SystemExit: serve() already treats a failed build as
+    survivable (the catalog takes an exclusive lock, so a maintenance job
+    holding it must not take the server down) and catches Exception. Raising
+    SystemExit here would sail past that handler and reintroduce the outage.
+    main() turns it into a one-line exit for the CLI.
+    """
+
+
+def require_catalog(db):
+    """Fail with an instruction rather than a duckdb traceback.
+
+    data/catalog.duckdb is built by scanning the drives, so it can never be
+    committed -- every fresh clone starts without it. duckdb's own message
+    ("Cannot open database ... in read-only mode") does not tell a new
+    operator which command produces the file, and this is the first thing a
+    fresh checkout hits.
+    """
+    if not os.path.exists(db):
+        raise CatalogMissing(
+            f'no catalog at {db}\n'
+            '  build one:  python tools/catalog/catalog.py refresh\n'
+            '  it scans the data roots in data/catalog_dirs.txt; see '
+            'tools/dashboard/dashboard.config.example.json for the paths '
+            'the dashboard itself needs.')
+
+
 def query_metrics(db):
     """Return ``(overall, per_region)`` metrics dicts from the catalog."""
+    require_catalog(db)
     con = duckdb.connect(db, read_only=True)
     try:
         has_dedup = con.execute(
@@ -3373,7 +3403,10 @@ def main():
     s.set_defaults(func=serve)
 
     args = p.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except CatalogMissing as e:
+        sys.exit(str(e))
 
 
 # ── shared lightbox ─────────────────────────────────────────────────────────
@@ -4264,7 +4297,11 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         '<span class="dv">'+(known&&d.total?p.toFixed(0)+'% \\u00b7 ':'')+
         (live?n(d.rate,function(v){return (+v).toFixed(1)}):DASH)+' img/s'+
         (live&&d.queue_depth?' \\u00b7 queue '+fmt(d.queue_depth):'')+'</span>'+
-        (live&&d.stalled?'<span class="dbadge" title="no progress for 30 s \\u2014 spin-down risk (1058:25a3)">stalled</span>':'')+
+        /* The 30 s threshold was tuned against a USB enclosure that parks its
+           disk aggressively; the badge means "no bytes moved", which is a
+           spin-down on that hardware but may be anything on yours. The tooltip
+           says what was MEASURED, not what this one host's enclosure does. */
+        (live&&d.stalled?'<span class="dbadge" title="no progress for 30 s">stalled</span>':'')+
         '</div>';
     }).join('')||'<div class="dnone">no drives reported</div>';
     /* regions: the FULL planned roster (scrolls past ~300px) so a partial
