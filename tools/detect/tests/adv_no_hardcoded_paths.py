@@ -80,9 +80,14 @@ PATTERNS = (
      'an absolute interpreter path'),
 )
 
-# Literal strings that must never appear. Drive serial numbers and the like:
-# no regex catches these, and they identify physical hardware.
-FORBIDDEN = ('<drive-serial>', '<drive-serial>')
+# Strings that must never appear: drive serial numbers, which no regex
+# generalises and which identify physical hardware.
+#
+# Assembled from halves rather than written out. These same serials are being
+# scrubbed from the repo's history with a literal search-and-replace, and a
+# scanner that spells out what it hunts for gets rewritten along with the
+# leak -- silently disarming itself while still reporting success.
+FORBIDDEN = tuple(a + b for a, b in (('SDG4', 'JKKR'), ('65GJ', '0P5K')))
 
 # Lines that are allowed to match: they describe the pattern rather than being
 # an instance of it. Marked, not guessed -- an exemption must be visible in the
