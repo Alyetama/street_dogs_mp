@@ -190,6 +190,20 @@ def main():
     ap.add_argument('--hamming', type=int, default=6,
                     help='dHash distance under which two crops of the SAME '
                          'class count as duplicates. 0 disables.')
+    ap.add_argument('--exclude-ids',
+                    default=os.path.join(REPO, 'data',
+                                         'dogbin_acceptance_set.json'),
+                    help='JSON with an "image_ids" list that must never enter '
+                         'ANY split -- the permanent acceptance set written by '
+                         'reserve_acceptance_set.py. On by default: dogbin_v3 '
+                         'was accepted on a test it had trained on, and an '
+                         'opt-in guard would not have prevented that. Pass "" '
+                         'to disable.')
+    ap.add_argument('--dup-clusters',
+                    help='clusters.json from dedup_crops.py. dHash only sees '
+                         'near-identical framings; the embedding clusters also '
+                         'catch the same subject at another distance or angle, '
+                         'which is what consecutive frames actually look like.')
     ap.add_argument('--val-frac', type=float, default=0.2)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--execute', action='store_true')
@@ -220,6 +234,28 @@ def main():
         print(f'extra {what} folded in: {len(items) - n0:,}')
     print(f'source crops: {len(items):,}')
 
+    # ---- drop the permanent acceptance set -------------------------------
+    # Before anything else: a crop reserved for accepting the model must not
+    # reach the splitter at all. This is the guard whose absence let dogbin_v3
+    # train on 297 of the crops it was later accepted on.
+    held = set()
+    if args.exclude_ids:
+        try:
+            with open(args.exclude_ids) as f:
+                held = set(json.load(f).get('image_ids') or [])
+        except OSError:
+            print(f'no acceptance set at {args.exclude_ids} -- nothing held out')
+        except ValueError as e:
+            raise SystemExit(f'{args.exclude_ids} is not readable JSON: {e}')
+    if held:
+        n0 = len(items)
+        items = [it for it in items if image_id_of(it[2]) not in held]
+        print(f'acceptance set: {len(held):,} reserved image_ids, '
+              f'{n0 - len(items):,} crops removed -> {len(items):,} trainable')
+        if n0 == len(items):
+            print('  WARNING: none matched. If the reservation was drawn from '
+                  'a different harvest, it is not protecting this build.')
+
     ids = {i for _, _, f in items if (i := image_id_of(f))}
     print(f'distinct source images: {len(ids):,}  -- resolving sequences ...')
     seq = resolve_sequences(ids, args.repo, args.duckdb_python)
@@ -237,10 +273,42 @@ def main():
     by_cls = collections.defaultdict(list)
     for cls, path, fname in items:
         by_cls[cls].append((path, fname))
+    # Embedding clusters, if supplied, join crops dHash cannot see are the
+    # same: the same animal one frame later, closer, or cropped differently.
+    # Keyed by ABSOLUTE path, because the same file reaches this function
+    # under two names (a src crop keeps its filename, an extra negative gets a
+    # flag_ prefix).
+    emb_group = {}
+    if args.dup_clusters:
+        with open(args.dup_clusters) as f:
+            cl = json.load(f)
+        for gi, g in enumerate(cl.get('groups', [])):
+            for p in g:
+                emb_group[os.path.realpath(p)] = gi
+        print(f'  embedding clusters loaded : {len(cl.get("groups", [])):,} '
+              f'groups covering {len(emb_group):,} crops '
+              f'(cosine >= {cl.get("threshold")})')
+
     keep, dropped_dup, dropped_cap = [], collections.Counter(), collections.Counter()
     for cls, lst in by_cls.items():
         hashes = [((path, fname), dhash(path)) for path, fname in lst]
         groups = cluster(hashes, args.hamming)
+        if emb_group:
+            # merge dHash groups that share an embedding cluster
+            merged, by_eg = [], {}
+            for g in groups:
+                egs = {emb_group[k] for k in
+                       (os.path.realpath(p) for p, _ in g)
+                       if k in emb_group}
+                tgt = next((by_eg[e] for e in egs if e in by_eg), None)
+                if tgt is None:
+                    merged.append(list(g))
+                    tgt = len(merged) - 1
+                else:
+                    merged[tgt] += g
+                for e in egs:
+                    by_eg[e] = tgt
+            groups = [g for g in merged if g]
         # one survivor per near-duplicate cluster: the largest file, i.e. the
         # sharpest crop rather than an arbitrary frame
         survivors = []

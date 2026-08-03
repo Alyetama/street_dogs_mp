@@ -77,23 +77,33 @@ def drop_trained_on(paths, data_root):
     """
     if not data_root:
         return paths, []
+    # Every long digit run in the name, not a single fixed pattern. Crops of
+    # the same detection reach this tool under at least three schemes --
+    #     flag_<image_id>_<det>.jpg     dataset member
+    #     <ts>_<image_id>_<conf>.jpg    dashboard thumbnail
+    #     <image_id>_<det>.jpg          harvest_flagged output
+    # -- and a regex written for one silently fails to parse the others, which
+    # means silently NOT excluding them. That is the whole bug: a guard that
+    # cannot read the filename reports zero contamination and looks like it
+    # passed. Over-matching is the safe direction here; a wrongly excluded
+    # crop costs one sample, a wrongly included one costs the conclusion.
+    def id_candidates(name):
+        return set(re.findall(r'\d{6,}', os.path.basename(name)))
+
     seen = set()
     for split in ('train', 'val'):
-        d = os.path.join(data_root, split, 'not_dog')
-        try:
-            names = os.listdir(d)
-        except OSError:
-            continue
-        for f in names:
-            m = re.match(r'^flag_(\d+)_', f)
-            if m:
-                seen.add(m.group(1))
+        for cls in ('not_dog', 'dog'):
+            try:
+                names = os.listdir(os.path.join(data_root, split, cls))
+            except OSError:
+                continue
+            for f in names:
+                seen |= id_candidates(f)
     if not seen:
         return paths, []
     keep, bad = [], []
     for p in paths:
-        m = re.match(r'^\d+_(\d+)_\d+\.jpg$', os.path.basename(p))
-        (bad if (m and m.group(1) in seen) else keep).append(p)
+        (bad if (id_candidates(p) & seen) else keep).append(p)
     return keep, bad
 
 
