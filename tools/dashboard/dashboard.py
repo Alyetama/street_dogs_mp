@@ -73,22 +73,39 @@ CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         'dashboard.config.json')
 
 
-@functools.lru_cache(maxsize=1)
+_cfg_cache = {'mtime': None, 'data': {}}
+
+
 def load_cfg():
     """Parsed dashboard.config.json, or {} if absent.
+
+    Re-read whenever the file changes, NOT cached for the process lifetime.
+    The server runs for days; when this was an lru_cache, repointing
+    dogbin_dataset from v3 to v4 had no effect on the live page, and the
+    review panel went on counting every flag made since v3's build as "not
+    built yet" -- 641 of them, all of which were in fact in v4. A stale config
+    that looks like live data is worse than no config.
 
     A malformed config is reported and then ignored rather than being allowed
     to take the dashboard down -- it is local preference, not data.
     """
-    if not os.path.exists(CFG_PATH):
+    try:
+        mtime = os.path.getmtime(CFG_PATH)
+    except OSError:
+        _cfg_cache.update(mtime=None, data={})
         return {}
+    if _cfg_cache['mtime'] == mtime:
+        return _cfg_cache['data']
     try:
         with open(CFG_PATH) as fh:
-            cfg = json.load(fh)
+            data = json.load(fh)
     except (OSError, ValueError) as e:
         sys.stderr.write(f'warning: ignoring {CFG_PATH}: {e}\n')
-        return {}
-    return cfg if isinstance(cfg, dict) else {}
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    _cfg_cache.update(mtime=mtime, data=data)
+    return data
 
 
 def cfg(key, default='', env=None):
@@ -2764,7 +2781,14 @@ def mark_seen(names, now=None):
 # so its location is configuration with no sensible default. Unset, the panel
 # says so instead of guessing. $DOGBIN_DATASET is the same variable
 # tools/detect/eval_dogbin.py and rebuild_crop_dataset.py already read.
-DATASET_DIR = cfg('dogbin_dataset', '', env='DOGBIN_DATASET')
+def dataset_dir():
+    """Resolved per call, not frozen at import.
+
+    A module constant here is what made repointing the config invisible to a
+    server that had already started: load_cfg() could reload all it liked and
+    this name still held the value read at import.
+    """
+    return cfg('dogbin_dataset', '', env='DOGBIN_DATASET')
 DATASET_CLASSES = ('dog', 'not_dog')
 # Crops that survive per FLAG, measured -- not guessed. Across the dogbin_v4
 # build: 1,075 flags -> 714 harvested at full res -> 494 reached the dataset.
@@ -2791,6 +2815,7 @@ def dataset_balance():
     negatives, so while not_dog < dog the answer is always "keep flagging" --
     adding dogs would move the target further away.
     """
+    DATASET_DIR = dataset_dir()
     if not DATASET_DIR:
         # Unconfigured is a distinct state from missing, and the fix differs.
         # Without this guard os.path.join('', 'train', 'dog') is RELATIVE and
