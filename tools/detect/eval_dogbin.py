@@ -172,6 +172,11 @@ def main():
                                          'crops'),
                     help='dashboard-flagged false positives: negatives from '
                          'the REAL sweep distribution')
+    ap.add_argument('--thumbnails', action='store_true',
+                    help='also score the dashboard thumbnail dir. OFF by '
+                         'default: those previews are ~36px median and gave '
+                         '54.9%% where the full-res reserved crops gave 81.3%% '
+                         'for the same model and the same detections')
     ap.add_argument('--acceptance-set',
                     default=os.path.join(REPO, 'data',
                                          'dogbin_acceptance_set.json'),
@@ -244,8 +249,17 @@ def main():
               f'{rej_neg/len(n):>16.4f} '
               f'[{rlo:.3f},{rhi:.3f}]{"":>2} {len(p)-kept_dog:>10}')
 
-    # ---- the honest test: negatives from the live sweep ----
-    hn = load_dir(args.hard_negatives)
+    # ---- dashboard thumbnails: DIAGNOSTIC ONLY, never the promotion number ---
+    # These are the ~160px previews the review page saves when you flag a crop
+    # (median short side 36px, some as small as 10). The model neither trains
+    # on nor ever meets anything that small in production, and the difference
+    # is not academic: on dogbin_004 this table said 54.9% rejected where the
+    # full-resolution reserved crops -- the SAME flagged detections -- said
+    # 81.3%. Read the ACCEPTANCE SET table below for anything that matters.
+    if not args.thumbnails:
+        hn = []
+    else:
+        hn = load_dir(args.hard_negatives)
     hn, contaminated = drop_trained_on(hn, args.data)
     if contaminated:
         print(f'\nEXCLUDED {len(contaminated)} flagged crop(s) that are IN the '
@@ -280,9 +294,9 @@ def main():
             print('  -> the gate is measurably WEAKER on real sweep negatives '
                   'than on annotator negatives; the curated number is '
                   'optimistic for deployment')
-    else:
+    elif args.thumbnails:
         print(f'\n(no crops under {args.hard_negatives} -- skipped the '
-              f'real-distribution check)')
+              f'thumbnail check)')
 
     # ---- THE number: the reserved acceptance set, at full resolution ------
     # Everything above is diagnostics. This table is the one a promotion may
