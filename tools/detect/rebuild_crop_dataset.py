@@ -2,7 +2,8 @@
 """
 Re-split and de-duplicate an existing crop-classifier dataset.
 
-Two defects were measured in ``leash_binary_v1`` (2026-08-02):
+Two defects were measured in the first build of this dataset
+(``leash_binary_v1``, since renamed ``dogbin_v1``) on 2026-08-02:
 
 1. **Sequence leakage.** Mapillary images come in sequences -- consecutive
    frames from one camera pass, seconds apart, same animal, same street,
@@ -36,8 +37,8 @@ dropped and why -- a dataset that silently shrinks is worse than one that
 never changed.
 
     python tools/detect/rebuild_crop_dataset.py \\
-        --src <home>/dogs_detection/leash_binary_v1 \\
-        --out <home>/dogs_detection/leash_binary_v2 \\
+        --src <home>/dogs_detection/dogbin_v1 \\
+        --out <home>/dogs_detection/dogbin_v3 \\
         --extra-negatives <harvested full-res flagged crops> --execute
 
 READ-ONLY on --src.

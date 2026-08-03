@@ -70,7 +70,7 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--weights', required=True)
-    ap.add_argument('--data', default='<home>/dogs_detection/leash_binary_v1')
+    ap.add_argument('--data', default='<home>/dogs_detection/dogbin_v3')
     ap.add_argument('--split', default='val')
     ap.add_argument('--hard-negatives',
                     default='<mounts>/crucial/street_dogs_mp_crucial/'
