@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-Turn dashboard-flagged false positives into full-resolution training crops.
+Turn dashboard verdicts into full-resolution training crops.
+
+``--label false_positive`` (default) harvests the hard NEGATIVES -- crops the
+reviewer marked "not a dog". ``--label true_positive`` harvests the hard
+POSITIVES -- low-confidence detections the reviewer confirmed really are dogs,
+which for a gate tuned on recall are the expensive ones to miss.
+
+Boxes corrected by hand in the review page override the detector geometry
+(``--corrections``); without that the editor would be decorative.
 
 The dashboard's "flag as false positive" button records the image_id of a
 detection the user judged not to be a dog. The thumbnail it copied is only
@@ -40,11 +48,21 @@ import store  # noqa: E402
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-FLAGS = os.path.join(REPO, 'data', 'hard_negatives', 'labels.jsonl')
+LEDGERS = {
+    'false_positive': os.path.join(REPO, 'data', 'hard_negatives',
+                                   'labels.jsonl'),
+    'true_positive': os.path.join(REPO, 'data', 'hard_positives',
+                                  'labels.jsonl'),
+}
+FLAGS = LEDGERS['false_positive']
+# Boxes the reviewer corrected by hand in the dashboard. They are the whole
+# point of the editor: without reading them here, every correction is
+# discarded and the crop is cut from the detector's original box.
+CORRECTIONS = os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl')
 
 
-def read_flags(path):
-    """{image_id: record} for label=false_positive, last write wins."""
+def read_corrections(path):
+    """{(image_id, det_idx): (x1, y1, x2, y2)} -- last write wins."""
     out = {}
     try:
         with open(path) as f:
@@ -56,7 +74,33 @@ def read_flags(path):
                     r = json.loads(ln)
                 except ValueError:
                     continue
-                if r.get('label') == 'false_positive' and r.get('image_id'):
+                if not isinstance(r, dict) or not r.get('image_id'):
+                    continue
+                try:
+                    out[(str(r['image_id']), int(r.get('det_idx') or 0))] = (
+                        float(r['x1']), float(r['y1']),
+                        float(r['x2']), float(r['y2']))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def read_flags(path, want='false_positive'):
+    """{image_id: record} for one label, last write wins."""
+    out = {}
+    try:
+        with open(path) as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if r.get('label') == want and r.get('image_id'):
                     out[str(r['image_id'])] = r
     except OSError:
         pass
@@ -128,8 +172,19 @@ def main():
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--flags', default=FLAGS)
-    p.add_argument('--out', help='write <out>/not_dog/*.jpg')
+    p.add_argument('--label',
+                   default='false_positive',
+                   choices=sorted(LEDGERS),
+                   help='which verdict to harvest. false_positive -> hard '
+                   'negatives (not_dog); true_positive -> the low-confidence '
+                   'real dogs the reviewer confirmed (dog).')
+    p.add_argument('--flags',
+                   help='ledger to read (defaults to the one for --label)')
+    p.add_argument('--corrections',
+                   default=CORRECTIONS,
+                   help='hand-corrected boxes from the review page; they '
+                   'override the detector geometry. Pass "" to ignore.')
+    p.add_argument('--out', help='write <out>/<class>/*.jpg')
     p.add_argument('--append-to',
                    help='write crops directly into this existing class dir '
                    '(e.g. leash_binary_v1/train/not_dog)')
@@ -169,9 +224,11 @@ def main():
 
     import cv2
 
-    flags = read_flags(args.flags)
+    ledger = args.flags or LEDGERS[args.label]
+    cls_dir = 'dog' if args.label == 'true_positive' else 'not_dog'
+    flags = read_flags(ledger, args.label)
     if not flags:
-        print(f'no false-positive flags in {args.flags}')
+        print(f'no {args.label} flags in {ledger}')
         return 0
     if args.max_conf is not None:
         flags = {
@@ -181,7 +238,7 @@ def main():
         }
     print(f'{len(flags):,} flagged detections')
 
-    dst = args.append_to or (os.path.join(args.out, 'not_dog')
+    dst = args.append_to or (os.path.join(args.out, cls_dir)
                              if args.out else None)
     if not dst:
         print('pass --out or --append-to', file=sys.stderr)
@@ -220,6 +277,21 @@ def main():
               f'{sum(len(v) for v in boxes.values()):,} detections'
               f'  (skipped {ambiguous:,} ambiguous, {unmatched:,} unmatched)')
         boxes = kept
+
+    # Hand-corrected geometry wins over the detector's. Without this the
+    # review page's box editor would be decorative: the user drags the box,
+    # and the crop is still cut where the model guessed.
+    corr = read_corrections(args.corrections) if args.corrections else {}
+    n_corr = 0
+    if corr:
+        for iid, dets in boxes.items():
+            for i, d in enumerate(dets):
+                c = corr.get((iid, d[0]))
+                if c:
+                    dets[i] = (d[0], c[0], c[1], c[2], c[3], d[5])
+                    n_corr += 1
+        print(f'  {n_corr:,} box(es) replaced by a reviewer correction '
+              f'({len(corr):,} in the ledger)')
 
     roots = [
         ln.strip() for ln in open(args.roots_file)
@@ -274,7 +346,8 @@ def main():
             cv2.imwrite(os.path.join(dst, f'{iid}_{di}.jpg'), img[b:d, a:c],
                         [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     verb = 'wrote' if args.execute else 'would write'
-    print(f'\n{verb} {n_ok:,} full-res negative crops -> {dst}')
+    kind = 'positive' if args.label == 'true_positive' else 'negative'
+    print(f'\n{verb} {n_ok:,} full-res {kind} crops -> {dst}')
     if n_small:
         print(f'  {n_small:,} skipped under {args.min_size}px')
     if n_noimg:

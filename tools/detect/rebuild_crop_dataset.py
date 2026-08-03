@@ -27,8 +27,9 @@ where each crop goes:
   never merged into a negative;
 * cap the number of crops kept per (sequence, class);
 * assign **whole sequences** to train/val, stratified per class;
-* optionally fold in extra full-resolution negatives (the dashboard-flagged
-  detector false positives from ``harvest_flagged.py``).
+* optionally fold in extra full-resolution crops from ``harvest_flagged.py``:
+  negatives (reviewer-flagged false positives) into not_dog, and positives
+  (low-confidence detections the reviewer confirmed are dogs) into dog.
 
 Every count is written to ``rebuild_manifest.json``, including what was
 dropped and why -- a dataset that silently shrinks is worse than one that
@@ -50,9 +51,12 @@ import re
 import shutil
 import sys
 
-# le_/un_ = leashed/unleashed (folded to dog), no_/nd_ = negatives,
-# flag_ = a dashboard-flagged detector false positive folded in by the builder
-NAME_RE = re.compile(r'^(?:flag_)?(?:le|un|no|nd)?_?(\d{6,})[_.]')
+# le_/un_ = leashed/unleashed (folded to dog), no_/nd_ = annotator negatives,
+# flag_ = a reviewer-flagged false positive, pos_ = a reviewer-confirmed dog.
+# A prefix missing from here does NOT fail loudly: image_id_of() returns None,
+# the crop is treated as sequence-less and pinned to train, and it silently
+# escapes the leak check this whole tool exists to enforce.
+NAME_RE = re.compile(r'^(?:flag_|pos_)?(?:le|un|no|nd)?_?(\d{6,})[_.]')
 
 
 def image_id_of(fname):
@@ -167,8 +171,15 @@ def main():
                     help='interpreter with duckdb, for the sequence lookup')
     ap.add_argument('--extra-negatives',
                     help='directory of additional FULL-RESOLUTION negative '
-                         'crops (e.g. harvest_flagged.py output)')
+                         'crops (harvest_flagged.py --label false_positive)')
+    ap.add_argument('--extra-positives',
+                    help='directory of additional FULL-RESOLUTION positive '
+                         'crops (harvest_flagged.py --label true_positive): '
+                         'the low-confidence real dogs the reviewer '
+                         'confirmed. Without this the "Is a dog" button '
+                         'collects data nothing ever trains on.')
     ap.add_argument('--neg-class', default='not_dog')
+    ap.add_argument('--pos-class', default='dog')
     ap.add_argument('--max-per-sequence', type=int, default=3,
                     help='cap crops kept per (sequence, class). Six frames of '
                          'one dog are about one example of signal.')
@@ -193,14 +204,16 @@ def main():
         for cls, fs in byc.items():
             for f in fs:
                 items.append((cls, os.path.join(args.src, split, cls, f), f))
-    if args.extra_negatives and os.path.isdir(args.extra_negatives):
+    for d, cls, tag, what in (
+            (args.extra_negatives, args.neg_class, 'flag_', 'negatives'),
+            (args.extra_positives, args.pos_class, 'pos_', 'positives')):
+        if not d or not os.path.isdir(d):
+            continue
         n0 = len(items)
-        for f in sorted(os.listdir(args.extra_negatives)):
+        for f in sorted(os.listdir(d)):
             if f.lower().endswith('.jpg'):
-                items.append((args.neg_class,
-                              os.path.join(args.extra_negatives, f),
-                              'flag_' + f))
-        print(f'extra negatives folded in: {len(items) - n0:,}')
+                items.append((cls, os.path.join(d, f), tag + f))
+        print(f'extra {what} folded in: {len(items) - n0:,}')
     print(f'source crops: {len(items):,}')
 
     ids = {i for _, _, f in items if (i := image_id_of(f))}
