@@ -52,6 +52,30 @@ def load_dir(d):
                   if f.lower().endswith(exts))
 
 
+def readable(paths):
+    """(good, bad): paths PIL can actually decode.
+
+    The flag ledger records a crop as copied before anything verifies the
+    bytes, so a truncated write leaves an entry pointing at a stub. One such
+    3-byte file used to abort the whole evaluation inside ultralytics with
+    PIL.UnidentifiedImageError, after the val table had already been printed
+    but before the number that decides promotion. Losing a 40-minute run to
+    one bad file out of 1023 is not a reasonable failure mode.
+
+    Dropped files are RETURNED, not swallowed: they shrink the denominator of
+    a rejection rate, so the caller has to say how many went missing.
+    """
+    from PIL import Image
+    good, bad = [], []
+    for p in paths:
+        try:
+            Image.open(p).verify()
+            good.append(p)
+        except Exception:
+            bad.append(p)
+    return good, bad
+
+
 def dog_prob(model, paths, batch=64, imgsz=640, device=0):
     """P(dog) for each path, in order."""
     out = []
@@ -147,6 +171,15 @@ def main():
 
     # ---- the honest test: negatives from the live sweep ----
     hn = load_dir(args.hard_negatives)
+    hn, unreadable = readable(hn)
+    if unreadable:
+        print(f'\nSKIPPED {len(unreadable)} unreadable crop(s) '
+              f'(truncated or non-image); they are excluded from the counts '
+              f'below:')
+        for p in unreadable[:5]:
+            print(f'    {os.path.basename(p)}  ({os.path.getsize(p)} bytes)')
+        if len(unreadable) > 5:
+            print(f'    ... and {len(unreadable) - 5} more')
     if hn:
         h = np.array(dog_prob(model, hn, args.batch, args.imgsz, args.device))
         print(f'\nFlagged false positives from the live sweep: {len(hn)} crops')
