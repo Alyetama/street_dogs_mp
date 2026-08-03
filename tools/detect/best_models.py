@@ -5,9 +5,14 @@ Track the best model per Comet project in data/best_models.json.
     python tools/detect/best_models.py            # show what is recorded
     python tools/detect/best_models.py --update   # refresh candidate metrics
 
-``--update`` re-reads every experiment in the tracked projects and rewrites the
-``candidates`` lists with current metrics and URLs. It deliberately does NOT
-touch ``best``.
+``--update`` refreshes the runs already listed under ``candidates`` -- their
+key, url, date and Comet metrics -- and deliberately does NOT touch ``best``,
+does not add untracked runs (use ``--add-new``), and does not overwrite
+metrics this file recorded that Comet never had.
+
+That last point is load-bearing: ``roc_auc_sequence_clean`` on ``dogbin_001``
+is the measurement proving it is not deployable, and an earlier version of
+this script wiped it on every refresh.
 
 That separation is the whole point. Promoting a model is a claim that it is fit
 for its job, and the evidence for that does not live in the leaderboard:
@@ -105,6 +110,12 @@ def main():
     ap.add_argument('--update', action='store_true',
                     help='refresh candidate metrics from Comet (never '
                          'changes which model is marked best)')
+    ap.add_argument('--add-new', action='store_true',
+                    help='also append runs not already tracked. Off by '
+                         'default: the candidate list is curated, and pulling '
+                         'in every experiment (21 in dogdetection) turns it '
+                         'back into the leaderboard this file exists to '
+                         'replace.')
     ap.add_argument('--state', default=STATE)
     args = ap.parse_args()
 
@@ -138,25 +149,38 @@ def main():
         except Exception as e:
             print(f'{proj}: could not refresh ({e})', file=sys.stderr)
             continue
-        keep = {c['run']: c for c in d.get('candidates', [])}
-        fresh = []
-        for r in rows:
-            old = keep.get(r['run'], {})
-            # notes and dataset provenance are hand-written -- carry them over
-            for k in ('note', 'dataset'):
-                if old.get(k):
-                    r[k] = old[k]
-            fresh.append(r)
-        # keep only what was already tracked, plus anything new since
-        d['candidates'] = [r for r in fresh
-                           if r['run'] in keep or r['run'] not in keep]
+        keep = {c['run']: c for c in d.get('candidates', []) if c.get('run')}
+        by_run = {r['run']: r for r in rows if r.get('run')}
+        out = []
+        for run, old in keep.items():
+            new = by_run.get(run)
+            if new is None:          # gone from Comet: keep what we recorded
+                out.append(old)
+                continue
+            merged = dict(old)
+            merged.update({k: new[k] for k in ('key', 'url', 'date') if new.get(k)})
+            # Comet's numbers refresh, hand-measured ones SURVIVE. This file
+            # carries metrics Comet never saw -- roc_auc_sequence_clean is the
+            # measurement that says dogbin_001 is not deployable, and an
+            # overwrite here would delete the reason its project's best is null.
+            merged['metrics'] = {**(old.get('metrics') or {}),
+                                 **(new.get('metrics') or {})}
+            out.append(merged)
+        added = 0
+        if args.add_new:
+            for run, r in by_run.items():
+                if run not in keep:
+                    out.append(r)
+                    added += 1
+        d['candidates'] = out
         best = d.get('best')
         if best:
             cur = next((r for r in rows if r['key'] == best.get('key')), None)
             if cur and cur['metrics']:
                 # refresh the numbers on the pinned model, not the pin itself
                 best['metrics'] = {**best.get('metrics', {}), **cur['metrics']}
-        print(f'{proj}: {len(rows)} experiments refreshed'
+        print(f'{proj}: {len(rows)} in Comet, {len(out)} tracked'
+              f'{f", +{added} new" if added else ""}'
               f'{" (best unchanged: " + best["run"] + ")" if best else " (best still unset)"}')
     import datetime
     state['updated_at'] = datetime.date.today().isoformat()
