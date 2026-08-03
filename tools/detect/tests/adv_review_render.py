@@ -228,7 +228,7 @@ function fetch(url, opts) {
 }
 
 // ── the page's own element graph (built from the real markup ids) ───────────
-for (const id of ['left','done','pg','pg2','prev','prev2','next','next2',
+for (const id of ['left','done','seen','unkeep','pg','pg2','prev','prev2','next','next2',
                   'foot','grid','state','sort','size','reload']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
@@ -570,8 +570,43 @@ async function t14() {
   ck(posted === null, 't14: posted an empty screen as reviewed');
 }
 
+// ── 15. Restore kept: confirmed, scoped, and never touches the flags ─────
+async function t15() {
+  let body = null, alerted = null, kept = 7;   // server-side kept count
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 4), [], {seen_total: kept}),
+           '/api/review/seen': (u, o) => { body = JSON.parse(o.body);
+                                           if (body.reset) kept = 0;
+                                           return { ok: true, restored: 7, seen_total: kept }; },
+           '/api/dataset': () => ({ dog: 10, not_dog: 2, new_flags: 0,
+                                    yield_per_flag: 0.822, dataset: 'x' }) };
+  await API.load(); await flush();
+  ck(API.st().seenN === 7, 't15: kept total not read from the payload');
+
+  // declining the confirm must do nothing at all
+  window.confirm = () => false;
+  body = null;
+  byId['unkeep'].onclick(); await flush();
+  ck(body === null, 't15: acted despite the confirm being declined');
+  ck(API.st().seenN === 7, 't15: cleared the counter on a declined confirm');
+
+  // accepting sends reset:true -- never a names list, which would BANK them
+  window.confirm = () => true;
+  byId['unkeep'].onclick(); await flush();
+  ck(body && body.reset === true, 't15: did not send reset:true, sent ' +
+     JSON.stringify(body));
+  ck(!body.names, 't15: sent a names list on reset -- that would re-bank them');
+  ck(API.st().seenN === 0, 't15: kept total not cleared after restore');
+
+  // with nothing kept it must warn instead of prompting to restore nothing
+  window.alert = m => { alerted = m; };
+  window.confirm = () => { throw new Error('should not prompt with 0 kept'); };
+  byId['unkeep'].onclick(); await flush();
+  ck(alerted && /Nothing to restore/.test(alerted),
+     't15: no guard when there is nothing to restore');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
