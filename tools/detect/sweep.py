@@ -616,7 +616,7 @@ def main():
     u.set_defaults(func=lambda a: print(UNIT % dict(
         gen=a.gen,
         repo=REPO,
-        py='<home>/miniforge3/envs/yolo/bin/python')))
+        py=os.environ.get('SWEEP_PYTHON') or sys.executable)))
     for name, fn in (('verify', store.verify), ('invariants',
                                                 store.invariants)):
         c = sub.add_parser(name)

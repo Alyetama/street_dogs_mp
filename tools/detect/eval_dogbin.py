@@ -29,6 +29,9 @@ import math
 import os
 import sys
 
+REPO = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def wilson(k, n, z=1.96):
     """Wilson score interval for k successes in n trials."""
@@ -70,11 +73,14 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--weights', required=True)
-    ap.add_argument('--data', default='<home>/dogs_detection/dogbin_v3')
+    # no machine path in a tracked file: $DOGBIN_DATASET, else pass --data
+    ap.add_argument('--data', default=os.environ.get('DOGBIN_DATASET'),
+                    help='dataset root with <split>/dog and <split>/not_dog '
+                         '(or set $DOGBIN_DATASET)')
     ap.add_argument('--split', default='val')
     ap.add_argument('--hard-negatives',
-                    default='<mounts>/crucial/street_dogs_mp_crucial/'
-                            'data/hard_negatives/crops',
+                    default=os.path.join(REPO, 'data', 'hard_negatives',
+                                         'crops'),
                     help='dashboard-flagged false positives: negatives from '
                          'the REAL sweep distribution')
     ap.add_argument('--imgsz', type=int, default=640)
@@ -90,6 +96,8 @@ def main():
     import numpy as np
     from sklearn.metrics import roc_auc_score, average_precision_score
 
+    if not args.data:
+        raise SystemExit('pass --data or set $DOGBIN_DATASET')
     model = YOLO(args.weights)
     print(f'model   : {args.weights}')
     print(f'classes : {model.names}')

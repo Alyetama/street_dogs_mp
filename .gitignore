@@ -201,3 +201,12 @@ run_missing_*.sh
 !.github/
 !.github/**
 .claude/
+
+# Data, not source. All of it stays on disk -- this only stops it going to
+# GitHub, where it is large, machine-specific, or both.
+*.parquet
+data/missing_unrecoverable/
+# undo journals: hundreds of KB of absolute paths from THIS machine
+runs/*.json
+# the dnd env was abandoned for yolo; its lockfile documents nothing live
+data/dnd_env_lock.txt

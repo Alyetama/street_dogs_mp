@@ -2,12 +2,13 @@
   "_comment": [
     "Best model per Comet project, hand-curated. Refresh candidate metrics with",
     "  tools/detect/best_models.py --update",
-    "which rewrites 'candidates' from Comet but NEVER changes 'best'. Promoting a",
-    "model is a judgement call about whether it is fit for its job, not an argmax",
-    "over a leaderboard -- dogbin_001 has the highest top-1 in its project and is",
-    "still not deployable (see its note).",
-    "A null 'best' means no model has earned the slot yet. It stays null until one",
-    "is trained and evaluated; it is never filled with the least-bad candidate."
+    "which rewrites metrics from Comet but NEVER changes 'best'. Promoting a model",
+    "is a judgement about fitness, not an argmax over a leaderboard -- dogbin_001",
+    "tops its project and is still not deployable (see its note).",
+    "A null 'best' means nothing has earned the slot yet; it is never filled with",
+    "the least-bad candidate.",
+    "URLs are NOT stored: they are built from url_template + workspace + the",
+    "project name + the experiment key, so this file carries no hardcoded links."
   ],
   "workspace": "alyetama",
   "updated_at": "2026-08-02",
@@ -17,7 +18,6 @@
       "best": {
         "run": "train-30",
         "key": "ef4a85c3c1ee4bfc8d6805fb413c43f3",
-        "url": "https://www.comet.com/alyetama/dogdetection/ef4a85c3c1ee4bfc8d6805fb413c43f3",
         "date": "2026-06-05",
         "metrics": {
           "mAP50": 0.8708,
@@ -39,19 +39,23 @@
         {
           "run": "dogbin_002",
           "key": "5180117841c746ac8697e413d16a8e8c",
-          "url": "https://www.comet.com/alyetama/dog-bin/5180117841c746ac8697e413d16a8e8c",
           "date": "2026-08-02",
           "dataset": "leash_binary_v2 (leak-free; renamed dogbin_v2 after training)",
-          "metrics": {"accuracy_top1": 0.9421},
+          "metrics": {
+            "accuracy_top1": 0.9421
+          },
           "note": "IN PROGRESS at time of writing. top-1 0.9421 against a 0.7283 majority-class prior. NOT comparable to dogbin_001: different val set."
         },
         {
           "run": "dogbin_001",
           "key": "0780d9935b6445ab9ab17f540c872387",
-          "url": "https://www.comet.com/alyetama/dog-bin/0780d9935b6445ab9ab17f540c872387",
           "date": "2026-08-02",
           "dataset": "leash_binary_v1 (renamed dogbin_v1) - SEQUENCE-LEAKED",
-          "metrics": {"accuracy_top1": 0.9652, "roc_auc_as_split": 0.9686, "roc_auc_sequence_clean": 0.9213},
+          "metrics": {
+            "accuracy_top1": 0.9652,
+            "roc_auc_as_split": 0.9686,
+            "roc_auc_sequence_clean": 0.9213
+          },
           "note": "Rejected as a gate. The headline number is inflated by leakage and it fails on the distribution it must actually survive."
         }
       ]
@@ -64,28 +68,32 @@
         {
           "run": "leash_03_jun_26-3",
           "key": "d390653dce5640f6aa7beb4f948ce29b",
-          "url": "https://www.comet.com/alyetama/leash-models/d390653dce5640f6aa7beb4f948ce29b",
           "date": "2026-06-03",
-          "metrics": {"accuracy_top1": 0.9251},
+          "metrics": {
+            "accuracy_top1": 0.9251
+          },
           "note": "Highest top-1 in the project. Unverified: split not checked for sequence leakage."
         },
         {
           "run": "leash_15-may_26",
           "key": "9347f7e945584dc0816b5ebe01a108e4",
-          "url": "https://www.comet.com/alyetama/leash-models/9347f7e945584dc0816b5ebe01a108e4",
           "date": "2026-05-15",
-          "metrics": {"accuracy_top1": 0.9211},
+          "metrics": {
+            "accuracy_top1": 0.9211
+          },
           "note": "Runner-up. Same caveat."
         },
         {
           "run": "leash_3class_003",
           "key": "7cdc48b12035447eb11841d2fa033fc9",
-          "url": "https://www.comet.com/alyetama/leash-models/7cdc48b12035447eb11841d2fa033fc9",
           "date": "2026-08-01",
-          "metrics": {"accuracy_top1": 0.7974},
+          "metrics": {
+            "accuracy_top1": 0.7974
+          },
           "note": "REJECTED. The 3-class experiment (leashed/unleashed/not_a_dog) that the binary gate replaced."
         }
       ]
     }
-  }
+  },
+  "url_template": "https://www.comet.com/{workspace}/{project}/{key}"
 }

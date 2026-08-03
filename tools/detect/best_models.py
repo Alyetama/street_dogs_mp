@@ -35,8 +35,10 @@ import sys
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STATE = os.path.join(REPO, 'data', 'best_models.json')
-ENV_FILES = (os.path.join(REPO, '.env'),
-             '<home>/dogs_detection/.env')
+# No machine paths in a tracked file: $COMET_ENV_FILE, then the repo's own
+# .env (gitignored). Point the env var at wherever the key actually lives.
+ENV_FILES = tuple(p for p in (os.environ.get('COMET_ENV_FILE'),
+                              os.path.join(REPO, '.env')) if p)
 # metrics worth carrying per model type; first match wins for the headline
 METRIC_KEYS = ('metrics/accuracy_top1', 'metrics/mAP50(B)',
                'metrics/mAP50-95(B)', 'metrics/precision(B)',
@@ -67,6 +69,14 @@ def _num(v):
         return None
 
 
+def url_for(state, project, key):
+    """Comet URL from the template -- never stored in the JSON."""
+    t = state.get('url_template',
+                  'https://www.comet.com/{workspace}/{project}/{key}')
+    return t.format(workspace=state.get('workspace', ''), project=project,
+                    key=key or '')
+
+
 def fetch(workspace, project):
     """[{run, key, url, date, metrics}] for every experiment in a project."""
     from comet_ml import API
@@ -95,7 +105,6 @@ def fetch(workspace, project):
         out.append({
             'run': params.get('name'),
             'key': e.id,
-            'url': f'https://www.comet.com/{workspace}/{project}/{e.id}',
             'date': (datetime.datetime.fromtimestamp(t / 1000)
                      .strftime('%Y-%m-%d') if t else None),
             'metrics': met,
@@ -129,7 +138,7 @@ def main():
             if b:
                 m = ' '.join(f'{k}={v}' for k, v in (b.get('metrics') or {}).items())
                 print(f'  BEST: {b["run"]}  {m}')
-                print(f'        {b["url"]}')
+                print(f'        {url_for(state, proj, b.get("key"))}')
             else:
                 print('  BEST: (none yet)')
                 print(f'        {d.get("why_blank", "")[:200]}')
@@ -158,7 +167,8 @@ def main():
                 out.append(old)
                 continue
             merged = dict(old)
-            merged.update({k: new[k] for k in ('key', 'url', 'date') if new.get(k)})
+            merged.update({k: new[k] for k in ('key', 'date') if new.get(k)})
+            merged.pop('url', None)      # derived, never stored
             # Comet's numbers refresh, hand-measured ones SURVIVE. This file
             # carries metrics Comet never saw -- roc_auc_sequence_clean is the
             # measurement that says dogbin_001 is not deployable, and an

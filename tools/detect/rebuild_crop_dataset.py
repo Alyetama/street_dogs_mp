@@ -52,6 +52,9 @@ import re
 import shutil
 import sys
 
+REPO = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # le_/un_ = leashed/unleashed (folded to dog), no_/nd_ = annotator negatives,
 # flag_ = a reviewer-flagged false positive, pos_ = a reviewer-confirmed dog.
 # A prefix missing from here does NOT fail loudly: image_id_of() returns None,
@@ -165,10 +168,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--src', required=True)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--repo',
-                    default='<mounts>/crucial/street_dogs_mp_crucial')
+    # derived from this file's location, not baked in
+    ap.add_argument('--repo', default=REPO)
     ap.add_argument('--duckdb-python',
-                    default='<home>/miniforge3/envs/mp14/bin/python',
+                    default=os.environ.get('DUCKDB_PYTHON') or sys.executable,
                     help='interpreter with duckdb, for the sequence lookup')
     ap.add_argument('--extra-negatives',
                     help='directory of additional FULL-RESOLUTION negative '
