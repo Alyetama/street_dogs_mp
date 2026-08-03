@@ -45,11 +45,14 @@
           "run": "dogbin_003",
           "key": null,
           "date": "2026-08-03",
-          "dataset": "dogbin_v3 (leak-free + dashboard-flagged hard negatives)",
+          "dataset": "dogbin_v3 (sequence-clean split + dashboard-flagged hard negatives folded in as extra negatives)",
           "metrics": {
-            "accuracy_top1": 0.9104
+            "accuracy_top1": 0.9126,
+            "roc_auc": 0.9278,
+            "sweep_fp_rejected_at_t0.5_heldout": 0.7032,
+            "sweep_fp_rejected_at_full_dog_recall": 0.4543
           },
-          "note": "IN PROGRESS: epoch 169/500 at time of writing, best top-1 0.9104 at epoch 162, patience 100. NOT comparable to dogbin_002's 0.9421 -- v3 adds the flagged false positives, which are the crops that already fooled the detector, so a lower number on a harder val set is the expected direction. The gate test is rejection rate on real sweep false positives, not top-1; measure that before promoting."
+          "note": "Converged: early-stopped at epoch 281/500, best at 181, patience 100. The first dog-bin run that is both leak-free AND finished. Far better than dogbin_001 as a gate -- on real sweep false positives it rejects 70.3% at t=0.5 with median P(dog) 0.0190, against dogbin_001's 16% at median 0.9998. NOT PROMOTED, for two reasons. (1) The first measurement was contaminated: 360 of the 1072 flagged crops in data/hard_negatives/crops are the same detections rebuild_crop_dataset.py folded into dogbin_v3 as extra negatives -- 297 in train, 63 in val. The collision is invisible by filename (dataset uses flag_<image_id>_<det>.jpg, the flag dir uses <ts>_<image_id>_<conf>.jpg) and only shows up when matching on image_id. Removing them moved rejection at t=0.5 from 0.7740 [0.747,0.799] to 0.7032 [0.669,0.736] -- disjoint intervals -- and median P(dog) from 0.0043 to 0.0190. eval_dogbin.py now excludes them automatically. (2) At the only threshold that loses no dogs (t=0.0086, val recall 1.0000) it rejects just 45.4% [0.418,0.491] of real false positives. Every headline figure is quoted at t>=0.5, which costs 5 of 326 val dogs; on a one-pass sweep a missed dog is unrecoverable. To promote: harvest a batch of flagged false positives that has never been passed to --extra-negatives, hold it out permanently, and quote rejection at a recall-preserving threshold measured against production dogs rather than 326 annotator crops."
         },
         {
           "run": "dogbin_002",

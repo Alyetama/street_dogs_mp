@@ -27,6 +27,7 @@ rate quoted to three decimals off 104 samples would be false precision.
 import argparse
 import math
 import os
+import re
 import sys
 
 REPO = os.path.dirname(
@@ -50,6 +51,50 @@ def load_dir(d):
         return []
     return sorted(os.path.join(d, f) for f in os.listdir(d)
                   if f.lower().endswith(exts))
+
+
+def drop_trained_on(paths, data_root):
+    """(held_out, contaminated): flagged crops the model has never seen.
+
+    The whole point of the sweep-negative table is that it measures the gate on
+    a distribution it was NOT fit to. But rebuild_crop_dataset.py folds these
+    same flagged detections in as --extra-negatives, so by default the two sets
+    overlap and the headline is partly a train-set score.
+
+    Nobody noticed because the two naming schemes never collide:
+
+        dataset : flag_<image_id>_<det_idx>.jpg
+        flag dir: <ts>_<image_id>_<conf>.jpg
+
+    A filename comparison returns zero overlap. Matching on the image_id inside
+    the name found 360 of 1072 -- 297 in train, 63 in val -- and removing them
+    moved rejection at t=0.5 from 0.7740 [0.747,0.799] to 0.7032 [0.669,0.736],
+    two intervals that do not touch. The contaminated median P(dog) was 4.4x
+    lower than the honest one, which is the memorisation showing through.
+
+    Excluded crops are returned so the caller reports the count. Silence here
+    would restore exactly the bug this function exists to prevent.
+    """
+    if not data_root:
+        return paths, []
+    seen = set()
+    for split in ('train', 'val'):
+        d = os.path.join(data_root, split, 'not_dog')
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for f in names:
+            m = re.match(r'^flag_(\d+)_', f)
+            if m:
+                seen.add(m.group(1))
+    if not seen:
+        return paths, []
+    keep, bad = [], []
+    for p in paths:
+        m = re.match(r'^\d+_(\d+)_\d+\.jpg$', os.path.basename(p))
+        (bad if (m and m.group(1) in seen) else keep).append(p)
+    return keep, bad
 
 
 def readable(paths):
@@ -171,6 +216,12 @@ def main():
 
     # ---- the honest test: negatives from the live sweep ----
     hn = load_dir(args.hard_negatives)
+    hn, contaminated = drop_trained_on(hn, args.data)
+    if contaminated:
+        print(f'\nEXCLUDED {len(contaminated)} flagged crop(s) that are IN the '
+              f'dataset at {os.path.basename(args.data or "")} -- the model was '
+              f'fit or early-stopped on them, so scoring them here would be a '
+              f'train-set score reported as a held-out one.')
     hn, unreadable = readable(hn)
     if unreadable:
         print(f'\nSKIPPED {len(unreadable)} unreadable crop(s) '
