@@ -256,6 +256,7 @@ try {
     src + '\nreturn {load,render,flag,undo,openLb,closeLb,stepLb,tile,score,'
         + 'idx,mark,cols,hideToast,showUndo,'
         + 'markSeen,imgScale,saveBox,paintBox,fitBox,fitImage,zoomBy,'
+        + 'flushSave,dirty,'
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
         + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
@@ -470,9 +471,9 @@ async function t9() {
   API.openLb(1);
   ck(API.st().sel === 1, 't9: opening did not move the selection');
   const first = byId['lbi'].src;
-  API.stepLb(1);
+  await API.stepLb(1); await flush();
   ck(byId['lbi'].src !== first, 't9: step(1) did not advance');
-  API.stepLb(1); API.stepLb(1); API.stepLb(1);
+  await API.stepLb(1); await API.stepLb(1); await API.stepLb(1); await flush();
   ck(!!API.st().lb, 't9: stepping past the end closed the lightbox');
   ck(API.st().sel >= 0 && API.st().sel < CROPS.mixed.length,
      't9: stepped outside the page, sel=' + API.st().sel);
@@ -749,8 +750,51 @@ async function t17() {
 }
 function crop0(){ return CROPS.normal[0]; }
 
+// ── 18. box edits save themselves, and always before the verdict ─────────
+async function t18() {
+  const order = [];
+  const BOX = { ok: true, image_id: 'img1', w: 4000, h: 3000, has_file: true,
+                boxes: [{det_idx: 0, x1: 100, y1: 100, x2: 500, y2: 500,
+                         conf: 0.5}], saved: null };
+  RESP = { '/api/review/box': (u, o) => { if (o) { order.push('box');
+                                                   return { ok: true }; }
+                                          return BOX; },
+           // three crops: stepping away must have somewhere to go
+           '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
+           '/api/detect/flag': () => { order.push('flag'); return { ok: true }; } };
+  await API.load(); await flush();
+  API.openLb(0); await flush();
+  byId['lbi'].naturalWidth = 4000; byId['lbi'].naturalHeight = 3000;
+  byId['lbw'].clientWidth = 800; byId['lbw'].clientHeight = 600;
+  API.fitImage();
+
+  // there is no Save button any more
+  ck(!byId['lbsave'], 't18: a Save box button still exists');
+
+  // an edit schedules a save on its own -- no click
+  order.length = 0;
+  API.dirty(true);
+  ck(order.length === 0, 't18: saved instantly, losing the debounce');
+  runTimers(); await flush();
+  ck(order[0] === 'box', 't18: an edit did not autosave, order=' + order);
+
+  // a verdict must not reach the server before the pending box does
+  order.length = 0;
+  API.dirty(true);                     // dirty again, still debouncing
+  byId['lbf'].onclick(); await flush(); await flush();
+  ck(order.join(',') === 'box,flag',
+     't18: verdict raced the box save, order=' + order.join(','));
+
+  // stepping away also flushes first
+  API.openLb(0); await flush();
+  order.length = 0;
+  API.dirty(true);
+  await API.stepLb(1); await flush();
+  ck(order[0] === 'box', 't18: stepping away dropped the pending edit');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
