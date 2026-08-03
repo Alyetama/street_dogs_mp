@@ -12,7 +12,7 @@
     "stage/short/emits/key_metric drive the pipeline view: the three projects are one chain, and a stage with best:null stops everything downstream of it."
   ],
   "workspace": "alyetama",
-  "updated_at": "2026-08-02",
+  "updated_at": "2026-08-03",
   "projects": {
     "dogdetection": {
       "role": "detector - finds ground animals in street imagery (the sweep runs this)",
@@ -39,8 +39,18 @@
     "dog-bin": {
       "role": "binary gate - dog vs not_dog, runs before the leash classifier",
       "best": null,
-      "why_blank": "No model has earned it yet. dogbin_001 tops the project on top-1 (0.9652) but that split leaked: 70.8% of its val images shared a Mapillary sequence with train, and on the sequence-clean remainder it scores 0.9213. Worse, on real sweep false positives it rejects only 16% at t=0.5 with median P(dog)=0.9998 -- unusable as a gate. dogbin_002 is the first run on a leak-free split but was still training when this was written.",
+      "why_blank": "No model has earned it yet. dogbin_001 tops the project on top-1 (0.9652) but that split leaked: 70.8% of its val images shared a Mapillary sequence with train, and on the sequence-clean remainder it scores 0.9213. Worse, on real sweep false positives it rejects only 16% at t=0.5 with median P(dog)=0.9998 -- unusable as a gate. dogbin_002 was the first run on a leak-free split but was killed at epoch 329 of 500 and never converged. dogbin_003 is the first run on dogbin_v3, which adds the dashboard-flagged false positives -- the crops that already beat the detector -- and it is still training. Nothing gets promoted on top-1 alone: the gate criterion is rejection rate on real sweep false positives, which is what disqualified dogbin_001 despite the highest top-1 in the project.",
       "candidates": [
+        {
+          "run": "dogbin_003",
+          "key": null,
+          "date": "2026-08-03",
+          "dataset": "dogbin_v3 (leak-free + dashboard-flagged hard negatives)",
+          "metrics": {
+            "accuracy_top1": 0.9104
+          },
+          "note": "IN PROGRESS: epoch 169/500 at time of writing, best top-1 0.9104 at epoch 162, patience 100. NOT comparable to dogbin_002's 0.9421 -- v3 adds the flagged false positives, which are the crops that already fooled the detector, so a lower number on a harder val set is the expected direction. The gate test is rejection rate on real sweep false positives, not top-1; measure that before promoting."
+        },
         {
           "run": "dogbin_002",
           "key": "5180117841c746ac8697e413d16a8e8c",
@@ -49,7 +59,7 @@
           "metrics": {
             "accuracy_top1": 0.9421
           },
-          "note": "IN PROGRESS at time of writing. top-1 0.9421 against a 0.7283 majority-class prior. NOT comparable to dogbin_001: different val set."
+          "note": "TERMINATED, not converged. Best top-1 0.9421 at epoch 299 against a 0.7283 majority-class prior; the run died at epoch 329 of 500 when a `git stash -u` swept away the leash_models symlink and the results-CSV path stopped resolving. Patience was 100, so it was still 71 epochs from an honest early stop -- 0.9421 is where it happened to be when it was killed, not where it settled. NOT comparable to dogbin_001 (different val set) nor to dogbin_003 (v3 adds the flagged hard negatives)."
         },
         {
           "run": "dogbin_001",
