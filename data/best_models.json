@@ -111,7 +111,7 @@
     "leash-models": {
       "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
       "best": null,
-      "why_blank": "Nothing here has been verified against a leak-free split, and no leash model is wired into the sweep yet (the panel still reads 'classifier not wired in yet'). The runs below are the top scorers by reported top-1, but every one predates the sequence-leak finding, so their numbers are suspect for the same reason dogbin_001's were. The 3-class variant was measured and rejected: it discarded 15.5% of real dogs at a mean confidence of 0.87, which is why the binary gate exists.",
+      "why_blank": "Measured, not assumed. leash_03_jun_26-3 (key d390653dce5640f6aa7beb4f948ce29b) reports top-1 0.9251, but its split leaks worse than dogbin_001 did: 72.9% of its 521 val images share a Mapillary sequence with train, and 95 image_ids appear in BOTH splits -- the same photo, different detection index. On the 137 sequence-clean val images it scores 0.8686 (ROC AUC 0.9744 -> 0.9352), against a 0.7591 majority baseline on that subset; the leaked subset scores 0.9453. It is also undertrained: max top-1 equals last top-1 at the final step, so it hit the 100-epoch ceiling still improving and patience=20 never fired. leash_v2 is now built to the dogbin_v4 standard (sequence-clean split, embedding near-duplicate removal, 312 image_ids reserved in data/leash_acceptance_set.json before splitting). Nothing gets promoted here until a model trained on it is scored on that reserved set.",
       "candidates": [
         {
           "run": "leash_03_jun_26-3",
@@ -144,7 +144,8 @@
       "stage": 3,
       "short": "Leash classifier",
       "emits": "leashed / unleashed",
-      "key_metric": "accuracy_top1"
+      "key_metric": "accuracy_top1",
+      "dataset": "leash_v2 (built 2026-08-03; 1,509 crops, 694/510 train, 175/130 val)"
     }
   },
   "url_template": "https://www.comet.com/{workspace}/{project}/{key}"
