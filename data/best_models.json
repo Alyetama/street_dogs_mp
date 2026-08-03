@@ -8,7 +8,8 @@
     "A null 'best' means nothing has earned the slot yet; it is never filled with",
     "the least-bad candidate.",
     "URLs are NOT stored: they are built from url_template + workspace + the",
-    "project name + the experiment key, so this file carries no hardcoded links."
+    "project name + the experiment key, so this file carries no hardcoded links.",
+    "stage/short/emits/key_metric drive the pipeline view: the three projects are one chain, and a stage with best:null stops everything downstream of it."
   ],
   "workspace": "alyetama",
   "updated_at": "2026-08-02",
@@ -29,7 +30,11 @@
         "engine": "data/engines/yolo26x_train30.engine",
         "sha256_engine": "ac98daeecefa24406f2f776348f0eb7101f94b7fc1267ef6d7fbde19950f0803",
         "why": "In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page."
-      }
+      },
+      "stage": 1,
+      "short": "Detector",
+      "emits": "boxes on ground animals",
+      "key_metric": "recall"
     },
     "dog-bin": {
       "role": "binary gate - dog vs not_dog, runs before the leash classifier",
@@ -58,7 +63,11 @@
           },
           "note": "Rejected as a gate. The headline number is inflated by leakage and it fails on the distribution it must actually survive."
         }
-      ]
+      ],
+      "stage": 2,
+      "short": "Dog gate",
+      "emits": "crops confirmed to be dogs",
+      "key_metric": "accuracy_top1"
     },
     "leash-models": {
       "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
@@ -92,7 +101,11 @@
           },
           "note": "REJECTED. The 3-class experiment (leashed/unleashed/not_a_dog) that the binary gate replaced."
         }
-      ]
+      ],
+      "stage": 3,
+      "short": "Leash classifier",
+      "emits": "leashed / unleashed",
+      "key_metric": "accuracy_top1"
     }
   },
   "url_template": "https://www.comet.com/{workspace}/{project}/{key}"
