@@ -40,7 +40,8 @@ import time
 from collections import deque
 from datetime import datetime
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # gitignored pointer to the sweep's output root (repo convention: no
 # env-specific drive paths in tracked files)
 DETECT_ROOT_FILE = os.path.join(REPO, 'data', 'detect_root.txt')
@@ -116,21 +117,31 @@ def sample_gpu():
     if sample_gpu._absent:
         return None
     try:
-        out = subprocess.run(
-            ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,'
-             'memory.total,temperature.gpu', '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=3)
+        out = subprocess.run([
+            'nvidia-smi', '--query-gpu=utilization.gpu,memory.used,'
+            'memory.total,temperature.gpu', '--format=csv,noheader,nounits'
+        ],
+                             capture_output=True,
+                             text=True,
+                             timeout=3)
         if out.returncode != 0:
             return None
-        parts = [p.strip() for p in out.stdout.strip().splitlines()[0].split(',')]
+        parts = [
+            p.strip() for p in out.stdout.strip().splitlines()[0].split(',')
+        ]
 
         def num(s):
             try:
                 return int(float(s))
             except ValueError:
-                return None                      # "[N/A]" on some boards
-        return {'util': num(parts[0]), 'mem_used_mb': num(parts[1]),
-                'mem_total_mb': num(parts[2]), 'temp': num(parts[3])}
+                return None  # "[N/A]" on some boards
+
+        return {
+            'util': num(parts[0]),
+            'mem_used_mb': num(parts[1]),
+            'mem_total_mb': num(parts[2]),
+            'temp': num(parts[3])
+        }
     except FileNotFoundError:
         sample_gpu._absent = True
         return None
@@ -154,9 +165,16 @@ class StatusWriter:
     resume, §7.3), never deltas — so a missed tick loses nothing.
     """
 
-    def __init__(self, run_id, gen, imgs_total, status_path=None,
-                 interval=5.0, drive_totals=None, region_totals=None,
-                 gpu_fn=sample_gpu, time_fn=time.time):
+    def __init__(self,
+                 run_id,
+                 gen,
+                 imgs_total,
+                 status_path=None,
+                 interval=5.0,
+                 drive_totals=None,
+                 region_totals=None,
+                 gpu_fn=sample_gpu,
+                 time_fn=time.time):
         self.path = status_path or default_status_path()
         self.interval = float(interval)
         self._now = time_fn
@@ -169,24 +187,41 @@ class StatusWriter:
         # publish cadence plus slack
         n = int(WINDOW_SLOW / max(self.interval, 0.1)) + 8
         self._samples = deque(maxlen=n)
-        self._drv_samples = {}                   # drive -> deque[(ts, done)]
-        self._drv_last_move = {}                 # drive -> ts of last progress
+        self._drv_samples = {}  # drive -> deque[(ts, done)]
+        self._drv_last_move = {}  # drive -> ts of last progress
         self._maxlen = n
         started = self._now()
         # denominators come from the deduped worklist (§7.3): totals are
         # fixed at plan-build time and passed in once, never re-derived.
         self._c = {
-            'run_id': run_id, 'gen': gen, 'state': 'running',
+            'run_id': run_id,
+            'gen': gen,
+            'state': 'running',
             'started_at': started,
-            'imgs_done': 0, 'imgs_total': int(imgs_total),
-            'boxes_total': 0, 'positives': 0,
+            'imgs_done': 0,
+            'imgs_total': int(imgs_total),
+            # images this PROCESS did; imgs_done is global across restarts
+            'run_imgs_done': 0,
+            'boxes_total': 0,
+            # positives is ALL-TIME (seeded from the store at startup, like
+            # imgs_done); run_positives is what this process found
+            'positives': 0,
+            'run_positives': 0,
             'crops_classified': 0,
-            'class_counts': {'leashed': 0, 'unleashed': 0, 'not_a_dog': 0},
-            'drive_done': {}, 'drive_queue': {},
+            'class_counts': {
+                'leashed': 0,
+                'unleashed': 0,
+                'not_a_dog': 0
+            },
+            'drive_done': {},
+            'drive_queue': {},
             'drive_totals': dict(drive_totals or {}),
             'region_done': {},
             'region_totals': dict(region_totals or {}),
-            'errors': {k: 0 for k in ERROR_KEYS},
+            'errors': {
+                k: 0
+                for k in ERROR_KEYS
+            },
             'last_error': None,
         }
 
@@ -201,7 +236,8 @@ class StatusWriter:
                     self._c[k] = v
 
     def start(self):
-        self._thread = threading.Thread(target=self._run, daemon=True,
+        self._thread = threading.Thread(target=self._run,
+                                        daemon=True,
                                         name='status-writer')
         self._thread.start()
         return self
@@ -246,7 +282,7 @@ class StatusWriter:
                 f.write(blob)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, self.path)           # atomic, same dir → same fs
+            os.replace(tmp, self.path)  # atomic, same dir → same fs
         except OSError:
             self.publish_errors += 1
             return False
@@ -271,8 +307,7 @@ class StatusWriter:
         drives = {}
         for d in sorted(set(c['drive_done']) | set(c['drive_totals'])):
             done = int(c['drive_done'].get(d, 0))
-            dq = self._drv_samples.setdefault(
-                d, deque(maxlen=self._maxlen))
+            dq = self._drv_samples.setdefault(d, deque(maxlen=self._maxlen))
             if not dq or dq[-1][1] != done:
                 self._drv_last_move[d] = now
             dq.append((now, done))
@@ -281,7 +316,8 @@ class StatusWriter:
             stalled = (unfinished and c['state'] == 'running'
                        and now - self._drv_last_move.get(d, now) > STALL_AFTER)
             drives[d] = {
-                'done': done, 'total': total,
+                'done': done,
+                'total': total,
                 'rate': _r1(_win_rate(dq, now, WINDOW_FAST)),
                 'queue_depth': int(c['drive_queue'].get(d, 0)),
                 'stalled': bool(stalled),
@@ -304,28 +340,44 @@ class StatusWriter:
         in_band = None if nad is None else bool(band_lo <= nad <= band_hi)
 
         return {
-            'run_id': c['run_id'], 'gen': c['gen'], 'state': c['state'],
+            'run_id': c['run_id'],
+            'gen': c['gen'],
+            'state': c['state'],
             'pid': os.getpid(),
             'ts': round(now, 1),
             'started_at': _iso(c['started_at']),
             'updated_at': _iso(now),
-            'imgs_done': done, 'imgs_total': c['imgs_total'],
-            'img_per_sec': {'w60': _r1(r60), 'w900': _r1(r900)},
+            'imgs_done': done,
+            'imgs_total': c['imgs_total'],
+            'run_imgs_done': int(c.get('run_imgs_done') or 0),
+            'img_per_sec': {
+                'w60': _r1(r60),
+                'w900': _r1(r900)
+            },
             'eta_s': eta,
             'drives': drives,
             'regions': regions,
             'positives': c['positives'],
+            'run_positives': c.get('run_positives', 0),
             'positive_rate': positive_rate,
             'boxes_total': c['boxes_total'],
             'boxes_per_img': boxes_per_img,
             'crops_classified': n_cls,
-            'class_split': {k: int(cls.get(k, 0))
-                            for k in ('leashed', 'unleashed', 'not_a_dog')},
+            'class_split': {
+                k: int(cls.get(k, 0))
+                for k in ('leashed', 'unleashed', 'not_a_dog')
+            },
             'not_a_dog_rate': nad,
-            'not_a_dog_band': {'lo': band_lo, 'hi': band_hi,
-                               'in_band': in_band},
-            'gpu': self._gpu_fn(),               # once per write; None if absent
-            'errors': {k: int(c['errors'].get(k, 0)) for k in ERROR_KEYS},
+            'not_a_dog_band': {
+                'lo': band_lo,
+                'hi': band_hi,
+                'in_band': in_band
+            },
+            'gpu': self._gpu_fn(),  # once per write; None if absent
+            'errors': {
+                k: int(c['errors'].get(k, 0))
+                for k in ERROR_KEYS
+            },
             'last_error': c['last_error'],
             'publish_errors': self.publish_errors,
         }
@@ -374,15 +426,20 @@ def read_status(path=None, stale_after=120.0, now_fn=time.time):
         return {'running': False}
     ts = d.get('ts')
     if not isinstance(ts, (int, float)):
-        try:                                     # tolerate a foreign payload
+        try:  # tolerate a foreign payload
             ts = os.stat(path).st_mtime
         except OSError:
             return {'running': False}
     age = now_fn() - ts
     if age > stale_after:
-        return {'running': False, 'stale': True, 'age_s': round(age),
-                'state': d.get('state'), 'run_id': d.get('run_id'),
-                'pid': d.get('pid')}
+        return {
+            'running': False,
+            'stale': True,
+            'age_s': round(age),
+            'state': d.get('state'),
+            'run_id': d.get('run_id'),
+            'pid': d.get('pid')
+        }
     d['age_s'] = round(max(age, 0))
     d['running'] = d.get('state') not in ('stopped', 'failed', 'done')
     return d

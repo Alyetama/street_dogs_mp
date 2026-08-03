@@ -192,7 +192,14 @@ const document = {
 };
 const docL = {};
 const CSS = { escape: s => String(s).replace(/([^\w-])/g, '\\$1') };
-const window = { matchMedia: () => ({ matches: false }) };
+const beacons = [];
+const window = {
+  matchMedia: () => ({ matches: false }),
+  addEventListener: (t, f) => (winL[t] = winL[t] || []).push(f),
+};
+const winL = {};
+const navigator = { sendBeacon: (u, b) => { beacons.push(u); return true; } };
+const Blob = function (parts, opts) { this.parts = parts; this.type = opts && opts.type; };
 function getComputedStyle() {
   return { gridTemplateColumns: new Array(COLS).fill('100px').join(' ') };
 }
@@ -208,7 +215,9 @@ let RESP = {};           // url-substring -> () => value | 'reject'
 const CALLS = [];
 function fetch(url, opts) {
   CALLS.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
-  for (const k of Object.keys(RESP)) {
+  // longest key first: '/api/review' is a prefix of '/api/review/seen', so
+  // insertion order would silently answer the seen POST with a page payload
+  for (const k of Object.keys(RESP).sort((a, b) => b.length - a.length)) {
     if (String(url).includes(k)) {
       const v = RESP[k](url, opts);
       if (v === 'reject') return Promise.reject(new Error('boom'));
@@ -233,13 +242,14 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 let API;
 try {
   API = new Function('document','window','CSS','fetch','getComputedStyle',
-    'requestAnimationFrame','setTimeout','clearTimeout','docL',
+    'requestAnimationFrame','setTimeout','clearTimeout','docL','navigator','Blob',
     src + '\nreturn {load,render,flag,undo,openLb,closeLb,stepLb,tile,score,'
         + 'idx,mark,cols,hideToast,showUndo,'
+        + 'markSeen,'
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
-        + 'session,lastUndo,lb})};')(
+        + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
-    setTimeout, clearTimeout, docL);
+    setTimeout, clearTimeout, docL, navigator, Blob);
 } catch (e) {
   console.log('FAIL: could not evaluate the review script: ' + e);
   process.exit(1);
@@ -532,8 +542,36 @@ async function t13() {
      't13: F flow lost its position, sel=' + API.st().sel + ' want 2');
 }
 
+// ── 14. paging banks the screen as reviewed, so it never comes back ──────
+async function t14() {
+  let posted = null;
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6), []),
+           '/api/review/seen': (u, o) => {
+             posted = JSON.parse(o.body).names; return { ok: true, seen_total: 99 };
+           } };
+  await API.load(); await flush();
+  const onScreen = API.st().items.map(c => c.name);
+  CALLS.length = 0;
+  byId['next'].onclick(); await flush();
+  ck(posted !== null, 't14: paging did not record the screen as reviewed');
+  ck(JSON.stringify(posted) === JSON.stringify(onScreen),
+     't14: banked the wrong crops');
+  ck(API.st().seenN === 99, 't14: reviewed total not tracked, ' + API.st().seenN);
+  // the seen POST must land BEFORE the next page is fetched, or the server
+  // computes the next page from a pool that still contains what we just kept
+  const order = CALLS.map(c => String(c.url).includes('/seen') ? 'seen' : 'page');
+  ck(order.indexOf('seen') >= 0 && order.indexOf('seen') < order.indexOf('page'),
+     't14: fetched the next page before banking this one: ' + order.join(','));
+  // an empty grid must not POST an empty list
+  RESP['/api/review'] = () => payload([], []);
+  posted = null;
+  await API.load(); await flush();
+  await API.markSeen(); await flush();
+  ck(posted === null, 't14: posted an empty screen as reviewed');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

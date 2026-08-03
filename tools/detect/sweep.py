@@ -122,7 +122,9 @@ class ShardCollector:
                  status,
                  base_done=None,
                  base_drive=None,
-                 base_region=None):
+                 base_region=None,
+                 base_positives=0,
+                 base_boxes=0):
         self.w = writer
         self.gen = gen
         self.status = status
@@ -136,6 +138,11 @@ class ShardCollector:
         self.done_imgs = 0
         self.drive_done = defaultdict(int)
         self.region_done = defaultdict(int)
+        # Global like base_done, and for the same reason: imgs_done is
+        # all-time, so a per-process positives counter made positive_rate
+        # (positives / imgs_done) collapse to ~0% after every restart.
+        self.base_positives = int(base_positives or 0)
+        self.base_boxes = int(base_boxes or 0)
         self.boxes = 0
         self.positives = 0
         self.errors = defaultdict(int)
@@ -217,8 +224,9 @@ class ShardCollector:
             reg[k] = reg.get(k, 0) + v
         self.status.update(imgs_done=self.base_done + self.done_imgs,
                            run_imgs_done=self.done_imgs,
-                           boxes_total=self.boxes,
-                           positives=self.positives,
+                           boxes_total=self.base_boxes + self.boxes,
+                           positives=self.base_positives + self.positives,
+                           run_positives=self.positives,
                            drive_done=drv,
                            region_done=reg,
                            errors=dict(self.errors))
@@ -385,6 +393,23 @@ def cmd_run(args):
         for r in region_corpus
     }
     base_done = corpus_total - sum(todo.values())
+    # All-time positives/boxes from the store, so the headline and the rate
+    # survive a restart. One aggregate at startup; never on the 5 s publish
+    # path. A failure here must not stop the sweep -- it only costs the
+    # pre-restart history in the panel.
+    base_positives = base_boxes = 0
+    try:
+        _img = store._sql_src(store._store_globs(detect_root, 'img'))
+        _r = store._run_queries({
+            'q': f'SELECT count(*) FILTER (WHERE status=0 AND n_det>0), '
+                 f'coalesce(sum(n_det),0) FROM {_img}'
+        })['q']
+        base_positives, base_boxes = int(_r[0][0]), int(_r[0][1])
+        print(f'already detected: {base_positives:,} positives / '
+              f'{base_boxes:,} boxes (all-time)')
+    except Exception as e:
+        print(f'could not seed all-time positives ({e}); '
+              f'panel will show this run only', file=sys.stderr)
     total = sum(todo.values())
     if args.max_images:
         total = min(total, args.max_images)
@@ -413,7 +438,9 @@ def cmd_run(args):
                           status,
                           base_done=base_done,
                           base_drive=base_drive,
-                          base_region=base_region)
+                          base_region=base_region,
+                          base_positives=base_positives,
+                          base_boxes=base_boxes)
     ring = engine.BatchRing(torch)
     stop_ev = threading.Event()
     signal.signal(signal.SIGINT, lambda *a: stop_ev.set())
