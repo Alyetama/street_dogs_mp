@@ -166,7 +166,9 @@ function matchSel(el, sel) {
     const key = am[2].replace(/^data-/, '');
     return String(el.dataset[key]) === am[3].replace(/\\(.)/g, '$1');
   }
-  if (sel[0] === '.') return el.classList.contains(sel.slice(1));
+  // compound classes: '.fbtn.no' must not be read as one class named 'fbtn.no'
+  if (sel[0] === '.')
+    return sel.slice(1).split('.').every(c => el.classList.contains(c));
   if (sel[0] === '#') return el.id === sel.slice(1);
   return el.tagName === sel.toUpperCase();
 }
@@ -522,8 +524,8 @@ async function t13() {
   // removal nothing may be selected -- otherwise the highlight lands on
   // whatever slid into that index, which reads as an auto-advance
   const card = document.querySelectorAll('.card')[1];
-  card.onmousedown({ target: { closest: sel => sel === '.fbtn' ? {} : null } });
-  ck(API.st().sel === -1, 't13: pressing the flag button selected the tile');
+  card.onmousedown({ target: { closest: sel => sel === '.acts' ? {} : null } });
+  ck(API.st().sel === -1, 't13: pressing a verdict button selected the tile');
   await API.flag(1); await flush();
   ck(API.st().sel === -1,
      't13: mouse flag left a selection (auto-advance), sel=' + API.st().sel);
@@ -542,6 +544,22 @@ async function t13() {
      't13: F did not flag the selected crop');
   ck(API.st().sel === 2,
      't13: F flow lost its position, sel=' + API.st().sel + ' want 2');
+  // D marks a low-confidence detection as a REAL dog -> the other ledger
+  const lbl = [];
+  RESP['/api/detect/flag'] = (u, o) => { lbl.push(JSON.parse(o.body).label);
+                                         return { ok: true }; };
+  const dogCrop = API.st().items[2].name;
+  key('d'); await flush();
+  ck(lbl[lbl.length - 1] === 'true_positive',
+     't13: D sent label ' + lbl[lbl.length - 1]);
+  ck(!API.st().items.some(c => c.name === dogCrop),
+     't13: D did not remove the crop from the queue');
+  // undo must return it under the SAME label, or it is undone in the wrong
+  // ledger and stays flagged forever in the other one
+  await API.undo(); await flush();
+  const last = CALLS[CALLS.length - 1];
+  ck(last.body && last.body.undo === true && last.body.label === 'true_positive',
+     't13: undo sent ' + JSON.stringify(last.body));
 }
 
 // ── 14. paging banks the screen as reviewed, so it never comes back ──────
