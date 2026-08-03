@@ -49,7 +49,7 @@ def load_dir(d):
                   if f.lower().endswith(exts))
 
 
-def dog_prob(model, paths, batch=64, imgsz=640):
+def dog_prob(model, paths, batch=64, imgsz=640, device=0):
     """P(dog) for each path, in order."""
     out = []
     names = model.names
@@ -59,7 +59,8 @@ def dog_prob(model, paths, batch=64, imgsz=640):
     dog_i = dog_i[0]
     for i in range(0, len(paths), batch):
         chunk = paths[i:i + batch]
-        for r in model.predict(chunk, imgsz=imgsz, verbose=False, device=0):
+        for r in model.predict(chunk, imgsz=imgsz, verbose=False,
+                               device=device):
             out.append(float(r.probs.data[dog_i]))
     return out
 
@@ -77,7 +78,12 @@ def main():
                     help='dashboard-flagged false positives: negatives from '
                          'the REAL sweep distribution')
     ap.add_argument('--imgsz', type=int, default=640)
-    ap.add_argument('--batch', type=int, default=64)
+    # small by default on purpose: this tool is meant to be run WHILE the
+    # 32.5M-image sweep holds most of the GPU, and a batch of 64 OOMs there
+    ap.add_argument('--batch', type=int, default=8)
+    # the GPU is usually busy with the sweep AND a training run; --device cpu
+    # is slower but never contends for memory that a multi-hour job needs
+    ap.add_argument('--device', default='0')
     args = ap.parse_args()
 
     from ultralytics import YOLO
@@ -99,8 +105,8 @@ def main():
     print(f'majority-class baseline (always "dog"): {prior:.4f}  '
           f'<- any top-1 near this means nothing was learnt')
 
-    p = np.array(dog_prob(model, pos, args.batch, args.imgsz))
-    n = np.array(dog_prob(model, neg, args.batch, args.imgsz))
+    p = np.array(dog_prob(model, pos, args.batch, args.imgsz, args.device))
+    n = np.array(dog_prob(model, neg, args.batch, args.imgsz, args.device))
     y = np.r_[np.ones_like(p), np.zeros_like(n)]
     s = np.r_[p, n]
 
@@ -134,7 +140,7 @@ def main():
     # ---- the honest test: negatives from the live sweep ----
     hn = load_dir(args.hard_negatives)
     if hn:
-        h = np.array(dog_prob(model, hn, args.batch, args.imgsz))
+        h = np.array(dog_prob(model, hn, args.batch, args.imgsz, args.device))
         print(f'\nFlagged false positives from the live sweep: {len(hn)} crops')
         print('  (all are not_dog by construction -- you flagged them)')
         for t in (0.5, 0.9, 0.95, 0.99):
