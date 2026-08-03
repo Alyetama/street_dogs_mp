@@ -47,17 +47,17 @@ you pass --execute.
 Usage:
     # one parent region at a time (recommended when space is tight) -- dry run:
     python tools/catalog/consolidate_data.py \
-        --dest <mounts>/weasel/street_dogs_mp_weasel/grid_runs \
+        --dest <consolidation-drive>/grid_runs \
         --region Europe
     # review the plan, then move it (each --execute run records the data-root
     # catalogue, so region-by-region is fine -- no need for a full pass):
     python tools/catalog/consolidate_data.py \
-        --dest <mounts>/weasel/street_dogs_mp_weasel/grid_runs \
+        --dest <consolidation-drive>/grid_runs \
         --region Europe --execute
 
     # or everything at once (when space allows):
     python tools/catalog/consolidate_data.py \
-        --dest <mounts>/weasel/street_dogs_mp_weasel/grid_runs --execute
+        --dest <consolidation-drive>/grid_runs --execute
 """
 import argparse
 import hashlib

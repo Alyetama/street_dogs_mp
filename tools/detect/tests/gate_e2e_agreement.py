@@ -7,7 +7,10 @@ Reference (measured, yolo env, ultralytics 8.3.165, conf 0.05 / iou 0.90):
 reference ran the .pt, so tolerances are: identical positive-image set up to
 2 images, total boxes within 1%, and mean per-image max-conf delta < 0.01.
 
-Run under the yolo env. ~1 min.
+Run under the yolo env. ~1 min. Point ``GATE_VAL_DIR`` at the val image
+directory (the 459-image set this gate's reference numbers were measured on);
+without it the gate skips rather than failing, since the images live outside
+the repo.
 """
 import glob
 import os
@@ -21,7 +24,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import engine  # noqa: E402
 
-VAL = '<home>/dogs_detection/archived_datasets/project-12-at-2026-06-06-18-24-q8Z1ZMOl/images/val'
+VAL = os.environ.get('GATE_VAL_DIR', '')
 ENGINE = os.path.join(os.path.dirname(__file__), '..', '..', '..',
                       'data', 'engines', 'yolo26x_train30.engine')
 PT = os.path.join(os.path.dirname(__file__), '..', '..', '..',
@@ -122,6 +125,13 @@ def run_reference(paths):
 
 
 def main():
+    # The val set lives outside the repo (it is annotation export, not source),
+    # so its location is configuration. Skipping beats failing: a fresh clone
+    # has no reason to own these 459 images.
+    if not VAL or not os.path.isdir(VAL):
+        print('SKIP: set GATE_VAL_DIR to the val image directory'
+              f'{" (not a directory: " + VAL + ")" if VAL else ""}')
+        return 0
     paths = sorted(glob.glob(os.path.join(VAL, '*')))
     print(f'{len(paths)} val images')
     t0 = time.time()

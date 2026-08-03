@@ -37,8 +37,8 @@ dropped and why -- a dataset that silently shrinks is worse than one that
 never changed.
 
     python tools/detect/rebuild_crop_dataset.py \\
-        --src <home>/dogs_detection/dogbin_v1 \\
-        --out <home>/dogs_detection/dogbin_v3 \\
+        --src <datasets>/dogbin_v1 \\
+        --out <datasets>/dogbin_v3 \\
         --extra-negatives <harvested full-res flagged crops> --execute
 
 READ-ONLY on --src.

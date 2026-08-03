@@ -31,7 +31,7 @@ are mostly distant specks (median short side 36 px vs 208 px for dogs); these
 sit in the same size range as true detections, so a classifier trained on them
 cannot fall back on "small means not a dog".
 
-    python tools/detect/harvest_flagged.py --out <home>/dogs_detection/hard_negatives
+    python tools/detect/harvest_flagged.py --out <datasets>/hard_negatives
     python tools/detect/harvest_flagged.py --append-to <dogbin_v3>/train/not_dog
 
 READ-ONLY on the sweep store and on every image drive.
