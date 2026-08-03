@@ -193,9 +193,11 @@ const document = {
 const docL = {};
 const CSS = { escape: s => String(s).replace(/([^\w-])/g, '\\$1') };
 const beacons = [];
+let scrolls = [];
 const window = {
   matchMedia: () => ({ matches: false }),
   addEventListener: (t, f) => (winL[t] = winL[t] || []).push(f),
+  scrollTo: (a) => scrolls.push(a),
 };
 const winL = {};
 const navigator = { sendBeacon: (u, b) => { beacons.push(u); return true; } };
@@ -228,7 +230,7 @@ function fetch(url, opts) {
 }
 
 // ── the page's own element graph (built from the real markup ids) ───────────
-for (const id of ['left','done','seen','unkeep','pg','pg2','prev','prev2','next','next2',
+for (const id of ['left','done','seen','unkeep','bal','balFill','balPend','balMain','balSub','pg','pg2','prev','prev2','next','next2',
                   'foot','grid','state','sort','size','reload']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
@@ -605,8 +607,31 @@ async function t15() {
      't15: no guard when there is nothing to restore');
 }
 
+// ── 16. a new page starts at the top ─────────────────────────────────────
+async function t16() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6), []),
+           '/api/review/seen': () => ({ ok: true, seen_total: 1 }),
+           '/api/detect/flag': () => ({ ok: true }) };
+  await API.load(); await flush();
+  scrolls = [];
+  byId['next'].onclick(); await flush();
+  ck(scrolls.length >= 1, 't16: paging did not scroll to the top');
+  ck(scrolls[scrolls.length - 1] &&
+     (scrolls[scrolls.length - 1].top === 0 || scrolls[scrolls.length - 1] === 0),
+     't16: scrolled somewhere other than the top: ' +
+     JSON.stringify(scrolls[scrolls.length - 1]));
+  // flagging must NOT jump the page -- the user is mid-grid judging crops
+  scrolls = [];
+  await API.flag(0); await flush();
+  ck(scrolls.length === 0, 't16: a flag scrolled the page');
+  // undo must not either
+  scrolls = [];
+  await API.undo(); await flush();
+  ck(scrolls.length === 0, 't16: an undo scrolled the page');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
