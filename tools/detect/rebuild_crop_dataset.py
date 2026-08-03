@@ -305,21 +305,37 @@ def main():
         hashes = [((path, fname), dhash(path)) for path, fname in lst]
         groups = cluster(hashes, args.hamming)
         if emb_group:
-            # merge dHash groups that share an embedding cluster
-            merged, by_eg = [], {}
-            for g in groups:
-                egs = {emb_group[k] for k in
-                       (os.path.realpath(p) for p, _ in g)
-                       if k in emb_group}
-                tgt = next((by_eg[e] for e in egs if e in by_eg), None)
-                if tgt is None:
-                    merged.append(list(g))
-                    tgt = len(merged) - 1
-                else:
-                    merged[tgt] += g
-                for e in egs:
-                    by_eg[e] = tgt
-            groups = [g for g in merged if g]
+            # Merge dHash groups that share an embedding cluster -- as a real
+            # union-find, not a single pass. The one-pass version kept a
+            # {cluster: target} map and joined each group to the FIRST known
+            # target; a dHash group bridging two clusters joined one and
+            # orphaned the other, so one cosine>=0.93 cluster could still
+            # yield two survivors -- and two survivors can land on opposite
+            # sides of the train/val split.
+            parent = list(range(len(groups)))
+
+            def find(x):
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            touch = {}
+            for gi, g in enumerate(groups):
+                for p, _ in g:
+                    e = emb_group.get(os.path.realpath(p))
+                    if e is None:
+                        continue
+                    if e in touch:
+                        ra, rb = find(touch[e]), find(gi)
+                        if ra != rb:
+                            parent[ra] = rb
+                    else:
+                        touch[e] = gi
+            merged = collections.defaultdict(list)
+            for gi, g in enumerate(groups):
+                merged[find(gi)] += g
+            groups = [merged[r] for r in sorted(merged)]
         # one survivor per near-duplicate cluster: the largest file, i.e. the
         # sharpest crop rather than an arbitrary frame
         survivors = []
@@ -410,6 +426,24 @@ def main():
           f'{len(val_seqs):,} | shared {len(shared)}')
     if shared:
         raise SystemExit(f'BUG: {len(shared)} sequences straddle the split')
+
+    # Two SOURCE files can map to one OUTPUT name: a src crop that is already
+    # flag_-prefixed collides with a re-harvested extra that gets the same
+    # prefix at fold-in. shutil.copy2 would keep whichever copies last, the
+    # manifest would count both, and nothing would say so. That is the exact
+    # situation of a v5 built with --src dogbin_v4: 494 of its not_dog crops
+    # share names with the harvest dir. Refuse rather than guess -- the two
+    # files may differ (a box correction is the usual reason), and silently
+    # dropping one of them is data loss with a lying manifest on top.
+    clash = collections.Counter((s, c, f) for s, c, _, f in plan)
+    clash = {k: v for k, v in clash.items() if v > 1}
+    if clash:
+        for (s, c, f), v in sorted(clash.items())[:10]:
+            print(f'  COLLISION {s}/{c}/{f} <- {v} source files')
+        raise SystemExit(
+            f'{len(clash)} output filename(s) map to multiple source crops. '
+            'Rename or drop one side (usually: do not pass --extra-negatives '
+            'that were already folded into --src).')
 
     if not args.execute:
         print('\nnothing written. re-run with --execute')

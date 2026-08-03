@@ -25,6 +25,7 @@ rate quoted to three decimals off 104 samples would be false precision.
 """
 
 import argparse
+import json
 import math
 import os
 import re
@@ -51,6 +52,15 @@ def load_dir(d):
         return []
     return sorted(os.path.join(d, f) for f in os.listdir(d)
                   if f.lower().endswith(exts))
+
+
+def id_of_name(path):
+    """First 6+ digit run in the basename -- the image_id for every crop
+    naming scheme this pipeline uses (flag_<id>_<det>, <id>_<det>,
+    <ts>_<id>_<conf> would yield the ts, but acceptance crops are harvested
+    <id>_<det> names, where the id comes first)."""
+    m = re.search(r'\d{6,}', os.path.basename(path))
+    return m.group(0) if m else None
 
 
 def drop_trained_on(paths, data_root):
@@ -162,6 +172,16 @@ def main():
                                          'crops'),
                     help='dashboard-flagged false positives: negatives from '
                          'the REAL sweep distribution')
+    ap.add_argument('--acceptance-set',
+                    default=os.path.join(REPO, 'data',
+                                         'dogbin_acceptance_set.json'),
+                    help='reserved image_ids (reserve_acceptance_set.py); '
+                         'scored as their own table, at full resolution')
+    ap.add_argument('--acceptance-crops',
+                    default=os.path.join(REPO, 'data', 'harvest', 'v4', 'fp',
+                                         'not_dog'),
+                    help='full-resolution harvest dir the reserved ids are '
+                         'drawn from')
     ap.add_argument('--imgsz', type=int, default=640)
     # small by default on purpose: this tool is meant to be run WHILE the
     # 32.5M-image sweep holds most of the GPU, and a batch of 64 OOMs there
@@ -237,8 +257,11 @@ def main():
         print(f'\nSKIPPED {len(unreadable)} unreadable crop(s) '
               f'(truncated or non-image); they are excluded from the counts '
               f'below:')
-        for p in unreadable[:5]:
-            print(f'    {os.path.basename(p)}  ({os.path.getsize(p)} bytes)')
+        # NOT `for p in ...`: p is the positive-score array, and rebinding it
+        # to a filename here would poison every later use in this function.
+        for bad_path in unreadable[:5]:
+            print(f'    {os.path.basename(bad_path)}  '
+                  f'({os.path.getsize(bad_path)} bytes)')
         if len(unreadable) > 5:
             print(f'    ... and {len(unreadable) - 5} more')
     if hn:
@@ -260,6 +283,43 @@ def main():
     else:
         print(f'\n(no crops under {args.hard_negatives} -- skipped the '
               f'real-distribution check)')
+
+    # ---- THE number: the reserved acceptance set, at full resolution ------
+    # Everything above is diagnostics. This table is the one a promotion may
+    # cite: negatives the model has never seen in ANY form (the ids are
+    # excluded from every split by rebuild_crop_dataset.py), scored from the
+    # full-resolution harvest -- not the ~160px dashboard thumbnails the
+    # --hard-negatives dir holds, which are a different distribution from
+    # anything the gate meets in production.
+    acc_ids = set()
+    if args.acceptance_set and os.path.exists(args.acceptance_set):
+        with open(args.acceptance_set) as fh:
+            acc_ids = set(json.load(fh).get('image_ids') or [])
+    if acc_ids and args.acceptance_crops and os.path.isdir(args.acceptance_crops):
+        acc = [f for f in load_dir(args.acceptance_crops)
+               if id_of_name(f) in acc_ids]
+        acc, contaminated = drop_trained_on(acc, args.data)
+        acc, _ = readable(acc)
+        if contaminated:
+            print(f'\nWARNING: {len(contaminated)} reserved crop(s) are in '
+                  f'the dataset -- the reservation is not protecting this '
+                  f'model. Their scores are excluded, but investigate.')
+        if acc:
+            a = np.array(dog_prob(model, acc, args.batch, args.imgsz,
+                                  args.device))
+            print(f'\nACCEPTANCE SET (reserved, never trained on, full-res): '
+                  f'{len(acc)} of {len(acc_ids)} reserved ids')
+            for t in (0.5, 0.9, 0.95, 0.99):
+                rej = int((a < t).sum())
+                lo, hi = wilson(rej, len(a))
+                print(f'  rejected at t={t:<5}: {rej:>4}/{len(a)} = '
+                      f'{rej/len(a):.4f}  [{lo:.3f}, {hi:.3f}]')
+            print(f'  median P(dog): {float(np.median(a)):.4f}')
+        else:
+            print(f'\n(no reserved crops found under {args.acceptance_crops})')
+    elif acc_ids:
+        print(f'\n(acceptance set has {len(acc_ids)} ids but no crop dir at '
+              f'{args.acceptance_crops} -- pass --acceptance-crops)')
     return 0
 
 

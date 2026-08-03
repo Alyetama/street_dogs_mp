@@ -259,7 +259,17 @@ def main():
         for iid, dets in boxes.items():
             want = flags[iid].get('conf')
             if want is None:
-                kept[iid] = dets
+                # A flag without a confidence cannot be matched to its box.
+                # Keeping every detection here -- which this branch used to do
+                # -- silently bypasses the guard the --all-detections help
+                # text describes: 94 of 314 flagged images carry 2-12
+                # detections, and the siblings are often real dogs. One
+                # detection is fine (nothing to disambiguate); more is
+                # ambiguous, same as several boxes at equal confidence.
+                if len(dets) == 1:
+                    kept[iid] = dets
+                else:
+                    ambiguous += 1
                 continue
             hit = [d for d in dets if abs(d[5] - float(want)) <= args.conf_tol]
             if len(hit) == 1:
