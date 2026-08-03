@@ -214,3 +214,10 @@ data/dnd_env_lock.txt
 # generated review thumbnails (rebuilt on demand from the originals)
 data/dashboard/hq_crops/
 data/dashboard/sequence_cache.json
+
+# Dashboard: the module is committed, its machine-specific settings are not.
+# ('*/' above already hides these; naming them is the durable guarantee, and
+# tools/detect/tests/adv_no_hardcoded_paths.py fails the build if a path
+# leaks back into the committed files.)
+tools/dashboard/dashboard.config.json
+tools/dashboard/street-dogs-dashboard.service

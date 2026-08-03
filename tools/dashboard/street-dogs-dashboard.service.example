@@ -1,0 +1,27 @@
+# Copy to street-dogs-dashboard.service (gitignored), replace every <...>,
+# then:
+#   sudo cp tools/dashboard/street-dogs-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now street-dogs-dashboard
+#
+# The dashboard has NO authentication. --host must be a private address (a
+# Tailscale or LAN interface). Binding it to 0.0.0.0 on a public-facing box
+# exposes the review queue and the catalog to anyone who finds the port.
+
+[Unit]
+Description=Street Dogs collection-progress dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=<path-to-repo>
+Environment=PYTHONUNBUFFERED=1
+# Machine-specific paths belong in tools/dashboard/dashboard.config.json, not
+# here; add Environment= lines only to override that file for this unit.
+ExecStart=<path-to-python> tools/dashboard/dashboard.py serve --host <private-bind-addr> --port 8050 --interval 3600 --images-every 1
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
