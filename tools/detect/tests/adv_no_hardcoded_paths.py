@@ -87,7 +87,8 @@ PATTERNS = (
 # scrubbed from the repo's history with a literal search-and-replace, and a
 # scanner that spells out what it hunts for gets rewritten along with the
 # leak -- silently disarming itself while still reporting success.
-FORBIDDEN = tuple(a + b for a, b in (('SDG4', 'JKKR'), ('65GJ', '0P5K')))
+FORBIDDEN = tuple(a + b for a, b in
+                  (('SDG4', 'JKKR'), ('65GJ', '0P5K'), ('PLG0', 'WNNP')))
 
 # Lines that are allowed to match: they describe the pattern rather than being
 # an instance of it. Marked, not guessed -- an exemption must be visible in the

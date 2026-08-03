@@ -221,3 +221,10 @@ data/dashboard/sequence_cache.json
 # leaks back into the committed files.)
 tools/dashboard/dashboard.config.json
 tools/dashboard/street-dogs-dashboard.service
+
+# One-off hardware remediation for THIS host: device nodes (/dev/sdm, /dev/sdd),
+# a drive serial and USB bridge ids. Named individually rather than globbed --
+# a `fix_*.sh` pattern would silently swallow a future script that belonged in
+# the repo.
+fix_bobcat_mount.sh
+fix_lynx_spindown.sh
