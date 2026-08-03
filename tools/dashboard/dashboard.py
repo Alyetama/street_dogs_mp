@@ -1239,6 +1239,9 @@ margin-top:4px}
 .ballg .s2{background:repeating-linear-gradient(90deg,rgba(216,116,58,.55) 0 3px,
 transparent 3px 6px);box-shadow:inset 0 0 0 1px rgba(216,116,58,.3)}
 .ballg .s3{background:rgba(130,140,150,.16)}
+/* s4 draws no bar segment -- the reserved crops are outside the training set
+   entirely, so an outline says "accounted for, not counted here" */
+.ballg .s4{background:transparent;box-shadow:inset 0 0 0 1px rgba(130,140,150,.5)}
 .bal.ok .balbar i{background:var(--green)}
 @media(max-width:700px){.bal{flex-wrap:wrap}.baltx{white-space:normal}}
 kbd{background:var(--panel2);border:1px solid var(--bd);border-bottom-width:2px;
@@ -1535,7 +1538,11 @@ function paintBal(){
     $('balLg').textContent=b.error||('missing '+(b.dataset||'dataset'));
     return;
   }
-  var y=b.yield_per_flag||0.822;
+  /* the server's measured value, never a copy: this line used to carry its
+     own 0.822 and drifted 1.8x out of date when the acceptance reservation
+     started withholding 30% of every harvest. 0 is the honest fallback -- it
+     paints "nothing banked yet" instead of inventing progress. */
+  var y=(typeof b.yield_per_flag==='number')?b.yield_per_flag:0;
   var pend=Math.round((b.new_flags||0)*y);
   var pendPos=Math.round((b.new_positive_flags||0)*y);
   var have=b.not_dog||0, want=(b.dog||0)+pendPos;   /* positives raise the bar */
@@ -1564,14 +1571,19 @@ function paintBal(){
   if(togo)L.push(['s3',n(togo),'still to find'+
     (pendPos?' (target +'+n(pendPos)+' from crops you marked as dogs)':'')]);
   else L.push(['s3','0','still to find']);
+  /* Name the reservation. Roughly a third of what you flag is withheld as the
+     acceptance set and never trains, so the target is far higher than "one
+     flag, one crop" -- without saying so the panel just looks pessimistic. */
+  if(b.reserved_ids)L.push(['s4',n(b.reserved_ids),
+    'reserved to test the gate, never trained on']);
   $('balLg').innerHTML=L.map(function(x){
     return '<span><i class="'+x[0]+'"></i><b>'+x[1]+'</b> '+esc(x[2])+'</span>';
   }).join('');
   $('balFill').title=n(have)+' not-dog crops already in '+ds;
   $('balPend').title=n(pend)+' negatives earned from flags since that build';
 }
-/* a verdict immediately banks ~0.82 of a crop; reflect it without a round
-   trip. Negatives close the gap, positives widen it. */
+/* a verdict immediately banks yield_per_flag of a crop; reflect it without a
+   round trip. Negatives close the gap, positives widen it. */
 function bumpBal(dNeg,dPos){
   if(!BAL)return;
   BAL.new_flags=Math.max(0,(BAL.new_flags||0)+(dNeg||0));
@@ -2754,12 +2766,20 @@ def mark_seen(names, now=None):
 # tools/detect/eval_dogbin.py and rebuild_crop_dataset.py already read.
 DATASET_DIR = cfg('dogbin_dataset', '', env='DOGBIN_DATASET')
 DATASET_CLASSES = ('dog', 'not_dog')
-# Crops that survive per FLAG, measured -- not guessed. Rebuilding
-# dogbin_v3 with and without the flagged negatives: not_dog 351 -> 711
-# for 434 flags = 0.829. It is below 1.0 because a flag is matched to its own
-# box (ambiguous ones are dropped), crops under the size floor are dropped,
-# and the near-duplicate/per-sequence caps trim the rest.
-FLAG_YIELD = 0.829
+# Crops that survive per FLAG, measured -- not guessed. Across the dogbin_v4
+# build: 1,075 flags -> 714 harvested at full res -> 494 reached the dataset.
+#
+# The v3-era value was 0.829 and is now wrong by 1.8x, because a term was
+# added between those two numbers: 30% of every harvest is reserved into
+# data/dogbin_acceptance_set.json and NEVER enters training. Those crops are
+# not wasted -- they are the only honest way to accept the gate -- but a
+# tracker that ignores them tells the reviewer to flag ~900 more when the real
+# figure is ~1,600, and the panel exists precisely to answer "how much longer".
+#
+# The rest of the shortfall is unchanged: a flag is matched to its own box
+# (ambiguous ones dropped), crops under the 64px floor go, and the
+# near-duplicate and per-sequence caps trim what is left.
+FLAG_YIELD = 0.460
 
 
 def dataset_balance():
@@ -2847,8 +2867,22 @@ def dataset_balance():
         'pending_positives': pending_pos,
         'flags_needed': int(-(-still // FLAG_YIELD)) if still else 0,
         'yield_per_flag': FLAG_YIELD,
+        # so the panel can explain why the target is what it is, rather than
+        # the number just doubling one day with no visible reason
+        'reserved_ids': _reserved_count(),
         'balanced': still == 0,
     }
+
+
+@functools.lru_cache(maxsize=1)
+def _reserved_count():
+    """How many flagged ids are withheld as the acceptance set."""
+    try:
+        with open(os.path.join(REPO, 'data',
+                               'dogbin_acceptance_set.json')) as fh:
+            return len(json.load(fh).get('image_ids') or [])
+    except (OSError, ValueError):
+        return 0
 
 
 REVIEW_SORTS = {
