@@ -55,6 +55,20 @@
       },
       "candidates": [
         {
+          "run": "dogbin_006",
+          "key": "1365664a1d1e46bd93dbf031b043f690",
+          "date": "2026-08-03",
+          "dataset": "dogbin_v4 (identical to dogbin_004; erasing 0.4 -> 0.1 was the ONLY change)",
+          "metrics": {
+            "accuracy_top1": 0.9198,
+            "roc_auc_val": 0.9455,
+            "acceptance_roc_auc": 0.9616,
+            "acceptance_rejected_at_full_dog_recall": 0.5093,
+            "acceptance_rejected_at_t0.5": 0.8131
+          },
+          "note": "NOT PROMOTED -- a tie, and a useful null result. The one-variable test of the augmentation hypothesis: dogbin_004 config with erasing 0.4 -> 0.1, the single change the rendered augmentations justified (RandAugment erases a dog's head in roughly 2 of 12 training views). Converged, epoch 180, best 80, patience 100. On the same 214 reserved crops it is indistinguishable at full dog recall: 50.93% [0.443,0.576] vs dogbin_004 52.34% [0.457,0.589], and acceptance ROC AUC 0.9616 vs 0.9685. That threshold is set by the single worst-scoring val dog, so a 1.4-point gap there is noise, which is why the tie was called in advance rather than after seeing it. It DOES win in the 0.99 recall band (71.5% vs 64.0%), but taking that band is not free: at corpus scale 0.990 recall costs ~38,000 real dogs to remove ~38,000 extra false positives -- a 1:1 trade of unrecoverable losses for one-click savings on a one-pass sweep. So the operating point stays at full recall, where the two models are equivalent and dogbin_004 has the better AUC. Combined with dogbin_005 (five variables, clearly worse), the augmentation defaults are at or near a local optimum for this dataset: the visible \"damage\" in the augmented views costs nothing measurable."
+        },
+        {
           "run": "dogbin_005",
           "key": "7a95c517e6e64daca1e929c3b0348fab",
           "date": "2026-08-03",
