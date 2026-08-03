@@ -140,10 +140,22 @@ def build(repo, out_path, force=False):
                 prev = json.load(fh).get('by_image') or {}
         except (OSError, ValueError):
             prev = {}
+    # ids previously looked up that resolved to NO country -- no coordinates
+    # in the parquets, or a point outside every polygon. Without remembering
+    # them, every incremental build re-scans the parquets and re-runs the
+    # point-in-polygon for the same permanently-unresolvable ids.
+    misses = set()
+    if not force:
+        try:
+            with open(out_path) as fh:
+                misses = set(json.load(fh).get('no_country') or [])
+        except (OSError, ValueError):
+            misses = set()
     ids = crop_image_ids(repo)
-    todo = {i for i in ids if i not in prev}
+    todo = {i for i in ids if i not in prev and i not in misses}
     print(f'{len(ids):,} review image_ids; {len(todo):,} need a lookup '
-          f'({len(ids) - len(todo):,} reused)', file=sys.stderr)
+          f'({len(ids) - len(todo):,} reused, {len(misses):,} known-unresolvable)',
+          file=sys.stderr)
     by = {i: prev[i] for i in ids if i in prev}
     names = {}
     if todo:
@@ -166,8 +178,12 @@ def build(repo, out_path, force=False):
     counts = {}
     for iso in by.values():
         counts[iso] = counts.get(iso, 0) + 1
+    # keep only misses still reachable, so the list cannot grow without bound
+    # as the pool rotates
+    misses = {i for i in (misses | (todo - set(by))) if i in ids}
     doc = {'generated': int(time.time()), 'by_image': by,
-           'counts': counts, 'names': names}
+           'counts': counts, 'names': names,
+           'no_country': sorted(misses)}
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     tmp = out_path + '.tmp'
     with open(tmp, 'w') as fh:

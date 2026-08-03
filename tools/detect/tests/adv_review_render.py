@@ -880,8 +880,42 @@ async function t21() {
      't21: label stuck on a country after clearing: ' + byId['leftlab'].textContent);
 }
 
+// ── 22. an option's count must equal what selecting it returns ──────────
+// The first cut tallied the dropdown from the country INDEX, which spans the
+// rolling pool plus both flag ledgers, while the queue excludes everything
+// judged/kept/collapsed. Measured on the live server: 60 of 60 options were
+// dead, promising 4,090 crops that did not exist.
+async function t22() {
+  const LIST = [{iso:'BRA',name:'Brazil',n:1073},{iso:'JPN',name:'Japan',n:312}];
+  RESP = { '/api/review': (url) => {
+             const iso = /country=([A-Z]*)/.exec(url);
+             const sel = iso && iso[1];
+             const hit = LIST.filter(c => c.iso === sel)[0];
+             return payload(CROPS.normal.slice(0, 3), [],
+               {countries: LIST, country: sel || '',
+                total_unflagged: hit ? hit.n : 1385});
+           },
+           '/api/review/seen': () => ({ ok: true, seen_total: 1 }) };
+  await API.load(); await flush();
+  // pick each option and check the queue size matches what it advertised
+  for (const c of LIST) {
+    byId['country'].value = c.iso;
+    await byId['country'].onchange.call(byId['country']);
+    await flush(); await flush();
+    const shown = byId['left'].textContent.replace(/,/g, '');
+    ck(shown === String(c.n),
+       't22: ' + c.iso + ' advertised ' + c.n + ' but the queue shows ' +
+       byId['left'].textContent);
+  }
+  // and an option that would return nothing must not be offered at all
+  RESP['/api/review'] = () => payload([], [], {countries: [], country: ''});
+  await API.load(); await flush();
+  ck(!/value="[A-Z]{3}"/.test(byId['country'].innerHTML),
+     't22: a country was still offered with an empty queue');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

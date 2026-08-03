@@ -2965,6 +2965,9 @@ def _reserved_count():
 
 # ── country filter ──────────────────────────────────────────────────────────
 COUNTRY_INDEX = os.path.join(OUT, 'countries.json')
+# seconds between incremental rebuilds. Well under the ~4 minute pool
+# turnover, and an incremental pass is ~1.7s, so the duty cycle is ~1%.
+COUNTRY_REFRESH = 120
 _country_cache = {'mtime': None, 'doc': {'by_image': {}, 'counts': {},
                                          'names': {}}}
 
@@ -3082,8 +3085,6 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
         if iid in judged:      # flagged, or already looked at and kept
             continue
         iso = by_country.get(iid, '')
-        if want and iso != want:
-            continue
         cands.append({'name': name, 'image_id': iid,
                       'ts': int(m.group(1)),
                       'conf': round(int(m.group(3)) / 100.0, 2),
@@ -3146,7 +3147,20 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
                     continue
                 hash_reps.append(h)
         kept.append(c)
-    items = kept
+
+    # Tally, then filter -- in that order, and both AFTER the collapse.
+    # Filtering at candidate time made the counts describe a larger population
+    # than the queue: the per-image dedup and the sequence collapse run later
+    # and remove more, so every option overstated (BRA advertised 1,460 and
+    # returned 1,079). Counting what actually survives makes the number the
+    # option shows identical to the number it delivers, by construction.
+    offer, tallied = {}, set()
+    for c in kept:
+        if c['country'] and c['image_id'] not in tallied:
+            tallied.add(c['image_id'])
+            offer[c['country']] = offer.get(c['country'], 0) + 1
+    coverage = (round(len(tallied) / len(kept), 3)) if kept else 0
+    items = [c for c in kept if c['country'] == want] if want else kept
     total = len(items)
     pages = max(1, -(-total // size))
     page = min(page, pages - 1)
@@ -3159,16 +3173,24 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
             'pages': pages, 'flagged_total': len(flagged_ids),
             'positive_total': n_pos, 'seen_total': len(seen_ids),
             'collapsed': collapsed,
-            # the dropdown's options, rebuilt hourly. Only countries the sweep
-            # has reached appear -- the counts come from crops that exist, so
-            # an option can never lead to an empty page.
+            # Options tallied from the live queue, NOT from the index's
+            # counts. The index spans the rolling pool plus both flag ledgers,
+            # while this queue excludes everything already judged, kept, or
+            # collapsed -- so index counts advertised crops that could never be
+            # returned. Measured on the running server: 60 of 60 options were
+            # dead, together promising 4,090 crops that did not exist. Counting
+            # what actually survives makes an empty option impossible rather
+            # than merely unintended.
             'country': want,
-            'countries': [{'iso': i, 'name': cdoc.get('names', {}).get(i, i),
-                           'n': n}
-                          for i, n in sorted(
-                              (cdoc.get('counts') or {}).items(),
-                              key=lambda kv: (-kv[1], kv[0]))],
-            'countries_generated': cdoc.get('generated')}
+            'countries': [{'iso': i,
+                           'name': cdoc.get('names', {}).get(i, i), 'n': n}
+                          for i, n in sorted(offer.items(),
+                                             key=lambda kv: (-kv[1], kv[0]))],
+            'countries_generated': cdoc.get('generated'),
+            # how much of the queue the index can currently place. The pool
+            # turns over every ~4 minutes at sweep rate, so this is the number
+            # that says whether the filter is usable at all.
+            'country_coverage': coverage}
 
 
 def sweep_pids():
@@ -3527,12 +3549,20 @@ def serve(args):
                 argparse.Namespace(db=args.db,
                                    no_refresh=False,
                                    images=(cyc % args.images_every == 0)))
-            refresh_countries()
             cyc += 1
 
-    # once at startup too: a server started after new cells were swept would
-    # otherwise offer a stale country list until the first interval elapsed
-    threading.Thread(target=refresh_countries, daemon=True).start()
+    # The country index gets its OWN cadence, not the hourly build's. At sweep
+    # rate the 3000-crop pool turns over about every 4 minutes, so an hourly
+    # index described a queue that no longer existed: measured on the running
+    # server, every one of 50 returned crops had no country at all. An
+    # incremental rebuild costs ~1.7s, so this was never a cost trade -- just
+    # the wrong number.
+    def country_loop():
+        while True:
+            refresh_countries()
+            time.sleep(COUNTRY_REFRESH)
+
+    threading.Thread(target=country_loop, daemon=True).start()
 
     threading.Thread(target=loop, daemon=True).start()
     BoardHandler.db = args.db
