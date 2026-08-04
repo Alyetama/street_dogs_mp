@@ -142,6 +142,17 @@ DET_SCHEMA = pa.schema([
     # classified.
     pa.field('leash_class', pa.uint8(), nullable=True),
     pa.field('leash_conf', pa.float32(), nullable=True),
+    # ── provenance ────────────────────────────────────────────────────────
+    # Which model produced this box. Eight hex of the engine file's sha256 --
+    # the same digest data/best_models.json records as sha256_engine, so a row
+    # joins straight to the model registry.
+    #
+    # A hash, not a filename: engine files get overwritten in place, and a
+    # path that means one model today can mean another tomorrow. NULL on every
+    # row written before this column existed (see _sql_src on union_by_name),
+    # which is honest -- those rows really are unattributable except through
+    # the run manifest.
+    pa.field('model_sha8', pa.string(), nullable=True),
 ])
 
 LEASH_CLASSES = {'leashed': 0, 'unleashed': 1, 'not_a_dog': 2}
@@ -167,6 +178,17 @@ IMG_SCHEMA = pa.schema([
     pa.field('ts_off', pa.uint32(), nullable=False),
     pa.field('run_id', pa.uint16(), nullable=False),
     pa.field('shard_idx', pa.uint32(), nullable=False),
+    # ── provenance ────────────────────────────────────────────────────────
+    # Which model produced this box. Eight hex of the engine file's sha256 --
+    # the same digest data/best_models.json records as sha256_engine, so a row
+    # joins straight to the model registry.
+    #
+    # A hash, not a filename: engine files get overwritten in place, and a
+    # path that means one model today can mean another tomorrow. NULL on every
+    # row written before this column existed (see _sql_src on union_by_name),
+    # which is honest -- those rows really are unattributable except through
+    # the run manifest.
+    pa.field('model_sha8', pa.string(), nullable=True),
 ])
 
 # §5.3 errors: narrow, keeps fat strings out of the 32.5M-row images table.
@@ -414,9 +436,15 @@ class Writer:
                  free_min_bytes=FREE_MIN_BYTES,
                  det_rows_max=DET_ROWS_MAX,
                  soft_window=SOFT_WINDOW_IMAGES,
-                 soft_ratio=SOFT_BOXES_PER_IMG):
+                 soft_ratio=SOFT_BOXES_PER_IMG,
+                 model_sha8=None):
         self.detect_root = detect_root or get_detect_root()
         self.max_det = max_det
+        # Stamped onto every row this writer commits. None is allowed and
+        # means the caller did not say -- the rows then read NULL, which is
+        # accurate rather than a guess, and run_manifest.py show() reports
+        # them as unattributable.
+        self.model_sha8 = model_sha8
         self.free_min_bytes = free_min_bytes
         self.det_rows_max = det_rows_max
         self.soft_window = soft_window
@@ -585,6 +613,7 @@ class ShardWriter:
         if int(n_det) == self._writer.max_det:
             row['guards'] |= GUARD_NDET_MAXED  # §5.5 flag
         row['shard_idx'] = self.shard_idx
+        row.setdefault('model_sha8', self._writer.model_sha8)
         iid = int(row['image_id'])
         if iid in self._img_ids:
             raise CommitError(f'duplicate image_id {iid} in shard part')
@@ -610,6 +639,7 @@ class ShardWriter:
                     f'exceeds the det_idx ceiling; cap boxes/image at 256 '
                     f'or amend the spec')
             row['shard_idx'] = self.shard_idx
+            row.setdefault('model_sha8', self._writer.model_sha8)
             self._det_rows.append(row)
 
     # -- commit -----------------------------------------------------------
@@ -844,7 +874,15 @@ def _sql_src(globs):
     # invariants key on (image_id, cell, drive) because cell twins (the same
     # image stored under more than one cell) are corpus-legitimate. See
     # unique_src() before computing any PER-IMAGE statistic off this.
-    return f'read_parquet([{paths}], hive_partitioning=1)'
+    # union_by_name is NOT optional. Without it duckdb takes the FIRST file's
+    # schema and silently drops any column the later files added: selecting it
+    # then fails with "Referenced column not found" even though the data is
+    # right there on disk. That makes every schema addition a breaking change
+    # for readers, which is how a provenance column would have been added and
+    # then quietly lost. With it, files written before a column existed read
+    # back NULL for it and filters work across the whole store.
+    return (f'read_parquet([{paths}], hive_partitioning=1, '
+            f'union_by_name=1)')
 
 
 def unique_src(detect_root=None, kind='img'):

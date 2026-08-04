@@ -137,7 +137,8 @@ def test_schema_byte_exact_and_encodings():
                ('orig_w', pa.uint16(), False), ('orig_h', pa.uint16(), False),
                ('reduce', pa.uint8(), False), ('guards', pa.uint16(), False),
                ('ts_off', pa.uint32(), False), ('run_id', pa.uint16(), False),
-               ('shard_idx', pa.uint32(), False)]
+               ('shard_idx', pa.uint32(), False),
+               ('model_sha8', pa.string(), True)]
     exp_det = [('image_id', pa.uint64(), False),
                ('det_idx', pa.uint8(), False), ('conf', pa.float32(), False),
                ('x1', pa.float32(), False), ('y1', pa.float32(), False),
@@ -145,7 +146,8 @@ def test_schema_byte_exact_and_encodings():
                ('run_id', pa.uint16(), False),
                ('shard_idx', pa.uint32(), False),
                ('leash_class', pa.uint8(), True),
-               ('leash_conf', pa.float32(), True)]
+               ('leash_conf', pa.float32(), True),
+               ('model_sha8', pa.string(), True)]
     for tbl, exp in ((img, exp_img), (det, exp_det)):
         got = [(f.name, f.type, f.nullable) for f in tbl.schema]
         assert got == exp, f'schema mismatch:\n got {got}\n exp {exp}'

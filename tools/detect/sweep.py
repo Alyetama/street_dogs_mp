@@ -426,13 +426,30 @@ def cmd_run(args):
 
     run_id = int(time.time()) & 0xFFFF
     epoch = time.time()
+    # Record which model is about to write boxes, BEFORE any are written.
+    # run_id is time.time() & 0xFFFF -- it identifies this process, not this
+    # model, and it wraps every ~18 hours. gen=0001 already held eleven of
+    # them, all assumed to be train-30 because nothing said otherwise. Never
+    # fatal: a sweep that cannot write its provenance should still sweep, it
+    # just says so loudly.
+    model_sha8 = None
+    try:
+        import run_manifest
+        run_manifest.write_for_run(REPO, args.gen, run_id, cfg,
+                                   started=epoch)
+        model_sha8 = run_manifest.sha256_of(cfg['engine'])[:8]
+    except Exception as e:
+        print(f'WARNING: could not write the run manifest ({e}); the boxes '
+              f'from run_id={run_id} will not be attributable to a model',
+              file=sys.stderr)
     status = StatusWriter(run_id,
                           args.gen,
                           corpus_total,
                           drive_totals=corpus,
                           region_totals=region_corpus)
     status.start()
-    writer = store.Writer(detect_root)
+    # the digest the manifest recorded, so each row says which model made it
+    writer = store.Writer(detect_root, model_sha8=model_sha8)
     coll = ShardCollector(writer,
                           args.gen,
                           status,
