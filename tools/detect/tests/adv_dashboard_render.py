@@ -995,19 +995,23 @@ def check_training_tracker():
                   'metrics/mAP50-95(B)': 0.30},
                  {'epoch': 2, 'metrics/recall(B)': 0.40,
                   'metrics/mAP50-95(B)': 0.50}]
-        got9 = {k: (round(v, 4), round(pk, 4))
-                for k, v, pk in tt.latest_metrics(rows9, 'detect')}
+        got9 = {m['key']: m for m in tt.latest_metrics(rows9, 'detect')}
         # fitness peaks at epoch 2, but recall peaked at epoch 1
-        if got9.get('recall') != (0.40, 0.90):
-            bad.append(f't9 recall latest/peak wrong: {got9.get("recall")}')
-        if got9.get('mAP50-95') != (0.50, 0.50):
-            bad.append(f't9 mAP50-95 latest/peak wrong: '
-                       f'{got9.get("mAP50-95")}')
+        if (round(got9['recall']['latest'], 4),
+                round(got9['recall']['peak'], 4)) != (0.40, 0.90):
+            bad.append(f't9 recall latest/peak wrong: {got9["recall"]}')
+        if got9['recall']['peak_epoch'] != 1:
+            bad.append(f't9 recall peak_epoch wrong: '
+                       f'{got9["recall"]["peak_epoch"]}')
+        if (round(got9['mAP50-95']['latest'], 4),
+                round(got9['mAP50-95']['peak'], 4)) != (0.50, 0.50):
+            bad.append(f't9 mAP50-95 latest/peak wrong: {got9["mAP50-95"]}')
+        # the card draws the metric's own history, so it must come back with it
+        if got9['recall']['series'] != [0.90, 0.40]:
+            bad.append(f't9 series not carried: {got9["recall"]["series"]}')
         # and the list itself is the short one, on purpose
-        if [k for k, _, _ in tt.latest_metrics(rows9, 'detect')] != \
-                ['mAP50-95', 'recall']:
-            bad.append(f't9 unexpected latest metric set: '
-                       f'{[k for k, _, _ in tt.latest_metrics(rows9, "detect")]}')
+        if list(got9) != ['mAP50-95', 'recall']:
+            bad.append(f't9 unexpected latest metric set: {list(got9)}')
 
         # t8 a run directory called "train" is ultralytics' DEFAULT name, and
         # "train" is also a dataset split -- pruning by name alone hid it

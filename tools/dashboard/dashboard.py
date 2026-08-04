@@ -2638,6 +2638,65 @@ def _chart(cid, run, metric, series, marks=(), fmt='.3f'):
             f'</svg><div class="ttip" hidden></div></figure>')
 
 
+TRK_LATEST, TRK_PEAK = '#c2872e', '#5b93cf'
+
+
+def _metric_card(m, label, hover):
+    """One metric: what it just did, against the best it has ever done.
+
+    The peak is drawn as a RULE ACROSS THE TRACE at its own height, and the
+    latest point sits below it by exactly the shortfall -- so the gap is a
+    distance rather than a second number to subtract. When the run is at its
+    peak the point lands on the rule and the card resolves to one value, which
+    is the state worth recognising at a glance.
+    """
+    vals = [v for v in m['series'] if v is not None]
+    if not vals:
+        return ''
+    lo, hi = min(vals), m['peak']
+    span = (hi - lo) or max(abs(hi) * 0.08, 1e-6)
+    # RIGHT is inset by the marker radius: the current point is the whole
+    # subject of the card and it was being clipped in half by the viewBox edge.
+    W, H, PAD, RIGHT = 232.0, 44.0, 6.0, 6.0
+    n = len(m['series'])
+
+    def xy(i, v):
+        x = ((W - RIGHT) * (i / (n - 1))) if n > 1 else (W - RIGHT) / 2
+        return (x, PAD + (H - 2 * PAD) * (1 - (v - lo) / span))
+
+    pts = [xy(i, v) for i, v in enumerate(m['series']) if v is not None]
+    trace = ' '.join(('M' if k == 0 else 'L') + f'{x:.1f} {y:.1f}'
+                     for k, (x, y) in enumerate(pts))
+    py = xy(m['peak_index'], m['peak'])[1]
+    lx, ly = xy(len(m['series']) - 1, m['latest'])
+    at_peak = (m['peak'] - m['latest']) <= 1e-9
+    spark = (
+        f'<svg class="spk" viewBox="0 0 {W:.0f} {H:.0f}" '
+        f'preserveAspectRatio="none" aria-hidden="true">'
+        # the rule: the benchmark, drawn where the benchmark actually is
+        f'<line class="pk" x1="0" y1="{py:.1f}" x2="{W:.0f}" y2="{py:.1f}"/>'
+        + (f'<line class="gap" x1="{lx:.1f}" y1="{py:.1f}" '
+           f'x2="{lx:.1f}" y2="{ly:.1f}"/>' if not at_peak else '')
+        + (f'<path class="tr" d="{trace}"/>' if len(pts) > 1 else '')
+        + f'<circle class="pkd" cx="{xy(m["peak_index"], m["peak"])[0]:.1f}" '
+          f'cy="{py:.1f}" r="2.6"/>'
+          f'<circle class="now" cx="{lx:.1f}" cy="{ly:.1f}" r="3.4"/>'
+          f'</svg>')
+    # The two numbers separate by POSITION as well as by colour: the peak sits
+    # on the label line, where a reference belongs, and the working value gets
+    # the card to itself.
+    return (
+        f'<div class="mcard"{_t(hover)}>'
+        f'<div class="mhead"><span class="mlab">{esc_html(label)}</span>'
+        f'<span class="mpv">{m["peak"]:.4f}'
+        f'<em>peak @{m["peak_epoch"]}</em></span></div>'
+        f'<div class="mnow">{m["latest"]:.4f}</div>'
+        f'<div class="mgap">'
+        + ('at its peak' if at_peak else
+           f'{m["peak"] - m["latest"]:.4f} below peak')
+        + f'</div>{spark}</div>')
+
+
 def _live_card(r):
     """The card that answers "how long until this stops?".
 
@@ -2666,14 +2725,11 @@ def _live_card(r):
     else:
         tile(f'{ep}<em>/{tot or "?"}</em>', 'epoch',
              'Epochs finished, out of the epochs= this run was started with.')
-        if r['best_headline'] is not None:
-            tile(f'{r["best_headline"]:.4f}', f'best {r["headline_label"]}',
-                 "The highest value so far on the run's own validation split. "
-                 'A tuning number, not an acceptance number.')
+        if r['best_epoch']:
             tile(f'@{r["best_epoch"]}', 'best epoch',
-                 'Ultralytics keeps the EARLIEST epoch when fitness ties, '
-                 'which is why this can sit far behind the current epoch once '
-                 'a metric saturates.')
+                 'The epoch early stopping is measuring from -- the peak of '
+                 'the fitness this run is scored on, which is not necessarily '
+                 'the peak of any single metric beside it.')
         if sec:
             tile(_hms(sec), 'per epoch',
                  'Mean over the last 10 epochs, so a slowdown shows instead '
@@ -2686,14 +2742,10 @@ def _live_card(r):
     # that is still climbing the two are the same number and on one that has
     # turned over they are not.
     latest = []
-    for key, val, peak in (r.get('latest') or ()):
-        label, hover, _ = metric_meaning(key)
-        peaked = (peak is not None and peak - val > 1e-9)
-        latest.append(
-            f'<div class="ttile lat"{_t(hover)}>'
-            f'<b>{val:.4f}</b><span>{esc_html(label)}</span>'
-            + (f'<u>peak {peak:.4f}</u>' if peaked else '<u>at its peak</u>')
-            + '</div>')
+    for m in (r.get('latest') or ()):
+        label, hover, _ = metric_meaning(m['key'])
+        latest.append(_metric_card(m, label, hover))
+
     # Two limits end this run and they are not the same race. The epoch
     # budget is fixed and visible from the start; patience moves -- it resets
     # to zero on every improvement -- and on these runs it is almost always
@@ -2750,9 +2802,11 @@ def _live_card(r):
             + (' &middot; one class' if r.get('single_cls') else '')
             + f' &middot; pid {r["pid"]}</span></div>'
             f'<div class="ttiles">{"".join(tiles)}</div>'
-            + (f'<div class="tlatest"><span class="tlab">latest epoch'
-               f'{(" " + str(r["last_epoch"])) if r.get("last_epoch") else ""}'
-               f'</span><div class="ttiles">{"".join(latest)}</div></div>'
+            + (f'<div class="tlatest"><span class="tlab">epoch '
+               f'{r.get("last_epoch") or "?"} '
+               f'<i class="k now"></i>latest'
+               f'<i class="k pk"></i>its own peak</span>'
+               f'<div class="mcards">{"".join(latest)}</div></div>'
                if latest else '')
             + f'{meter}</div>')
 
@@ -4869,11 +4923,44 @@ font-variant-numeric:tabular-nums;line-height:1.15}
 .tlatest{margin-top:13px;padding-top:12px;border-top:1px solid var(--bd)}
 .tlab{display:block;font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
 color:var(--dim);margin-bottom:8px}
-.ttile.lat{flex:0 1 150px;padding:8px 11px 7px}
-.ttile.lat b{font-size:16px}
-.ttile.lat span{font-size:10.5px}
-.ttile.lat u{display:block;margin-top:3px;font-size:10px;color:var(--dim);
-text-decoration:none;font-variant-numeric:tabular-nums}
+/* two roles, held to across the card and the charts:
+   amber = the working value, what the run just produced
+   blue  = the benchmark it is measured against (its own peak; validation loss)
+   validated on both panel surfaces -- lightness band, chroma, CVD dE 21.8
+   protan / 22.6 tritan, normal-vision 23.3, contrast all pass */
+.tlab .k{display:inline-block;width:12px;height:2px;border-radius:1px;
+vertical-align:middle;margin:0 5px 0 14px}
+.tlab .k.now{background:#c2872e}
+.tlab .k.pk{background:#5b93cf}
+.mcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));
+gap:12px}
+.mcard{background:var(--panel);border:1px solid var(--bd);border-radius:10px;
+padding:11px 13px 9px;min-width:0}
+.mcard:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (max-width:430px){
+  .mcards{grid-template-columns:1fr}
+  .mhead{flex-wrap:wrap;gap:2px 10px}
+}
+.mhead{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}
+.mlab{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.mnow{font-size:27px;font-weight:600;letter-spacing:-.7px;line-height:1.05;
+color:#c2872e;font-variant-numeric:tabular-nums}
+.mpv{flex:none;font-size:12.5px;color:#5b93cf;font-variant-numeric:tabular-nums;
+font-weight:560}
+.mpv em{font-style:normal;font-size:10px;color:var(--dim);margin-left:5px;
+font-weight:500}
+.mgap{margin-top:2px;font-size:11.5px;color:var(--mut);
+font-variant-numeric:tabular-nums}
+.spk{display:block;width:100%;height:44px;margin-top:8px;overflow:visible}
+/* the signature: the benchmark is a rule at its own height, and the drop from
+   it to the current point IS the shortfall -- not a badge describing one */
+.spk .pk{stroke:#5b93cf;stroke-width:1;stroke-dasharray:2 4;opacity:.6}
+.spk .gap{stroke:#5b93cf;stroke-width:1.5;opacity:.8;stroke-linecap:round}
+.spk .tr{fill:none;stroke:rgba(150,160,172,.42);stroke-width:1.5;
+stroke-linejoin:round;stroke-linecap:round}
+.spk .pkd{fill:#5b93cf}
+.spk .now{fill:#c2872e;stroke:var(--panel);stroke-width:1.5}
 .tmeters{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
 gap:14px 22px;margin-top:13px}
 .tmnote{margin-top:7px;font-size:11px;color:var(--mut)}

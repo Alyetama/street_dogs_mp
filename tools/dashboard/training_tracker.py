@@ -196,11 +196,15 @@ LATEST = {
 
 
 def latest_metrics(rows, task):
-    """[(glossary key, value, best so far)] for the newest epoch.
+    """[{key, latest, peak, peak_epoch, series}] for the newest epoch.
 
-    `best so far` is the running max of THAT metric, which is not the same as
-    the value at the best-fitness epoch -- reporting the latter as "best mAP50"
-    would attribute one metric's peak to another metric's epoch.
+    `peak` is the running max of THAT metric, which is not the value at the
+    best-fitness epoch -- reporting the latter as "best recall" would
+    attribute one metric's peak to another metric's epoch, and the two agree
+    on every run where they happen to coincide.
+
+    The series comes back with it so the card can draw the metric's own shape
+    rather than describing it in words.
     """
     if not rows:
         return []
@@ -210,8 +214,16 @@ def latest_metrics(rows, task):
         v = last.get(col)
         if v is None:
             continue
-        seen = [r[col] for r in rows if r.get(col) is not None]
-        out.append((key, v, max(seen) if seen else None))
+        series = [r.get(col) for r in rows]
+        seen = [(x, i) for i, x in enumerate(series) if x is not None]
+        if not seen:
+            continue
+        pk, pi = max(seen)                      # ties keep the EARLIER epoch
+        pk, pi = max(seen, key=lambda t: (t[0], -t[1]))
+        e = rows[pi].get('epoch')
+        out.append({'key': key, 'latest': v, 'peak': pk,
+                    'peak_epoch': int(e) if e is not None else pi + 1,
+                    'peak_index': pi, 'series': series})
     return out
 
 
