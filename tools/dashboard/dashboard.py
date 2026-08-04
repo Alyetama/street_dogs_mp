@@ -3051,8 +3051,39 @@ def is_real_run(r, floor):
     return r['status'] in REAL and (r['epochs_done'] or 0) >= floor
 
 
+def best_per_project(runs):
+    """{project: run name} -- the highest deciding metric in each project.
+
+    Only runs of the SAME task are compared, because mAP50-95 and top-1
+    accuracy are not the same axis. Ties keep the earlier row, matching how
+    ultralytics breaks a fitness tie.
+
+    This is a measurement over what is on disk, and it can disagree with the
+    registry's `best` -- which is worth seeing rather than hiding. The registry
+    records what was PROMOTED, on reserved data and after a human looked; this
+    column records what merely scored highest on each run's own validation
+    split. When they differ, the promoted one is usually still right.
+    """
+    top = {}
+    for r in runs:
+        v = r.get('best_headline')
+        if v is None or not r.get('task'):
+            continue
+        key = (r['project'], r['task'])
+        if key not in top or v > top[key][0]:
+            top[key] = (v, r['name'])
+    # one winner per project: if a project somehow holds two tasks, the
+    # higher number would be meaningless across them, so keep them separate
+    out = {}
+    for (proj, _task), (v, name) in top.items():
+        if proj not in out or v > out[proj][0]:
+            out[proj] = (v, name)
+    return {p: n for p, (_v, n) in out.items()}
+
+
 def _history(runs):
     """Finished runs as a table -- also the non-hover route to every value."""
+    top = best_per_project(runs)
     body = []
     for r in runs:
         lab, cls, gly = TRK_STATUS.get(r['status'], (r['status'], 'idle', ''))
@@ -3070,6 +3101,15 @@ def _history(runs):
         # 10-epoch rate by the epoch count invents a number that disagrees
         # with it whenever the rate changed.
         dur = _hms(r.get('wall_clock_s')) if r.get('wall_clock_s') else '&mdash;'
+        star = ''
+        if top.get(r['project']) == r['name']:
+            star = (f'<span class="bstar"'
+                    + _t(f'Highest {r.get("headline_label") or "metric"} among '
+                         f'this project\'s runs, on each run\'s own '
+                         f'validation split. Not the same claim as the '
+                         f'registry column, which records what was promoted, '
+                         f'on reserved data.')
+                    + '>&#9733; best</span>')
         body.append(
             f'<tr data-proj="{esc_html(r["project"])}" '
             f'data-key="{esc_html(run_key(r))}" tabindex="0" '
@@ -3082,6 +3122,7 @@ def _history(runs):
             f'<td class="num">{r["epochs_done"] or "&mdash;"}</td>'
             f'<td class="num">{r["best_epoch"] or "&mdash;"}</td>'
             f'<td class="num">{best}</td>'
+            f'<td class="tbest">{star}</td>'
             f'<td class="num">{dur}</td>'
             f'<td>{prom}</td></tr>')
     return (
@@ -3092,6 +3133,11 @@ def _history(runs):
         'best@</th>'
         f'<th class="num"{_t("Best value of the deciding metric on this "
                              "run own validation split.")}>best metric</th>'
+        f'<th{_t("The highest deciding metric among this projects runs, "
+                  "measured from results.csv. Compared only within a task, and "
+                  "on each run own validation split -- two runs trained on "
+                  "different datasets are not strictly comparable.")}>'
+        'best in project</th>'
         f'<th class="num"{_t("Epochs times the mean seconds per epoch.")}>'
         'wall clock</th>'
         '<th>registry</th></tr></thead><tbody>'
@@ -5654,6 +5700,11 @@ color:var(--mut);white-space:nowrap}
 .tst.halt{color:var(--red)}
 .tst.idle{color:var(--dim)}
 .tcand{font-size:10.5px;color:var(--dim)}
+/* the measured winner, said quietly: the registry column beside it carries
+   the stronger claim and should keep the louder styling */
+.bstar{display:inline-flex;align-items:center;gap:4px;font-size:11px;
+color:var(--acc);white-space:nowrap}
+.tbest{white-space:nowrap}
 .tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .thist{min-width:640px}
 .tpage{display:flex;align-items:center;gap:10px;justify-content:flex-end;
@@ -5674,7 +5725,9 @@ outline-offset:2px}
 .tmetric{font-size:12.5px;font-weight:620;color:var(--tx);letter-spacing:-.1px}
 .trun{font-size:11px;color:var(--dim)}
 @media (max-width:700px){
-  .thist th:nth-child(6),.thist td:nth-child(6){display:none}
+  /* wall clock is column 7 now that "best in project" sits at 6 -- an
+     nth-child that does not move with the table hides the wrong column */
+  .thist th:nth-child(7),.thist td:nth-child(7){display:none}
 }
 @media (prefers-reduced-motion:reduce){
   .tmtrack i{transition:none}
