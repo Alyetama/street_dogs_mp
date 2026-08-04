@@ -181,13 +181,18 @@ VIEWS = {
                (r.provenance_class = 'attested') AS model_is_attested
         FROM images i
         LEFT JOIN runs r ON r.gen = i.gen AND r.run_id = i.run_id""",
+    # LEFT, not INNER. A detection whose image row is missing is an
+    # incomplete record, and an inner join answers by pretending it does not
+    # exist -- the row count looked right while 2,541 boxes were invisible.
+    # They come through with NULL context and `has_image` says so.
     'detection_events': """
         SELECT d.*, i.ts, i.orig_w, i.orig_h,
                (d.x2 - d.x1) * (d.y2 - d.y1) AS box_area,
-               i.provenance_class, i.comet_run, i.model, i.model_is_attested
+               i.provenance_class, i.comet_run, i.model, i.model_is_attested,
+               (i.image_id IS NOT NULL) AS has_image
         FROM detections d
-        JOIN image_events i ON i.image_id = d.image_id AND i.gen = d.gen
-                           AND i.cell = d.cell AND i.run_id = d.run_id""",
+        LEFT JOIN image_events i ON i.image_id = d.image_id AND i.gen = d.gen
+                                AND i.cell = d.cell AND i.run_id = d.run_id""",
 }
 
 
@@ -226,11 +231,17 @@ def build(args):
 
     seen = {r[0]: (r[1], r[2]) for r in
             con.execute('SELECT path, size, mtime FROM _files').fetchall()}
+    # ONE snapshot of the directory for both kinds. Listing img, ingesting it,
+    # then listing det let the running sweep commit in between -- det ran three
+    # files ahead of img and the database ended up with 2,541 detections whose
+    # image row did not exist. A shard's img and det parts are committed
+    # together, so a single listing is internally consistent.
+    listing = {k: part_files(root, k) for k in ('img', 'det')}
     total_new = 0
     for kind, cols in (('img', IMG_COLS), ('det', DET_COLS)):
         table = 'images' if kind == 'img' else 'detections'
         todo = []
-        for p in part_files(root, kind):
+        for p in listing[kind]:
             try:
                 st = os.stat(p)
             except OSError:
@@ -323,6 +334,11 @@ def verify(args):
     ni = con.execute('SELECT count(*) FROM images').fetchone()[0]
     nd = con.execute('SELECT count(*) FROM detections').fetchone()[0]
     built = meta_get(con, 'built_at')
+    dangling = con.execute(
+        'SELECT count(*) FROM detections d WHERE NOT EXISTS ('
+        'SELECT 1 FROM images i WHERE i.image_id = d.image_id '
+        'AND i.gen = d.gen AND i.cell = d.cell AND i.run_id = d.run_id)'
+    ).fetchone()[0]
     con.close()
     live = _live_counts(root)
     print(f'built at {built}')
@@ -334,11 +350,16 @@ def verify(args):
         print(f'{label:12}{mine:>14,}{theirs:>14,}{gap:>10,}')
         if gap < 0:
             bad = True
+    print(f'{"detections without an image row":<12}{dangling:>26,}')
     if bad:
         print('\nThis database holds MORE rows than the store. That is not '
               'staleness -- it means rows were counted twice, or the store '
               'lost parts. Investigate before trusting it.')
         return 2
+    if dangling:
+        print(f'\n{dangling:,} detection row(s) have no image row in this '
+              f'database. That is a torn snapshot, not staleness: re-run '
+              f'`build` and it resolves once the matching image parts land.')
     if ni != live['img'] or nd != live['det']:
         print('\nBehind the store, as expected while the sweep runs. '
               'Re-run `build` to catch up -- it only reads new part files.')
