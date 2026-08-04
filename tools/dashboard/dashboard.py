@@ -1695,6 +1695,55 @@ function render(){
   items.forEach(function(c){f.appendChild(tile(c))});
   g.appendChild(f);
   mark();
+  prefetchNext();
+}
+/* Warm the NEXT page's crops once THIS page has finished loading -- never
+   before, or the two compete for the same connections and the page you are
+   looking at gets slower to make the one you are not faster.
+   `reserve` is already in the payload (it is what backfills the grid as you
+   flag), and /hq answers with max-age=86400, so a warmed crop is served from
+   cache when the page turns. */
+var prefetchGen=0,prefetched={};
+function prefetchNext(){
+  /* Wrapped whole: this is an optimisation, and an optimisation that can
+     throw takes down the render it was meant to speed up. It already did --
+     with no Image/navigator in the environment, render() aborted after
+     building the grid and the page showed nothing. */
+  try{ prefetchNext_(); }catch(e){}
+}
+function prefetchNext_(){
+  if(typeof Image==='undefined'||typeof document==='undefined') return;
+  var gen=++prefetchGen;
+  var conn=(typeof navigator!=='undefined'&&navigator.connection)||{};
+  if(conn.saveData) return;              /* the user asked not to spend data */
+  function warm(){
+    if(gen!==prefetchGen||document.hidden) return;
+    var queue=(reserve||[]).map(function(c){return c.name})
+      .filter(function(n){return n&&!prefetched[n]});
+    if(!queue.length) return;
+    var at=0;
+    /* four workers, each pulling the next name when its own image settles */
+    function pump(){
+      if(gen!==prefetchGen||at>=queue.length) return;
+      var name=queue[at++];
+      prefetched[name]=1;
+      var im=new Image();
+      /* onerror counts as settled: a crop with no full-res file must not
+         stall the queue behind it */
+      im.onload=im.onerror=pump;
+      im.src='/hq?name='+encodeURIComponent(name);
+    }
+    for(var k=0;k<4;k++) pump();
+  }
+  var imgs=[].slice.call(document.querySelectorAll('#grid img'));
+  var pending=imgs.filter(function(im){return !im.complete});
+  if(!pending.length){ warm(); return; }
+  var left=pending.length;
+  pending.forEach(function(im){
+    var fin=function(){ if(--left<=0) warm(); };
+    im.addEventListener('load',fin,{once:true});
+    im.addEventListener('error',fin,{once:true});
+  });
 }
 function idx(name){
   for(var i=0;i<items.length;i++)if(items[i].name===name)return i;
@@ -2482,7 +2531,8 @@ def training_root():
 # fresh enough and stops a page full of assets re-walking every run directory.
 # Deliberately NOT lru_cache: that is exactly what froze the reserved-crop
 # count and the dataset path against a config the user had already changed.
-_TRK = {'at': 0.0, 'root': None, 'runs': [], 'error': None}
+_TRK = {'at': 0.0, 'root': None, 'runs': [], 'error': None,
+        'hidden': 0}
 TRK_TTL = 20
 
 
@@ -2503,20 +2553,22 @@ def training_runs():
     now = time.time()
     if _TRK['root'] == root and now - _TRK['at'] < TRK_TTL:
         return _TRK['runs']
-    runs, err = [], None
+    runs, err, n_hidden = [], None, 0
     if root:
         try:
             import training_tracker
             runs = training_tracker.collect(root, registry=best_models())
             hide = hidden_projects()
             if hide:
-                runs = [r for r in runs
-                        if r['project'].lower() not in hide]
+                keep = [r for r in runs if r['project'].lower() not in hide]
+                n_hidden = len(runs) - len(keep)
+                runs = keep
         except Exception as e:
             # swallowing this printed "no runs found", which is a different
             # fact and sends the reader to check the wrong thing
             err = f'{type(e).__name__}: {e}'
-    _TRK.update(at=now, root=root, runs=runs, error=err)
+    _TRK.update(at=now, root=root, runs=runs, error=err,
+                hidden=n_hidden)
     return runs
 
 
@@ -2710,7 +2762,7 @@ def _metric_card(m, label, hover):
     lx, ly = xy(len(m['series']) - 1, m['latest'])
     at_peak = (m['peak'] - m['latest']) <= 1e-9
     spark = (
-        f'<svg class="spk" viewBox="0 0 {W:.0f} {H:.0f}" '
+        f'<svg class="mspk" viewBox="0 0 {W:.0f} {H:.0f}" '
         f'preserveAspectRatio="none" aria-hidden="true">'
         # the rule: the benchmark, drawn where the benchmark actually is
         f'<line class="pk" x1="0" y1="{py:.1f}" x2="{W:.0f}" y2="{py:.1f}"/>'
@@ -3081,13 +3133,20 @@ def render_training():
     shown = [r for r in runs if r['status'] in REAL]
     hidden = len(runs) - len(shown)
     out.append(_history(shown))
+    # Never silently, and never with one reason standing in for two: a run
+    # left out for being unfinished and a project retired in the config are
+    # different facts, and one sentence covering both said something untrue
+    # about each.
+    why = []
     if hidden:
-        # never silently. A run that vanished from the table is a run the
-        # reader will look for and fail to find.
-        out.append(f'<div class="thid">{hidden} run'
-                   f'{"s" if hidden != 1 else ""} not listed: interrupted '
-                   f'before patience or the epoch budget, or no epoch ever '
-                   f'finished.</div>')
+        why.append(f'{hidden} interrupted before patience or the epoch '
+                   f'budget, or never finished an epoch')
+    if _TRK.get('hidden'):
+        why.append(f'{_TRK["hidden"]} in projects hidden by '
+                   f'<code>training_hide_projects</code>')
+    if why:
+        out.append('<div class="thid">Not listed: ' + '; '.join(why)
+                   + '.</div>')
     return ''.join(out)
 
 
@@ -5162,15 +5221,19 @@ font-weight:560}
 font-weight:500}
 .mgap{margin-top:2px;font-size:11.5px;color:var(--mut);
 font-variant-numeric:tabular-nums}
-.spk{display:block;width:100%;height:44px;margin-top:8px;overflow:visible}
+/* NOT .spk: the detection-sweep KPI chip is .kpi.ok.spk, and a bare
+   .spk{height:44px} here clipped its value away with overflow:hidden --
+   the chip rendered its label and nothing else. */
+.mspk{display:block;width:100%;height:44px;margin-top:8px;
+overflow:visible}
 /* the signature: the benchmark is a rule at its own height, and the drop from
    it to the current point IS the shortfall -- not a badge describing one */
-.spk .pk{stroke:#5b93cf;stroke-width:1;stroke-dasharray:2 4;opacity:.6}
-.spk .gap{stroke:#5b93cf;stroke-width:1.5;opacity:.8;stroke-linecap:round}
-.spk .tr{fill:none;stroke:rgba(150,160,172,.42);stroke-width:1.5;
+.mspk .pk{stroke:#5b93cf;stroke-width:1;stroke-dasharray:2 4;opacity:.6}
+.mspk .gap{stroke:#5b93cf;stroke-width:1.5;opacity:.8;stroke-linecap:round}
+.mspk .tr{fill:none;stroke:rgba(150,160,172,.42);stroke-width:1.5;
 stroke-linejoin:round;stroke-linecap:round}
-.spk .pkd{fill:#5b93cf}
-.spk .now{fill:#c2872e;stroke:var(--panel);stroke-width:1.5}
+.mspk .pkd{fill:#5b93cf}
+.mspk .now{fill:#c2872e;stroke:var(--panel);stroke-width:1.5}
 .tmeters{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
 gap:14px 22px;margin-top:13px}
 .tmnote{margin-top:7px;font-size:11px;color:var(--mut)}
@@ -5989,13 +6052,27 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         '</div>';
     }).join('')||'<div class="dnone">no drives reported</div>';
     /* regions: the FULL planned roster (scrolls past ~300px) so a partial
-       sweep never reads as "only these regions exist" — in-progress first
-       by % desc, untouched ones muted at 0% */
+       sweep never reads as "only these regions exist".
+       Order: IN PROGRESS first (that is the only group anything is happening
+       to), nearest-to-done first within it; then finished; then untouched,
+       muted. A plain % desc put every 100% region above the ones actually
+       moving -- which is the comment this code carried while doing the
+       opposite. */
     var rg=j.regions||{},rk=Object.keys(rg);
     keep('regions',rk);
+    function rank(r){
+      if(r.p!=null&&r.p>0&&r.p<100) return 0;   /* moving */
+      if(r.p!=null&&r.p>=100) return 1;         /* done */
+      return 2;                                  /* not started */
+    }
     var all=(rk.length?rk:roster.regions).map(function(nm){
         return {n:nm,p:(live&&rg[nm]!=null)?+rg[nm]||0:null}})
-      .sort(function(a,b){return (b.p||0)-(a.p||0)||a.n.localeCompare(b.n)});
+      .sort(function(a,b){
+        var ra=rank(a),rb=rank(b);
+        if(ra!==rb) return ra-rb;
+        if(ra===0) return (b.p||0)-(a.p||0)||a.n.localeCompare(b.n);
+        return a.n.localeCompare(b.n);
+      });
     var prog=all.filter(function(r){return r.p>0&&r.p<100});
     rHead.textContent=all.length?'Per region \\u2014 '+(live?prog.length:DASH)+
       ' of '+all.length+' in progress':'Per region';
