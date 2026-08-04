@@ -1496,7 +1496,7 @@ min-width:44px;text-align:center}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,
+    smallN=0,minPx=0,harvestN=0,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1533,6 +1533,7 @@ function load(){
     items=j.items||[];reserve=j.reserve||[];page=j.page||0;pages=j.pages||1;
     todoN=j.total_unflagged||0;flaggedN=j.flagged_total||0;
     smallN=j.too_small||0;minPx=j.min_px||0;
+    harvestN=j.harvested_available||0;
     if(j.seen_total!=null)seenN=j.seen_total;
     if(j.positive_total!=null)posN=j.positive_total;
     if(j.collapsed!=null)dupN=j.collapsed;
@@ -1546,6 +1547,10 @@ function load(){
     /* Held-back crops are stated, not silently dropped -- and the threshold
        is named so the number can be argued with. */
     if(smallN)lab+=' \u00b7 '+n(smallN)+' too small to judge (under '+minPx+'px)';
+    /* the queue is two sources now, and which one a crop came from changes
+       what it is: the pool is whatever the sweep passed in the last while,
+       the harvested set was chosen from all 1.2M positives on purpose */
+    if(harvestN)lab+=' \u00b7 '+n(harvestN)+' harvested from the full sweep';
     $('pg').textContent=lab;$('pg2').textContent=lab;
     $('next').disabled=$('next2').disabled=!more;
     $('foot').hidden=!items.length;
@@ -1678,7 +1683,7 @@ function tile(c){
      saved, and the editor reads the original either way. */
   d.innerHTML='<img class="thumb zoom" loading="lazy" alt="detection crop" '+
       'src="/hq?name='+encodeURIComponent(c.name)+'" '+
-      "onerror=\"this.onerror=null;this.src='/recent_crops/"+
+      "onerror=\"this.onerror=null;this.src='"+(c.harvested?'/review_set/':'/recent_crops/')+
       encodeURIComponent(c.name)+"'\">"+
     '<div class="rail"><i style="width:'+pc+'%"></i></div>'+
     '<div class="meta"><span class="id" title="'+att(c.image_id)+'">'+esc(c.image_id)+
@@ -4109,6 +4114,41 @@ REVIEW_SORTS = {
 }
 
 
+# ── the harvested review set ────────────────────────────────────────────────
+# recent_crops/ is a rolling window: 2 crops/s written, newest 3,000 kept, and
+# 0.24% of the sweep's positives held at any moment. Everything else is pruned
+# unreviewed. build_review_set.py picks crops from the WHOLE store on purpose
+# -- confidence band, size floor, spread over cells -- and writes them here,
+# where nothing prunes them.
+#
+# Same filename convention, so every existing mechanism works untouched: the
+# flag ledgers, /hq, the box editor, the country filter, the size floor.
+def review_extra_dir():
+    d = cfg('review_extra_dir', '', env='REVIEW_EXTRA_DIR')
+    # resolved against the REPO, never the cwd: the server is started from
+    # wherever, and a relative path that depends on that is a path that works
+    # until someone starts it from somewhere else
+    return os.path.join(REPO, d) if d and not os.path.isabs(d) else d
+
+
+def review_pool_names():
+    """[(name, directory)] across the live pool and the harvested set.
+
+    The live pool comes first so a fresh detection still surfaces promptly;
+    within a directory the sort decides the order anyway.
+    """
+    out = []
+    for d in (CROPS, review_extra_dir()):
+        if not d:
+            continue
+        try:
+            for n in os.listdir(d):
+                out.append((n, d))
+        except OSError:
+            continue          # absent or unreadable is not an error here
+    return out
+
+
 # ── crops too small for anyone to judge ─────────────────────────────────────
 # /hq cuts each tile from the ORIGINAL at native box resolution, so what the
 # reviewer sees is the box's true pixel size. A 17x15 box in a 1920x1080 frame
@@ -4209,10 +4249,13 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
                            for i, n in sorted((_cd.get('counts') or {}).items(),
                                               key=lambda kv: (-kv[1], kv[0]))],
              'countries_generated': _cd.get('generated')}
-    try:
-        names = os.listdir(CROPS)
-    except OSError:
+    pooled = review_pool_names()
+    if not pooled:
         return empty
+    names = [n for n, _ in pooled]
+    # which directory each crop came from, so the client can be served the
+    # right bytes without guessing
+    where = {n: d for n, d in pooled}
     try:
         full = set(os.listdir(os.path.join(CROPS, 'full')))
     except OSError:
@@ -4251,6 +4294,9 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
                       'ts': int(m.group(1)),
                       'conf': round(int(m.group(3)) / 100.0, 2),
                       'country': iso,
+                      # harvested crops have no burned-in preview frame, so
+                      # the lightbox opens on the ORIGINAL through /hq
+                      'harvested': where.get(name) != CROPS,
                       'has_full': name in full})
     # Hold back what cannot be judged. A crop whose geometry the store does
     # not have yet (~9.5% of the live pool, shard not committed) is NOT
@@ -4351,6 +4397,9 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
             'pages': pages, 'flagged_total': len(flagged_ids),
             # never a silent cap: the page says how many it is holding back
             'too_small': too_small, 'min_px': floor,
+            # crops only: the set's manifest sits in the same directory
+            'harvested_available': sum(1 for n, d in pooled
+                                       if d != CROPS and _CROP_RE.match(n)),
             'positive_total': n_pos, 'seen_total': len(seen_ids),
             'collapsed': collapsed,
             # Options tallied from the live queue, NOT from the index's
