@@ -453,7 +453,12 @@ def cmd_run(args):
                           region_totals=region_corpus)
     status.start()
     # the digest the manifest recorded, so each row says which model made it
-    writer = store.Writer(detect_root, model_sha8=model_sha8)
+    # max_det too: the writer's NMS-saturation guard compares against it, and
+    # left at the module default it watches for 300 boxes on an engine that
+    # can only ever return cfg['max_det'].
+    writer = store.Writer(detect_root, max_det=int(cfg.get('max_det')
+                                                   or store.MAX_DET),
+                          model_sha8=model_sha8)
     coll = ShardCollector(writer,
                           args.gen,
                           status,

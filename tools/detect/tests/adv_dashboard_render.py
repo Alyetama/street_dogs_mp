@@ -893,10 +893,10 @@ def check_training_tracker():
             with open(f, 'w') as fh:
                 fh.write(cols + '\n1,1,2,3,1,2,3\n2,1,1,1,1,1,1\n')
             r = tt.read_results(f)
-            tr, _ = tt.loss_series(r)
-            if tr[0] != 6:
-                bad.append(f't5 {heads} summed to {tr[0]}, not 6 -- a head '
-                           f'was dropped')
+            tr, va = tt.loss_series(r)
+            if tr[0] != 6 or va[0] != 6:
+                bad.append(f't5 {heads} summed to train={tr[0]} val={va[0]}, '
+                           f'not 6 -- a head was dropped')
             if not tt.loss_label(r).startswith(want):
                 bad.append(f't5 {heads} labelled {tt.loss_label(r)!r}')
 
@@ -964,10 +964,47 @@ def check_training_tracker():
         if wrong:
             bad.append(f't4 epoch-less runs reported as {wrong}')
 
+        # t7 the detect fitness formula CHANGED in ultralytics 8.4. Keyed on
+        # the wrong one, train-22 was reported early-stopped at best@248 when
+        # it ran its full 300-epoch budget and peaked at 262.
+        det = [{'epoch': i + 1, 'metrics/mAP50(B)': m50,
+                'metrics/mAP50-95(B)': m95}
+               for i, (m50, m95) in enumerate([(0.90, 0.40), (0.50, 0.41)])]
+        if tt.best_index(det, 'detect', tt.DET_W_84) != 1:
+            bad.append('t7 the 8.4 fitness (mAP50-95 alone) picked the wrong '
+                       'epoch')
+        if tt.best_index(det, 'detect', tt.DET_W_LEGACY) != 0:
+            bad.append('t7 the <=8.3 fitness (0.1/0.9) picked the wrong epoch')
+        if tt.det_weights('8.4.115') != tt.DET_W_84 or \
+                tt.det_weights('8.3.165') != tt.DET_W_LEGACY:
+            bad.append(f't7 version->weights mapping is wrong: '
+                       f'8.4.115->{tt.det_weights("8.4.115")} '
+                       f'8.3.165->{tt.det_weights("8.3.165")}')
+        # ultralytics keeps replacing the best while fitness is still 0, so a
+        # run that never leaves zero has its best at the LAST epoch
+        zero = [{'epoch': i + 1, 'metrics/mAP50(B)': 0.0,
+                 'metrics/mAP50-95(B)': 0.0} for i in range(5)]
+        if tt.best_index(zero, 'detect') != 4:
+            bad.append('t7 the best_fitness==0 clause is not reproduced')
+
+        # t8 a run directory called "train" is ultralytics' DEFAULT name, and
+        # "train" is also a dataset split -- pruning by name alone hid it
+        d8 = os.path.join(tmp, 'named')
+        for name in ('train', 'val', 'my_run'):
+            os.makedirs(os.path.join(d8, 'runs', 'detect', name))
+            with open(os.path.join(d8, 'runs', 'detect', name,
+                                   'args.yaml'), 'w') as fh:
+                fh.write(f'name: {name}\nproject: p\n')
+        os.makedirs(os.path.join(d8, 'dataset', 'images', 'train'))
+        got8 = sorted(r['name'] for r in tt.discover(d8))
+        if got8 != ['my_run', 'train', 'val']:
+            bad.append(f't8 discovery dropped default-named runs: {got8}')
+
     if bad:
         raise SystemExit('training tracker:\n  ' + '\n  '.join(bad))
     print('ok   training tracker: live claim is exclusive and save_dir-aware, '
-          'fitness ties break first, loss heads come from the file')
+          'fitness matches the run ultralytics version, default-named runs '
+          'are found')
 
 
 def main():

@@ -129,6 +129,7 @@ def main():
         # for the real one, so point it at the fake repo for the duration
         real = store.get_detect_root
 
+        rm_at_start = __import__('run_manifest').MEASURED_AT_START
         store.get_detect_root = lambda repo_root=None: droot
         try:
             cfg = {'engine': eng, 'conf': 0.05, 'iou': 0.9, 'max_det': 256,
@@ -147,6 +148,15 @@ def main():
             files = os.listdir(os.path.join(droot, 'runs', 'gen=0001'))
             check('t4 the two manifests are separate files',
                   len(files) == 2, f'{sorted(files)}')
+            # the CLASS of every document these paths produce, asserted --
+            # both directions could be inverted with the suite green
+            check('t11 write_for_run classes its record measured_at_start',
+                  all(d.get('provenance_class') == rm_at_start
+                      for d in docs),
+                  f'{[d.get("provenance_class") for d in docs]}')
+            check('t11 and stamps the schema version',
+                  all(d.get('schema') == run_manifest.SCHEMA for d in docs),
+                  f'{[d.get("schema") for d in docs]}')
         finally:
             store.get_detect_root = real
     finally:
@@ -164,7 +174,9 @@ def main():
            'corroboration': {'identical': 0, 'differing': 0,
                              'shares_with_run_ids': []}}
     basis, line = rm._describe(att, None)
-    check('t6 an attested row is labelled ATTESTED', basis == rm.BASIS[rm.ATTESTED],
+    # Against the literal, not against rm.BASIS[rm.ATTESTED] -- comparing
+    # _describe's output to the dict it reads from can never fail.
+    check('t6 an attested row is labelled ATTESTED', basis == 'ATTESTED',
           f'got {basis!r}')
     check('t6 an attested row always says NOT measured', 'NOT measured' in line,
           line[:90])
@@ -186,6 +198,20 @@ def main():
                    'comet_key': 'ef4a85c3c1ee4bfc8d6805fb413c43f3'}}, None)
     check('t8 a late digest says it was taken after the rows',
           'AFTER the run had already written rows' in line, line[:110])
+
+    # t12 a class this version does not understand is not a measurement
+    basis, line = rm._describe({'schema': 99, 'provenance_class': 'attested_v3',
+                                'gen': 1, 'run_id': 1,
+                                'model': {'sha8': 'abcd1234',
+                                          'comet_run': 'train-99'}}, None)
+    check('t12 an unrecognised provenance_class is not rendered as measured',
+          basis == 'UNRECOGNISED' and 'train-99' not in line, f'{basis} {line[:70]}')
+
+    # t13 a corroboration that never ran must not read as a measured zero
+    _, line = rm._describe(dict(att, corroboration={'status': 'failed',
+                                                    'identical': None}), None)
+    check('t13 a skipped/failed corroboration says so',
+          'NOT measured either way' in line, line[-70:])
 
     # t9 generation 0 must not widen the glob to every generation
     with tempfile.TemporaryDirectory() as tmp:

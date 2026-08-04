@@ -171,12 +171,26 @@ def derive_start(root, gen, run_id):
     base = int(med) - (int(med) & 0xFFFF) + run_id
     t = min((base - 65536, base, base + 65536), key=lambda c: abs(c - med))
     spread = max(est) - min(est)
-    if abs(t - med) > 32768:
-        return (None, None, 'estimate too loose to resolve the 18.2h wrap')
-    return (int(t), max(60, int(spread)),
+    # `abs(t - med) > 32768` can never fire: min() over three candidates 65536
+    # apart always lands within half a period. The real risk is the estimate
+    # being off by more than half a wrap, which SNAPS CONFIDENTLY TO THE WRONG
+    # SECOND -- that already happened once here, producing a start a full day
+    # out that satisfied the congruence perfectly. Guard the input instead.
+    if spread > 32768:
+        return (None, None,
+                f'part-file estimates span {int(spread)}s, more than half the '
+                f'18.2h run_id wrap -- the correct multiple cannot be chosen')
+    # The uncertainty is how far the individual estimates sit from the value
+    # chosen, NOT how much they agree with each other: a systematic shift moves
+    # them all together and would report near-zero error while being wrong.
+    resid = max(abs(e - t) for e in est)
+    return (int(t), max(1, int(resid)),
             f'derived: median over {len(est)} part files of '
             f'(file mtime - max ts_off in that file), snapped to the unique '
-            f'second with int(t) & 0xFFFF == run_id (spread {int(spread)}s)')
+            f'second with int(t) & 0xFFFF == run_id; part estimates span '
+            f'{int(spread)}s and the worst sits {int(resid)}s from the value '
+            f'chosen. Part mtimes change if the store is ever compacted, '
+            f'which would invalidate this derivation.')
 
 
 def cmd_write(args):
@@ -314,14 +328,20 @@ def cmd_attest(args):
         except (OSError, ValueError, AttributeError):
             pass
 
-    corr = {}
-    if not args.no_corroborate:
-        corr = cross_run_agreement(_detect_root(args.repo), args.gen)
+    if args.no_corroborate:
+        corr_status, corr = 'skipped', {}
+    else:
+        corr_status, corr = cross_run_agreement(_detect_root(args.repo),
+                                                args.gen)
 
     stamp = time.strftime('%Y-%m-%d %H:%M:%S')
     att_id = args.id or f'att-{time.strftime("%Y%m%d")}-{(args.run or "x")}'
     covered = sorted(args.run_ids)
-    written = []
+    # Build every document and check every destination BEFORE writing any of
+    # them. Raising from inside the write loop would leave files on disk whose
+    # attestation block claims to cover runs that were never written -- a
+    # record that lies about its own scope.
+    planned, written = [], []
     for rid in covered:
         started, unc, how = derive_start(_detect_root(args.repo), args.gen, rid)
         c = corr.get(rid)
@@ -363,17 +383,11 @@ def cmd_attest(args):
                 'covers_fields': ['attested_model.comet_run',
                                   'attested_model.comet_project'],
             },
-            # measured, and the only thing here that is
-            'corroboration': (
-                {'method': 'detections compared between runs that both '
-                           'processed the same image_id, box for box',
-                 'identical': c['identical'], 'differing': c['differing'],
-                 'shares_with_run_ids': sorted(c['with'])} if c else
-                {'method': 'detections compared between runs that both '
-                           'processed the same image_id, box for box',
-                 'identical': 0, 'differing': 0, 'shares_with_run_ids': [],
-                 'note': 'no image in this run was processed by any other '
-                         'run, so nothing corroborates it'}),
+            # measured, and the only thing in this file that is -- so it
+            # carries its own status. "we compared and found nothing" and
+            # "the comparison never ran" are different facts and a reader
+            # must never have to guess which one a zero means.
+            'corroboration': _corroboration(corr_status, corr.get(rid)),
             # unknowable for a historical run. NOT today's config values:
             # the override file is untracked, and the env has since moved.
             'inference': {'conf': None, 'iou': None, 'max_det': None,
@@ -386,6 +400,22 @@ def cmd_attest(args):
         out = os.path.join(root, name)
         if os.path.exists(out) and not args.force:
             raise SystemExit(f'{out} exists; pass --force')
+        # never overwrite a MEASUREMENT with a claim, --force or not
+        if os.path.exists(out):
+            try:
+                with open(out) as fh:
+                    prev = json.load(fh)
+                if prev.get('provenance_class') in (MEASURED_AT_START,
+                                                    MEASURED_LATE):
+                    raise SystemExit(
+                        f'{out} is a {prev["provenance_class"]} record; '
+                        f'refusing to replace a measurement with an '
+                        f'attestation')
+            except (OSError, ValueError):
+                pass
+        planned.append((rid, out, c, doc))
+
+    for rid, out, c, doc in planned:
         tmp = out + '.tmp'
         with open(tmp, 'w') as fh:
             json.dump(doc, fh, indent=1)
@@ -393,16 +423,43 @@ def cmd_attest(args):
             os.fsync(fh.fileno())
         os.replace(tmp, out)
         written.append((rid, out, c))
+    try:                                  # the rename itself must be durable
+        fd = os.open(root, os.O_RDONLY)
+        os.fsync(fd)
+        os.close(fd)
+    except OSError:
+        pass
     print(f'attested {len(written)} run(s) as {run!r}, by {who}')
     print(f'  statement: {args.statement}')
     for rid, out, c in written:
-        n = (f'{c["identical"]:,} identical / {c["differing"]} differing'
+        n = ('corroboration NOT measured' if corr_status != 'measured' else
+             f'{c["identical"]:,} identical / {c["differing"]} differing'
              if c else 'NO corroboration')
         print(f'  run {rid:>6}  {n:<40} {os.path.basename(out)}')
     print('\nNothing about these runs was measured. The model block in each '
           'file is null;\nthe claim is in attested_model and is labelled as '
           'a claim.')
     return 0
+
+
+def _corroboration(status, c):
+    base = {'status': status,
+            'method': ('one row per (run, image_id, det_idx) after collapsing '
+                       'cell twins; boxes compared between runs that both '
+                       'processed the same image_id, within the same gen')}
+    if status != 'measured':
+        base.update(identical=None, differing=None, shares_with_run_ids=None,
+                    note=('the comparison did not run, so this says nothing '
+                          'either way'))
+        return base
+    if not c:
+        base.update(identical=0, differing=0, shares_with_run_ids=[],
+                    note=('measured: no image in this run was processed by '
+                          'any other run, so nothing corroborates it'))
+        return base
+    base.update(identical=c['identical'], differing=c['differing'],
+                shares_with_run_ids=sorted(c['with']))
+    return base
 
 
 def _detect_root(repo):
@@ -412,12 +469,21 @@ def _detect_root(repo):
 
 
 def cross_run_agreement(root, gen):
-    """{run_id: {identical, differing, with}} -- measured, not asserted.
+    """(status, {run_id: {identical, differing, with}}) -- measured, not asserted.
 
     Two runs that both processed an image_id and produced byte-identical boxes
     ran the same weights through the same graph: a different export precision
-    or build moves the floats. This does not prove WHICH model, but it does
-    tie the runs to each other, so a digest measured for one reaches the rest.
+    or build moves the floats. This does not prove WHICH model, but it ties the
+    runs to each other, so a digest measured for one reaches the rest.
+
+    THE SAME IMAGE IS STORED ONCE PER CELL IT FALLS IN. A self-join on the raw
+    rows therefore multiplies every comparison by (twins on the left x twins on
+    the right) -- it reported 123,598 agreeing detections for a run that has
+    11,749, an 11.2x inflation, and those numbers were written into permanent
+    records. Deduplicate to one row per (run, image, det) FIRST.
+
+    The status is returned rather than implied: a comparison that was skipped
+    or that crashed must never be recorded as one that ran and found nothing.
     """
     try:
         import duckdb
@@ -425,27 +491,31 @@ def cross_run_agreement(root, gen):
         import store as _store
         img = _store._sql_src(_store._store_globs(root, 'img'))
         det = _store._sql_src(_store._store_globs(root, 'det'))
+        g = f'{gen:04d}'
         con = duckdb.connect()
-        con.execute(f'CREATE TEMP TABLE sh AS SELECT image_id FROM {img} '
-                    f'GROUP BY 1 HAVING count(DISTINCT run_id) > 1')
-        con.execute(f'CREATE TEMP TABLE d AS SELECT d.image_id, d.run_id, '
-                    f'd.det_idx, round(d.conf,4) c, round(d.x1,2) x1, '
-                    f'round(d.y1,2) y1, round(d.x2,2) x2, round(d.y2,2) y2 '
-                    f'FROM {det} d JOIN sh USING (image_id)')
+        # one row per (run, image, det): cell twins collapse here, not later
+        con.execute(
+            f"CREATE TEMP TABLE u AS SELECT DISTINCT run_id, image_id, "
+            f"det_idx, round(conf,4) c, round(x1,2) x1, round(y1,2) y1, "
+            f"round(x2,2) x2, round(y2,2) y2 FROM {det} WHERE gen = '{g}'")
+        # run_id is a 16-bit wrap and is reused across generations, so the
+        # generation filter is load-bearing, not decoration
+        con.execute(f"CREATE TEMP TABLE sh AS SELECT image_id FROM {img} "
+                    f"WHERE gen = '{g}' GROUP BY 1 "
+                    f"HAVING count(DISTINCT run_id) > 1")
+        eq = ('a.c=b.c AND a.x1=b.x1 AND a.y1=b.y1 AND a.x2=b.x2 '
+              'AND a.y2=b.y2')
         rows = con.execute(
-            'SELECT a.run_id, b.run_id, '
-            'count(*) FILTER (WHERE a.c=b.c AND a.x1=b.x1 AND a.y1=b.y1 '
-            '                 AND a.x2=b.x2 AND a.y2=b.y2), '
-            'count(*) FILTER (WHERE NOT (a.c=b.c AND a.x1=b.x1 AND a.y1=b.y1 '
-            '                 AND a.x2=b.x2 AND a.y2=b.y2)) '
-            'FROM d a JOIN d b ON a.image_id=b.image_id '
-            'AND a.det_idx=b.det_idx AND a.run_id < b.run_id '
-            'GROUP BY 1, 2').fetchall()
+            f'SELECT a.run_id, b.run_id, count(*) FILTER (WHERE {eq}), '
+            f'count(*) FILTER (WHERE NOT ({eq})) '
+            f'FROM u a JOIN u b ON a.image_id=b.image_id '
+            f'AND a.det_idx=b.det_idx AND a.run_id < b.run_id '
+            f'JOIN sh ON sh.image_id = a.image_id GROUP BY 1, 2').fetchall()
         con.close()
     except Exception as e:
         print(f'WARNING: could not measure cross-run agreement ({e})',
               file=sys.stderr)
-        return {}
+        return ('failed', {})
     out = {}
     for ra, rb, same, diff in rows:
         for r, o in ((int(ra), int(rb)), (int(rb), int(ra))):
@@ -454,7 +524,7 @@ def cross_run_agreement(root, gen):
             e['differing'] += int(diff)
             if o not in e['with']:
                 e['with'].append(o)
-    return out
+    return ('measured', out)
 
 
 def _describe(d, sha8):
@@ -467,10 +537,14 @@ def _describe(d, sha8):
         am = d.get('attested_model') or {}
         c = d.get('corroboration') or {}
         # The attester and "NOT measured" are part of the sentence, not a
-        # suffix that a narrower terminal could drop.
-        who = f'{am.get("comet_run") or "?"} -- asserted by ' \
-              f'{(a.get("by") or "?").split(" <")[0]} {(a.get("at") or "")[:10]}, NOT measured'
-        if c.get('identical'):
+        # suffix a narrower terminal could drop.
+        who = (f'{am.get("comet_run") or "?"} -- asserted by '
+               f'{(a.get("by") or "?").split(" <")[0]} '
+               f'{(a.get("at") or "")[:10]}, NOT measured')
+        st = c.get('status')
+        if st is not None and st != 'measured':
+            who += f'; corroboration {st} -- NOT measured either way'
+        elif c.get('identical'):
             who += (f'; {c["identical"]:,} identical detections with runs '
                     f'{c.get("shares_with_run_ids")}, '
                     f'{c.get("differing", 0)} conflicting')
@@ -480,6 +554,12 @@ def _describe(d, sha8):
     if cls is None:
         return 'unknown', ('schema 1 manifest -- it does not say whether its '
                            'digest was measured at run start or later')
+    if cls not in BASIS:
+        # A class this code does not understand is not a measurement. Falling
+        # through to the model{} renderer would print a future "attested_v3"
+        # record in exactly the shape of a reading.
+        return 'UNRECOGNISED', (f'provenance_class {cls!r} is not understood '
+                                f'by this version -- treat as unverified')
     who = f'{m.get("comet_run") or "?"}'
     if m.get('comet_key'):
         who += f'  [{m["comet_key"][:8]}]'
@@ -532,10 +612,14 @@ def cmd_show(args):
                 continue
             docs = hit or docs
         if len(docs) > 1:
+            # Each candidate still goes through _describe: the guarantee that
+            # a claim never renders as a reading has to hold on EVERY path,
+            # and this one used to format the docs itself.
             print(f'{int(gen):>4}{int(rid):>8}{n:>12,}  {"AMBIGUOUS":<12}'
-                  f'{len(docs)} runs share run_id={int(rid)}: '
-                  + ', '.join(f'{(d.get("model") or {}).get("sha8") or "?"}'
-                              f'@{d.get("run_started") or "?"}' for d in docs))
+                  f'{len(docs)} runs share run_id={int(rid)}')
+            for d in docs:
+                b, w = _describe(d, sha8)
+                print(f'{"":>24}  {b:<12}{w}')
             continue
         if not docs:
             unattributed += n

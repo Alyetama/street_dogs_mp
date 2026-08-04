@@ -91,7 +91,56 @@ def task_of(rows):
     return None
 
 
-def fitness_of(row, task):
+# The detect fitness formula CHANGED between ultralytics releases, and both
+# releases are installed on this machine:
+#   <= 8.3  Metric.fitness w = [0, 0, 0.1, 0.9]  -> 0.1*mAP50 + 0.9*mAP50-95
+#   >= 8.4  Metric.fitness w = [0, 0, 0.0, 1.0]  -> mAP50-95 alone
+# Hardcoding the 8.3 form made three runs disagree with what actually happened
+# on disk: train-22 was reported early-stopped at best@248 when it ran its full
+# 300-epoch budget and peaked at 262. Nothing looked wrong -- the epoch was a
+# plausible number in the right range.
+DET_W_LEGACY = (0.1, 0.9)
+DET_W_84 = (0.0, 1.0)
+_VER_RE = re.compile(rb'8\.\d+\.\d+')
+
+
+def ultra_version(run_dir):
+    """The ultralytics version that wrote this run, from its checkpoint.
+
+    The version is in the checkpoint's pickle. Read with zipfile alone -- no
+    torch, no unpickling of untrusted data, and only the small data.pkl member
+    rather than the 100MB of weights beside it.
+    """
+    for w in ('weights/best.pt', 'weights/last.pt'):
+        p = os.path.join(run_dir, w)
+        if not os.path.exists(p):
+            continue
+        try:
+            import zipfile
+            with zipfile.ZipFile(p) as z:
+                names = [n for n in z.namelist() if n.endswith('data.pkl')]
+                if not names:
+                    continue
+                m = _VER_RE.search(z.read(names[0]))
+            if m:
+                return m.group(0).decode()
+        except Exception:
+            pass
+    return None
+
+
+def det_weights(version):
+    """(w_mAP50, w_mAP50-95) for a version string, or None if unknown."""
+    if not version:
+        return None
+    try:
+        major, minor = (int(x) for x in version.split('.')[:2])
+    except ValueError:
+        return None
+    return DET_W_84 if (major, minor) >= (8, 4) else DET_W_LEGACY
+
+
+def fitness_of(row, task, det_w=DET_W_84):
     """Ultralytics' fitness: what early stopping compares, epoch to epoch."""
     if task == 'classify':
         a = row.get(CLS_FITNESS[0])
@@ -104,19 +153,26 @@ def fitness_of(row, task):
         m95 = row.get('metrics/mAP50-95(B)')
         if m95 is None:
             return None
-        return 0.1 * (m50 if m50 is not None else 0.0) + 0.9 * m95
+        return det_w[0] * (m50 if m50 is not None else 0.0) + det_w[1] * m95
     return None
 
 
-def best_index(rows, task):
-    """Index of the best epoch, ties broken toward the FIRST -- as ultralytics
-    does. Python's max() breaks toward the last, which is the opposite."""
-    best, at = None, None
+def best_index(rows, task, det_w=DET_W_84):
+    """Index of the best epoch, exactly as ultralytics' EarlyStopping tracks it.
+
+    Two behaviours that are easy to miss and both change the answer:
+      - a tie keeps the EARLIER epoch (strict >), where Python's max() keeps
+        the later one;
+      - `or self.best_fitness == 0` means that while fitness is still zero,
+        EVERY epoch replaces the best -- so a run that never leaves 0.0 has its
+        best at the LAST epoch, and never early-stops.
+    """
+    best, at = 0.0, None
     for i, r in enumerate(rows):
-        f = fitness_of(r, task)
-        if f is None:
+        f = fitness_of(r, task, det_w)
+        if f is None:                      # val=False epochs do not count
             continue
-        if best is None or f > best:   # strict >, so a tie keeps the earlier
+        if f > best or best == 0.0:
             best, at = f, i
     return at
 
@@ -283,7 +339,10 @@ def live_trainings():
             if '=' in a and not a.startswith('-'):
                 k, _, v = a.partition('=')
                 kv[k] = v
-        if 'model' not in kv and 'data' not in kv:
+        # `yolo train resume=path/to/last.pt` is the documented resume form
+        # and carries neither model= nor data=. Dropping it made a resumed
+        # training invisible: no live card, and the run listed as interrupted.
+        if not ({'model', 'data', 'resume'} & set(kv)):
             continue
         rec = {'pid': pid, 'argv': argv, 'project': kv.get('project'),
                'name': kv.get('name'), 'data': kv.get('data'),
@@ -372,9 +431,24 @@ def attach_live(runs, lives):
 
 
 # ── discovery ───────────────────────────────────────────────────────────────
+# Names worth not descending into -- but ONLY when the directory is not itself
+# a run. 'train' is on this list because a dataset split is called train and is
+# full of images; it is ALSO ultralytics' default run name (cfg: name = name or
+# f"{args.mode}"), so pruning it by name alone hid every run started without
+# name= -- including, on this machine, runs/detect/train and
+# runs/detect/DogDetection/train.
 SKIP_DIRS = {'weights', 'node_modules', '__pycache__', 'images', 'labels',
              'train', 'val', 'test', 'archived', 'archived_datasets'}
 MAX_DEPTH = 5
+
+
+def _prunable(cur, d):
+    """A directory holding an args.yaml is a run, whatever it is called."""
+    if d.startswith('.'):
+        return True
+    if d not in SKIP_DIRS:
+        return False
+    return not os.path.isfile(os.path.join(cur, d, 'args.yaml'))
 
 
 def discover(root, projects=None):
@@ -399,8 +473,7 @@ def discover(root, projects=None):
         depth = cur[len(base):].count(os.sep)
         if depth >= MAX_DEPTH:
             dirs[:] = []
-        dirs[:] = sorted(d for d in dirs
-                         if not d.startswith('.') and d not in SKIP_DIRS)
+        dirs[:] = sorted(d for d in dirs if not _prunable(cur, d))
         if 'args.yaml' not in files:
             continue
         dirs[:] = []                      # a run holds no nested runs
@@ -420,7 +493,15 @@ def summarize(run, live=None, registry=None):
     rows = read_results(os.path.join(run['dir'], 'results.csv'))
     task = task_of(rows) or ('classify' if 'cls' in str(
         (run.get('args') or {}).get('model', '')) else None)
-    bi = best_index(rows, task)
+    version = ultra_version(run['dir']) if task == 'detect' else None
+    det_w = det_weights(version) or DET_W_84
+    bi = best_index(rows, task, det_w)
+    # An unknown version only matters if the two formulas actually disagree on
+    # THIS run. Saying "uncertain" when both agree would be noise; staying
+    # silent when they differ would be the wrong kind of quiet.
+    formula_uncertain = False
+    if task == 'detect' and not det_weights(version):
+        formula_uncertain = best_index(rows, task, DET_W_LEGACY) != bi
     args = run.get('args') or {}
 
     epochs_planned = int(args.get('epochs') or 0) or None
@@ -435,6 +516,8 @@ def summarize(run, live=None, registry=None):
         e = rows[i].get('epoch') if 0 <= i < len(rows) else None
         return int(e) if e is not None else (i + 1)
 
+    last_epoch = epoch_at(done - 1) if done else None
+
     # seconds per epoch from the cumulative 'time' column, over the last 10
     # epochs -- an average over the whole run understates a slowdown
     secs = None
@@ -442,6 +525,10 @@ def summarize(run, live=None, registry=None):
     if len(tcol) >= 2:
         k = min(10, len(tcol) - 1)
         secs = (tcol[-1] - tcol[-1 - k]) / k
+        if secs <= 0:
+            # the 'time' column restarts at 0 on resume, so a window spanning
+            # the restart yields a negative rate -- and a negative ETA
+            secs = None
 
     head_key, head_label = HEADLINE.get(task, (None, ''))
     curve = [r.get(head_key) for r in rows] if head_key else []
@@ -455,10 +542,13 @@ def summarize(run, live=None, registry=None):
         status = 'running'
     elif done == 0:
         status = 'never_started'
+    elif epochs_planned and (last_epoch or done) >= epochs_planned:
+        # Checked BEFORE patience: a run that reached its epoch budget ran to
+        # the end by definition. With this test second, train-22 -- 300 rows of
+        # a 300-epoch budget -- was labelled early-stopped.
+        status = 'completed'
     elif patience and since_best is not None and since_best >= patience:
         status = 'early_stopped'
-    elif epochs_planned and done >= epochs_planned:
-        status = 'completed'
     else:
         status = 'interrupted'
     stopped_early = status == 'early_stopped'
@@ -479,13 +569,18 @@ def summarize(run, live=None, registry=None):
         'task': task, 'epochs_done': done, 'epochs_planned': epochs_planned,
         'patience': patience,
         'best_epoch': epoch_at(bi) if bi is not None else None,
-        'last_epoch': epoch_at(done - 1) if done else None,
+        'last_epoch': last_epoch,
         'best_fitness': fitness_of(rows[bi], task) if bi is not None else None,
         'best_headline': (curve[bi] if bi is not None and bi < len(curve)
                           else None),
         'last_headline': curve[-1] if curve else None,
         'since_best': since_best, 'secs_per_epoch': secs,
         'headline_key': head_key, 'headline_label': head_label,
+        'wall_clock_s': (tcol[-1] if tcol else None),
+        'ultralytics': version, 'fitness_uncertain': formula_uncertain,
+        'fitness_formula': ('mAP50-95' if det_w == DET_W_84 else
+                            '0.1*mAP50 + 0.9*mAP50-95') if task == 'detect'
+                           else '(top1 + top5) / 2',
         'curve': curve, 'train_loss': tr, 'val_loss': va,
         'loss_label': loss_label(rows),
         'live': bool(live), 'pid': live['pid'] if live else None,

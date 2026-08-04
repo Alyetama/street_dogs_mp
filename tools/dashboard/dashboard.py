@@ -2462,7 +2462,7 @@ def training_root():
 # fresh enough and stops a page full of assets re-walking every run directory.
 # Deliberately NOT lru_cache: that is exactly what froze the reserved-crop
 # count and the dataset path against a config the user had already changed.
-_TRK = {'at': 0.0, 'root': None, 'runs': []}
+_TRK = {'at': 0.0, 'root': None, 'runs': [], 'error': None}
 TRK_TTL = 20
 
 
@@ -2471,14 +2471,16 @@ def training_runs():
     now = time.time()
     if _TRK['root'] == root and now - _TRK['at'] < TRK_TTL:
         return _TRK['runs']
-    runs = []
+    runs, err = [], None
     if root:
         try:
             import training_tracker
             runs = training_tracker.collect(root, registry=best_models())
-        except Exception:
-            runs = []
-    _TRK.update(at=now, root=root, runs=runs)
+        except Exception as e:
+            # swallowing this printed "no runs found", which is a different
+            # fact and sends the reader to check the wrong thing
+            err = f'{type(e).__name__}: {e}'
+    _TRK.update(at=now, root=root, runs=runs, error=err)
     return runs
 
 
@@ -2525,7 +2527,7 @@ def _pts(vals, x0, y0, w, h, lo, hi):
     span = (hi - lo) or 1.0
     out = []
     for i, v in enumerate(vals):
-        if v is None:
+        if v is None or v != v or v in (float('inf'), float('-inf')):
             continue
         x = x0 + (w * (i / (n - 1)) if n > 1 else w / 2)
         out.append((x, y0 + h - h * ((v - lo) / span), i, v))
@@ -2586,12 +2588,19 @@ def _chart(cid, run, metric, series, marks=(), fmt='.3f'):
             continue
         if s.get('dim'):
             body.append(f'<path class="ctx" d="{_path(p)}"/>')
+        elif len(p) == 1:
+            # a one-point path paints nothing; a successful 1-epoch run would
+            # render as an empty plot, which is what "no data" looks like
+            body.append(f'<circle class="mk" cx="{p[0][0]:.1f}" '
+                        f'cy="{p[0][1]:.1f}" r="4" '
+                        f'style="fill:{s["color"]}"/>')
         else:
             body.append(f'<path class="ln" d="{_path(p)}" '
                         f'style="stroke:{s["color"]}"/>')
             keyed.append({'name': s['name'], 'color': s['color'],
-                          'values': [None if v is None else round(v, 6)
-                                     for v in s['values']]})
+                          'values': [None if v is None or v != v
+                                     or v in (float('inf'), float('-inf'))
+                                     else round(v, 6) for v in s['values']]})
     for m in marks:
         p = _pts([m['v'] if i == m['i'] else None for i in range(n)],
                  L, T, w, h, lo, hi)
@@ -2613,8 +2622,10 @@ def _chart(cid, run, metric, series, marks=(), fmt='.3f'):
     # No rotated y-axis label: the caption already names the quantity, and
     # the rotated text landed on top of the tick values.
     axis = ''
+    # allow_nan=False would raise; the point is to emit valid JSON, so
+    # non-finite values become null -- the same thing a missing epoch is.
     data = json.dumps({'x0': L, 'w': w, 'n': n, 'top': T, 'h': h,
-                       'series': keyed})
+                       'series': keyed}, allow_nan=False)
     return (f'<figure class="tfig" data-chart="{esc_html(data)}">'
             f'<figcaption><b class="tmetric">{esc_html(metric)}</b>'
             f'<span class="trun">{esc_html(run)}</span>{legend}</figcaption>'
@@ -2718,8 +2729,10 @@ def _history(runs):
                     '<span class="bdg ok">promoted</span>'
                     if not p.get('candidate') else
                     '<span class="tcand">candidate</span>')
-        dur = (_hms(r['secs_per_epoch'] * r['epochs_done'])
-               if r['secs_per_epoch'] and r['epochs_done'] else '&mdash;')
+        # results.csv already carries cumulative seconds; multiplying a
+        # 10-epoch rate by the epoch count invents a number that disagrees
+        # with it whenever the rate changed.
+        dur = _hms(r.get('wall_clock_s')) if r.get('wall_clock_s') else '&mdash;'
         body.append(
             f'<tr data-proj="{esc_html(r["project"])}">'
             f'<td class="tn"><b>{esc_html(r["name"])}</b>'
@@ -2761,7 +2774,20 @@ def render_training():
                 '<code>training_root</code> in the dashboard config (or '
                 '<code>$TRAINING_ROOT</code>) to the directory holding the '
                 'ultralytics project folders.</div>')
+    if not os.path.isdir(root):
+        what = ('is a file, not a directory' if os.path.exists(root)
+                else 'does not exist')
+        return (f'<div class="mnone">Training root <code>{esc_html(root)}'
+                f'</code> {what}. Fix <code>training_root</code> in the '
+                f'dashboard config.</div>')
+    if not os.access(root, os.R_OK | os.X_OK):
+        return (f'<div class="mnone">Training root <code>{esc_html(root)}'
+                f'</code> is not readable by the dashboard process.</div>')
     runs = training_runs()
+    if _TRK.get('error'):
+        return (f'<div class="mnone">Could not read training runs under '
+                f'<code>{esc_html(root)}</code>: '
+                f'<code>{esc_html(_TRK["error"])}</code></div>')
     if not runs:
         return (f'<div class="mnone">No ultralytics runs found under '
                 f'<code>{esc_html(root)}</code>. A run is any directory with '
@@ -2782,15 +2808,27 @@ def render_training():
     focus = next((r for r in runs if r['live'] and r['epochs_done']), None) \
         or next((r for r in runs if r['epochs_done']), None)
     if focus:
-        marks = ([{'i': focus['best_epoch'] - 1, 'v': focus['best_headline'],
-                   'label': f'best @{focus["best_epoch"]}'}]
-                 if focus['best_epoch'] and focus['best_headline'] is not None
-                 else [])
+        # best_epoch is the number in the epoch COLUMN; the chart is indexed
+        # by row. They differ on a resumed run, which put the marker at the
+        # right height and the wrong x.
+        marks = []
+        if focus['best_epoch'] and focus['best_headline'] is not None:
+            try:
+                bi = focus['curve'].index(focus['best_headline'])
+            except ValueError:
+                bi = min(focus['best_epoch'] - 1, len(focus['curve']) - 1)
+            marks = [{'i': bi, 'v': focus['best_headline'],
+                      'label': f'best @{focus["best_epoch"]}'}]
         who = f'{focus["project"]}/{focus["name"]}'
         if not focus['live']:
-            out.append('<div class="tlead">The live run has not written an '
-                       'epoch yet. Charts below are the most recent run that '
-                       'did.</div>')
+            any_live = any(r['live'] for r in runs)
+            out.append('<div class="tlead">'
+                       + ('The live run has not written an epoch yet. Charts '
+                          'below are the most recent run that did.'
+                          if any_live else
+                          'Nothing is training. Charts below are the most '
+                          'recent run that recorded epochs.')
+                       + '</div>')
         out.append('<div class="tgrid">')
         out.append(_chart(
             'trk-metric', who, focus['headline_key'] or focus['headline_label'],
@@ -2806,7 +2844,8 @@ def render_training():
     out.append('<div class="tbar"><label for="tproj">project</label>'
                '<select id="tproj" title="scope the table below to one '
                'project"><option value="">all projects</option>'
-               + ''.join(f'<option>{esc_html(p)}</option>' for p in
+               + ''.join(f'<option value="{esc_html(p)}">{esc_html(p)}'
+                         f'</option>' for p in
                          sorted({r['project'] for r in runs
                                  if r['status'] in REAL}))
                + '</select><span class="tnote">Numbers here are each run\'s '
@@ -3882,6 +3921,17 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split('?', 1)[0] == '/api/training':
+            # The page itself is a build artefact, so the live card, its
+            # clock and the patience countdown were frozen until the next
+            # hourly rebuild -- the one part of the page whose whole purpose
+            # is to be current. Rendered here, in Python, so there is still
+            # exactly one implementation of the section.
+            try:
+                self._json({'html': render_training()})
+            except Exception as e:
+                self._json({'html': '', 'error': str(e)})
+            return
         if self.path.split('?', 1)[0] == '/api/sweep':
             self._json({'running': bool(sweep_pids())})
             return
@@ -3963,6 +4013,17 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json({'ok': ok}, 200 if ok else 400)
             except Exception as e:
                 self._json({'error': str(e)}, 500)
+            return
+        if self.path.split('?', 1)[0] == '/api/training':
+            # The page itself is a build artefact, so the live card, its
+            # clock and the patience countdown were frozen until the next
+            # hourly rebuild -- the one part of the page whose whole purpose
+            # is to be current. Rendered here, in Python, so there is still
+            # exactly one implementation of the section.
+            try:
+                self._json({'html': render_training()})
+            except Exception as e:
+                self._json({'html': '', 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/sweep':
             try:
@@ -4765,6 +4826,9 @@ transition:width .4s ease}
 
 .tgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
 gap:12px;margin-bottom:14px}
+/* below ~370px the 330px track is wider than the viewport and the whole page
+   scrolls sideways; one column is the right answer, not a scrollbar */
+@media (max-width:420px){.tgrid{grid-template-columns:1fr}}
 .tfig{position:relative;background:var(--panel2);border:1px solid var(--bd);
 border-radius:10px;padding:11px 12px 6px;min-width:0}
 .tfig figcaption{font-size:11.5px;color:var(--mut);margin-bottom:6px;
@@ -4825,6 +4889,9 @@ color:var(--mut);white-space:nowrap}
 .thist{min-width:640px}
 .tpage{display:flex;align-items:center;gap:10px;justify-content:flex-end;
 margin-top:11px}
+/* a bare display:flex beats the UA's [hidden]{display:none}, so pager.hidden
+   had no visual effect and an unpaginated table still showed "1-3 of 3" */
+.tpage[hidden]{display:none}
 .tpage .tpn{font-size:11.5px;color:var(--dim);
 font-variant-numeric:tabular-nums}
 .tpb{background:var(--panel2);color:var(--tx);border:1px solid var(--bd);
@@ -4911,7 +4978,7 @@ outline-offset:2px}
 
 <details class="fold sec" id="f-training" open>
 <summary class="sect">Training <span>what is training now, its curves, and the runs behind it</span></summary>
-<div class="panel">__TRAINING__</div>
+<div class="panel" id="trk">__TRAINING__</div>
 </details>
 
 <details class="fold sec" id="f-models" open>
@@ -5054,7 +5121,7 @@ var cmdRegion=document.getElementById('cmdRegion'),cmdOut=document.getElementByI
 function esc(s){return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 __LB_JS__
 /* ── training tracker: crosshair + tooltip, one readout for every series ── */
-(function(){
+function initTracker(){
   var figs=document.querySelectorAll('.tfig[data-chart]');
   Array.prototype.forEach.call(figs,function(fig){
     var spec;
@@ -5124,8 +5191,13 @@ __LB_JS__
     spec.series.forEach(function(s){ s.values.forEach(function(v){
       if(v!==null&&v!==undefined) all.push(v); }); });
     var lo=Math.min.apply(null,all), hi=Math.max.apply(null,all);
+    var lo0=lo;
     if(hi-lo<1e-9){ var p=Math.max(Math.abs(hi)*0.05,0.01); lo-=p; hi+=p; }
     else { var pad=(hi-lo)*0.08; lo-=pad; hi+=pad; }
+    /* Python's _nice() clamps the low end to 0 for non-negative data. Without
+       the same clamp here the axes differ and the hover dot sits off the line
+       on every loss chart. */
+    if(lo0>=0&&lo<0) lo=0;
     function yAt(s,i){
       var v=s.values[i];
       return spec.top+spec.h-spec.h*((v-lo)/((hi-lo)||1));
@@ -5193,6 +5265,37 @@ __LB_JS__
   }
   if(sel) sel.addEventListener('change',function(){ page=0; draw(); });
   if(rows.length) draw();
+}
+initTracker();
+/* Re-render the section from the server on an interval. The markup comes from
+   render_training() so the client never re-implements a chart; after the swap
+   the hover layer is re-bound because the old nodes are gone. Paused while the
+   tab is hidden -- a background tab polling a duckdb-backed endpoint every
+   30s is pure waste. */
+(function(){
+  var host=document.getElementById('trk');
+  if(!host) return;
+  var busy=false;
+  function refresh(){
+    if(busy||document.hidden) return;
+    busy=true;
+    fetch('/api/training').then(function(r){return r.json()}).then(function(j){
+      /* keep the previous render on failure rather than blanking the panel */
+      if(j&&j.html){
+        var open=document.getElementById('tproj');
+        var want=open?open.value:'';
+        host.innerHTML=j.html;
+        var sel=document.getElementById('tproj');
+        if(sel&&want){ sel.value=want; }
+        initTracker();
+        if(sel&&want){ sel.dispatchEvent(new Event('change')); }
+      }
+    }).catch(function(){}).then(function(){ busy=false; });
+  }
+  setInterval(refresh,30000);
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden) refresh();
+  });
 })();
 
 function genCommands(){
