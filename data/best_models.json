@@ -125,17 +125,34 @@
     },
     "leash-models": {
       "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
-      "best": null,
-      "why_blank": "Measured, not assumed. leash_03_jun_26-3 (key d390653dce5640f6aa7beb4f948ce29b) reports top-1 0.9251, but its split leaks worse than dogbin_001 did: 72.9% of its 521 val images share a Mapillary sequence with train, and 95 image_ids appear in BOTH splits -- the same photo, different detection index. On the 137 sequence-clean val images it scores 0.8686 (ROC AUC 0.9744 -> 0.9352), against a 0.7591 majority baseline on that subset; the leaked subset scores 0.9453. It is also undertrained: max top-1 equals last top-1 at the final step, so it hit the 100-epoch ceiling still improving and patience=20 never fired. leash_v2 is now built to the dogbin_v4 standard (sequence-clean split, embedding near-duplicate removal, 312 image_ids reserved in data/leash_acceptance_set.json before splitting). Nothing gets promoted here until a model trained on it is scored on that reserved set.",
+      "best": {
+        "run": "leash_v2_001",
+        "key": "e0ce94c019a64d9e9962b339dd1547da",
+        "date": "2026-08-03",
+        "dataset": "leash_v2",
+        "weights": "leash-models/leash_v2_001/weights/best.pt",
+        "metrics": {
+          "balanced_accuracy_acceptance": 0.8951,
+          "roc_auc_acceptance": 0.9591,
+          "recall_leashed_acceptance": 0.8874,
+          "recall_unleashed_acceptance": 0.9029,
+          "balanced_accuracy_val": 0.91,
+          "accuracy_top1_val": 0.9115
+        },
+        "why": "First leash model measured on data it provably never saw: 397 crops over 312 image_ids reserved into data/leash_acceptance_set.json BEFORE leash_v2 was split, so absent from train AND val -- and val here drives early stopping, which makes it a tuning set rather than an independent one. Balanced accuracy 0.8951 against a 0.5592 majority baseline, with the two class recalls within 1.6 points of each other (leashed 0.8874, unleashed 0.9029), so it is not leaning on the majority class. ROC AUC 0.9591. Converged: early-stopped at epoch 350, best 250, patience 100. Promoted on BALANCED accuracy, not top-1: the two errors here cost the same (a mislabelled animal either way), unlike the gate upstream where a missed dog is unrecoverable.",
+        "caveat": "No like-for-like predecessor comparison exists and none can be made. The previous best, leash_03_jun_26-3, cannot be scored on this acceptance set: all 312 reserved ids are in its own training data, and eval_leash.py now refuses the run rather than printing the 0.9334 it used to. The fairest available comparison is each model on its own honest population -- leash_v2_001 0.8951 balanced / 0.9591 AUC over 397 crops (baseline 0.5592) versus leash_03_jun_26-3 0.8721 balanced / 0.9352 AUC over the 137-image sequence-clean remainder of its own val (baseline 0.7591, only 33 unleashed, so wide intervals). Better on both metrics, on a larger and better-balanced set, against a harder baseline -- but different populations, so treat the margin as directional."
+      },
       "candidates": [
         {
           "run": "leash_03_jun_26-3",
           "key": "d390653dce5640f6aa7beb4f948ce29b",
           "date": "2026-06-03",
           "metrics": {
-            "accuracy_top1": 0.9251
+            "accuracy_top1": 0.9251,
+            "balanced_accuracy_sequence_clean": 0.8721,
+            "roc_auc_sequence_clean": 0.9352
           },
-          "note": "Highest top-1 in the project. Unverified: split not checked for sequence leakage."
+          "note": "SUPERSEDED by leash_v2_001. Its reported 0.9251 top-1 came from a split where 72.9% of val shared a Mapillary sequence with train and 95 image_ids sat in BOTH splits. Sequence-clean it scores 0.8686 top-1 / 0.8721 balanced / 0.9352 AUC on the 137 images that survive that filter. Also undertrained: max top-1 equals last top-1 at the final step, so it hit the 100-epoch ceiling still improving and patience=20 never fired. Cannot be scored on the current acceptance set -- all 312 reserved ids are in its training data."
         },
         {
           "run": "leash_15-may_26",
