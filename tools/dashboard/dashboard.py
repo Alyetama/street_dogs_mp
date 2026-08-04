@@ -1438,9 +1438,8 @@ min-width:44px;text-align:center}
          would throw away every keep decision made so far -->
     <button class="rbtn danger" id="unkeep" title="put every crop you already judged a dog back into the queue">&#8630; Restore kept</button>
     <span class="sp"></span>
-    <button class="rbtn quiet" id="prev">&lsaquo; Prev</button>
     <span class="cnt" id="pg">&mdash;</span>
-    <button class="rbtn quiet" id="next">Next &rsaquo;</button>
+    <button class="rbtn quiet" id="next" title="bank this screen and bring up the next unjudged crops">Next &rsaquo;</button>
   </div>
 </header>
 
@@ -1472,9 +1471,8 @@ min-width:44px;text-align:center}
 <div class="grid" id="grid"></div>
 <div id="state"></div>
 <div class="foot" id="foot" hidden>
-  <button class="rbtn quiet" id="prev2">&lsaquo; Prev</button>
   <span class="cnt" id="pg2"></span>
-  <button class="rbtn quiet" id="next2">Next &rsaquo;</button>
+  <button class="rbtn quiet" id="next2" title="bank this screen and bring up the next unjudged crops">Next &rsaquo;</button>
 </div>
 </div>
 <script>
@@ -1522,11 +1520,14 @@ function load(){
     if(j.collapsed!=null)dupN=j.collapsed;
     paintCountries(j.countries,j.country);
     score();
-    var lab='Page '+(page+1)+' of '+pages;
+    /* "Page 3 of 47" described an offset that no longer moves. What the
+       reader actually needs is how much is left after this screen. */
+    var more=Math.max(0,todoN-items.length);
+    var lab=items.length?(n(items.length)+' shown \u00b7 '+n(more)+' left'):
+      'nothing left to review';
     $('pg').textContent=lab;$('pg2').textContent=lab;
-    $('prev').disabled=$('prev2').disabled=page<=0;
-    $('next').disabled=$('next2').disabled=page>=pages-1;
-    $('foot').hidden=pages<=1;
+    $('next').disabled=$('next2').disabled=!more;
+    $('foot').hidden=!items.length;
     if(sel>=items.length)sel=items.length-1;   /* -1 when the page is empty */
     render();
     /* New page, new content: start at the top. Every caller of load() is a
@@ -2170,11 +2171,15 @@ window.addEventListener('pagehide',function(){
 /* ── controls ───────────────────────────────────────────────────────────── */
 /* every navigation banks the current screen first, then loads the next one */
 function nav(fn){return function(){markSeen().then(fn)}}
-function go(d){return nav(function(){var p=page+d;
-  /* the pool shrinks as pages are banked, so stepping forward from page 1
-     keeps landing on fresh crops -- do not clamp to the stale `pages` */
-  page=Math.max(0,p);sel=-1;load()})}
-$('prev').onclick=$('prev2').onclick=go(-1);
+/* THE QUEUE IS CONSUMED FROM THE HEAD, NOT PAGED THROUGH.
+   nav() banks every crop on screen first (markSeen removes them from the
+   queue), so the queue has ALREADY advanced by a screenful by the time the
+   next load runs. Adding an offset on top of that skipped a second screenful
+   every turn: measured, page 2 shared 4 of 50 crops with the page-1 reserve,
+   and 43 of the other 46 were still sitting at the head of the queue
+   afterwards, never reviewed. Staying at offset 0 shows exactly the crops
+   that banking uncovered -- which is also the block the prefetcher warmed. */
+function go(d){return nav(function(){page=0;sel=-1;load()})}
 $('next').onclick=$('next2').onclick=go(1);
 $('reload').onclick=nav(function(){page=0;sel=-1;load()});
 /* Restore kept: undoes every "this is a dog" decision. Names the real count

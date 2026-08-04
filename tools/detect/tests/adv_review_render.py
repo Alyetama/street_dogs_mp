@@ -238,7 +238,7 @@ function fetch(url, opts) {
 }
 
 // ── the page's own element graph (built from the real markup ids) ───────────
-for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','prev','prev2','next','next2',
+for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','next','next2',
                   'foot','grid','state','sort','size','reload','country','leftlab']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
@@ -292,8 +292,15 @@ async function t1() {
   ck(cards.length === 6, 't1: rendered ' + cards.length + ' tiles, want 6');
   ck(byId['left'].textContent === '120', 't1: left=' + byId['left'].textContent);
   ck(byId['done'].textContent === '30', 't1: done=' + byId['done'].textContent);
-  ck(byId['pg'].textContent === 'Page 1 of 2', 't1: pg=' + byId['pg'].textContent);
-  ck(byId['prev'].disabled === true, 't1: prev not disabled on page 1');
+  /* The queue is consumed from the head, not paged through: nav() banks the
+     screen before loading, so an offset on top of that skipped a screenful
+     every turn. The label counts what is LEFT rather than naming an offset
+     that no longer moves, and Prev is gone -- Restore kept is the way back. */
+  ck(/^6 shown \u00b7 \d+ left$/.test(byId['pg'].textContent),
+     't1: pg=' + byId['pg'].textContent);
+  ck(byId['next'].disabled === false, 't1: next disabled with crops left');
+  ck(byId['prev'] === undefined || byId['prev'] === null ||
+     !byId['prev'].onclick, 't1: Prev still wired');
   ck(byId['next'].disabled === false, 't1: next disabled with 2 pages');
   // nothing may be pre-selected: a highlighted first tile reads as a choice
   // the user did not make
