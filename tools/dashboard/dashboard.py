@@ -2449,6 +2449,389 @@ def metric_meaning(key):
     return (key.replace('_', ' '), '', '')
 
 
+# ── training tracker ────────────────────────────────────────────────────────
+# The runs live in the OTHER repo (dogs_detection), so the root is
+# configuration with no sensible default -- unset, the section says so instead
+# of guessing.
+def training_root():
+    """Resolved per call, so repointing the config reaches a running server."""
+    return cfg('training_root', '', env='TRAINING_ROOT')
+
+
+# A training writes at most one epoch every few minutes, so a 20s window is
+# fresh enough and stops a page full of assets re-walking every run directory.
+# Deliberately NOT lru_cache: that is exactly what froze the reserved-crop
+# count and the dataset path against a config the user had already changed.
+_TRK = {'at': 0.0, 'root': None, 'runs': []}
+TRK_TTL = 20
+
+
+def training_runs():
+    root = training_root()
+    now = time.time()
+    if _TRK['root'] == root and now - _TRK['at'] < TRK_TTL:
+        return _TRK['runs']
+    runs = []
+    if root:
+        try:
+            import training_tracker
+            runs = training_tracker.collect(root, registry=best_models())
+        except Exception:
+            runs = []
+    _TRK.update(at=now, root=root, runs=runs)
+    return runs
+
+
+# Validated on the dark panels (#1b2027 and #21262d): lightness band, chroma
+# floor, CVD adjacent separation (dE 21.8 protan / 22.6 tritan), normal-vision
+# floor (23.3) and contrast all pass. The dashboard's own --acc (#e8a645) sits
+# at OKLCH L 0.77, outside the dark band, so it stays an INK accent and never
+# becomes a chart mark.
+TRK_A, TRK_B = '#c2872e', '#5b93cf'
+TRK_STATUS = {
+    'running': ('running', 'live', '&#9679;'),
+    'early_stopped': ('early-stopped', 'ok', '&#10003;'),
+    'completed': ('ran to last epoch', 'ok', '&#10003;'),
+    'interrupted': ('interrupted', 'halt', '&#9632;'),
+    'never_started': ('no epoch finished', 'idle', '&#8212;'),
+}
+
+
+def _t(hint):
+    return f' title="{esc_html(hint)}"' if hint else ''
+
+
+def _int(v):
+    """args.yaml numbers arrive as floats; "imgsz 1280.0" reads as a typo."""
+    try:
+        return str(int(float(v)))
+    except (TypeError, ValueError):
+        return '?'
+
+
+def _hms(sec):
+    if not sec or sec < 0:
+        return '--'
+    sec = int(sec)
+    if sec < 3600:
+        return f'{sec // 60}m'
+    if sec < 86400:
+        return f'{sec // 3600}h {(sec % 3600) // 60:02d}m'
+    return f'{sec // 86400}d {(sec % 86400) // 3600}h'
+
+
+def _pts(vals, x0, y0, w, h, lo, hi):
+    n = len(vals)
+    span = (hi - lo) or 1.0
+    out = []
+    for i, v in enumerate(vals):
+        if v is None:
+            continue
+        x = x0 + (w * (i / (n - 1)) if n > 1 else w / 2)
+        out.append((x, y0 + h - h * ((v - lo) / span), i, v))
+    return out
+
+
+def _path(pts):
+    return ' '.join(('M' if k == 0 else 'L') + f'{x:.1f} {y:.1f}'
+                    for k, (x, y, _, _) in enumerate(pts))
+
+
+def _nice(lo, hi):
+    """A padded range that never collapses to zero height on a flat series.
+
+    The padding is not allowed to push a non-negative quantity below zero: a
+    loss axis labelled "-0.00" invites the reader to look for a negative loss.
+    """
+    if hi - lo < 1e-9:
+        out = (lo - max(abs(lo) * 0.05, 0.01), hi + max(abs(hi) * 0.05, 0.01))
+    else:
+        pad = (hi - lo) * 0.08
+        out = (lo - pad, hi + pad)
+    return (max(0.0, out[0]) if lo >= 0 else out[0], out[1])
+
+
+LOSS_LABEL = {
+    'classify': 'train/loss vs val/loss',
+    'detect': 'box + cls + dfl loss, summed',
+}
+
+
+def _chart(cid, run, metric, series, marks=(), fmt='.3f'):
+    """One line chart as inline SVG plus the JSON its hover layer reads.
+
+    series: [{name, values, color, dim}] -- dim renders as context gray, which
+    is the emphasis form: the run being read is in colour, its predecessors
+    are the grey it is being compared against.
+    """
+    title = f'{run} — {metric}'
+    W, H = 780, 250
+    L, R, T, B = 46, 16, 14, 26
+    w, h = W - L - R, H - T - B
+    live = [v for s in series for v in s['values'] if v is not None]
+    if not live:
+        return '<div class="tempty">no epochs recorded yet</div>'
+    lo, hi = _nice(min(live), max(live))
+    n = max((len(s['values']) for s in series), default=1)
+
+    grid, ticks = [], []
+    for k in range(4):
+        y = T + h - h * (k / 3)
+        grid.append(f'<line x1="{L}" y1="{y:.1f}" x2="{L + w}" y2="{y:.1f}"/>')
+        ticks.append(f'<text x="{L - 7}" y="{y + 3.5:.1f}" text-anchor="end">'
+                     f'{lo + (hi - lo) * k / 3:{fmt}}</text>')
+    for k, e in ((0, 1), (1, n)):
+        x = L + (w * ((e - 1) / (n - 1)) if n > 1 else w / 2)
+        ticks.append(f'<text x="{x:.1f}" y="{T + h + 16}" '
+                     f'text-anchor="{"start" if k == 0 else "end"}">{e}</text>')
+
+    body, keyed = [], []
+    for s in series:
+        p = _pts(s['values'], L, T, w, h, lo, hi)
+        if not p:
+            continue
+        if s.get('dim'):
+            body.append(f'<path class="ctx" d="{_path(p)}"/>')
+        else:
+            body.append(f'<path class="ln" d="{_path(p)}" '
+                        f'style="stroke:{s["color"]}"/>')
+            keyed.append({'name': s['name'], 'color': s['color'],
+                          'values': [None if v is None else round(v, 6)
+                                     for v in s['values']]})
+    for m in marks:
+        p = _pts([m['v'] if i == m['i'] else None for i in range(n)],
+                 L, T, w, h, lo, hi)
+        if not p:
+            continue
+        x, y = p[0][0], p[0][1]
+        end = x > L + w * 0.7
+        body.append(
+            f'<circle class="mk" cx="{x:.1f}" cy="{y:.1f}" r="5"/>'
+            f'<text class="mklab" x="{x + (-11 if end else 11):.1f}" '
+            f'y="{y + 4:.1f}" text-anchor="{"end" if end else "start"}">'
+            f'{esc_html(m["label"])}</text>')
+
+    legend = ''
+    if len(keyed) > 1:
+        legend = '<span class="tleg">' + ''.join(
+            f'<span><i style="background:{s["color"]}"></i>'
+            f'{esc_html(s["name"])}</span>' for s in keyed) + '</span>'
+    # No rotated y-axis label: the caption already names the quantity, and
+    # the rotated text landed on top of the tick values.
+    axis = ''
+    data = json.dumps({'x0': L, 'w': w, 'n': n, 'top': T, 'h': h,
+                       'series': keyed})
+    return (f'<figure class="tfig" data-chart="{esc_html(data)}">'
+            f'<figcaption><b class="tmetric">{esc_html(metric)}</b>'
+            f'<span class="trun">{esc_html(run)}</span>{legend}</figcaption>'
+            f'<svg class="tsvg" viewBox="0 0 {W} {H}" role="img" '
+            f'aria-label="{esc_html(title)}">'
+            f'<g class="grid">{"".join(grid)}</g>'
+            f'<g class="tick">{"".join(ticks)}</g>{axis}{"".join(body)}'
+            f'<line class="cross" x1="0" y1="{T}" x2="0" y2="{T + h}"/>'
+            f'<rect class="hit" x="{L}" y="{T}" width="{w}" height="{h}"/>'
+            f'</svg><div class="ttip" hidden></div></figure>')
+
+
+def _live_card(r):
+    """The card that answers "how long until this stops?".
+
+    Early stopping fires on epochs since the BEST epoch, never on epochs
+    elapsed -- so that ratio is the meter and everything else is context.
+    """
+    ep, tot = r['epochs_done'], r['epochs_planned']
+    pat, since, sec = r['patience'], r['since_best'], r['secs_per_epoch']
+    tiles = []
+
+    def tile(v, k, hint=''):
+        tiles.append(f'<div class="ttile"{_t(hint)}><b>{v}</b>'
+                     f'<span>{k}</span></div>')
+
+    if not ep:
+        tile('&mdash;', 'no epoch finished yet',
+             'results.csv gets a row only when an epoch completes. Until then '
+             'the run is loading its dataset or is inside epoch 1.')
+        if r.get('started'):
+            tile(_hms(time.time() - r['started']), 'running for')
+        if tot:
+            tile(str(tot), 'epochs planned')
+        if pat:
+            tile(str(pat), 'patience',
+                 'Epochs without an improvement that end the run.')
+    else:
+        tile(f'{ep}<em>/{tot or "?"}</em>', 'epoch',
+             'Epochs finished, out of the epochs= this run was started with.')
+        if r['best_headline'] is not None:
+            tile(f'{r["best_headline"]:.4f}', f'best {r["headline_label"]}',
+                 "The highest value so far on the run's own validation split. "
+                 'A tuning number, not an acceptance number.')
+            tile(f'@{r["best_epoch"]}', 'best epoch',
+                 'Ultralytics keeps the EARLIEST epoch when fitness ties, '
+                 'which is why this can sit far behind the current epoch once '
+                 'a metric saturates.')
+        if sec:
+            tile(_hms(sec), 'per epoch',
+                 'Mean over the last 10 epochs, so a slowdown shows instead '
+                 'of being averaged away.')
+
+    meter = ''
+    if pat and since is not None:
+        left = max(0, pat - since)
+        eta = f' &middot; about {_hms(left * sec)} away' if sec else ''
+        meter = (
+            f'<div class="tmeter"'
+            + _t('Ultralytics stops the run when this reaches patience. It '
+                 'resets to zero every time the metric improves.')
+            + f'><div class="tmhead"><span>epochs since the best</span>'
+            f'<b>{since}<em>&thinsp;/&thinsp;{pat}</em></b></div>'
+            f'<div class="tmtrack"><i style="width:'
+            f'{min(1.0, since / pat) * 100:.1f}%"></i></div>'
+            f'<div class="tmfoot">{left} more epochs without an improvement '
+            f'and the run stops{eta}</div></div>')
+
+    return (f'<div class="tlive">'
+            f'<div class="tlhead"><span class="bdg live">running</span>'
+            f'<b>{esc_html(r["project"])}/{esc_html(r["name"])}</b>'
+            f'<span class="tsub">{esc_html(r.get("model") or "")} &middot; '
+            f'imgsz {_int(r.get("imgsz"))} &middot; '
+            f'batch {_int(r.get("batch"))}'
+            + (' &middot; one class' if r.get('single_cls') else '')
+            + f' &middot; pid {r["pid"]}</span></div>'
+            f'<div class="ttiles">{"".join(tiles)}</div>{meter}</div>')
+
+
+# A run that finished, on its own terms. early_stopped IS a completion --
+# patience firing is how these runs are meant to end. 'interrupted' (killed
+# before either patience or the epoch budget) and 'never_started' are not
+# results, and putting them in the history invites comparing a killed run's
+# best epoch against a finished one's.
+REAL = ('running', 'early_stopped', 'completed')
+TRK_PAGE = 8
+
+
+def _history(runs):
+    """Finished runs as a table -- also the non-hover route to every value."""
+    body = []
+    for r in runs:
+        lab, cls, gly = TRK_STATUS.get(r['status'], (r['status'], 'idle', ''))
+        best = ('&mdash;' if r['best_headline'] is None
+                else f'{r["best_headline"]:.4f}')
+        prom = ''
+        if r.get('promoted'):
+            p = r['promoted']
+            prom = ('<span class="bdg live">in production</span>'
+                    if p.get('deployed') else
+                    '<span class="bdg ok">promoted</span>'
+                    if not p.get('candidate') else
+                    '<span class="tcand">candidate</span>')
+        dur = (_hms(r['secs_per_epoch'] * r['epochs_done'])
+               if r['secs_per_epoch'] and r['epochs_done'] else '&mdash;')
+        body.append(
+            f'<tr data-proj="{esc_html(r["project"])}">'
+            f'<td class="tn"><b>{esc_html(r["name"])}</b>'
+            f'<span>{esc_html(r["project"])}</span></td>'
+            f'<td><span class="tst {cls}">{gly} {lab}</span></td>'
+            f'<td class="num">{r["epochs_done"] or "&mdash;"}</td>'
+            f'<td class="num">{r["best_epoch"] or "&mdash;"}</td>'
+            f'<td class="num">{best}</td>'
+            f'<td class="num">{dur}</td>'
+            f'<td>{prom}</td></tr>')
+    return (
+        '<div class="tscroll"><table class="thist"><thead><tr>'
+        '<th>run</th><th>status</th>'
+        f'<th class="num"{_t("Epochs written to results.csv.")}>epochs</th>'
+        f'<th class="num"{_t("The epoch early stopping measured from.")}>'
+        'best@</th>'
+        f'<th class="num"{_t("Best value of the deciding metric on this "
+                             "run own validation split.")}>best metric</th>'
+        f'<th class="num"{_t("Epochs times the mean seconds per epoch.")}>'
+        'wall clock</th>'
+        '<th>registry</th></tr></thead><tbody>'
+        + ''.join(body) + '</tbody></table></div>'
+        '<div class="tpage" hidden><button type="button" class="tpb" '
+        'data-d="-1" aria-label="previous page">&#8592;</button>'
+        '<span class="tpn"></span>'
+        '<button type="button" class="tpb" data-d="1" '
+        'aria-label="next page">&#8594;</button></div>')
+
+
+def render_training():
+    """Runs on disk: what is training now, how it compares, what came before.
+
+    The live run leads because it is the only part that changes while the page
+    is open, and the only question with a deadline attached.
+    """
+    root = training_root()
+    if not root:
+        return ('<div class="mnone">No training root configured. Set '
+                '<code>training_root</code> in the dashboard config (or '
+                '<code>$TRAINING_ROOT</code>) to the directory holding the '
+                'ultralytics project folders.</div>')
+    runs = training_runs()
+    if not runs:
+        return (f'<div class="mnone">No ultralytics runs found under '
+                f'<code>{esc_html(root)}</code>. A run is any directory with '
+                f'an <code>args.yaml</code> in it.</div>')
+
+    out = []
+    for r in runs:
+        if r['live']:
+            out.append(_live_card(r))
+
+    # Charts for the newest run that has epochs -- and, in grey behind it,
+    # every earlier run in the same project. "Is this beating the last one"
+    # is the question, and it cannot be answered by one curve alone.
+    # One run per chart. Overlaying its predecessors put four grey curves
+    # behind the one being read, which is the comparison the history table
+    # already makes -- and it is exactly the emphasis form's failure case:
+    # context that buries the subject.
+    focus = next((r for r in runs if r['live'] and r['epochs_done']), None) \
+        or next((r for r in runs if r['epochs_done']), None)
+    if focus:
+        marks = ([{'i': focus['best_epoch'] - 1, 'v': focus['best_headline'],
+                   'label': f'best @{focus["best_epoch"]}'}]
+                 if focus['best_epoch'] and focus['best_headline'] is not None
+                 else [])
+        who = f'{focus["project"]}/{focus["name"]}'
+        if not focus['live']:
+            out.append('<div class="tlead">The live run has not written an '
+                       'epoch yet. Charts below are the most recent run that '
+                       'did.</div>')
+        out.append('<div class="tgrid">')
+        out.append(_chart(
+            'trk-metric', who, focus['headline_key'] or focus['headline_label'],
+            [{'name': focus['headline_label'], 'values': focus['curve'],
+              'color': TRK_A}], marks, fmt='.3f'))
+        out.append(_chart(
+            'trk-loss', who, LOSS_LABEL.get(focus['task'], 'loss'),
+            [{'name': 'train', 'values': focus['train_loss'], 'color': TRK_A},
+             {'name': 'validation', 'values': focus['val_loss'],
+              'color': TRK_B}], fmt='.2f'))
+        out.append('</div>')
+
+    out.append('<div class="tbar"><label for="tproj">project</label>'
+               '<select id="tproj" title="scope the table below to one '
+               'project"><option value="">all projects</option>'
+               + ''.join(f'<option>{esc_html(p)}</option>' for p in
+                         sorted({r['project'] for r in runs
+                                 if r['status'] in REAL}))
+               + '</select><span class="tnote">Numbers here are each run\'s '
+                 'own validation split &mdash; the split that drove its early '
+                 'stopping. What a model is <em>accepted</em> on is the '
+                 'reserved set, in Best models above.</span></div>')
+    shown = [r for r in runs if r['status'] in REAL]
+    hidden = len(runs) - len(shown)
+    out.append(_history(shown))
+    if hidden:
+        # never silently. A run that vanished from the table is a run the
+        # reader will look for and fail to find.
+        out.append(f'<div class="thid">{hidden} run'
+                   f'{"s" if hidden != 1 else ""} not listed: interrupted '
+                   f'before patience or the epoch budget, or no epoch ever '
+                   f'finished.</div>')
+    return ''.join(out)
+
+
 def render_models():
     """The three projects as the PIPELINE they are, not three cards.
 
@@ -3683,7 +4066,8 @@ def render(ov, per, tr, now, locs=()):
             .replace('__LB_CSS__', LB_CSS)
             .replace('__LB_HTML__', LB_HTML)
             .replace('__LB_JS__', LB_JS)
-            .replace('__MODELS__', render_models()))
+            .replace('__MODELS__', render_models())
+            .replace('__TRAINING__', render_training()))
     # A placeholder that survives is not cosmetic: __LB_JS__ left inside the
     # <script> is a syntax error that kills EVERY handler on the page (charts,
     # polling, folds, the sweep control) in one shot. Fail the build instead --
@@ -4359,6 +4743,112 @@ __LB_CSS__
 .derr .dt{cursor:pointer;user-select:none}
 .derr .dt:hover{color:var(--tx)}
 .dmeta{font-size:11px;color:var(--dim);margin-top:12px}
+/* ── training tracker ─────────────────────────────────────────────────── */
+.tlive{background:var(--panel2);border:1px solid rgba(67,181,129,.22);
+border-radius:11px;padding:15px 16px 16px;margin-bottom:14px}
+.tlhead{display:flex;align-items:center;flex-wrap:wrap;gap:8px 11px;
+margin-bottom:13px}
+.tlhead b{font-size:15px;font-weight:640;letter-spacing:-.15px}
+.tsub{color:var(--dim);font-size:11.5px}
+.ttiles{display:flex;flex-wrap:wrap;gap:10px}
+.ttile{flex:0 1 190px;background:var(--panel);border:1px solid var(--bd);
+border-radius:9px;padding:10px 12px 9px}
+.ttile b{display:block;font-size:21px;font-weight:600;letter-spacing:-.4px;
+font-variant-numeric:tabular-nums;line-height:1.15}
+.ttile b em{font-style:normal;font-size:13px;color:var(--dim);font-weight:500}
+.ttile span{display:block;margin-top:2px;font-size:11px;color:var(--mut)}
+.tmeter{margin-top:13px}
+.tmhead{display:flex;justify-content:space-between;align-items:baseline;
+font-size:11.5px;color:var(--mut)}
+.tmhead b{color:var(--tx);font-size:13.5px;font-variant-numeric:tabular-nums}
+.tmhead b em{font-style:normal;color:var(--dim);font-weight:500}
+/* a meter, not a chart mark: one hue on its own track */
+.tmtrack{height:7px;border-radius:4px;background:rgba(130,140,150,.16);
+margin:6px 0 5px;overflow:hidden}
+.tmtrack i{display:block;height:100%;border-radius:4px;background:#c2872e;
+transition:width .4s ease}
+.tmfoot{font-size:11px;color:var(--dim)}
+
+.tgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+gap:12px;margin-bottom:14px}
+.tfig{position:relative;background:var(--panel2);border:1px solid var(--bd);
+border-radius:10px;padding:11px 12px 6px;min-width:0}
+.tfig figcaption{font-size:11.5px;color:var(--mut);margin-bottom:6px;
+display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tleg{display:flex;gap:11px;margin-left:auto}
+.tleg span{display:inline-flex;align-items:center;gap:5px;font-size:11px;
+color:var(--mut)}
+/* lines get a line key, never a filled box */
+.tleg i{width:13px;height:2px;border-radius:1px}
+.tsvg{width:100%;height:auto;display:block;overflow:visible}
+.tsvg .grid line{stroke:rgba(130,140,150,.13);stroke-width:1}
+.tsvg .tick{fill:var(--dim);font-size:9.5px;
+font-variant-numeric:tabular-nums}
+.tsvg .ylab{fill:var(--dim);font-size:9.5px;letter-spacing:.03em}
+.tsvg .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.tsvg .ctx{fill:none;stroke:rgba(130,140,150,.34);stroke-width:1.5}
+.tsvg .mk{fill:#c2872e;stroke:var(--panel2);stroke-width:2}
+.tsvg .mklab{fill:var(--mut);font-size:10px}
+.tsvg .cross{stroke:rgba(150,160,172,.5);stroke-width:1;stroke-dasharray:3 3;
+display:none;pointer-events:none}
+.tsvg .hit{fill:transparent;cursor:crosshair}
+.tsvg .dot{fill:var(--panel2);stroke-width:2;display:none}
+.ttip{position:absolute;pointer-events:none;z-index:6;background:#0f1116;
+border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font-size:11.5px;
+box-shadow:0 8px 22px rgba(0,0,0,.5);min-width:118px}
+.ttip .tth{color:var(--dim);font-size:10px;letter-spacing:.05em;
+text-transform:uppercase;margin-bottom:5px}
+.ttip .ttr{display:flex;align-items:center;gap:7px;margin-top:3px}
+.ttip .ttr i{width:11px;height:2px;border-radius:1px;flex:none}
+.ttip .ttr b{font-variant-numeric:tabular-nums;font-size:12.5px}
+.ttip .ttr span{color:var(--mut);font-size:11px}
+.tempty{color:var(--dim);font-size:12px;padding:22px 0;text-align:center}
+
+.tbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:2px 0 9px}
+.tbar label{font-size:11px;color:var(--dim);text-transform:uppercase;
+letter-spacing:.06em}
+.tbar select{background:var(--panel2);color:var(--tx);border:1px solid var(--bd);
+border-radius:7px;padding:5px 9px;font-size:12px;font-family:inherit}
+.tnote{font-size:11px;color:var(--dim);flex:1 1 260px;min-width:0}
+.tnote em{color:var(--mut);font-style:normal}
+
+.thist{width:100%;border-collapse:collapse;font-size:12.5px}
+.thist th{text-align:left;font-weight:600;font-size:10.5px;color:var(--dim);
+text-transform:uppercase;letter-spacing:.06em;padding:0 10px 7px;
+border-bottom:1px solid var(--bd)}
+.thist td{padding:9px 10px;border-bottom:1px solid rgba(130,140,150,.07)}
+.thist tr:last-child td{border-bottom:0}
+.thist .num{text-align:right;font-variant-numeric:tabular-nums}
+.thist .tn b{display:block;font-weight:600}
+.thist .tn span{color:var(--dim);font-size:10.5px}
+.tst{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;
+color:var(--mut);white-space:nowrap}
+.tst.live{color:var(--green)}
+.tst.halt{color:var(--red)}
+.tst.idle{color:var(--dim)}
+.tcand{font-size:10.5px;color:var(--dim)}
+.tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.thist{min-width:640px}
+.tpage{display:flex;align-items:center;gap:10px;justify-content:flex-end;
+margin-top:11px}
+.tpage .tpn{font-size:11.5px;color:var(--dim);
+font-variant-numeric:tabular-nums}
+.tpb{background:var(--panel2);color:var(--tx);border:1px solid var(--bd);
+border-radius:7px;width:28px;height:26px;font-size:13px;cursor:pointer;
+line-height:1}
+.tpb:disabled{color:var(--dim);cursor:default;opacity:.5}
+.tpb:focus-visible,.tfig:focus-visible{outline:2px solid var(--acc);
+outline-offset:2px}
+.thid{margin-top:10px;font-size:11px;color:var(--dim)}
+.tlead{font-size:11.5px;color:var(--mut);margin:0 0 9px}
+.tmetric{font-size:12.5px;font-weight:620;color:var(--tx);letter-spacing:-.1px}
+.trun{font-size:11px;color:var(--dim)}
+@media (max-width:700px){
+  .thist th:nth-child(6),.thist td:nth-child(6){display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  .tmtrack i{transition:none}
+}
 </style></head><body><div class="wrap">
 
 <header>
@@ -4423,6 +4913,11 @@ __LB_CSS__
     <div class="dflag" id="dcropFlagged"></div>
   </div>
 </div>
+</details>
+
+<details class="fold sec" id="f-training" open>
+<summary class="sect">Training <span>what is training now, its curves, and the runs behind it</span></summary>
+<div class="panel">__TRAINING__</div>
 </details>
 
 <details class="fold sec" id="f-models" open>
@@ -4564,6 +5059,148 @@ if(rbtn)rbtn.addEventListener('click',refreshNow);
 var cmdRegion=document.getElementById('cmdRegion'),cmdOut=document.getElementById('cmdOut'),cmdGen=document.getElementById('cmdGen');
 function esc(s){return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 __LB_JS__
+/* ── training tracker: crosshair + tooltip, one readout for every series ── */
+(function(){
+  var figs=document.querySelectorAll('.tfig[data-chart]');
+  Array.prototype.forEach.call(figs,function(fig){
+    var spec;
+    try{ spec=JSON.parse(fig.getAttribute('data-chart')); }catch(e){ return; }
+    if(!spec||!spec.series||!spec.series.length) return;
+    var svg=fig.querySelector('svg'), cross=fig.querySelector('.cross'),
+        tip=fig.querySelector('.ttip'), hit=fig.querySelector('.hit');
+    if(!svg||!hit) return;
+    /* one dot per series, so the reader sees which point is being read */
+    var dots=spec.series.map(function(s){
+      var c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+      c.setAttribute('class','dot'); c.setAttribute('r','4');
+      c.setAttribute('stroke',s.color); svg.appendChild(c); return c;
+    });
+
+    function idxFor(clientX){
+      var box=svg.getBoundingClientRect();
+      /* viewBox units, not pixels: the svg scales with the column */
+      var vb=svg.viewBox.baseVal.width||780;
+      var ux=(clientX-box.left)*(vb/box.width);
+      var f=(ux-spec.x0)/spec.w;
+      return Math.max(0,Math.min(spec.n-1,Math.round(f*(spec.n-1))));
+    }
+    function xOf(i){
+      return spec.x0+(spec.n>1?spec.w*(i/(spec.n-1)):spec.w/2);
+    }
+    function show(clientX){
+      var i=idxFor(clientX), x=xOf(i);
+      cross.setAttribute('x1',x); cross.setAttribute('x2',x);
+      /* NOT '' -- clearing the inline style falls back to the stylesheet,
+         where these start at display:none, so the crosshair never appeared */
+      cross.style.display='block';
+      /* values ARE reachable without this -- the history table below holds
+         every run's numbers, and the best epoch is direct-labelled */
+      while(tip.firstChild) tip.removeChild(tip.firstChild);
+      var head=document.createElement('div');
+      head.className='tth';
+      head.appendChild(document.createTextNode('epoch '+(i+1)));
+      tip.appendChild(head);
+      spec.series.forEach(function(s,k){
+        var v=s.values[i];
+        var row=document.createElement('div'); row.className='ttr';
+        var key=document.createElement('i'); key.style.background=s.color;
+        var val=document.createElement('b');
+        /* series names come from directory names -- untrusted text */
+        val.appendChild(document.createTextNode(
+          v===null||v===undefined?'--':(+v).toFixed(4)));
+        var nm=document.createElement('span');
+        nm.appendChild(document.createTextNode(s.name));
+        row.appendChild(key); row.appendChild(val); row.appendChild(nm);
+        tip.appendChild(row);
+        var d=dots[k];
+        if(v===null||v===undefined){ d.style.display='none'; return; }
+        d.setAttribute('cx',x);
+        d.setAttribute('cy',yAt(s,i));
+        d.style.display='block';
+      });
+      tip.hidden=false;
+      var box=svg.getBoundingClientRect(), fb=fig.getBoundingClientRect();
+      var px=box.left-fb.left+(x/(svg.viewBox.baseVal.width||780))*box.width;
+      var tw=tip.offsetWidth;
+      tip.style.left=Math.max(4,Math.min(fb.width-tw-4,px+12))+'px';
+      tip.style.top='34px';
+    }
+    /* the y a value maps to, recomputed from the same range the server used */
+    var all=[];
+    spec.series.forEach(function(s){ s.values.forEach(function(v){
+      if(v!==null&&v!==undefined) all.push(v); }); });
+    var lo=Math.min.apply(null,all), hi=Math.max.apply(null,all);
+    if(hi-lo<1e-9){ var p=Math.max(Math.abs(hi)*0.05,0.01); lo-=p; hi+=p; }
+    else { var pad=(hi-lo)*0.08; lo-=pad; hi+=pad; }
+    function yAt(s,i){
+      var v=s.values[i];
+      return spec.top+spec.h-spec.h*((v-lo)/((hi-lo)||1));
+    }
+
+    function hide(){
+      cross.style.display='none'; tip.hidden=true;
+      dots.forEach(function(d){ d.style.display='none'; });
+    }
+    hit.addEventListener('pointermove',function(e){ show(e.clientX); });
+    hit.addEventListener('pointerleave',hide);
+    /* keyboard gets the same readout as the pointer */
+    fig.tabIndex=0;
+    var kb=0;
+    fig.addEventListener('keydown',function(e){
+      if(e.key!=='ArrowLeft'&&e.key!=='ArrowRight') return;
+      kb=Math.max(0,Math.min(spec.n-1,kb+(e.key==='ArrowRight'?1:-1)));
+      e.preventDefault();
+      var box=svg.getBoundingClientRect();
+      show(box.left+(xOf(kb)/(svg.viewBox.baseVal.width||780))*box.width);
+    });
+    fig.addEventListener('blur',hide);
+  });
+
+  /* filter and pagination are ONE pass: paging the raw row list would page
+     rows the filter has already removed, and the reader would land on an
+     empty page 3 of a two-row project. */
+  var sel=document.getElementById('tproj'),
+      rows=[].slice.call(document.querySelectorAll('.thist tbody tr')),
+      pager=document.querySelector('.tpage'),
+      pnum=pager&&pager.querySelector('.tpn'),
+      PER=8, page=0;
+  function draw(){
+    var want=sel?sel.value:'';
+    var keep=rows.filter(function(tr){
+      return !want||tr.getAttribute('data-proj')===want;
+    });
+    var pages=Math.max(1,Math.ceil(keep.length/PER));
+    if(page>=pages) page=pages-1;
+    if(page<0) page=0;
+    rows.forEach(function(tr){ tr.style.display='none'; });
+    keep.slice(page*PER,(page+1)*PER).forEach(function(tr){
+      tr.style.display='';
+    });
+    if(pager){
+      pager.hidden=pages<2;
+      if(pnum){
+        while(pnum.firstChild) pnum.removeChild(pnum.firstChild);
+        pnum.appendChild(document.createTextNode(
+          (page*PER+1)+'\u2013'+Math.min(keep.length,(page+1)*PER)+
+          ' of '+keep.length));
+      }
+      [].forEach.call(pager.querySelectorAll('.tpb'),function(b){
+        var d=+b.getAttribute('data-d');
+        b.disabled=(d<0&&page===0)||(d>0&&page>=pages-1);
+      });
+    }
+  }
+  if(pager){
+    [].forEach.call(pager.querySelectorAll('.tpb'),function(b){
+      b.addEventListener('click',function(){
+        page+=+b.getAttribute('data-d'); draw();
+      });
+    });
+  }
+  if(sel) sel.addEventListener('change',function(){ page=0; draw(); });
+  if(rows.length) draw();
+})();
+
 function genCommands(){
   var region=(cmdRegion.value||'').trim();
   if(!region){cmdOut.innerHTML='';return;}

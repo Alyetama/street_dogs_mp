@@ -828,6 +828,98 @@ def check_key_metrics():
     print(f'ok   key_metric resolves for all {n} promoted model(s)')
 
 
+def check_training_tracker():
+    """The tracker's failure modes all render cleanly.
+
+    t1  A live training must be claimed by AT MOST ONE run directory. Three
+        directories here share one project, one dataset and one command line
+        from an afternoon of restarts; a matcher without exclusivity paints
+        all three "running" and the page looks fine.
+
+    t2  Ultralytics breaks a fitness tie toward the FIRST epoch and Python's
+        max() toward the LAST. On a saturated metric that moves the reported
+        best epoch by tens of epochs -- and the wrong answer is a plausible
+        number in the right range, which nothing downstream can catch.
+
+    t3  results.csv headers are padded in older ultralytics versions. An
+        unstripped parser returns zero columns, which is indistinguishable
+        from a run that has not started.
+
+    t4  A run that never wrote an epoch must not be reported as finished.
+    """
+    import importlib.util
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    mod = os.path.join(repo, 'tools', 'dashboard', 'training_tracker.py')
+    spec = importlib.util.spec_from_file_location('training_tracker', mod)
+    tt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tt)
+    bad = []
+
+    # t2 -- a tie at the top, deliberately not at the last epoch
+    rows = [{'metrics/accuracy_top1': v, 'metrics/accuracy_top5': 1.0}
+            for v in (0.80, 0.92, 0.91, 0.92, 0.90)]
+    if tt.best_index(rows, 'classify') != 1:
+        bad.append(f't2 fitness tie broke toward epoch '
+                   f'{tt.best_index(rows, "classify") + 1}, not the first')
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # t3 -- the padded header an older ultralytics writes
+        pad = os.path.join(tmp, 'padded.csv')
+        with open(pad, 'w') as fh:
+            fh.write('                  epoch,             train/loss,'
+                     '  metrics/accuracy_top1\n1,0.6,0.75\n2,0.5,0.80\n')
+        got = tt.read_results(pad)
+        if len(got) != 2 or 'metrics/accuracy_top1' not in (got[0] if got
+                                                           else {}):
+            bad.append(f't3 padded header parsed to {got}')
+
+        # t1 / t4 -- three lookalike run dirs, one live process
+        root = os.path.join(tmp, 'root', 'proj')
+        os.makedirs(root)
+        for name in ('run_a', 'run_a2', 'older'):
+            d = os.path.join(root, name)
+            os.makedirs(d)
+            with open(os.path.join(d, 'args.yaml'), 'w') as fh:
+                fh.write(f'name: {name}\nproject: proj\n'
+                         f'data: /same/dataset.yaml\nepochs: 100\n'
+                         f'patience: 10\n')
+        runs = tt.discover(os.path.join(tmp, 'root'))
+
+        def proc(pid, name):
+            return {'pid': pid, 'argv': [], 'project': 'proj', 'name': name,
+                    'data': '/same/dataset.yaml', 'started': None}
+
+        claims = tt.attach_live(runs, [proc(-1, 'run_a')])
+        if len(claims) != 1:
+            bad.append(f't1 one live process claimed {len(claims)} run dirs')
+        elif os.path.basename(next(iter(claims))) != 'run_a':
+            bad.append(f't1 claimed {next(iter(claims))!r}, not run_a')
+
+        # Two trainings started WITHOUT name= -- how ultralytics' default
+        # train/train2 runs happen. Neither command line names a directory, so
+        # both score every candidate identically and both pick the same one.
+        # Only exclusivity separates them; without it the two live runs
+        # collapse to one and the other vanishes from the page.
+        two = tt.attach_live(runs, [proc(-1, None), proc(-2, None)])
+        if len(two) != 2:
+            bad.append(f't1 two unnamed live processes resolved to '
+                       f'{sorted(os.path.basename(d) for d in two)}')
+
+        # t4 -- none of them wrote an epoch
+        states = {r['name']: r['status']
+                  for r in tt.collect(os.path.join(tmp, 'root'))}
+        wrong = {k: v for k, v in states.items()
+                 if v not in ('never_started', 'running')}
+        if wrong:
+            bad.append(f't4 epoch-less runs reported as {wrong}')
+
+    if bad:
+        raise SystemExit('training tracker:\n  ' + '\n  '.join(bad))
+    print('ok   training tracker: live claim is exclusive, fitness ties break '
+          'first, padded headers parse')
+
+
 def main():
     if shutil.which('node') is None:
         print('SKIP: node not on PATH — client render test not run')
@@ -838,6 +930,7 @@ def main():
     check_whole_script(html)
     check_markup(html)
     check_key_metrics()
+    check_training_tracker()
     check_flag_api()
     helpers, iife, crops_iife = extract_snippets(html)
 
