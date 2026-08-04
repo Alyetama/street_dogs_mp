@@ -100,11 +100,22 @@ def drop_trained_on(paths, data_root):
     def id_candidates(name):
         return set(re.findall(r'\d{6,}', os.path.basename(name)))
 
+    # EVERY class directory, not a hardcoded pair. This scanned only
+    # ('not_dog', 'dog'), so pointing it at a leashed/unleashed dataset found
+    # no files, built an empty id set, and reported every crop clean --
+    # a guard that silently verifies nothing. Measured: the leash acceptance
+    # check passed while all 312 reserved ids sat in the model's training set.
     seen = set()
-    for split in ('train', 'val'):
-        for cls in ('not_dog', 'dog'):
+    for split in ('train', 'val', 'test'):
+        sd = os.path.join(data_root, split)
+        try:
+            classes = [c for c in os.listdir(sd)
+                       if os.path.isdir(os.path.join(sd, c))]
+        except OSError:
+            continue
+        for cls in classes:
             try:
-                names = os.listdir(os.path.join(data_root, split, cls))
+                names = os.listdir(os.path.join(sd, cls))
             except OSError:
                 continue
             for f in names:
