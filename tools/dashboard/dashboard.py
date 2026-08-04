@@ -2551,6 +2551,9 @@ def _hms(sec):
     if not sec or sec < 0:
         return '--'
     sec = int(sec)
+    if sec < 60:
+        # a 35s epoch printed as "0m", which reads as a broken clock
+        return f'{sec}s'
     if sec < 3600:
         return f'{sec // 60}m'
     if sec < 86400:
@@ -2777,11 +2780,6 @@ def _live_card(r):
     # from the newest epoch; the peak is shown beside it because on a metric
     # that is still climbing the two are the same number and on one that has
     # turned over they are not.
-    latest = []
-    for m in (r.get('latest') or ()):
-        label, hover, _ = metric_meaning(m['key'])
-        latest.append(_metric_card(m, label, hover))
-
     # Two limits end this run and they are not the same race. The epoch
     # budget is fixed and visible from the start; patience moves -- it resets
     # to zero on every improvement -- and on these runs it is almost always
@@ -2838,12 +2836,7 @@ def _live_card(r):
             + (' &middot; one class' if r.get('single_cls') else '')
             + f' &middot; pid {r["pid"]}</span></div>'
             f'<div class="ttiles">{"".join(tiles)}</div>'
-            + (f'<div class="tlatest"><span class="tlab">epoch '
-               f'{r.get("last_epoch") or "?"} '
-               f'<i class="k now"></i>latest'
-               f'<i class="k pk"></i>its own peak</span>'
-               f'<div class="mcards">{"".join(latest)}</div></div>'
-               if latest else '')
+            + _metric_row(r)
             + f'{meter}</div>')
 
 
@@ -2876,7 +2869,11 @@ def _history(runs):
         # with it whenever the rate changed.
         dur = _hms(r.get('wall_clock_s')) if r.get('wall_clock_s') else '&mdash;'
         body.append(
-            f'<tr data-proj="{esc_html(r["project"])}">'
+            f'<tr data-proj="{esc_html(r["project"])}" '
+            f'data-key="{esc_html(run_key(r))}" tabindex="0" '
+            f'role="button" aria-label="Show metrics for '
+            f'{esc_html(run_key(r))}"'
+            + (' class="onair"' if r['live'] else '') + '>'
             f'<td class="tn"><b>{esc_html(r["name"])}</b>'
             f'<span>{esc_html(r["project"])}</span></td>'
             f'<td><span class="tst {cls}">{gly} {lab}</span></td>'
@@ -2902,6 +2899,121 @@ def _history(runs):
         '<span class="tpn"></span>'
         '<button type="button" class="tpb" data-d="1" '
         'aria-label="next page">&#8594;</button></div>')
+
+
+def run_key(r):
+    """The identity the client sends back. Never a path: a directory from the
+    client is a traversal waiting to happen, and this resolves by exact match
+    against the runs already discovered."""
+    return f'{r["project"]}/{r["name"]}'
+
+
+def _metric_row(r):
+    """The metric cards. Every run has them -- for a finished run the "latest"
+    epoch is simply its last one, which is the number you want."""
+    cards = []
+    for m in (r.get('latest') or ()):
+        label, hover, _ = metric_meaning(m['key'])
+        cards.append(_metric_card(m, label, hover))
+    if not cards:
+        return ''
+    return (f'<div class="tlatest"><span class="tlab">epoch '
+            f'{r.get("last_epoch") or "?"} '
+            f'<i class="k now"></i>latest'
+            f'<i class="k pk"></i>its own peak</span>'
+            f'<div class="mcards">{"".join(cards)}</div></div>')
+
+
+def _charts(r):
+    """The deciding metric and the losses, for one run."""
+    if not r.get('epochs_done'):
+        return ''
+    marks = []
+    if r['best_epoch'] and r['best_headline'] is not None:
+        # best_epoch is the number in the epoch COLUMN; the chart is indexed
+        # by row. They differ on a resumed run, which put the marker at the
+        # right height and the wrong x.
+        try:
+            bi = r['curve'].index(r['best_headline'])
+        except ValueError:
+            bi = min(r['best_epoch'] - 1, len(r['curve']) - 1)
+        marks = [{'i': bi, 'v': r['best_headline'],
+                  'label': f'best @{r["best_epoch"]}'}]
+    who = f'{r["project"]}/{r["name"]}'
+    return ('<div class="tgrid">'
+            + _chart('trk-metric', who,
+                     r['headline_key'] or r['headline_label'],
+                     [{'name': r['headline_label'], 'values': r['curve'],
+                       'color': TRK_A}], marks, fmt='.3f')
+            + _chart('trk-loss', who, r.get('loss_label') or 'loss',
+                     [{'name': 'train', 'values': r['train_loss'],
+                       'color': TRK_A},
+                      {'name': 'validation', 'values': r['val_loss'],
+                       'color': TRK_B}], fmt='.2f')
+            + '</div>')
+
+
+def _past_head(r):
+    """A finished run's identity line -- the live card's shape without the
+    clocks, because none of them are still running."""
+    lab, cls, gly = TRK_STATUS.get(r['status'], (r['status'], 'idle', ''))
+    bits = [f'{_int(r.get("imgsz"))} px', f'batch {_int(r.get("batch"))}']
+    if r.get('single_cls'):
+        bits.append('one class')
+    if r.get('wall_clock_s'):
+        bits.append(f'ran {_hms(r["wall_clock_s"])}')
+    if r.get('ultralytics'):
+        bits.append(f'ultralytics {esc_html(r["ultralytics"])}')
+    tiles = [f'<div class="ttile"><b>{r["epochs_done"]}'
+             f'<em>/{r.get("epochs_planned") or "?"}</em></b>'
+             f'<span>epochs</span></div>']
+    if r.get('best_epoch'):
+        tiles.append(f'<div class="ttile"><b>@{r["best_epoch"]}</b>'
+                     f'<span>best epoch</span></div>')
+    if r.get('secs_per_epoch'):
+        tiles.append(f'<div class="ttile"><b>{_hms(r["secs_per_epoch"])}</b>'
+                     f'<span>per epoch</span></div>')
+    return (f'<div class="tlive past">'
+            f'<div class="tlhead"><span class="tst {cls}">{gly} {lab}</span>'
+            f'<b>{esc_html(r["project"])}/{esc_html(r["name"])}</b>'
+            f'<span class="tsub">{esc_html(r.get("model") or "")} &middot; '
+            f'{" &middot; ".join(bits)}</span>'
+            f'<button type="button" class="rbtn quiet tback" id="trkBack">'
+            f'&larr; back to the live run</button></div>'
+            f'<div class="ttiles">{"".join(tiles)}</div>'
+            f'{_metric_row(r)}</div>')
+
+
+def render_run_detail(key):
+    """One run's detail region, resolved by key against what was discovered."""
+    for r in training_runs():
+        if run_key(r) == key:
+            return _past_head(r) + _charts(r)
+    return '<div class="mnone">That run is no longer on disk.</div>'
+
+
+def detect_store_path():
+    """Where the sweep writes. Read at render time from data/detect_root.txt,
+    never a constant: this repo is public and the store lives on a drive whose
+    path is specific to one machine."""
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        import store as _store
+        return _store.get_detect_root()
+    except Exception as e:
+        return f'(unresolved: {type(e).__name__})'
+
+
+def render_store_path():
+    p = detect_store_path()
+    return (f'<div class="spath">'
+            f'<span class="splab">predictions store</span>'
+            f'<code id="storePath">{esc_html(p)}</code>'
+            f'<button type="button" class="cp" id="storeCp" '
+            f'title="Copy the store path" aria-label="Copy the store path">'
+            '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>'
+            f'<span class="sphint">hive parquet, partitioned by '
+            f'gen / region / cell / drive</span></div>')
 
 
 def render_training():
@@ -2935,33 +3047,14 @@ def render_training():
                 f'<code>{esc_html(root)}</code>. A run is any directory with '
                 f'an <code>args.yaml</code> in it.</div>')
 
-    out = []
+    out = ['<div id="trkdet">']
     for r in runs:
         if r['live']:
             out.append(_live_card(r))
 
-    # Charts for the newest run that has epochs -- and, in grey behind it,
-    # every earlier run in the same project. "Is this beating the last one"
-    # is the question, and it cannot be answered by one curve alone.
-    # One run per chart. Overlaying its predecessors put four grey curves
-    # behind the one being read, which is the comparison the history table
-    # already makes -- and it is exactly the emphasis form's failure case:
-    # context that buries the subject.
     focus = next((r for r in runs if r['live'] and r['epochs_done']), None) \
         or next((r for r in runs if r['epochs_done']), None)
     if focus:
-        # best_epoch is the number in the epoch COLUMN; the chart is indexed
-        # by row. They differ on a resumed run, which put the marker at the
-        # right height and the wrong x.
-        marks = []
-        if focus['best_epoch'] and focus['best_headline'] is not None:
-            try:
-                bi = focus['curve'].index(focus['best_headline'])
-            except ValueError:
-                bi = min(focus['best_epoch'] - 1, len(focus['curve']) - 1)
-            marks = [{'i': bi, 'v': focus['best_headline'],
-                      'label': f'best @{focus["best_epoch"]}'}]
-        who = f'{focus["project"]}/{focus["name"]}'
         if not focus['live']:
             any_live = any(r['live'] for r in runs)
             out.append('<div class="tlead">'
@@ -2971,17 +3064,8 @@ def render_training():
                           'Nothing is training. Charts below are the most '
                           'recent run that recorded epochs.')
                        + '</div>')
-        out.append('<div class="tgrid">')
-        out.append(_chart(
-            'trk-metric', who, focus['headline_key'] or focus['headline_label'],
-            [{'name': focus['headline_label'], 'values': focus['curve'],
-              'color': TRK_A}], marks, fmt='.3f'))
-        out.append(_chart(
-            'trk-loss', who, focus.get('loss_label') or 'loss',
-            [{'name': 'train', 'values': focus['train_loss'], 'color': TRK_A},
-             {'name': 'validation', 'values': focus['val_loss'],
-              'color': TRK_B}], fmt='.2f'))
-        out.append('</div>')
+        out.append(_charts(focus))
+    out.append('</div>')
 
     out.append('<div class="tbar"><label for="tproj">project</label>'
                '<select id="tproj" title="scope the table below to one '
@@ -4072,6 +4156,14 @@ class BoardHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self._json({'left': None, 'error': str(e)})
             return
+        if self.path.split('?', 1)[0] == '/api/training/run':
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                self._json({'html': render_run_detail(
+                    q.get('key', [''])[0])})
+            except Exception as e:
+                self._json({'html': '', 'error': str(e)})
+            return
         if self.path.split('?', 1)[0] == '/api/training':
             # The page itself is a build artefact, so the live card, its
             # clock and the patience countdown were frozen until the next
@@ -4173,6 +4265,14 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json({'left': review_payload(0, 0)['total_unflagged']})
             except Exception as e:
                 self._json({'left': None, 'error': str(e)})
+            return
+        if self.path.split('?', 1)[0] == '/api/training/run':
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                self._json({'html': render_run_detail(
+                    q.get('key', [''])[0])})
+            except Exception as e:
+                self._json({'html': '', 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/training':
             # The page itself is a build artefact, so the live card, its
@@ -4282,7 +4382,8 @@ def render(ov, per, tr, now, locs=()):
             .replace('__LB_HTML__', LB_HTML)
             .replace('__LB_JS__', LB_JS)
             .replace('__MODELS__', render_models())
-            .replace('__TRAINING__', render_training()))
+            .replace('__TRAINING__', render_training())
+            .replace('__STOREPATH__', render_store_path()))
     # A placeholder that survives is not cosmetic: __LB_JS__ left inside the
     # <script> is a syntax error that kills EVERY handler on the page (charts,
     # polling, folds, the sweep control) in one shot. Fail the build instead --
@@ -4987,7 +5088,31 @@ __LB_CSS__
 .derr .dt{cursor:pointer;user-select:none}
 .derr .dt:hover{color:var(--tx)}
 .dmeta{font-size:11px;color:var(--dim);margin-top:12px}
+.spath{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+margin:0 0 13px;padding:8px 11px;background:var(--panel2);
+border:1px solid var(--bd);border-radius:9px}
+.splab{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
+color:var(--dim)}
+.spath code{font-size:12px;color:var(--tx);font-family:ui-monospace,
+SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all;min-width:0}
+.spath .cp{flex:none}
+.sphint{font-size:11px;color:var(--dim);margin-left:auto}
+@media (max-width:620px){.sphint{display:none}}
 /* ── training tracker ─────────────────────────────────────────────────── */
+/* a history row is a control: it opens that run's metrics above */
+.thist tbody tr{cursor:pointer;transition:background .1s}
+.thist tbody tr:hover{background:rgba(130,140,150,.06)}
+.thist tbody tr:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.thist tbody tr.sel{background:rgba(232,166,69,.09);
+box-shadow:inset 2px 0 0 var(--acc)}
+.thist tbody tr.onair .tn b{color:var(--green)}
+.tlive.past{border-color:var(--bd)}
+.tlive.past .tlhead b{font-size:15px}
+.tback{margin-left:auto;flex:none}
+.rbtn.quiet{background:transparent;border-color:var(--bd);color:var(--mut)}
+.rbtn.quiet:hover{background:rgba(130,140,150,.1);color:var(--tx)}
+@media (prefers-reduced-motion:reduce){.thist tbody tr{transition:none}}
+
 .tlive{background:var(--panel2);border:1px solid rgba(67,181,129,.22);
 border-radius:11px;padding:15px 16px 16px;margin-bottom:14px}
 .tlhead{display:flex;align-items:center;flex-wrap:wrap;gap:8px 11px;
@@ -5015,8 +5140,10 @@ color:var(--dim);margin-bottom:8px}
 vertical-align:middle;margin:0 5px 0 14px}
 .tlab .k.now{background:#c2872e}
 .tlab .k.pk{background:#5b93cf}
-.mcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));
-gap:12px}
+/* auto-fit with a 1fr max let a single card span the whole row, which
+   stretched its sparkline into a flat smear. Cap the track. */
+.mcards{display:grid;gap:12px;justify-content:start;
+grid-template-columns:repeat(auto-fit,minmax(238px,340px))}
 .mcard{background:var(--panel);border:1px solid var(--bd);border-radius:10px;
 padding:11px 13px 9px;min-width:0}
 .mcard:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
@@ -5184,6 +5311,7 @@ outline-offset:2px}
   <!-- status line ABOVE the cards, never instead of them: the layout below is
        always present and goes to em-dashes when idle, so nothing jumps when
        the sweep starts. #detOn is kept (and never hidden) as the cards' box. -->
+  __STOREPATH__
   <div id="detOff" class="dnone dstat">sweep idle</div>
   <div id="detOn">
     <div class="kpis" style="margin-bottom:12px">
@@ -5361,12 +5489,22 @@ function refreshNow(){
   fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(j){if(j&&j.error){stop('refresh failed');return;}poll();}).catch(function(){stop('refresh failed (offline?)')});
 }
 if(rbtn)rbtn.addEventListener('click',refreshNow);
+/* ── copy the store path ── */
+(function(){
+  var b=document.getElementById('storeCp'),p=document.getElementById('storePath');
+  if(b&&p) b.addEventListener('click',function(e){
+    e.preventDefault(); copyText(p.textContent.trim());
+  });
+})();
 /* ── command generator ── */
 var cmdRegion=document.getElementById('cmdRegion'),cmdOut=document.getElementById('cmdOut'),cmdGen=document.getElementById('cmdGen');
 function esc(s){return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 __LB_JS__
 /* ── training tracker: crosshair + tooltip, one readout for every series ── */
-function initTracker(){
+/* Split deliberately. Opening a past run replaces only the detail region, so
+   it re-binds CHARTS alone; calling the whole initialiser there re-entered the
+   selection-restore at its tail and openRun called itself forever. */
+function bindCharts(){
   var figs=document.querySelectorAll('.tfig[data-chart]');
   Array.prototype.forEach.call(figs,function(fig){
     var spec;
@@ -5470,6 +5608,10 @@ function initTracker(){
   /* filter and pagination are ONE pass: paging the raw row list would page
      rows the filter has already removed, and the reader would land on an
      empty page 3 of a two-row project. */
+}
+
+function initTracker(){
+  bindCharts();
   var sel=document.getElementById('tproj'),
       rows=[].slice.call(document.querySelectorAll('.thist tbody tr')),
       pager=document.querySelector('.tpage'),
@@ -5510,6 +5652,43 @@ function initTracker(){
   }
   if(sel) sel.addEventListener('change',function(){ page=0; draw(); });
   if(rows.length) draw();
+  /* Clicking a run opens its metrics in the same region the live run uses --
+     one detail view, not a second layout that could drift from it. The key is
+     project/name and the server resolves it against the runs it already
+     discovered; a path from the client is never accepted. */
+  var det=document.getElementById('trkdet');
+  function openRun(key,tr){
+    if(!det) return;
+    fetch('/api/training/run?key='+encodeURIComponent(key))
+      .then(function(r){return r.json()}).then(function(j){
+        if(!j||!j.html) return;
+        det.innerHTML=j.html;
+        window.__trkSel=key;
+        [].forEach.call(document.querySelectorAll('.thist tbody tr'),
+          function(x){ x.classList.toggle('sel',x===tr); });
+        bindCharts();
+        var back=document.getElementById('trkBack');
+        if(back) back.addEventListener('click',function(){
+          window.__trkSel=null; refreshTracker(true);
+        });
+        det.scrollIntoView({block:'nearest',
+          behavior:(matchMedia('(prefers-reduced-motion:reduce)').matches
+                    ?'auto':'smooth')});
+      }).catch(function(){});
+  }
+  [].forEach.call(document.querySelectorAll('.thist tbody tr'),function(tr){
+    var key=tr.getAttribute('data-key');
+    if(!key) return;
+    tr.addEventListener('click',function(){ openRun(key,tr); });
+    tr.addEventListener('keydown',function(e){
+      if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openRun(key,tr); }
+    });
+  });
+  if(window.__trkSel){
+    var keep=document.querySelector(
+      '.thist tbody tr[data-key="'+window.__trkSel.replace(/"/g,'\\"')+'"]');
+    if(keep) openRun(window.__trkSel,keep);
+  }
 }
 initTracker();
 /* Re-render the section from the server on an interval. The markup comes from
@@ -5517,12 +5696,14 @@ initTracker();
    the hover layer is re-bound because the old nodes are gone. Paused while the
    tab is hidden -- a background tab polling a duckdb-backed endpoint every
    30s is pure waste. */
+var refreshTracker;
 (function(){
   var host=document.getElementById('trk');
   if(!host) return;
   var busy=false;
-  function refresh(){
-    if(busy||document.hidden) return;
+  function refresh(force){
+    /* a forced refresh (back to the live run) runs even mid-poll */
+    if((busy||document.hidden)&&!force) return;
     busy=true;
     fetch('/api/training').then(function(r){return r.json()}).then(function(j){
       /* keep the previous render on failure rather than blanking the panel */
@@ -5537,6 +5718,7 @@ initTracker();
       }
     }).catch(function(){}).then(function(){ busy=false; });
   }
+  refreshTracker=refresh;
   setInterval(refresh,30000);
   document.addEventListener('visibilitychange',function(){
     if(!document.hidden) refresh();
