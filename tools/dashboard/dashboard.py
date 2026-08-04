@@ -2294,7 +2294,23 @@ $('unkeep').onclick=function(){
       seenN=0;page=0;sel=-1;load();loadBal();
    }).catch(function(){b.disabled=false;b.innerHTML='\u21ba Restore kept';});
 };
-$('sort').onchange=function(){var v=this.value;markSeen().then(function(){
+/* The sort choice survives the visit. Validated against the <select>'s own
+   options on the way back in, so a stale value left by an older build -- or
+   anything else that ends up in storage -- cannot put the page into a sort
+   the server does not know. */
+var SORT_KEY='sdReviewSort';
+function restoreSort(){
+  var el=$('sort');if(!el)return;
+  var v=null;
+  try{v=localStorage.getItem(SORT_KEY)}catch(_){}
+  if(!v)return;
+  for(var i=0;i<el.options.length;i++){
+    if(el.options[i].value===v){sort=v;el.value=v;return;}
+  }
+}
+$('sort').onchange=function(){var v=this.value;
+  try{localStorage.setItem(SORT_KEY,v)}catch(_){}
+  markSeen().then(function(){
   sort=v;page=0;sel=-1;load()})};
 $('size').onchange=function(){var v=parseInt(this.value,10)||50;
   markSeen().then(function(){size=v;page=0;sel=-1;load()})};
@@ -2321,6 +2337,7 @@ function paintCountries(list,cur){
 }
 $('country').onchange=function(){var v=this.value;
   markSeen().then(function(){country=v;page=0;sel=-1;load()})};
+restoreSort();
 load();loadBal();
 </script></body></html>"""
 
@@ -3000,6 +3017,28 @@ def _live_card(r):
 # best epoch against a finished one's.
 REAL = ('running', 'early_stopped', 'completed')
 TRK_PAGE = 8
+# A run that finished one epoch is a smoke test, not a result: it "ran to last
+# epoch" only because its budget WAS one epoch. Two of them sat in the history
+# beside 300-epoch runs with a best epoch of 1 and a metric nobody should
+# compare against anything.
+TRK_MIN_EPOCHS_DEFAULT = 2
+
+
+def min_epochs():
+    return max(0, cfg_int('training_min_epochs', TRK_MIN_EPOCHS_DEFAULT,
+                          env='TRAINING_MIN_EPOCHS'))
+
+
+def is_real_run(r, floor):
+    """Whether a run belongs in the history.
+
+    A LIVE run always does, whatever its epoch count -- it is on epoch 1 for a
+    while, and hiding the thing the section exists to watch would be the worst
+    possible reading of "too short to matter".
+    """
+    if r['status'] == 'running':
+        return True
+    return r['status'] in REAL and (r['epochs_done'] or 0) >= floor
 
 
 def _history(runs):
@@ -3249,7 +3288,15 @@ def render_training():
         if r['live']:
             out.append(_live_card(r))
 
+    # Decided before anything reads it: the charts, the project dropdown and
+    # the table all have to agree on which runs count.
+    floor = min_epochs()
+    shown = [r for r in runs if is_real_run(r, floor)]
+    hidden = sum(1 for r in runs if r['status'] not in REAL)
+    too_short = len(runs) - len(shown) - hidden
+
     focus = next((r for r in runs if r['live'] and r['epochs_done']), None) \
+        or next((r for r in shown if r['epochs_done']), None) \
         or next((r for r in runs if r['epochs_done']), None)
     if focus:
         if not focus['live']:
@@ -3269,14 +3316,11 @@ def render_training():
                'project"><option value="">all projects</option>'
                + ''.join(f'<option value="{esc_html(p)}">{esc_html(p)}'
                          f'</option>' for p in
-                         sorted({r['project'] for r in runs
-                                 if r['status'] in REAL}))
+                         sorted({r['project'] for r in shown}))
                + '</select><span class="tnote">Numbers here are each run\'s '
                  'own validation split &mdash; the split that drove its early '
                  'stopping. What a model is <em>accepted</em> on is the '
                  'reserved set, in Best models above.</span></div>')
-    shown = [r for r in runs if r['status'] in REAL]
-    hidden = len(runs) - len(shown)
     out.append(_history(shown))
     # Never silently, and never with one reason standing in for two: a run
     # left out for being unfinished and a project retired in the config are
@@ -3286,6 +3330,10 @@ def render_training():
     if hidden:
         why.append(f'{hidden} interrupted before patience or the epoch '
                    f'budget, or never finished an epoch')
+    if too_short:
+        why.append(f'{too_short} shorter than {floor} epoch'
+                   f'{"s" if floor != 1 else ""} &mdash; a smoke test, not a '
+                   f'result')
     if _TRK.get('hidden'):
         why.append(f'{_TRK["hidden"]} in projects hidden by '
                    f'<code>training_hide_projects</code>')
