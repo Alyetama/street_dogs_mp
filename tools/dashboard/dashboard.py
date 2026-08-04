@@ -5433,10 +5433,14 @@ color:var(--dim);margin-bottom:8px}
 vertical-align:middle;margin:0 5px 0 14px}
 .tlab .k.now{background:#c2872e}
 .tlab .k.pk{background:#5b93cf}
-/* auto-fit with a 1fr max let a single card span the whole row, which
-   stretched its sparkline into a flat smear. Cap the track. */
+/* Tracks share the row so four cards fit on one line; the CARD is what gets
+   capped, not the track. Capping the track at 340px meant four could not fit
+   at panel width and the fourth orphaned onto a row of its own -- but a 1fr
+   track with no cap on the card was the original bug, where a lone card
+   spanned the full width and smeared its sparkline flat. */
 .mcards{display:grid;gap:12px;justify-content:start;
-grid-template-columns:repeat(auto-fit,minmax(238px,340px))}
+grid-template-columns:repeat(auto-fit,minmax(238px,1fr))}
+.mcard{max-width:360px}
 .mcard{background:var(--panel);border:1px solid var(--bd);border-radius:10px;
 padding:11px 13px 9px;min-width:0}
 .mcard:focus-visible{outline:2px solid var(--acc);outline-offset:2px}

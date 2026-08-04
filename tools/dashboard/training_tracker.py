@@ -185,10 +185,13 @@ HEADLINE = {
 # What the LATEST epoch reported, beyond the one metric early stopping
 # watches. Keys are the glossary names the dashboard already uses, so the
 # hovers come from one place. Ordered: the deciding metric first.
-# Deliberately short. mAP50 tracks mAP50-95 closely enough to add a number
-# without adding information, and top-5 on a two-class problem is 1.0 forever.
+# Short on purpose -- top-5 on a two-class problem is 1.0 forever, so the
+# classifiers get one card. The two mAPs sit together because they answer the
+# same question at different strictness, and the gap between them IS the
+# reading: mAP50 high with mAP50-95 low means the boxes are found but loose.
 LATEST = {
     'detect': (('metrics/mAP50-95(B)', 'mAP50-95'),   # what decides the run
+               ('metrics/mAP50(B)', 'mAP50'),         # same, forgiving overlap
                ('metrics/recall(B)', 'recall'),       # the unrecoverable error
                ('metrics/precision(B)', 'precision')),
     'classify': (('metrics/accuracy_top1', 'accuracy_top1'),),
