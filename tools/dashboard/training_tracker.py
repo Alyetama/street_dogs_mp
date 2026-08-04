@@ -126,17 +126,37 @@ HEADLINE = {
     'classify': ('metrics/accuracy_top1', 'top-1 accuracy'),
     'detect': ('metrics/mAP50-95(B)', 'mAP50-95'),
 }
-LOSSES = {
-    'classify': (('train/loss',), ('val/loss',)),
-    'detect': (('train/box_loss', 'train/cls_loss', 'train/dfl_loss'),
-               ('val/box_loss', 'val/cls_loss', 'val/dfl_loss')),
-}
+def loss_keys(rows):
+    """(train keys, val keys) taken from the FILE, not from a fixed list.
+
+    The detect heads are not stable across ultralytics versions: this project
+    has runs with train/dfl_loss and runs with train/l1_loss. A hardcoded
+    triple silently drops the term it does not know about and still produces a
+    plausible curve -- while the caption goes on naming a loss that is not in
+    the sum.
+    """
+    if not rows:
+        return ((), ())
+    cols = [c for c in rows[0] if c.endswith('loss')]
+    return (tuple(c for c in cols if c.startswith('train/')),
+            tuple(c for c in cols if c.startswith('val/')))
 
 
-def loss_series(rows, task):
-    """(train, val) totals per epoch. Detect has three loss heads; their sum is
-    what the reader wants -- three overlaid pairs is six series for one idea."""
-    tr_k, va_k = LOSSES.get(task, ((), ()))
+def loss_label(rows):
+    """What the summed curve actually contains, in the file's own words."""
+    tr, _ = loss_keys(rows)
+    parts = [c.split('/', 1)[1].replace('_loss', '') for c in tr]
+    if not parts:
+        return 'loss'
+    if len(parts) == 1:
+        return 'train/loss vs val/loss'
+    return ' + '.join(parts) + ' loss, summed'
+
+
+def loss_series(rows, task=None):
+    """(train, val) totals per epoch. Detect has several loss heads; their sum
+    is what the reader wants -- one idea should not be six overlaid series."""
+    tr_k, va_k = loss_keys(rows)
 
     def tot(r, keys):
         vals = [r[k] for k in keys if r.get(k) is not None]
@@ -309,6 +329,13 @@ def _live_score(run, lv):
         score += 40
     if lv.get('project') and lv['project'] == args.get('project'):
         score += 10
+    # A run records where it writes. When that is an absolute path, it settles
+    # which of two identically-named directories is the real one: the leftover
+    # skeleton at <root>/<project>/<run> carries a RELATIVE save_dir from a
+    # different working directory and never matches itself.
+    sd = args.get('save_dir')
+    if sd and os.path.isabs(str(sd)):
+        score += 80 if _same_path(sd, run['dir']) else -60
     if score < CLAIM_FLOOR:
         return None
     # a directory created at or after the process is the likelier output; worth
@@ -345,27 +372,46 @@ def attach_live(runs, lives):
 
 
 # ── discovery ───────────────────────────────────────────────────────────────
-def discover(root, projects=None):
-    """[run] under ``root``: <root>/<project>/<run>/args.yaml.
+SKIP_DIRS = {'weights', 'node_modules', '__pycache__', 'images', 'labels',
+             'train', 'val', 'test', 'archived', 'archived_datasets'}
+MAX_DEPTH = 5
 
-    Only directories holding an args.yaml count as runs, so dataset folders and
-    scratch directories sitting beside the projects are skipped without needing
-    a list of names to exclude.
+
+def discover(root, projects=None):
+    """[run] under ``root`` -- any directory holding an args.yaml.
+
+    A fixed <root>/<project>/<run> walk is wrong, and wrong in the worst way:
+    ultralytics honours its own `runs_dir` setting, so `project=dogdetection`
+    can land at <root>/runs/detect/dogdetection/<run> while a stale directory
+    of the SAME name sits at <root>/dogdetection/<run> from an earlier attempt.
+    The two-level walk found only the stale one -- an args.yaml, no results,
+    reported as "no epoch finished" while the real run was eight epochs in.
+
+    The project name comes from args.yaml, not from the parent directory: runs
+    get moved and folders get renamed, but a run's own record of what project
+    it belongs to does not drift.
     """
     runs = []
     if not root or not os.path.isdir(root):
         return runs
-    for proj in sorted(os.listdir(root)):
-        pdir = os.path.join(root, proj)
-        if not os.path.isdir(pdir) or (projects and proj not in projects):
+    base = os.path.abspath(root)
+    for cur, dirs, files in os.walk(base):
+        depth = cur[len(base):].count(os.sep)
+        if depth >= MAX_DEPTH:
+            dirs[:] = []
+        dirs[:] = sorted(d for d in dirs
+                         if not d.startswith('.') and d not in SKIP_DIRS)
+        if 'args.yaml' not in files:
             continue
-        for name in sorted(os.listdir(pdir)):
-            d = os.path.join(pdir, name)
-            ay = os.path.join(d, 'args.yaml')
-            if not os.path.isfile(ay):
-                continue
-            runs.append({'project': proj, 'name': name, 'dir': d,
-                         'args': read_args(ay)})
+        dirs[:] = []                      # a run holds no nested runs
+        args = read_args(os.path.join(cur, 'args.yaml'))
+        proj = (args.get('project')
+                or os.path.basename(os.path.dirname(cur)) or '?')
+        if projects and proj not in projects:
+            continue
+        runs.append({'project': str(proj), 'name': os.path.basename(cur),
+                     'dir': cur, 'args': args})
+    runs.sort(key=lambda r: (r['project'], r['name']))
     return runs
 
 
@@ -382,6 +428,13 @@ def summarize(run, live=None, registry=None):
     done = len(rows)
     since_best = (done - 1 - bi) if bi is not None else None
 
+    # The epoch NUMBER comes from the file, not from the row index: a resumed
+    # run's results.csv does not start at 1, and "best @1" on a run that
+    # resumed at epoch 180 is a number with no relation to anything.
+    def epoch_at(i):
+        e = rows[i].get('epoch') if 0 <= i < len(rows) else None
+        return int(e) if e is not None else (i + 1)
+
     # seconds per epoch from the cumulative 'time' column, over the last 10
     # epochs -- an average over the whole run understates a slowdown
     secs = None
@@ -392,7 +445,7 @@ def summarize(run, live=None, registry=None):
 
     head_key, head_label = HEADLINE.get(task, (None, ''))
     curve = [r.get(head_key) for r in rows] if head_key else []
-    tr, va = loss_series(rows, task)
+    tr, va = loss_series(rows)
 
     # Five states, not two. "finished" for a directory that holds an args.yaml
     # and nothing else would be a lie -- three of those exist here from one
@@ -424,7 +477,9 @@ def summarize(run, live=None, registry=None):
     return {
         'project': run['project'], 'name': run['name'], 'dir': run['dir'],
         'task': task, 'epochs_done': done, 'epochs_planned': epochs_planned,
-        'patience': patience, 'best_epoch': (bi + 1) if bi is not None else None,
+        'patience': patience,
+        'best_epoch': epoch_at(bi) if bi is not None else None,
+        'last_epoch': epoch_at(done - 1) if done else None,
         'best_fitness': fitness_of(rows[bi], task) if bi is not None else None,
         'best_headline': (curve[bi] if bi is not None and bi < len(curve)
                           else None),
@@ -432,6 +487,7 @@ def summarize(run, live=None, registry=None):
         'since_best': since_best, 'secs_per_epoch': secs,
         'headline_key': head_key, 'headline_label': head_label,
         'curve': curve, 'train_loss': tr, 'val_loss': va,
+        'loss_label': loss_label(rows),
         'live': bool(live), 'pid': live['pid'] if live else None,
         'started': live.get('started') if live else None,
         'stopped_early': stopped_early, 'status': status,

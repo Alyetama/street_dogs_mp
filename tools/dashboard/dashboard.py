@@ -2551,12 +2551,6 @@ def _nice(lo, hi):
     return (max(0.0, out[0]) if lo >= 0 else out[0], out[1])
 
 
-LOSS_LABEL = {
-    'classify': 'train/loss vs val/loss',
-    'detect': 'box + cls + dfl loss, summed',
-}
-
-
 def _chart(cid, run, metric, series, marks=(), fmt='.3f'):
     """One line chart as inline SVG plus the JSON its hover layer reads.
 
@@ -2803,7 +2797,7 @@ def render_training():
             [{'name': focus['headline_label'], 'values': focus['curve'],
               'color': TRK_A}], marks, fmt='.3f'))
         out.append(_chart(
-            'trk-loss', who, LOSS_LABEL.get(focus['task'], 'loss'),
+            'trk-loss', who, focus.get('loss_label') or 'loss',
             [{'name': 'train', 'values': focus['train_loss'], 'color': TRK_A},
              {'name': 'validation', 'values': focus['val_loss'],
               'color': TRK_B}], fmt='.2f'))

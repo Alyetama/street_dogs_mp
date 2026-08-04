@@ -846,6 +846,15 @@ def check_training_tracker():
         from a run that has not started.
 
     t4  A run that never wrote an epoch must not be reported as finished.
+
+    t5  The detect loss heads are not stable across ultralytics versions --
+        this project has runs with train/dfl_loss and runs with train/l1_loss.
+        A hardcoded triple drops the unknown term, still draws a plausible
+        curve, and captions it with a loss that is not in the sum.
+
+    t6  A run directory is wherever ultralytics' runs_dir puts it. A fixed
+        <root>/<project>/<run> walk found a stale same-named directory and
+        reported "no epoch finished" while the real run was eight epochs in.
     """
     import importlib.util
     repo = os.path.dirname(os.path.dirname(os.path.dirname(
@@ -873,6 +882,47 @@ def check_training_tracker():
         if len(got) != 2 or 'metrics/accuracy_top1' not in (got[0] if got
                                                            else {}):
             bad.append(f't3 padded header parsed to {got}')
+
+        # t5 -- the same idea, two different loss vocabularies
+        for heads, want in ((('box', 'cls', 'dfl'), 'box + cls + dfl'),
+                            (('box', 'cls', 'l1'), 'box + cls + l1')):
+            f = os.path.join(tmp, 'loss_' + heads[-1] + '.csv')
+            cols = ','.join(['epoch']
+                            + [f'train/{h}_loss' for h in heads]
+                            + [f'val/{h}_loss' for h in heads])
+            with open(f, 'w') as fh:
+                fh.write(cols + '\n1,1,2,3,1,2,3\n2,1,1,1,1,1,1\n')
+            r = tt.read_results(f)
+            tr, _ = tt.loss_series(r)
+            if tr[0] != 6:
+                bad.append(f't5 {heads} summed to {tr[0]}, not 6 -- a head '
+                           f'was dropped')
+            if not tt.loss_label(r).startswith(want):
+                bad.append(f't5 {heads} labelled {tt.loss_label(r)!r}')
+
+        # t6 -- the real run lives under runs_dir, a stale twin sits at the
+        # two-level path, and both carry the same project and name
+        deep = os.path.join(tmp, 'deep')
+        real = os.path.join(deep, 'runs', 'detect', 'proj', 'r1')
+        stale = os.path.join(deep, 'proj', 'r1')
+        for d, sd in ((real, real), (stale, 'proj/r1')):
+            os.makedirs(d)
+            with open(os.path.join(d, 'args.yaml'), 'w') as fh:
+                fh.write(f'name: r1\nproject: proj\ndata: /d.yaml\n'
+                         f'epochs: 100\npatience: 10\nsave_dir: {sd}\n')
+        with open(os.path.join(real, 'results.csv'), 'w') as fh:
+            fh.write('epoch,metrics/mAP50(B),metrics/mAP50-95(B)\n'
+                     '1,0.5,0.3\n2,0.6,0.4\n')
+        found = {r['dir'] for r in tt.discover(deep)}
+        if real not in found:
+            bad.append('t6 the run under runs_dir was not discovered')
+        claimed = tt.attach_live(
+            tt.discover(deep),
+            [{'pid': -3, 'argv': [], 'project': 'proj', 'name': 'r1',
+              'data': '/d.yaml', 'started': None}])
+        if list(claimed) != [real]:
+            bad.append(f't6 the live process claimed {list(claimed)}, '
+                       f'not the directory its own save_dir names')
 
         # t1 / t4 -- three lookalike run dirs, one live process
         root = os.path.join(tmp, 'root', 'proj')
@@ -916,8 +966,8 @@ def check_training_tracker():
 
     if bad:
         raise SystemExit('training tracker:\n  ' + '\n  '.join(bad))
-    print('ok   training tracker: live claim is exclusive, fitness ties break '
-          'first, padded headers parse')
+    print('ok   training tracker: live claim is exclusive and save_dir-aware, '
+          'fitness ties break first, loss heads come from the file')
 
 
 def main():
