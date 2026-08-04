@@ -2360,93 +2360,93 @@ METRIC_GLOSSARY = {
     'recall': (
         'ground animals found',
         'Share of real animals the detector finds. The expensive error: the '
-        'sweep runs once, so anything missed here is gone for good.'),
+        'sweep runs once, so anything missed here is gone for good.', 'tuning split'),
     'precision': (
         'detections that were real',
         'Share of the detector\'s boxes that are real animals. Cheap to get '
-        'wrong -- the gate downstream and the review page both filter these.'),
+        'wrong -- the gate downstream and the review page both filter these.', 'tuning split'),
     'mAP50': (
         'box quality, loose overlap',
         'Mean average precision at 50% box overlap. Rewards finding the animal; '
-        'forgiving about exactly where the box sits.'),
+        'forgiving about exactly where the box sits.', 'tuning split'),
     'mAP50-95': (
         'box quality, strict overlap',
         'Mean average precision averaged over overlap thresholds 50-95%. '
-        'Punishes sloppy boxes, so it tracks crop quality for the classifiers.'),
+        'Punishes sloppy boxes, so it tracks crop quality for the classifiers.', 'tuning split'),
     'accuracy_top1': (
         'plain accuracy',
         'Share of crops classified correctly at threshold 0.5. NOT what a gate '
         'is promoted on: on a dog-heavy split, always answering "dog" already '
-        'scores high.'),
+        'scores high.', 'tuning split'),
     'roc_auc_val': (
         'separation on the tuning split',
         'Ranking quality on the val split. That split drives early stopping, so '
-        'it is a tuning set, not an independent one.'),
+        'it is a tuning set, not an independent one.', 'tuning split'),
     'acceptance_roc_auc': (
         'separation, unseen data',
         'Ranking quality on crops reserved before the dataset was split -- never '
-        'trained on, never early-stopped on.'),
+        'trained on, never early-stopped on.', 'reserved crops'),
     'acceptance_rejected_at_full_dog_recall': (
         'false positives removed, at zero dog loss',
         'The promotion number. Share of real detector mistakes the gate discards '
         'at the strictest threshold that still keeps every dog in the val set. '
-        'Measured on reserved crops the model has never seen.'),
+        'Measured on reserved crops the model has never seen.', 'reserved crops'),
     'acceptance_rejected_at_t0.5': (
         'false positives removed, at 0.5',
         'Same reserved crops, but at the default threshold -- which costs a few '
-        'real dogs. Higher than the headline for that reason.'),
+        'real dogs. Higher than the headline for that reason.', 'reserved crops'),
     'balanced_accuracy_acceptance': (
         'accuracy, both classes weighted equally',
         'Mean of the two class recalls on reserved crops. The headline here '
         'because leashed and unleashed cost the same to get wrong, so plain '
-        'accuracy would just reward leaning on the bigger class.'),
+        'accuracy would just reward leaning on the bigger class.', 'reserved crops'),
     'roc_auc_acceptance': (
         'separation, unseen data',
         'Ranking quality on the 312 reserved image_ids, held out before the '
-        'split.'),
+        'split.', 'reserved crops'),
     'recall_leashed_acceptance': (
         'leashed dogs caught',
-        'Share of leashed dogs called leashed, on reserved crops.'),
+        'Share of leashed dogs called leashed, on reserved crops.', 'reserved crops'),
     'recall_unleashed_acceptance': (
         'unleashed dogs caught',
-        'Share of unleashed dogs called unleashed, on reserved crops.'),
+        'Share of unleashed dogs called unleashed, on reserved crops.', 'reserved crops'),
     'balanced_accuracy_val': (
         'balanced accuracy, tuning split',
         'Same measure on the val split, which drove early stopping -- expect it '
-        'to flatter the model relative to the reserved number.'),
+        'to flatter the model relative to the reserved number.', 'tuning split'),
     'accuracy_top1_val': (
         'plain accuracy, tuning split',
         'Top-1 on the val split. Listed for continuity with older runs; not '
-        'what this model was promoted on.'),
+        'what this model was promoted on.', 'tuning split'),
     'roc_auc_as_split': (
         'separation, as originally split',
         'Ranking quality on the split as shipped -- which leaked, so this '
-        'number is inflated.'),
+        'number is inflated.', 'leaked split'),
     'roc_auc_sequence_clean': (
         'separation, leak removed',
         'Ranking quality after dropping val images that share a Mapillary '
-        'sequence with training. The honest version of the number above it.'),
+        'sequence with training. The honest version of the number above it.', 'leak removed'),
     'balanced_accuracy_sequence_clean': (
         'balanced accuracy, leak removed',
         'Both class recalls averaged, after removing val images that share a '
-        'sequence with training.'),
+        'sequence with training.', 'leak removed'),
     'sweep_fp_rejected_at_t0.5_heldout': (
         'false positives removed, at 0.5',
         'Share of real detector mistakes discarded at threshold 0.5, on flagged '
-        'crops this model did not train on.'),
+        'crops this model did not train on.', 'held-out flags'),
     'sweep_fp_rejected_at_full_dog_recall': (
         'false positives removed, at zero dog loss',
-        'Share discarded at the strictest threshold that keeps every val dog.'),
+        'Share discarded at the strictest threshold that keeps every val dog.', 'held-out flags'),
 }
 
 
 def metric_meaning(key):
-    """(headline label, hover text). Unknown keys degrade to the raw name
+    """(label, hover text, population). Unknown keys degrade to the raw name
     rather than inventing an explanation."""
     hit = METRIC_GLOSSARY.get(key)
     if hit:
         return hit
-    return (key.replace('_', ' '), '')
+    return (key.replace('_', ' '), '', '')
 
 
 def render_models():
@@ -2488,15 +2488,20 @@ def render_models():
         """
         if not metrics or not key or key not in metrics:
             return ''
-        label, hover = metric_meaning(key)
+        label, hover, pop = metric_meaning(key)
         v = metrics[key]
         try:
             shown = (f'{float(v) * 100:.1f}%' if 0 <= float(v) <= 1
                      else f'{float(v):.4g}')
         except (TypeError, ValueError):
             shown = str(v)
+        # The population, always. Without it the leash headline read
+        # "accuracy, both classes weighted equally" directly above a chip
+        # reading "balanced accuracy, tuning split" -- the same measure on
+        # different data, with only the chip saying which.
+        eb = (f'<em class="pop">{esc_html(pop)}</em>' if pop else '')
         return (f'<div class="hero" title="{esc_html(hover)}">'
-                f'<b>{esc_html(shown)}</b>'
+                f'{eb}<b>{esc_html(shown)}</b>'
                 f'<span>{esc_html(label)}</span></div>')
 
     def tags(metrics, key=None, small=False):
@@ -2515,9 +2520,11 @@ def render_models():
         for k, v in metrics.items():
             if k == key:
                 continue          # already the headline; twice is noise
-            label, hover = metric_meaning(k)
+            label, hover, pop = metric_meaning(k)
+            tail = (f'<em class="pop">{esc_html(pop)}</em>' if pop else '')
             out.append(f'<span class="tag" title="{esc_html(hover or label)}">'
-                       f'<i>{esc_html(label)}</i><b>{esc_html(v)}</b></span>')
+                       f'<i>{esc_html(label)}</i><b>{esc_html(v)}</b>'
+                       f'{tail}</span>')
         if key and key not in metrics:
             out.append('<span class="tag warn" title="key_metric names a '
                        'metric this model does not report, so nothing is '
@@ -2599,7 +2606,45 @@ def render_models():
         rows.append(f'<div class="stg {cls}"><div class="dot"></div>'
                     f'{head}<div class="sbody">{body}{why}</div></div>')
     upd = esc_html(st.get('updated_at') or '')
+    # The words under every number, defined once. Which data a figure came
+    # from is the whole difference between a result and a train-set score
+    # here, and "reserved crops" carries that difference in two words -- so
+    # the two words have to be defined somewhere the reader can reach them.
+    terms = [
+        ('reserved crops',
+         'Images set aside BEFORE the dataset was split, listed in a '
+         'dogbin_/leash_acceptance_set.json. They appear in no training and no '
+         'validation split, so a model has never seen them in any form. This '
+         'is the only population a promotion is written from.'),
+        ('tuning split',
+         'The val folder. It decides when training stops, which makes the '
+         'model indirectly fitted to it -- so its numbers run optimistic and '
+         'are shown here for context, not for deciding.'),
+        ('leak removed',
+         'A number recomputed after dropping validation images that share a '
+         'Mapillary sequence with training. Consecutive frames of one animal '
+         'seconds apart are effectively the same photo; counting them as '
+         'held-out inflated two models in this project by 4-6 points.'),
+        ('at zero dog loss',
+         'The strictest threshold that still keeps every dog in the '
+         'validation set. The sweep runs once over 32.5M images, so a discarded '
+         'dog is gone for good, while a surviving false positive costs one '
+         'click in the review page.'),
+        ('separation',
+         'ROC AUC: the chance the model scores a random positive above a '
+         'random negative. Independent of where the threshold sits, so it says '
+         'whether the two classes are distinguishable at all.'),
+        ('promoted, not wired in',
+         'Accepted as the best model for its stage, but nothing runs it yet. '
+         'Only the detector currently executes inside the sweep.'),
+    ]
+    gl = ''.join(
+        f'<div class="gt"><dt>{esc_html(t)}</dt><dd>{esc_html(v)}</dd></div>'
+        for t, v in terms)
     return (f'<div class="pipe">{"".join(rows)}</div>'
+            f'<details class="gloss"><summary>What these words mean'
+            f'<span class="wc">{len(terms)} terms</span></summary>'
+            f'<dl class="gwrap">{gl}</dl></details>'
             f'<div class="mfoot">data/best_models.json &middot; updated {upd} '
             f'&middot; refresh with <code>tools/detect/best_models.py --update</code>'
             f'</div>')
@@ -4103,6 +4148,36 @@ transition:transform .15s ease}
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .swhy p{font-size:11.5px;color:var(--dim);line-height:1.65;margin-top:9px}
 .swhy p+p{margin-top:7px}
+
+/* ── the population marker ────────────────────────────────────────────────
+   Which data a number came from, on the number itself. Deliberately quiet:
+   it is a qualifier, not a reading. */
+.pop{font-style:normal;font-size:9.5px;letter-spacing:.06em;
+text-transform:uppercase;color:var(--dim);white-space:nowrap}
+.hero .pop{margin-bottom:5px}
+.tag .pop{margin-left:2px;padding-left:7px;
+border-left:1px solid rgba(130,140,150,.22)}
+
+/* ── the shared vocabulary, closed ─────────────────────────────────────── */
+.gloss{margin:18px 0 0;padding-top:15px;max-width:74ch;
+border-top:1px solid var(--bd)}
+.gloss summary{font-size:11.5px;color:var(--mut);cursor:pointer;
+list-style:none;display:inline-flex;align-items:center;gap:8px;user-select:none}
+.gloss summary::-webkit-details-marker{display:none}
+.gloss summary::before{content:"";width:0;height:0;
+border-left:4.5px solid currentColor;border-top:3.5px solid transparent;
+border-bottom:3.5px solid transparent;transition:transform .15s ease}
+.gloss[open] summary::before{transform:rotate(90deg)}
+.gloss summary:hover{color:var(--tx)}
+.gloss summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.gloss .wc{font-size:10px;color:var(--dim);
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.gwrap{margin-top:12px;display:grid;gap:11px}
+.gt dt{font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+color:var(--acc);margin-bottom:3px}
+.gt dd{font-size:11.5px;color:var(--dim);line-height:1.6}
+@media(prefers-reduced-motion:reduce){.gloss summary::before{transition:none}}
+
 @media(prefers-reduced-motion:reduce){.swhy summary::before{transition:none}}
 .sfile{font-size:10.5px;color:var(--dim);margin-top:8px;
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
