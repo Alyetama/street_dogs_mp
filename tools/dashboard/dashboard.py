@@ -1437,9 +1437,9 @@ min-width:44px;text-align:center}
   </div>
   <div class="bar">
     <select id="sort" title="which crops to surface first">
+      <option value="low" selected>Least confident first</option>
       <option value="conf">Most confident first</option>
       <option value="new">Newest first</option>
-      <option value="low">Least confident first</option>
     </select>
     <!-- Populated from /api/review, which lists only countries the sweep has
          actually produced crops for, with counts. Rebuilt hourly alongside the
@@ -1495,7 +1495,7 @@ min-width:44px;text-align:center}
 /* sel = -1 means NOTHING is selected. The page opens that way on purpose:
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
-var page=0,size=50,sort='conf',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
+var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
     smallN=0,minPx=0,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
@@ -4050,6 +4050,10 @@ def refresh_countries():
         sys.stderr.write(f'country index refresh failed: {e}\n')
 
 
+# One name for the default, because it was written in three places and the
+# request handler's copy shadowed the one inside review_payload -- the page
+# said "least confident" while the API still answered newest-first.
+REVIEW_SORT_DEFAULT = 'low'
 REVIEW_SORTS = {
     'new': lambda c: -c['ts'],
     'conf': lambda c: (-c['conf'], -c['ts']),
@@ -4110,17 +4114,24 @@ def box_short_sides(keys):
     return _SZ['by_key']
 
 
-def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
+def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
     browser can never resurface something already judged. One listdir over the
     pool (retention is 3000), no per-file stat.
 
-    ``sort`` matters for what this page is actually FOR: the crops worth mining
-    as hard negatives are the ones the detector was most confident about and
-    still got wrong, so 'conf' (highest first) puts the valuable mistakes on
-    page 1 instead of scattering them through 40 pages of newest-first.
+    ``sort`` matters for what this page is actually FOR, and the default is
+    'low' -- least confident first. The detector's low-confidence boxes are
+    where it is least sure and where a human adds the most information: they
+    are the crops most likely to be wrong in either direction, so judging them
+    both cleans the pipeline and teaches the gate the most per click.
+
+    'conf' (highest first) is still one option away, and it answers a
+    different question -- the confident mistakes are the ones worth mining as
+    hard negatives. It was the default until the queue grew a size floor;
+    with unjudgeable crops now held back, the low end is worth a person's
+    time again.
 
     ``reserve`` is the next slice after the page. The client consumes it to
     backfill a tile it just flagged, so the grid keeps a constant length
@@ -4128,7 +4139,7 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
     """
     size = 100 if int(size) >= 100 else REVIEW_PAGE
     page = max(0, int(page))
-    sort = sort if sort in REVIEW_SORTS else 'new'
+    sort = sort if sort in REVIEW_SORTS else REVIEW_SORT_DEFAULT
     key = REVIEW_SORTS[sort]
     # _flag_names(), never the raw global: _flagged is None until something
     # lazily loads the ledger, so reading it directly made /review 500 on a
@@ -4409,7 +4420,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                          parse_qs(self.path.split('?', 1)[1]).items()}
                 self._json(review_payload(int(q.get('page', 0)),
                                           int(q.get('size', REVIEW_PAGE)),
-                                          str(q.get('sort', 'new')),
+                                          str(q.get('sort', REVIEW_SORT_DEFAULT)),
                                           str(q.get('country', ''))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
