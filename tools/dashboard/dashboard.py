@@ -2694,20 +2694,52 @@ def _live_card(r):
             f'<b>{val:.4f}</b><span>{esc_html(label)}</span>'
             + (f'<u>peak {peak:.4f}</u>' if peaked else '<u>at its peak</u>')
             + '</div>')
-    meter = ''
+    # Two limits end this run and they are not the same race. The epoch
+    # budget is fixed and visible from the start; patience moves -- it resets
+    # to zero on every improvement -- and on these runs it is almost always
+    # the one that fires. Showing only one of them answered half the question.
+    def _meter(label, val, limit, foot, hint):
+        return (f'<div class="tmeter"{_t(hint)}>'
+                f'<div class="tmhead"><span>{label}</span>'
+                f'<b>{val}<em>&thinsp;/&thinsp;{limit}</em></b></div>'
+                f'<div class="tmtrack"><i style="width:'
+                f'{min(1.0, val / limit) * 100:.1f}%"></i></div>'
+                f'<div class="tmfoot">{foot}</div></div>')
+
+    meters = []
+    if tot and ep:
+        left_ep = max(0, tot - ep)
+        meters.append(_meter(
+            'epochs run', ep, tot,
+            f'{left_ep} left in the budget'
+            + (f' &middot; about {_hms(left_ep * sec)} away' if sec else ''),
+            'The epochs= this run was started with. Reaching it is one of the '
+            'two ways the run can end, and usually the slower one.'))
     if pat and since is not None:
-        left = max(0, pat - since)
-        eta = f' &middot; about {_hms(left * sec)} away' if sec else ''
-        meter = (
-            f'<div class="tmeter"'
-            + _t('Ultralytics stops the run when this reaches patience. It '
-                 'resets to zero every time the metric improves.')
-            + f'><div class="tmhead"><span>epochs since the best</span>'
-            f'<b>{since}<em>&thinsp;/&thinsp;{pat}</em></b></div>'
-            f'<div class="tmtrack"><i style="width:'
-            f'{min(1.0, since / pat) * 100:.1f}%"></i></div>'
-            f'<div class="tmfoot">{left} more epochs without an improvement '
-            f'and the run stops{eta}</div></div>')
+        left_pat = max(0, pat - since)
+        meters.append(_meter(
+            'epochs since the best', since, pat,
+            f'{left_pat} more without an improvement and the run stops'
+            + (f' &middot; about {_hms(left_pat * sec)} away' if sec else ''),
+            'Ultralytics stops the run when this reaches patience. It resets '
+            'to zero every time the metric improves, so this bar can go '
+            'backwards while the one beside it only ever fills.'))
+
+    meter = ''
+    if meters:
+        # which limit is actually nearer, said once rather than left to be
+        # worked out from two bars
+        note = ''
+        if tot and ep and pat and since is not None:
+            a_left, b_left = max(0, tot - ep), max(0, pat - since)
+            note = (f'<div class="tmnote">'
+                    + ('patience is nearer -- expect the run to early-stop'
+                       if b_left < a_left else
+                       'the epoch budget is nearer -- expect the run to use '
+                       'all of it' if a_left < b_left else
+                       'both limits are the same distance away')
+                    + '</div>')
+        meter = f'<div class="tmeters">{"".join(meters)}</div>{note}'
 
     return (f'<div class="tlive">'
             f'<div class="tlhead"><span class="bdg live">running</span>'
@@ -4842,7 +4874,10 @@ color:var(--dim);margin-bottom:8px}
 .ttile.lat span{font-size:10.5px}
 .ttile.lat u{display:block;margin-top:3px;font-size:10px;color:var(--dim);
 text-decoration:none;font-variant-numeric:tabular-nums}
-.tmeter{margin-top:13px}
+.tmeters{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+gap:14px 22px;margin-top:13px}
+.tmnote{margin-top:7px;font-size:11px;color:var(--mut)}
+.tmeter{margin-top:0}
 .tmhead{display:flex;justify-content:space-between;align-items:baseline;
 font-size:11.5px;color:var(--mut)}
 .tmhead b{color:var(--tx);font-size:13.5px;font-variant-numeric:tabular-nums}
