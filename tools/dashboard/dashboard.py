@@ -3044,28 +3044,72 @@ def render_run_detail(key):
     return '<div class="mnone">That run is no longer on disk.</div>'
 
 
-def detect_store_path():
-    """Where the sweep writes. Read at render time from data/detect_root.txt,
-    never a constant: this repo is public and the store lives on a drive whose
-    path is specific to one machine."""
+def sweep_db_path():
+    """The unified DuckDB file, resolved at render time. Never a constant:
+    this repo is public and the store lives on a drive specific to one box."""
     try:
         sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
-        import store as _store
-        return _store.get_detect_root()
-    except Exception as e:
-        return f'(unresolved: {type(e).__name__})'
+        import build_sqldb
+        return build_sqldb.default_db(build_sqldb.detect_root())
+    except Exception:
+        return None
+
+
+def _db_facts(path):
+    """(built_at, images) from the database's own _meta, or (None, None).
+
+    Read-only and best-effort: a build in progress holds the write lock, and
+    the panel should still show the path rather than fail because someone is
+    refreshing it.
+    """
+    if not path or not os.path.exists(path):
+        return (None, None)
+    try:
+        import duckdb
+        con = duckdb.connect(path, read_only=True)
+        try:
+            got = dict(con.execute(
+                "SELECT key, value FROM _meta WHERE key IN "
+                "('built_at', 'images_at_build')").fetchall())
+        finally:
+            con.close()
+        return (got.get('built_at'), got.get('images_at_build'))
+    except Exception:
+        return (None, None)
 
 
 def render_store_path():
-    p = detect_store_path()
+    """The one path worth copying: what you paste into duckdb or a notebook.
+
+    It is a DERIVED file, so the line says so. A path handed over without that
+    is an invitation to read a stale copy as the live one -- and this database
+    is stale by design, the moment the sweep writes another part.
+    """
+    db = sweep_db_path()
+    if not db:
+        return ''
+    built, imgs = _db_facts(db)
+    cmd = 'python tools/detect/build_sqldb.py build'
+    if not os.path.exists(db):
+        hint = (f'not built yet &mdash; run <code>{esc_html(cmd)}</code>')
+    else:
+        n = f'{int(imgs):,} images' if imgs and str(imgs).isdigit() else ''
+        hint = ('derived from the parquet store beside it'
+                + (f' &middot; built {esc_html(built)}' if built else '')
+                + (f' &middot; {n}' if n else '')
+                + f' &middot; refresh with <code>{esc_html(cmd)}</code>')
     return (f'<div class="spath">'
-            f'<span class="splab">predictions store</span>'
-            f'<code id="storePath">{esc_html(p)}</code>'
+            f'<span class="splab">sweep database</span>'
+            f'<code id="storePath">{esc_html(db)}</code>'
             f'<button type="button" class="cp" id="storeCp" '
-            f'title="Copy the store path" aria-label="Copy the store path">'
-            '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>'
-            f'<span class="sphint">hive parquet, partitioned by '
-            f'gen / region / cell / drive</span></div>')
+            f'title="Copy the database path" '
+            f'aria-label="Copy the database path">'
+            f'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" '
+            f'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+            f'stroke-linejoin="round"><rect x="9" y="9" width="12" '
+            f'height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 '
+            f'2-2h9a2 2 0 0 1 2 2v1"/></svg></button>'
+            f'<span class="sphint">{hint}</span></div>')
 
 
 def render_training():
@@ -5152,11 +5196,18 @@ margin:0 0 13px;padding:8px 11px;background:var(--panel2);
 border:1px solid var(--bd);border-radius:9px}
 .splab{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
 color:var(--dim)}
-.spath code{font-size:12px;color:var(--tx);font-family:ui-monospace,
+.spath > code{font-size:12px;color:var(--tx);font-family:ui-monospace,
 SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all;min-width:0}
 .spath .cp{flex:none}
+/* The hint carries the staleness caveat and the rebuild command, so it wraps
+   to its own line rather than being hidden on a narrow screen -- a path handed
+   over without "this is derived" is the whole risk of showing it at all. */
 .sphint{font-size:11px;color:var(--dim);margin-left:auto}
-@media (max-width:620px){.sphint{display:none}}
+.sphint code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+font-size:10.5px;color:var(--mut)}
+@media (max-width:820px){
+  .sphint{margin-left:0;flex-basis:100%}
+}
 /* ── training tracker ─────────────────────────────────────────────────── */
 /* a history row is a control: it opens that run's metrics above */
 .thist tbody tr{cursor:pointer;transition:background .1s}
