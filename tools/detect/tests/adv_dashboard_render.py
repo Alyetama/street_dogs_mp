@@ -792,6 +792,42 @@ console.log('ok   crops/' + name + ' (all ' + COLCASES.length + ' grid widths)')
 """
 
 
+def check_key_metrics():
+    """Every project's key_metric must name a metric its best model reports.
+
+    An unmatched key accents nothing, which is indistinguishable from a
+    project that simply has no headline. leash-models sat like that after its
+    metrics were renamed, while dog-bin accented accuracy_top1 -- the one
+    metric its own entry says it was NOT promoted on. A silent accent is worse
+    than a wrong one: nobody looks twice at a panel that renders cleanly.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    path = os.path.join(repo, 'data', 'best_models.json')
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f'{path}: {e}')
+    bad = []
+    for name, proj in (doc.get('projects') or {}).items():
+        key = proj.get('key_metric')
+        best = proj.get('best')
+        if not best:
+            continue                      # nothing promoted: nothing to accent
+        metrics = best.get('metrics') or {}
+        if not key:
+            bad.append(f'{name}: best model but no key_metric')
+        elif key not in metrics:
+            bad.append(f'{name}: key_metric {key!r} not in '
+                       f'{sorted(metrics)}')
+    if bad:
+        raise SystemExit('key_metric does not match the reported metrics:\n  '
+                         + '\n  '.join(bad))
+    n = sum(1 for p in (doc.get('projects') or {}).values() if p.get('best'))
+    print(f'ok   key_metric resolves for all {n} promoted model(s)')
+
+
 def main():
     if shutil.which('node') is None:
         print('SKIP: node not on PATH — client render test not run')
@@ -801,6 +837,7 @@ def main():
     html = open(INDEX, encoding='utf-8').read()
     check_whole_script(html)
     check_markup(html)
+    check_key_metrics()
     check_flag_api()
     helpers, iife, crops_iife = extract_snippets(html)
 

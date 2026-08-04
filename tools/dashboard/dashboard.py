@@ -2379,6 +2379,15 @@ def render_models():
             return None
 
     def tags(metrics, key=None, small=False):
+        """Metric chips, with the deciding one accented.
+
+        A key_metric naming a metric the model does not carry accents NOTHING
+        and looks identical to a project that simply has no headline -- which
+        is how leash-models sat unhighlighted after its metrics were renamed,
+        while dog-bin quietly accented accuracy_top1, the one metric its own
+        entry says it was NOT promoted on. So an unmatched key is called out
+        rather than rendered as silence.
+        """
         if not metrics:
             return ''
         out = []
@@ -2386,6 +2395,11 @@ def render_models():
             hot = ' hot' if k == key else ''
             out.append(f'<span class="tag{hot}">'
                        f'<i>{esc_html(k)}</i><b>{esc_html(v)}</b></span>')
+        if key and key not in metrics:
+            out.append('<span class="tag warn" title="key_metric names a '
+                       'metric this model does not report, so nothing is '
+                       'accented -- fix data/best_models.json">'
+                       f'<i>key_metric</i><b>{esc_html(key)}?</b></span>')
         return f'<div class="tags{" sm" if small else ""}">{"".join(out)}</div>'
 
     order = sorted(projs.items(), key=lambda kv: kv[1].get('stage', 99))
@@ -3892,6 +3906,11 @@ font-variant-numeric:tabular-nums}
 .tag.hot{border-color:rgba(232,166,69,.45);background:rgba(232,166,69,.09)}
 .tag.hot i{color:var(--acc)}
 .tag.hot b{color:var(--acc)}
+/* a key_metric that matches nothing: red, not amber -- amber is the accent
+   that means "this decided the promotion", and reusing it here would make a
+   config error look like a result */
+.tag.warn{border-color:rgba(219,84,84,.5);background:rgba(219,84,84,.10)}
+.tag.warn i,.tag.warn b{color:var(--red)}
 .tags.sm{margin-top:5px;gap:4px}
 .tags.sm .tag{padding:0;border:0;background:none}
 .tags.sm .tag b{color:var(--mut)}
