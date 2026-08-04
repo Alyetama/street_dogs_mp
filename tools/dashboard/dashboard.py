@@ -1376,6 +1376,7 @@ overscroll-behavior:contain}
 .lbw img{display:block;max-width:none;max-height:none;border:0;border-radius:0;
 image-rendering:auto}
 /* the box lives in the same scaled space as the image */
+.lbw .bx{cursor:move}
 .bx{position:absolute;border:1px solid var(--acc);cursor:move;
 box-shadow:0 0 0 1px rgba(0,0,0,.8),inset 0 0 0 1px rgba(0,0,0,.55)}
 .bx[hidden]{display:none}
@@ -1933,6 +1934,7 @@ function openLb(i){
     $('lbi').onload=function(){if(curBox)fitBox();else fitImage()};
     window.addEventListener('resize',function(){applyZoom()});
     initDrag();
+    initPan();
     $('lbx').focus();
   }
   curBox=origBox=null;boxMeta=null;zoom=1;
@@ -1984,6 +1986,7 @@ function applyZoom(){
   im.style.width=Math.round(im.naturalWidth*zoom)+'px';
   im.style.height=Math.round(im.naturalHeight*zoom)+'px';
   var z=$('zlv');if(z)z.textContent=Math.round(zoom*100)+'%';
+  var w=$('lbw');if(w&&w.__cursor)w.__cursor();
   paintBox();
 }
 function centreOn(cx,cy){
@@ -2076,6 +2079,57 @@ function clampBox(){
   curBox[3]=Math.max(0,Math.min(curBox[3],h));
   if(curBox[2]<curBox[0])curBox=[curBox[2],curBox[1],curBox[0],curBox[3]];
   if(curBox[3]<curBox[1])curBox=[curBox[0],curBox[3],curBox[2],curBox[1]];
+}
+/* Drag anywhere on the image to pan it. Zoom already resized the <img>
+   inside a scrolling wrapper, so panning is just scrollLeft/scrollTop -- but
+   reaching for a scrollbar to inspect a 40-pixel animal is the wrong gesture
+   for the job. The box overlay stops propagation on mousedown, so editing a
+   box still wins over panning wherever the two overlap. */
+function initPan(){
+  var w=$('lbw'), im=$('lbi');
+  if(!w||w.__pan)return;
+  w.__pan=1;
+  im.draggable=false;
+  im.addEventListener('dragstart',function(e){e.preventDefault()});
+  var p=null;
+  function canPan(){
+    return w.scrollWidth>w.clientWidth+1||w.scrollHeight>w.clientHeight+1;
+  }
+  function cursor(){ w.style.cursor=canPan()?(p?'grabbing':'grab'):''; }
+  w.addEventListener('pointerdown',function(e){
+    /* left button only, and never when there is nothing to pan to */
+    if(e.button!==0||!canPan())return;
+    /* The box overlay stops propagation on MOUSEDOWN, which does nothing to
+       a pointerdown -- they are separate streams and pointer fires first. So
+       this has to opt out by target, or setPointerCapture steals the drag
+       and a box resize silently pans the image instead. */
+    if(e.target&&e.target.closest&&e.target.closest('#lbbox'))return;
+    p={x:e.clientX,y:e.clientY,l:w.scrollLeft,t:w.scrollTop,moved:0};
+    try{w.setPointerCapture(e.pointerId)}catch(_){}
+    cursor(); e.preventDefault();
+  });
+  w.addEventListener('pointermove',function(e){
+    if(!p)return;
+    var dx=e.clientX-p.x, dy=e.clientY-p.y;
+    p.moved=Math.max(p.moved,Math.abs(dx)+Math.abs(dy));
+    w.scrollLeft=p.l-dx; w.scrollTop=p.t-dy;
+  });
+  function end(e){
+    if(!p)return;
+    /* a pan that ends over the backdrop must not read as a click and close
+       the lightbox; swallow the click this gesture is about to produce */
+    if(p.moved>4)w.__swallow=1;
+    p=null;
+    try{w.releasePointerCapture(e.pointerId)}catch(_){}
+    cursor();
+  }
+  w.addEventListener('pointerup',end);
+  w.addEventListener('pointercancel',end);
+  w.addEventListener('click',function(e){
+    if(w.__swallow){w.__swallow=0;e.stopPropagation();e.preventDefault();}
+  },true);
+  w.addEventListener('mouseenter',cursor);
+  w.__cursor=cursor;
 }
 function initDrag(){
   var bx=$('lbbox');
