@@ -9,7 +9,8 @@
     "the least-bad candidate.",
     "URLs are NOT stored: they are built from url_template + workspace + the",
     "project name + the experiment key, so this file carries no hardcoded links.",
-    "stage/short/emits/key_metric drive the pipeline view: the three projects are one chain, and a stage with best:null stops everything downstream of it."
+    "stage/short/emits/key_metric drive the pipeline view: the three projects are one chain, and a stage with best:null stops everything downstream of it.",
+    "A model's 'deployed' flag means the sweep actually runs it right now, which is not the same as being promoted. Only stage 1 is deployed today; the gate and leash classifier are accepted but not yet wired into sweep.py."
   ],
   "workspace": "alyetama",
   "updated_at": "2026-08-03",
@@ -29,7 +30,8 @@
         "weights": "data/engines/yolo26x_train30.pt",
         "engine": "data/engines/yolo26x_train30.engine",
         "sha256_engine": "ac98daeecefa24406f2f776348f0eb7101f94b7fc1267ef6d7fbde19950f0803",
-        "why": "In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page."
+        "why": "In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page.",
+        "deployed": true
       },
       "stage": 1,
       "short": "Detector",

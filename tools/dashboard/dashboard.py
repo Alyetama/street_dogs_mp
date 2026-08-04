@@ -2349,6 +2349,106 @@ def best_models():
         return {}
 
 
+# What each metric KEY actually claims, in the operator's language.
+# The keys are precise and unreadable -- acceptance_rejected_at_full_dog_recall
+# is the number a promotion turns on, and nothing about the name says so. The
+# first field is the plain-English claim used as the headline label; the second
+# is the hover text, which says what the number measures AND on what population,
+# because this project has twice promoted a model on a figure that turned out to
+# be measured on training data.
+METRIC_GLOSSARY = {
+    'recall': (
+        'ground animals found',
+        'Share of real animals the detector finds. The expensive error: the '
+        'sweep runs once, so anything missed here is gone for good.'),
+    'precision': (
+        'detections that were real',
+        'Share of the detector\'s boxes that are real animals. Cheap to get '
+        'wrong -- the gate downstream and the review page both filter these.'),
+    'mAP50': (
+        'box quality, loose overlap',
+        'Mean average precision at 50% box overlap. Rewards finding the animal; '
+        'forgiving about exactly where the box sits.'),
+    'mAP50-95': (
+        'box quality, strict overlap',
+        'Mean average precision averaged over overlap thresholds 50-95%. '
+        'Punishes sloppy boxes, so it tracks crop quality for the classifiers.'),
+    'accuracy_top1': (
+        'plain accuracy',
+        'Share of crops classified correctly at threshold 0.5. NOT what a gate '
+        'is promoted on: on a dog-heavy split, always answering "dog" already '
+        'scores high.'),
+    'roc_auc_val': (
+        'separation on the tuning split',
+        'Ranking quality on the val split. That split drives early stopping, so '
+        'it is a tuning set, not an independent one.'),
+    'acceptance_roc_auc': (
+        'separation, unseen data',
+        'Ranking quality on crops reserved before the dataset was split -- never '
+        'trained on, never early-stopped on.'),
+    'acceptance_rejected_at_full_dog_recall': (
+        'false positives removed, at zero dog loss',
+        'The promotion number. Share of real detector mistakes the gate discards '
+        'at the strictest threshold that still keeps every dog in the val set. '
+        'Measured on reserved crops the model has never seen.'),
+    'acceptance_rejected_at_t0.5': (
+        'false positives removed, at 0.5',
+        'Same reserved crops, but at the default threshold -- which costs a few '
+        'real dogs. Higher than the headline for that reason.'),
+    'balanced_accuracy_acceptance': (
+        'accuracy, both classes weighted equally',
+        'Mean of the two class recalls on reserved crops. The headline here '
+        'because leashed and unleashed cost the same to get wrong, so plain '
+        'accuracy would just reward leaning on the bigger class.'),
+    'roc_auc_acceptance': (
+        'separation, unseen data',
+        'Ranking quality on the 312 reserved image_ids, held out before the '
+        'split.'),
+    'recall_leashed_acceptance': (
+        'leashed dogs caught',
+        'Share of leashed dogs called leashed, on reserved crops.'),
+    'recall_unleashed_acceptance': (
+        'unleashed dogs caught',
+        'Share of unleashed dogs called unleashed, on reserved crops.'),
+    'balanced_accuracy_val': (
+        'balanced accuracy, tuning split',
+        'Same measure on the val split, which drove early stopping -- expect it '
+        'to flatter the model relative to the reserved number.'),
+    'accuracy_top1_val': (
+        'plain accuracy, tuning split',
+        'Top-1 on the val split. Listed for continuity with older runs; not '
+        'what this model was promoted on.'),
+    'roc_auc_as_split': (
+        'separation, as originally split',
+        'Ranking quality on the split as shipped -- which leaked, so this '
+        'number is inflated.'),
+    'roc_auc_sequence_clean': (
+        'separation, leak removed',
+        'Ranking quality after dropping val images that share a Mapillary '
+        'sequence with training. The honest version of the number above it.'),
+    'balanced_accuracy_sequence_clean': (
+        'balanced accuracy, leak removed',
+        'Both class recalls averaged, after removing val images that share a '
+        'sequence with training.'),
+    'sweep_fp_rejected_at_t0.5_heldout': (
+        'false positives removed, at 0.5',
+        'Share of real detector mistakes discarded at threshold 0.5, on flagged '
+        'crops this model did not train on.'),
+    'sweep_fp_rejected_at_full_dog_recall': (
+        'false positives removed, at zero dog loss',
+        'Share discarded at the strictest threshold that keeps every val dog.'),
+}
+
+
+def metric_meaning(key):
+    """(headline label, hover text). Unknown keys degrade to the raw name
+    rather than inventing an explanation."""
+    hit = METRIC_GLOSSARY.get(key)
+    if hit:
+        return hit
+    return (key.replace('_', ' '), '')
+
+
 def render_models():
     """The three projects as the PIPELINE they are, not three cards.
 
@@ -2378,6 +2478,27 @@ def render_models():
         except (KeyError, IndexError):
             return None
 
+    def readout(metrics, key):
+        """The deciding metric, large, labelled with the claim it makes.
+
+        The key names are precise and unreadable. Leading with
+        'acceptance_rejected_at_full_dog_recall = 0.5234' asks the reader to
+        already know which of six numbers decided the promotion and what it
+        was measured on; leading with the claim does not.
+        """
+        if not metrics or not key or key not in metrics:
+            return ''
+        label, hover = metric_meaning(key)
+        v = metrics[key]
+        try:
+            shown = (f'{float(v) * 100:.1f}%' if 0 <= float(v) <= 1
+                     else f'{float(v):.4g}')
+        except (TypeError, ValueError):
+            shown = str(v)
+        return (f'<div class="hero" title="{esc_html(hover)}">'
+                f'<b>{esc_html(shown)}</b>'
+                f'<span>{esc_html(label)}</span></div>')
+
     def tags(metrics, key=None, small=False):
         """Metric chips, with the deciding one accented.
 
@@ -2392,9 +2513,11 @@ def render_models():
             return ''
         out = []
         for k, v in metrics.items():
-            hot = ' hot' if k == key else ''
-            out.append(f'<span class="tag{hot}">'
-                       f'<i>{esc_html(k)}</i><b>{esc_html(v)}</b></span>')
+            if k == key:
+                continue          # already the headline; twice is noise
+            label, hover = metric_meaning(k)
+            out.append(f'<span class="tag" title="{esc_html(hover or label)}">'
+                       f'<i>{esc_html(label)}</i><b>{esc_html(v)}</b></span>')
         if key and key not in metrics:
             out.append('<span class="tag warn" title="key_metric names a '
                        'metric this model does not report, so nothing is '
@@ -2413,7 +2536,14 @@ def render_models():
         live = bool(b)
         blocked = broken_at is not None and stage > broken_at
         cls = 'live' if live else ('halt' if stage == broken_at else 'idle')
-        badge = ('<span class="bdg live">in production</span>' if live else
+        # A promoted model is not a deployed one. Only the detector runs
+        # inside the sweep today; the gate and the leash classifier are
+        # accepted but not wired in, and printing "in production" for all
+        # three told the operator the pipeline was doing work it is not.
+        deployed = bool(b and b.get('deployed'))
+        badge = (('<span class="bdg live">in production</span>' if deployed
+                  else '<span class="bdg ok">promoted &middot; not wired in'
+                       '</span>') if live else
                  '<span class="bdg halt">pipeline stops here</span>'
                  if stage == broken_at else
                  '<span class="bdg idle">waiting on stage %d</span>' % broken_at)
@@ -2427,11 +2557,15 @@ def render_models():
                    f'rel="noopener">{esc_html(b.get("run"))}<span class="ext">'
                    f'&#8599;</span></a>' if u else
                    f'<span class="srun">{esc_html(b.get("run"))}</span>')
-            body = run + tags(b.get('metrics'), d.get('key_metric'))
+            body = (run + readout(b.get('metrics'), d.get('key_metric'))
+                    + tags(b.get('metrics'), d.get('key_metric')))
             w = b.get('weights')
             if w:
                 body += f'<div class="sfile">{esc_html(w)}</div>'
             note = b.get('why') or ''
+            cav = b.get('caveat')
+            if cav:
+                note = note + '\n\n' + cav
         else:
             body = '<span class="srun none">no model accepted</span>'
             note = d.get('why_blank') or ''
@@ -2450,9 +2584,20 @@ def render_models():
                               if u else f'<span class="cand">{inner}</span>')
                 body += ('<div class="cwrap"><div class="clab">tried</div>'
                          + ''.join(cl) + '</div>')
+        # The justification is 200-400 words of measurement history -- the
+        # reason to trust the number, which matters exactly once and then
+        # never again until someone questions it. Collapsed by default: at
+        # full length it buried the number it was defending.
+        why = ''
+        if note:
+            words = len(note.split())
+            paras = ''.join(f'<p>{esc_html(x)}</p>'
+                            for x in note.split('\n\n') if x.strip())
+            why = (f'<details class="swhy"><summary>Why this one'
+                   f'<span class="wc">{words} words</span></summary>'
+                   f'{paras}</details>')
         rows.append(f'<div class="stg {cls}"><div class="dot"></div>'
-                    f'{head}<div class="sbody">{body}'
-                    f'<p class="swhy">{esc_html(note)}</p></div></div>')
+                    f'{head}<div class="sbody">{body}{why}</div></div>')
     upd = esc_html(st.get('updated_at') or '')
     return (f'<div class="pipe">{"".join(rows)}</div>'
             f'<div class="mfoot">data/best_models.json &middot; updated {upd} '
@@ -3883,6 +4028,10 @@ Menlo,monospace;margin-left:auto;opacity:.7}
 border-radius:999px;padding:2px 8px;border:1px solid}
 .bdg.live{color:var(--green);border-color:rgba(67,181,129,.35);
 background:rgba(67,181,129,.1)}
+/* accepted, but nothing downstream runs it yet -- neutral, not green: green
+   here would claim the pipeline is doing work it is not */
+.bdg.ok{color:var(--mut);border-color:rgba(130,140,150,.28);
+background:rgba(130,140,150,.07)}
 .bdg.halt{color:var(--mut);border-color:rgba(130,140,150,.3);
 background:rgba(130,140,150,.08)}
 .bdg.idle{color:var(--dim);border-color:transparent;background:transparent;
@@ -3896,9 +4045,12 @@ a.srun:hover{color:var(--acc);border-bottom-color:var(--acc)}
 /* ── the ask: metrics as tags ── */
 .tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .tag{display:inline-flex;align-items:baseline;gap:6px;background:var(--panel2);
+cursor:help;
 border:1px solid var(--bd);border-radius:7px;padding:3px 9px}
-.tag i{font-style:normal;font-size:9.5px;letter-spacing:.07em;
-text-transform:uppercase;color:var(--dim)}
+/* sentence case, not caps: these were metric KEYS (MAP50) and are now short
+   phrases ("separation on the tuning split"), which caps turns into shouting */
+.tag i{font-style:normal;font-size:10.5px;letter-spacing:.005em;
+color:var(--dim)}
 .tag b{font-size:12.5px;font-weight:640;color:var(--tx);
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
 font-variant-numeric:tabular-nums}
@@ -3917,8 +4069,41 @@ font-variant-numeric:tabular-nums}
 a.cand:hover .tags.sm .tag b{color:var(--tx)}
 .tags.sm .tag i{font-size:9px}
 .tags.sm .tag b{font-size:11px}
-.swhy{font-size:11.5px;color:var(--dim);line-height:1.62;margin-top:11px;
-max-width:72ch}
+/* ── the deciding metric, as an instrument readout ────────────────────────
+   Everything else on the card is a supporting reading. The value is set in
+   the mono face at display size with the CLAIM underneath, because the metric
+   key alone ("acceptance_rejected_at_full_dog_recall") tells a reader nothing
+   about which of six numbers the promotion rests on. */
+.hero{margin:12px 0 2px;display:flex;flex-direction:column;gap:1px;
+cursor:help;width:max-content}
+.hero b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+font-size:34px;font-weight:600;line-height:1;letter-spacing:-.02em;
+color:var(--acc);font-variant-numeric:tabular-nums}
+.hero span{font-size:11.5px;color:var(--mut);letter-spacing:.01em;
+max-width:34ch;line-height:1.35}
+.stg.live .hero b{color:var(--acc)}
+
+/* ── the audit trail, closed ──────────────────────────────────────────────
+   Kept on the card because "why should I believe this" is a real question,
+   collapsed because it is asked once. The word count sets the expectation
+   before the click. */
+.swhy{margin-top:14px;max-width:74ch}
+.swhy summary{font-size:11.5px;color:var(--mut);cursor:pointer;
+list-style:none;display:inline-flex;align-items:center;gap:8px;
+padding:3px 9px 3px 0;border-radius:5px;user-select:none}
+.swhy summary::-webkit-details-marker{display:none}
+.swhy summary::before{content:"";width:0;height:0;
+border-left:4.5px solid currentColor;border-top:3.5px solid transparent;
+border-bottom:3.5px solid transparent;margin-right:1px;
+transition:transform .15s ease}
+.swhy[open] summary::before{transform:rotate(90deg)}
+.swhy summary:hover{color:var(--tx)}
+.swhy summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.swhy .wc{font-size:10px;color:var(--dim);
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.swhy p{font-size:11.5px;color:var(--dim);line-height:1.65;margin-top:9px}
+.swhy p+p{margin-top:7px}
+@media(prefers-reduced-motion:reduce){.swhy summary::before{transition:none}}
 .sfile{font-size:10.5px;color:var(--dim);margin-top:8px;
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .cwrap{margin-top:12px;display:flex;flex-wrap:wrap;gap:6px 18px;align-items:flex-start}
