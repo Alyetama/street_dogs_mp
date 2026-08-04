@@ -5175,8 +5175,12 @@ width:2px;background:var(--green);opacity:.55}
 /* below the break, flow is only potential -- dash it and drain the colour */
 .stg.halt::before,.stg.idle::before{background:none;opacity:1;
 border-left:2px dashed rgba(130,140,150,.38)}
-.dot{position:absolute;left:-27px;top:5px;width:12px;height:12px;border-radius:50%;
-background:var(--bg);border:2px solid var(--green)}
+/* SCOPED to the pipeline rail. Unscoped, this rule also captured the header's
+   status dot -- .upd is position:static, so left:-27px resolved against the
+   page and parked a pulsing green ring off the left edge of the window, the
+   only part of it still visible. Same collision as .spk vs .kpi.ok.spk. */
+.stg .dot{position:absolute;left:-27px;top:5px;width:12px;height:12px;
+border-radius:50%;background:var(--bg);border:2px solid var(--green)}
 .stg.live .dot{background:var(--green);animation:pulse 2.6s infinite}
 .stg.halt .dot{border-color:var(--mut);border-style:dashed}
 .stg.idle .dot{border-color:rgba(130,140,150,.4)}
