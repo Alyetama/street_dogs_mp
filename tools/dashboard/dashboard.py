@@ -2313,12 +2313,17 @@ function restoreSort(){
     if(el.options[i].value===v){sort=v;el.value=v;return;}
   }
 }
+/* CHANGING THE VIEW IS NOT REVIEWING.
+   markSeen() banks every crop on screen -- it is how "I am done with these"
+   is recorded, and Next earns it. These three do not: showing 100 instead of
+   50, reordering the same queue, or narrowing to one country all mean "show
+   me this differently", and banking first threw the current screenful out of
+   the queue unjudged. Switching 50 -> 100 quietly consumed 50 crops. */
 $('sort').onchange=function(){var v=this.value;
   try{localStorage.setItem(SORT_KEY,v)}catch(_){}
-  markSeen().then(function(){
-  sort=v;page=0;sel=-1;load()})};
+  sort=v;page=0;sel=-1;load()};
 $('size').onchange=function(){var v=parseInt(this.value,10)||50;
-  markSeen().then(function(){size=v;page=0;sel=-1;load()})};
+  size=v;page=0;sel=-1;load()};
 /* Rebuilt from every response so the hourly refresh reaches an open tab, but
    only when the option set actually CHANGED -- rewriting the <select> on each
    page turn would drop the open dropdown and reset the caret mid-click. */
@@ -2341,7 +2346,7 @@ function paintCountries(list,cur){
   if(cur!=null)$('country').value=cur;
 }
 $('country').onchange=function(){var v=this.value;
-  markSeen().then(function(){country=v;page=0;sel=-1;load()})};
+  country=v;page=0;sel=-1;load()};
 restoreSort();
 load();loadBal();
 </script></body></html>"""
