@@ -987,6 +987,28 @@ def check_training_tracker():
         if tt.best_index(zero, 'detect') != 4:
             bad.append('t7 the best_fitness==0 clause is not reproduced')
 
+        # t9 each latest-epoch tile shows the peak of ITS OWN metric. Taking
+        # the value at the best-FITNESS epoch instead would attribute one
+        # metric's peak to another metric's epoch -- a wrong number that sits
+        # in the right range and matches on any run where they coincide.
+        rows9 = [{'epoch': 1, 'metrics/recall(B)': 0.90,
+                  'metrics/mAP50-95(B)': 0.30},
+                 {'epoch': 2, 'metrics/recall(B)': 0.40,
+                  'metrics/mAP50-95(B)': 0.50}]
+        got9 = {k: (round(v, 4), round(pk, 4))
+                for k, v, pk in tt.latest_metrics(rows9, 'detect')}
+        # fitness peaks at epoch 2, but recall peaked at epoch 1
+        if got9.get('recall') != (0.40, 0.90):
+            bad.append(f't9 recall latest/peak wrong: {got9.get("recall")}')
+        if got9.get('mAP50-95') != (0.50, 0.50):
+            bad.append(f't9 mAP50-95 latest/peak wrong: '
+                       f'{got9.get("mAP50-95")}')
+        # and the list itself is the short one, on purpose
+        if [k for k, _, _ in tt.latest_metrics(rows9, 'detect')] != \
+                ['mAP50-95', 'recall']:
+            bad.append(f't9 unexpected latest metric set: '
+                       f'{[k for k, _, _ in tt.latest_metrics(rows9, "detect")]}')
+
         # t8 a run directory called "train" is ultralytics' DEFAULT name, and
         # "train" is also a dataset split -- pruning by name alone hid it
         d8 = os.path.join(tmp, 'named')

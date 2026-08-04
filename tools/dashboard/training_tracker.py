@@ -182,6 +182,39 @@ HEADLINE = {
     'classify': ('metrics/accuracy_top1', 'top-1 accuracy'),
     'detect': ('metrics/mAP50-95(B)', 'mAP50-95'),
 }
+# What the LATEST epoch reported, beyond the one metric early stopping
+# watches. Keys are the glossary names the dashboard already uses, so the
+# hovers come from one place. Ordered: the deciding metric first.
+# Deliberately short. mAP50 tracks mAP50-95 closely enough to add a number
+# without adding information, and top-5 on a two-class problem is 1.0 forever.
+LATEST = {
+    'detect': (('metrics/mAP50-95(B)', 'mAP50-95'),   # what decides the run
+               ('metrics/recall(B)', 'recall'),       # the unrecoverable error
+               ('metrics/precision(B)', 'precision')),
+    'classify': (('metrics/accuracy_top1', 'accuracy_top1'),),
+}
+
+
+def latest_metrics(rows, task):
+    """[(glossary key, value, best so far)] for the newest epoch.
+
+    `best so far` is the running max of THAT metric, which is not the same as
+    the value at the best-fitness epoch -- reporting the latter as "best mAP50"
+    would attribute one metric's peak to another metric's epoch.
+    """
+    if not rows:
+        return []
+    last = rows[-1]
+    out = []
+    for col, key in LATEST.get(task, ()):
+        v = last.get(col)
+        if v is None:
+            continue
+        seen = [r[col] for r in rows if r.get(col) is not None]
+        out.append((key, v, max(seen) if seen else None))
+    return out
+
+
 def loss_keys(rows):
     """(train keys, val keys) taken from the FILE, not from a fixed list.
 
@@ -577,6 +610,10 @@ def summarize(run, live=None, registry=None):
         'since_best': since_best, 'secs_per_epoch': secs,
         'headline_key': head_key, 'headline_label': head_label,
         'wall_clock_s': (tcol[-1] if tcol else None),
+        'latest': latest_metrics(rows, task),
+        'latest_train_loss': (tr[-1] if tr else None),
+        'latest_val_loss': (va[-1] if va else None),
+        'lr': rows[-1].get('lr/pg0') if rows else None,
         'ultralytics': version, 'fitness_uncertain': formula_uncertain,
         'fitness_formula': ('mAP50-95' if det_w == DET_W_84 else
                             '0.1*mAP50 + 0.9*mAP50-95') if task == 'detect'

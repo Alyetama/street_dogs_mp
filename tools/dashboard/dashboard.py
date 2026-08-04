@@ -2679,6 +2679,21 @@ def _live_card(r):
                  'Mean over the last 10 epochs, so a slowdown shows instead '
                  'of being averaged away.')
 
+    # ── what the LATEST epoch reported ─────────────────────────────────
+    # The tiles above answer "when does this stop". These answer "is it any
+    # good yet", which is the other question asked mid-run. Every value is
+    # from the newest epoch; the peak is shown beside it because on a metric
+    # that is still climbing the two are the same number and on one that has
+    # turned over they are not.
+    latest = []
+    for key, val, peak in (r.get('latest') or ()):
+        label, hover, _ = metric_meaning(key)
+        peaked = (peak is not None and peak - val > 1e-9)
+        latest.append(
+            f'<div class="ttile lat"{_t(hover)}>'
+            f'<b>{val:.4f}</b><span>{esc_html(label)}</span>'
+            + (f'<u>peak {peak:.4f}</u>' if peaked else '<u>at its peak</u>')
+            + '</div>')
     meter = ''
     if pat and since is not None:
         left = max(0, pat - since)
@@ -2702,7 +2717,12 @@ def _live_card(r):
             f'batch {_int(r.get("batch"))}'
             + (' &middot; one class' if r.get('single_cls') else '')
             + f' &middot; pid {r["pid"]}</span></div>'
-            f'<div class="ttiles">{"".join(tiles)}</div>{meter}</div>')
+            f'<div class="ttiles">{"".join(tiles)}</div>'
+            + (f'<div class="tlatest"><span class="tlab">latest epoch'
+               f'{(" " + str(r["last_epoch"])) if r.get("last_epoch") else ""}'
+               f'</span><div class="ttiles">{"".join(latest)}</div></div>'
+               if latest else '')
+            + f'{meter}</div>')
 
 
 # A run that finished, on its own terms. early_stopped IS a completion --
@@ -4812,6 +4832,16 @@ border-radius:9px;padding:10px 12px 9px}
 font-variant-numeric:tabular-nums;line-height:1.15}
 .ttile b em{font-style:normal;font-size:13px;color:var(--dim);font-weight:500}
 .ttile span{display:block;margin-top:2px;font-size:11px;color:var(--mut)}
+/* the latest-epoch row is context for the row above it, so it reads quieter:
+   smaller numbers, its own rule, and a label that says what it is */
+.tlatest{margin-top:13px;padding-top:12px;border-top:1px solid var(--bd)}
+.tlab{display:block;font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
+color:var(--dim);margin-bottom:8px}
+.ttile.lat{flex:0 1 150px;padding:8px 11px 7px}
+.ttile.lat b{font-size:16px}
+.ttile.lat span{font-size:10.5px}
+.ttile.lat u{display:block;margin-top:3px;font-size:10px;color:var(--dim);
+text-decoration:none;font-variant-numeric:tabular-nums}
 .tmeter{margin-top:13px}
 .tmhead{display:flex;justify-content:space-between;align-items:baseline;
 font-size:11.5px;color:var(--mut)}
