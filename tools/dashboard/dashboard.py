@@ -116,7 +116,27 @@ def cfg(key, default='', env=None):
     if v:
         return v
     v = load_cfg().get(key)
+    if v is not None and not isinstance(v, str):
+        # A key that IS set but is not a string used to fall through to the
+        # default with nothing on screen -- a config the user had written and
+        # the dashboard silently ignored. Lists have their own reader below.
+        sys.stderr.write(
+            f'warning: {CFG_PATH}: "{key}" is {type(v).__name__}, not a '
+            f'string -- ignored. Use cfg_list() for a list-valued key.\n')
     return v if isinstance(v, str) and v else default
+
+
+def cfg_list(key, env=None):
+    """A list-valued config key, from JSON or a comma-separated string."""
+    raw = os.environ.get(env or ('DASHBOARD_' + key.upper()))
+    if raw:
+        return [x.strip() for x in raw.split(',') if x.strip()]
+    v = load_cfg().get(key)
+    if isinstance(v, str):
+        return [x.strip() for x in v.split(',') if x.strip()]
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return []
 
 REGION_SQL = """
 WITH f AS (
@@ -2466,6 +2486,18 @@ _TRK = {'at': 0.0, 'root': None, 'runs': [], 'error': None}
 TRK_TTL = 20
 
 
+def hidden_projects():
+    """Project names the panel should not list, from `training_hide_projects`.
+
+    A folder that once held work and no longer represents a live project is
+    still on disk, and nothing in the run files marks it dead -- so which ones
+    to retire is a judgement, and judgements belong in config rather than in a
+    constant shipped to everyone who clones this.
+    """
+    return {x.lower() for x in
+            cfg_list('training_hide_projects', env='TRAINING_HIDE_PROJECTS')}
+
+
 def training_runs():
     root = training_root()
     now = time.time()
@@ -2476,6 +2508,10 @@ def training_runs():
         try:
             import training_tracker
             runs = training_tracker.collect(root, registry=best_models())
+            hide = hidden_projects()
+            if hide:
+                runs = [r for r in runs
+                        if r['project'].lower() not in hide]
         except Exception as e:
             # swallowing this printed "no runs found", which is a different
             # fact and sends the reader to check the wrong thing
@@ -4027,6 +4063,15 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split('?', 1)[0] == '/api/review/count':
+            # Just the queue depth. review_payload does one listdir over a
+            # pool capped at 3000 plus the ledgers, so asking for size=0 is
+            # the whole computation without serialising any crop.
+            try:
+                self._json({'left': review_payload(0, 0)['total_unflagged']})
+            except Exception as e:
+                self._json({'left': None, 'error': str(e)})
+            return
         if self.path.split('?', 1)[0] == '/api/training':
             # The page itself is a build artefact, so the live card, its
             # clock and the patience countdown were frozen until the next
@@ -4119,6 +4164,15 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json({'ok': ok}, 200 if ok else 400)
             except Exception as e:
                 self._json({'error': str(e)}, 500)
+            return
+        if self.path.split('?', 1)[0] == '/api/review/count':
+            # Just the queue depth. review_payload does one listdir over a
+            # pool capped at 3000 plus the ledgers, so asking for size=0 is
+            # the whole computation without serialising any crop.
+            try:
+                self._json({'left': review_payload(0, 0)['total_unflagged']})
+            except Exception as e:
+                self._json({'left': None, 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/training':
             # The page itself is a build artefact, so the live card, its
@@ -4518,6 +4572,35 @@ h1 .o{color:var(--acc)}
 .upd{display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12.5px}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2.4s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(67,181,129,.5)}70%{box-shadow:0 0 0 7px rgba(67,181,129,0)}100%{box-shadow:0 0 0 0 rgba(67,181,129,0)}}
+/* The one solid-filled control on the page. Everything else is a tint or an
+   outline, so filling exactly one thing makes it unambiguously THE action --
+   and the action this dashboard exists to send someone to is the queue.
+   #13151a on #e8a645 is the page background on the page accent: 8.9:1. */
+.hact{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;
+justify-content:flex-end}
+.revbtn{display:inline-flex;align-items:center;gap:10px;text-decoration:none;
+background:var(--acc);color:#13151a;border:1px solid var(--acc);
+border-radius:10px;padding:7px 12px 7px 13px;line-height:1.1;
+transition:transform .12s ease,box-shadow .12s ease,background .12s ease}
+.revbtn:hover{background:#f0b45c;transform:translateY(-1px);
+box-shadow:0 6px 16px rgba(232,166,69,.18)}
+.revbtn:focus-visible{outline:2px solid var(--acc);outline-offset:3px}
+.revbtn .rvf{font-size:15px;opacity:.7}
+.revbtn .rvn{display:flex;flex-direction:column}
+.revbtn b{font-size:17px;font-weight:680;letter-spacing:-.35px;
+font-variant-numeric:tabular-nums}
+.revbtn em{font-style:normal;font-size:10px;font-weight:600;opacity:.68;
+letter-spacing:.04em;text-transform:uppercase}
+/* An empty queue is not an achievement to celebrate in the accent colour; it
+   is a page with nothing to do, and it should read that way. */
+.revbtn.quiet{background:transparent;color:var(--mut);
+border-color:var(--bd);box-shadow:none}
+.revbtn.quiet:hover{background:rgba(130,140,150,.08);transform:none;
+box-shadow:none}
+.revbtn.quiet b{font-size:13px;font-weight:600}
+@media (prefers-reduced-motion:reduce){
+  .revbtn,.revbtn:hover{transition:none;transform:none}
+}
 .rbtn{background:rgba(232,166,69,.14);border:1px solid rgba(232,166,69,.35);color:var(--acc);border-radius:8px;padding:4px 11px;font-size:12px;font-weight:600;cursor:pointer;transition:background .12s;font-variant-numeric:tabular-nums}
 .rbtn:hover{background:rgba(232,166,69,.24)}
 .rbtn:disabled{cursor:default;opacity:.85}
@@ -5067,7 +5150,17 @@ outline-offset:2px}
 <header>
   <div><h1>Street Dogs · <span class="o">Collection Progress</span></h1>
     <div class="sub">global Mapillary ground-animal harvest</div></div>
-  <div class="upd"><span class="dot"></span>updated __NOW__ · auto-refreshes hourly<button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
+  <div class="hact">
+    <!-- The count is the point: a queue depth is what makes someone open the
+         page, and an empty queue should say so quietly rather than shout a
+         zero in the accent colour. -->
+    <a class="revbtn" id="revBtn" href="/review"
+       title="Judge detections one by one — dog or not a dog">
+      <span class="rvf">&#9873;</span>
+      <span class="rvn"><b id="revN">&mdash;</b><em id="revL">to review</em>
+      </span></a>
+    <div class="upd"><span class="dot"></span>updated __NOW__ · auto-refreshes hourly<button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
+  </div>
 </header>
 
 <div class="ring-row">
@@ -5450,6 +5543,31 @@ initTracker();
   });
 })();
 
+/* ── review queue depth in the header ── */
+(function(){
+  var btn=document.getElementById('revBtn'),
+      num=document.getElementById('revN'),
+      lab=document.getElementById('revL');
+  if(!btn||!num) return;
+  function paint(n){
+    if(n===null||n===undefined){ num.textContent='\u2014'; return; }
+    btn.classList.toggle('quiet',n===0);
+    num.textContent=n===0?'Review':n.toLocaleString();
+    lab.textContent=n===0?'nothing waiting':(n===1?'to review':'to review');
+  }
+  function poll(){
+    if(document.hidden) return;
+    fetch('/api/review/count').then(function(r){return r.json()})
+      .then(function(j){ paint(j&&typeof j.left==='number'?j.left:null); })
+      /* keep the last good number rather than blanking the button */
+      .catch(function(){});
+  }
+  poll();
+  setInterval(poll,30000);
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden) poll();
+  });
+})();
 function genCommands(){
   var region=(cmdRegion.value||'').trim();
   if(!region){cmdOut.innerHTML='';return;}
