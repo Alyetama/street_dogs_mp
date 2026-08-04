@@ -152,6 +152,79 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # ── t6-t9: how a provenance record is CLASSED ───────────────────────
+    import run_manifest as rm
+
+    # t6 an attested record must be impossible to render as a measurement
+    att = {'schema': 2, 'provenance_class': rm.ATTESTED, 'gen': 1,
+           'run_id': 1, 'model': {'sha8': None, 'comet_run': None,
+                                  'comet_key': None},
+           'attested_model': {'comet_run': 'train-30'},
+           'attestation': {'by': 'Someone <a@b>', 'at': '2026-08-03'},
+           'corroboration': {'identical': 0, 'differing': 0,
+                             'shares_with_run_ids': []}}
+    basis, line = rm._describe(att, None)
+    check('t6 an attested row is labelled ATTESTED', basis == rm.BASIS[rm.ATTESTED],
+          f'got {basis!r}')
+    check('t6 an attested row always says NOT measured', 'NOT measured' in line,
+          line[:90])
+    check('t6 an attested row names its attester', 'Someone' in line, line[:90])
+    check('t6 an uncorroborated attestation says so',
+          'NO corroboration' in line, line[:90])
+
+    # t7 a schema 1 record must not be read as measured
+    basis, line = rm._describe({'gen': 1, 'run_id': 1,
+                                'model': {'sha8': 'abcd1234'}}, None)
+    check('t7 a class-less manifest is "unknown", not measured',
+          basis == 'unknown', f'got {basis!r}')
+
+    # t8 a measured-late record must say the digest came after the rows
+    basis, line = rm._describe(
+        {'schema': 2, 'provenance_class': rm.MEASURED_LATE, 'gen': 1,
+         'run_id': 1, 'engine_hashed_at': '2026-08-03 22:57:49',
+         'model': {'sha8': 'ac98daee', 'comet_run': 'train-30',
+                   'comet_key': 'ef4a85c3c1ee4bfc8d6805fb413c43f3'}}, None)
+    check('t8 a late digest says it was taken after the rows',
+          'AFTER the run had already written rows' in line, line[:110])
+
+    # t9 generation 0 must not widen the glob to every generation
+    with tempfile.TemporaryDirectory() as tmp:
+        for g, rid in ((0, 999), (1, 4242)):
+            d = os.path.join(tmp, 'runs', f'gen={g:04d}')
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, f'run_{rid}_x.json'), 'w') as fh:
+                json.dump({'gen': g, 'run_id': rid}, fh)
+        got = sorted(rm.manifests_for(tmp, 0))
+        check('t9 gen=0 selects generation 0, not all of them',
+              got == [(0, 999)], f'{got}')
+
+    # t10 a manifest failure must never kill a sweep. run_manifest raises
+    # SystemExit, which is NOT an Exception -- the guard has to be wider.
+    # Structural, not a text window: a string search silently measures
+    # whatever happens to be within N characters of the call.
+    import ast as _ast
+    tree = _ast.parse(open(os.path.join(DETECT, 'sweep.py')).read())
+    wide = None
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Try):
+            continue
+        calls = [n for n in _ast.walk(node)
+                 if isinstance(n, _ast.Attribute)
+                 and n.attr == 'write_for_run']
+        if not calls:
+            continue
+        names = []
+        for h in node.handlers:
+            t = h.type
+            names += ([e.id for e in t.elts if isinstance(e, _ast.Name)]
+                      if isinstance(t, _ast.Tuple)
+                      else [t.id] if isinstance(t, _ast.Name)
+                      else ['<bare>'] if t is None else ['?'])
+        wide = names
+    check('t10 the sweep guard catches SystemExit too',
+          wide is not None and ('BaseException' in wide or '<bare>' in wide),
+          f'handlers around write_for_run: {wide}')
+
     print()
     if FAILED:
         print(f'{len(FAILED)} FAILED: {", ".join(FAILED)}')

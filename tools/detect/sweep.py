@@ -438,8 +438,12 @@ def cmd_run(args):
         run_manifest.write_for_run(REPO, args.gen, run_id, cfg,
                                    started=epoch)
         model_sha8 = run_manifest.sha256_of(cfg['engine'])[:8]
-    except Exception as e:
-        print(f'WARNING: could not write the run manifest ({e}); the boxes '
+    # BaseException, not Exception: run_manifest raises SystemExit for a
+    # missing engine, which sailed straight through an `except Exception` and
+    # killed a 32.5M-image sweep over a bookkeeping failure -- the exact
+    # opposite of what the comment above promises.
+    except BaseException as e:
+        print(f'WARNING: could not write the run manifest ({e!r}); the boxes '
               f'from run_id={run_id} will not be attributable to a model',
               file=sys.stderr)
     status = StatusWriter(run_id,
