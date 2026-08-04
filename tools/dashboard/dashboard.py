@@ -2597,12 +2597,10 @@ def render_models():
         # full length it buried the number it was defending.
         why = ''
         if note:
-            words = len(note.split())
             paras = ''.join(f'<p>{esc_html(x)}</p>'
                             for x in note.split('\n\n') if x.strip())
-            why = (f'<details class="swhy"><summary>Why this one'
-                   f'<span class="wc">{words} words</span></summary>'
-                   f'{paras}</details>')
+            why = ('<details class="swhy"><summary>Why this model'
+                   '</summary>' + paras + '</details>')
         rows.append(f'<div class="stg {cls}"><div class="dot"></div>'
                     f'{head}<div class="sbody">{body}{why}</div></div>')
     upd = esc_html(st.get('updated_at') or '')
@@ -2642,12 +2640,14 @@ def render_models():
         f'<div class="gt"><dt>{esc_html(t)}</dt><dd>{esc_html(v)}</dd></div>'
         for t, v in terms)
     return (f'<div class="pipe">{"".join(rows)}</div>'
-            f'<details class="gloss"><summary>What these words mean'
-            f'<span class="wc">{len(terms)} terms</span></summary>'
-            f'<dl class="gwrap">{gl}</dl></details>'
             f'<div class="mfoot">data/best_models.json &middot; updated {upd} '
             f'&middot; refresh with <code>tools/detect/best_models.py --update</code>'
-            f'</div>')
+            f'</div>'
+            f'<details class="gloss"><summary>'
+            f'<span class="gk">Glossary</span>'
+            f'How to read these numbers'
+            f'</summary>'
+            f'<dl class="gwrap">{gl}</dl></details>')
 
 
 def esc_html(v):
@@ -4144,8 +4144,6 @@ transition:transform .15s ease}
 .swhy[open] summary::before{transform:rotate(90deg)}
 .swhy summary:hover{color:var(--tx)}
 .swhy summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
-.swhy .wc{font-size:10px;color:var(--dim);
-font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .swhy p{font-size:11.5px;color:var(--dim);line-height:1.65;margin-top:9px}
 .swhy p+p{margin-top:7px}
 
@@ -4159,10 +4157,17 @@ text-transform:uppercase;color:var(--dim);white-space:nowrap}
 border-left:1px solid rgba(130,140,150,.22)}
 
 /* ── the shared vocabulary, closed ─────────────────────────────────────── */
-.gloss{margin:18px 0 0;padding-top:15px;max-width:74ch;
-border-top:1px solid var(--bd)}
+/* A block of its own, not a third disclosure on the last card. Panel fill and
+   full width put it at section scope; the per-card "Why this one" stays a bare
+   caret inside the rail. */
+.gloss{margin:14px 0 0;background:var(--panel2);border:1px solid var(--bd);
+border-radius:9px;padding:11px 14px}
+.gloss[open]{padding-bottom:15px}
 .gloss summary{font-size:11.5px;color:var(--mut);cursor:pointer;
-list-style:none;display:inline-flex;align-items:center;gap:8px;user-select:none}
+list-style:none;display:flex;align-items:center;gap:9px;user-select:none}
+.gloss .gk{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
+color:var(--acc);font-weight:600}
+.gloss summary{font-size:12.5px;color:var(--tx)}
 .gloss summary::-webkit-details-marker{display:none}
 .gloss summary::before{content:"";width:0;height:0;
 border-left:4.5px solid currentColor;border-top:3.5px solid transparent;
@@ -4172,7 +4177,8 @@ border-bottom:3.5px solid transparent;transition:transform .15s ease}
 .gloss summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .gloss .wc{font-size:10px;color:var(--dim);
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.gwrap{margin-top:12px;display:grid;gap:11px}
+.gwrap{margin-top:14px;display:grid;gap:12px;
+grid-template-columns:repeat(auto-fit,minmax(280px,1fr));max-width:none}
 .gt dt{font-size:10px;letter-spacing:.07em;text-transform:uppercase;
 color:var(--acc);margin-bottom:3px}
 .gt dd{font-size:11.5px;color:var(--dim);line-height:1.6}
