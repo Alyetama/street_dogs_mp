@@ -2505,17 +2505,21 @@ def best_models():
 # because this project has twice promoted a model on a figure that turned out to
 # be measured on training data.
 METRIC_GLOSSARY = {
+    # The HARVEST collects ground animals; the DETECTOR is one class -- dog.
+    # train-30 and dogdet_v2 both train single_cls on a set whose only name is
+    # "target", so a detector metric is a statement about dogs, and calling it
+    # "ground animals" credited the model with a job it was never given.
     'recall': (
-        'ground animals found',
-        'Share of real animals the detector finds. The expensive error: the '
+        'dogs found',
+        'Share of real dogs the detector finds. The expensive error: the '
         'sweep runs once, so anything missed here is gone for good.', 'tuning split'),
     'precision': (
-        'detections that were real',
-        'Share of the detector\'s boxes that are real animals. Cheap to get '
+        'detections that were dogs',
+        'Share of the detector\'s boxes that are really dogs. Cheap to get '
         'wrong -- the gate downstream and the review page both filter these.', 'tuning split'),
     'mAP50': (
         'box quality, loose overlap',
-        'Mean average precision at 50% box overlap. Rewards finding the animal; '
+        'Mean average precision at 50% box overlap. Rewards finding the dog; '
         'forgiving about exactly where the box sits.', 'tuning split'),
     'mAP50-95': (
         'box quality, strict overlap',

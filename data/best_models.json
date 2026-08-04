@@ -1,185 +1,185 @@
 {
-  "_comment": [
-    "Best model per Comet project, hand-curated. Refresh candidate metrics with",
-    "  tools/detect/best_models.py --update",
-    "which rewrites metrics from Comet but NEVER changes 'best'. Promoting a model",
-    "is a judgement about fitness, not an argmax over a leaderboard -- dogbin_001",
-    "tops its project and is still not deployable (see its note).",
-    "A null 'best' means nothing has earned the slot yet; it is never filled with",
-    "the least-bad candidate.",
-    "URLs are NOT stored: they are built from url_template + workspace + the",
-    "project name + the experiment key, so this file carries no hardcoded links.",
-    "stage/short/emits/key_metric drive the pipeline view: the three projects are one chain, and a stage with best:null stops everything downstream of it.",
-    "A model's 'deployed' flag means the sweep actually runs it right now, which is not the same as being promoted. Only stage 1 is deployed today; the gate and leash classifier are accepted but not yet wired into sweep.py."
-  ],
-  "workspace": "alyetama",
-  "updated_at": "2026-08-03",
-  "projects": {
-    "dogdetection": {
-      "role": "detector - finds ground animals in street imagery (the sweep runs this)",
-      "best": {
-        "run": "train-30",
-        "key": "ef4a85c3c1ee4bfc8d6805fb413c43f3",
-        "date": "2026-06-05",
-        "metrics": {
-          "mAP50": 0.8708,
-          "mAP50-95": 0.4973,
-          "precision": 0.8977,
-          "recall": 0.8764
-        },
-        "weights": "data/engines/yolo26x_train30.pt",
-        "engine": "data/engines/yolo26x_train30.engine",
-        "sha256_engine": "ac98daeecefa24406f2f776348f0eb7101f94b7fc1267ef6d7fbde19950f0803",
-        "why": "In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page.",
-        "deployed": true
-      },
-      "stage": 1,
-      "short": "Detector",
-      "emits": "boxes on ground animals",
-      "key_metric": "recall"
+ "_comment": [
+  "Best model per Comet project, hand-curated. Refresh candidate metrics with",
+  "  tools/detect/best_models.py --update",
+  "which rewrites metrics from Comet but NEVER changes 'best'. Promoting a model",
+  "is a judgement about fitness, not an argmax over a leaderboard -- dogbin_001",
+  "tops its project and is still not deployable (see its note).",
+  "A null 'best' means nothing has earned the slot yet; it is never filled with",
+  "the least-bad candidate.",
+  "URLs are NOT stored: they are built from url_template + workspace + the",
+  "project name + the experiment key, so this file carries no hardcoded links.",
+  "stage/short/emits/key_metric drive the pipeline view: the three projects are one chain, and a stage with best:null stops everything downstream of it.",
+  "A model's 'deployed' flag means the sweep actually runs it right now, which is not the same as being promoted. Only stage 1 is deployed today; the gate and leash classifier are accepted but not yet wired into sweep.py."
+ ],
+ "workspace": "alyetama",
+ "updated_at": "2026-08-03",
+ "projects": {
+  "dogdetection": {
+   "role": "detector - finds dogs in street imagery, one class (the sweep runs this). The HARVEST collects ground animals; this model is trained single_cls on a set whose only class is \"target\" = dog, so a non-dog animal in its output is a false positive, which is what the dog-bin gate downstream exists to catch.",
+   "best": {
+    "run": "train-30",
+    "key": "ef4a85c3c1ee4bfc8d6805fb413c43f3",
+    "date": "2026-06-05",
+    "metrics": {
+     "mAP50": 0.8708,
+     "mAP50-95": 0.4973,
+     "precision": 0.8977,
+     "recall": 0.8764
     },
-    "dog-bin": {
-      "role": "binary gate - dog vs not_dog, runs before the leash classifier",
-      "best": {
-        "run": "dogbin_004",
-        "key": "5bc8a36218be426ca89ab800fb986afa",
-        "date": "2026-08-03",
-        "dataset": "dogbin_v4",
-        "weights": "dog-bin/dogbin_004/weights/best.pt",
-        "metrics": {
-          "accuracy_top1": 0.9279,
-          "roc_auc_val": 0.968,
-          "acceptance_roc_auc": 0.9685,
-          "acceptance_rejected_at_full_dog_recall": 0.5234,
-          "acceptance_rejected_at_t0.5": 0.8131
-        },
-        "why": "FIRST model in this project accepted on data it provably never saw: 214 of 214 reserved image_ids scored, 0 excluded by the contamination guard. The ids were reserved into data/dogbin_acceptance_set.json BEFORE dogbin_v4 was split, so the number is not a train-set score. At the only threshold that loses no dog on the val set (t=0.0015, recall 1.0000 of 330) it discards 52.3% [0.457,0.589] of real flagged false positives. Like for like on the SAME reserved population, dogbin_003 scores 33.3% [0.259,0.417] -- measured on the 132 of the 214 it did not train on, with 82 excluded by the contamination guard -- so the intervals do not overlap. (An earlier version of this note compared 52.3% against dogbin_003's 45.4% and dogbin_001's 16%; those two came from the ~36px dashboard-thumbnail population, not the reserved full-resolution set, and were never like for like.) Acceptance-set ROC AUC 0.9685, median P(dog) on unseen negatives 0.0009. Converged: early-stopped at epoch 197, best 97, patience 100. Promoted on the recall-preserving rejection rate, NOT on top-1."
-      },
-      "candidates": [
-        {
-          "run": "dogbin_006",
-          "key": "1365664a1d1e46bd93dbf031b043f690",
-          "date": "2026-08-03",
-          "dataset": "dogbin_v4 (identical to dogbin_004; erasing 0.4 -> 0.1 was the ONLY change)",
-          "metrics": {
-            "accuracy_top1": 0.9198,
-            "roc_auc_val": 0.9455,
-            "acceptance_roc_auc": 0.9616,
-            "acceptance_rejected_at_full_dog_recall": 0.5093,
-            "acceptance_rejected_at_t0.5": 0.8131
-          },
-          "note": "NOT PROMOTED -- a tie, and a useful null result. The one-variable test of the augmentation hypothesis: dogbin_004 config with erasing 0.4 -> 0.1, the single change the rendered augmentations justified (RandAugment erases a dog's head in roughly 2 of 12 training views). Converged, epoch 180, best 80, patience 100. On the same 214 reserved crops it is indistinguishable at full dog recall: 50.93% [0.443,0.576] vs dogbin_004 52.34% [0.457,0.589], and acceptance ROC AUC 0.9616 vs 0.9685. That threshold is set by the single worst-scoring val dog, so a 1.4-point gap there is noise, which is why the tie was called in advance rather than after seeing it. It DOES win in the 0.99 recall band (71.5% vs 64.0%), but taking that band is not free: at corpus scale 0.990 recall costs ~38,000 real dogs to remove ~38,000 extra false positives -- a 1:1 trade of unrecoverable losses for one-click savings on a one-pass sweep. So the operating point stays at full recall, where the two models are equivalent and dogbin_004 has the better AUC. Combined with dogbin_005 (five variables, clearly worse), the augmentation defaults are at or near a local optimum for this dataset: the visible \"damage\" in the augmented views costs nothing measurable."
-        },
-        {
-          "run": "dogbin_005",
-          "key": "7a95c517e6e64daca1e929c3b0348fab",
-          "date": "2026-08-03",
-          "dataset": "dogbin_v4 (same data as dogbin_004; only augmentation differed)",
-          "metrics": {
-            "accuracy_top1": 0.9078,
-            "acceptance_roc_auc": 0.9581,
-            "acceptance_rejected_at_full_dog_recall": 0.4065,
-            "acceptance_rejected_at_t0.5": 0.8178
-          },
-          "note": "REJECTED, and the reason is worth keeping. Trained with auto_augment=None, erasing 0.4->0.1, scale 0.5->0.25, dropout=0.2, weight_decay=0.001, cos_lr=True -- chosen after rendering the augmented views and seeing RandAugment erase dogs' heads and solarise them. The pictures were persuasive and the measurement disagreed: on the SAME reserved 214 crops it loses at every recall level (full recall 40.7% vs 52.3%, 0.98 recall 68.7% vs 77.1%, 0.95 recall 77.6% vs 86.0%) and on acceptance ROC AUC (0.9581 vs 0.9685). With only 1,266 training dogs the aggressive policy was doing real regularisation work; removing it made val loss diverge EARLIER (best at epoch 14 vs 004 epoch 73) despite the added dropout and weight decay. Note five variables changed at once, so this does not isolate which mattered -- at t=0.5 the two are indistinguishable (81.8% vs 81.3%), and only the recall-preserving end separates them."
-        },
-        {
-          "run": "dogbin_003",
-          "key": "352205b000ed4c6a82418f55769eab04",
-          "date": "2026-08-03",
-          "dataset": "dogbin_v3 (sequence-clean split + dashboard-flagged hard negatives folded in as extra negatives)",
-          "metrics": {
-            "accuracy_top1": 0.9126,
-            "roc_auc": 0.9278,
-            "sweep_fp_rejected_at_t0.5_heldout": 0.7032,
-            "sweep_fp_rejected_at_full_dog_recall": 0.4543
-          },
-          "note": "Converged: early-stopped at epoch 281/500, best at 181, patience 100. The first dog-bin run that is both leak-free AND finished. Far better than dogbin_001 as a gate -- on real sweep false positives it rejects 70.3% at t=0.5 with median P(dog) 0.0190, against dogbin_001's 16% at median 0.9998. NOT PROMOTED, for two reasons. (1) The first measurement was contaminated: 360 of the 1072 flagged crops in data/hard_negatives/crops are the same detections rebuild_crop_dataset.py folded into dogbin_v3 as extra negatives -- 297 in train, 63 in val. The collision is invisible by filename (dataset uses flag_<image_id>_<det>.jpg, the flag dir uses <ts>_<image_id>_<conf>.jpg) and only shows up when matching on image_id. Removing them moved rejection at t=0.5 from 0.7740 [0.747,0.799] to 0.7032 [0.669,0.736] -- disjoint intervals -- and median P(dog) from 0.0043 to 0.0190. eval_dogbin.py now excludes them automatically. (2) At the only threshold that loses no dogs (t=0.0086, val recall 1.0000) it rejects just 45.4% [0.418,0.491] of real false positives. Every headline figure is quoted at t>=0.5, which costs 5 of 326 val dogs; on a one-pass sweep a missed dog is unrecoverable. To promote: harvest a batch of flagged false positives that has never been passed to --extra-negatives, hold it out permanently, and quote rejection at a recall-preserving threshold measured against production dogs rather than 326 annotator crops."
-        },
-        {
-          "run": "dogbin_002",
-          "key": "5180117841c746ac8697e413d16a8e8c",
-          "date": "2026-08-02",
-          "dataset": "leash_binary_v2 (leak-free; renamed dogbin_v2 after training)",
-          "metrics": {
-            "accuracy_top1": 0.9421
-          },
-          "note": "TERMINATED, not converged. Best fitness at epoch 248 (top-1 0.9421) against a 0.7283 majority-class prior; the run died at epoch 329 of 500 when a `git stash -u` swept away the leash_models symlink and the results-CSV path stopped resolving. Patience was 100 and it stopped 80 epochs after its best, so it was still short of an honest early stop. Never evaluated as a gate on sweep negatives. (An earlier note said best epoch 299: that came from argmax over top-1, which breaks ties toward the LAST epoch, while ultralytics updates best on strict > and keeps the FIRST.)"
-        },
-        {
-          "run": "dogbin_001",
-          "key": "0780d9935b6445ab9ab17f540c872387",
-          "date": "2026-08-02",
-          "dataset": "leash_binary_v1 (renamed dogbin_v1) - SEQUENCE-LEAKED",
-          "metrics": {
-            "accuracy_top1": 0.9652,
-            "roc_auc_as_split": 0.9686,
-            "roc_auc_sequence_clean": 0.9213
-          },
-          "note": "Rejected as a gate. The headline number is inflated by leakage and it fails on the distribution it must actually survive."
-        }
-      ],
-      "stage": 2,
-      "short": "Dog gate",
-      "emits": "crops confirmed to be dogs",
-      "key_metric": "acceptance_rejected_at_full_dog_recall"
-    },
-    "leash-models": {
-      "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
-      "best": {
-        "run": "leash_v2_001",
-        "key": "e0ce94c019a64d9e9962b339dd1547da",
-        "date": "2026-08-03",
-        "dataset": "leash_v2",
-        "weights": "leash-models/leash_v2_001/weights/best.pt",
-        "metrics": {
-          "balanced_accuracy_acceptance": 0.8951,
-          "roc_auc_acceptance": 0.9591,
-          "recall_leashed_acceptance": 0.8874,
-          "recall_unleashed_acceptance": 0.9029,
-          "balanced_accuracy_val": 0.91,
-          "accuracy_top1_val": 0.9115
-        },
-        "why": "First leash model measured on data it provably never saw: 397 crops over 312 image_ids reserved into data/leash_acceptance_set.json BEFORE leash_v2 was split, so absent from train AND val -- and val here drives early stopping, which makes it a tuning set rather than an independent one. Balanced accuracy 0.8951 against a 0.5592 majority baseline, with the two class recalls within 1.6 points of each other (leashed 0.8874, unleashed 0.9029), so it is not leaning on the majority class. ROC AUC 0.9591. Converged: early-stopped at epoch 350, best 250, patience 100. Promoted on BALANCED accuracy, not top-1: the two errors here cost the same (a mislabelled animal either way), unlike the gate upstream where a missed dog is unrecoverable.",
-        "caveat": "No like-for-like predecessor comparison exists and none can be made. The previous best, leash_03_jun_26-3, cannot be scored on this acceptance set: all 312 reserved ids are in its own training data, and eval_leash.py now refuses the run rather than printing the 0.9334 it used to. The fairest available comparison is each model on its own honest population -- leash_v2_001 0.8951 balanced / 0.9591 AUC over 397 crops (baseline 0.5592) versus leash_03_jun_26-3 0.8721 balanced / 0.9352 AUC over the 137-image sequence-clean remainder of its own val (baseline 0.7591, only 33 unleashed, so wide intervals). Better on both metrics, on a larger and better-balanced set, against a harder baseline -- but different populations, so treat the margin as directional."
-      },
-      "candidates": [
-        {
-          "run": "leash_03_jun_26-3",
-          "key": "d390653dce5640f6aa7beb4f948ce29b",
-          "date": "2026-06-03",
-          "metrics": {
-            "accuracy_top1": 0.9251,
-            "balanced_accuracy_sequence_clean": 0.8721,
-            "roc_auc_sequence_clean": 0.9352
-          },
-          "note": "SUPERSEDED by leash_v2_001. Its reported 0.9251 top-1 came from a split where 72.9% of val shared a Mapillary sequence with train and 95 image_ids sat in BOTH splits. Sequence-clean it scores 0.8686 top-1 / 0.8721 balanced / 0.9352 AUC on the 137 images that survive that filter. Also undertrained: max top-1 equals last top-1 at the final step, so it hit the 100-epoch ceiling still improving and patience=20 never fired. Cannot be scored on the current acceptance set -- all 312 reserved ids are in its training data."
-        },
-        {
-          "run": "leash_15-may_26",
-          "key": "9347f7e945584dc0816b5ebe01a108e4",
-          "date": "2026-05-15",
-          "metrics": {
-            "accuracy_top1": 0.9211
-          },
-          "note": "Runner-up. Same caveat."
-        },
-        {
-          "run": "leash_3class_003",
-          "key": "7cdc48b12035447eb11841d2fa033fc9",
-          "date": "2026-08-01",
-          "metrics": {
-            "accuracy_top1": 0.7974
-          },
-          "note": "REJECTED. The 3-class experiment (leashed/unleashed/not_a_dog) that the binary gate replaced."
-        }
-      ],
-      "stage": 3,
-      "short": "Leash classifier",
-      "emits": "leashed / unleashed",
-      "key_metric": "balanced_accuracy_acceptance",
-      "dataset": "leash_v2 (built 2026-08-03; 1,509 crops, 694/510 train, 175/130 val)"
-    }
+    "weights": "data/engines/yolo26x_train30.pt",
+    "engine": "data/engines/yolo26x_train30.engine",
+    "sha256_engine": "ac98daeecefa24406f2f776348f0eb7101f94b7fc1267ef6d7fbde19950f0803",
+    "why": "In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page.",
+    "deployed": true
+   },
+   "stage": 1,
+   "short": "Detector",
+   "emits": "boxes on dogs",
+   "key_metric": "recall"
   },
-  "url_template": "https://www.comet.com/{workspace}/{project}/{key}"
+  "dog-bin": {
+   "role": "binary gate - dog vs not_dog, runs before the leash classifier",
+   "best": {
+    "run": "dogbin_004",
+    "key": "5bc8a36218be426ca89ab800fb986afa",
+    "date": "2026-08-03",
+    "dataset": "dogbin_v4",
+    "weights": "dog-bin/dogbin_004/weights/best.pt",
+    "metrics": {
+     "accuracy_top1": 0.9279,
+     "roc_auc_val": 0.968,
+     "acceptance_roc_auc": 0.9685,
+     "acceptance_rejected_at_full_dog_recall": 0.5234,
+     "acceptance_rejected_at_t0.5": 0.8131
+    },
+    "why": "FIRST model in this project accepted on data it provably never saw: 214 of 214 reserved image_ids scored, 0 excluded by the contamination guard. The ids were reserved into data/dogbin_acceptance_set.json BEFORE dogbin_v4 was split, so the number is not a train-set score. At the only threshold that loses no dog on the val set (t=0.0015, recall 1.0000 of 330) it discards 52.3% [0.457,0.589] of real flagged false positives. Like for like on the SAME reserved population, dogbin_003 scores 33.3% [0.259,0.417] -- measured on the 132 of the 214 it did not train on, with 82 excluded by the contamination guard -- so the intervals do not overlap. (An earlier version of this note compared 52.3% against dogbin_003's 45.4% and dogbin_001's 16%; those two came from the ~36px dashboard-thumbnail population, not the reserved full-resolution set, and were never like for like.) Acceptance-set ROC AUC 0.9685, median P(dog) on unseen negatives 0.0009. Converged: early-stopped at epoch 197, best 97, patience 100. Promoted on the recall-preserving rejection rate, NOT on top-1."
+   },
+   "candidates": [
+    {
+     "run": "dogbin_006",
+     "key": "1365664a1d1e46bd93dbf031b043f690",
+     "date": "2026-08-03",
+     "dataset": "dogbin_v4 (identical to dogbin_004; erasing 0.4 -> 0.1 was the ONLY change)",
+     "metrics": {
+      "accuracy_top1": 0.9198,
+      "roc_auc_val": 0.9455,
+      "acceptance_roc_auc": 0.9616,
+      "acceptance_rejected_at_full_dog_recall": 0.5093,
+      "acceptance_rejected_at_t0.5": 0.8131
+     },
+     "note": "NOT PROMOTED -- a tie, and a useful null result. The one-variable test of the augmentation hypothesis: dogbin_004 config with erasing 0.4 -> 0.1, the single change the rendered augmentations justified (RandAugment erases a dog's head in roughly 2 of 12 training views). Converged, epoch 180, best 80, patience 100. On the same 214 reserved crops it is indistinguishable at full dog recall: 50.93% [0.443,0.576] vs dogbin_004 52.34% [0.457,0.589], and acceptance ROC AUC 0.9616 vs 0.9685. That threshold is set by the single worst-scoring val dog, so a 1.4-point gap there is noise, which is why the tie was called in advance rather than after seeing it. It DOES win in the 0.99 recall band (71.5% vs 64.0%), but taking that band is not free: at corpus scale 0.990 recall costs ~38,000 real dogs to remove ~38,000 extra false positives -- a 1:1 trade of unrecoverable losses for one-click savings on a one-pass sweep. So the operating point stays at full recall, where the two models are equivalent and dogbin_004 has the better AUC. Combined with dogbin_005 (five variables, clearly worse), the augmentation defaults are at or near a local optimum for this dataset: the visible \"damage\" in the augmented views costs nothing measurable."
+    },
+    {
+     "run": "dogbin_005",
+     "key": "7a95c517e6e64daca1e929c3b0348fab",
+     "date": "2026-08-03",
+     "dataset": "dogbin_v4 (same data as dogbin_004; only augmentation differed)",
+     "metrics": {
+      "accuracy_top1": 0.9078,
+      "acceptance_roc_auc": 0.9581,
+      "acceptance_rejected_at_full_dog_recall": 0.4065,
+      "acceptance_rejected_at_t0.5": 0.8178
+     },
+     "note": "REJECTED, and the reason is worth keeping. Trained with auto_augment=None, erasing 0.4->0.1, scale 0.5->0.25, dropout=0.2, weight_decay=0.001, cos_lr=True -- chosen after rendering the augmented views and seeing RandAugment erase dogs' heads and solarise them. The pictures were persuasive and the measurement disagreed: on the SAME reserved 214 crops it loses at every recall level (full recall 40.7% vs 52.3%, 0.98 recall 68.7% vs 77.1%, 0.95 recall 77.6% vs 86.0%) and on acceptance ROC AUC (0.9581 vs 0.9685). With only 1,266 training dogs the aggressive policy was doing real regularisation work; removing it made val loss diverge EARLIER (best at epoch 14 vs 004 epoch 73) despite the added dropout and weight decay. Note five variables changed at once, so this does not isolate which mattered -- at t=0.5 the two are indistinguishable (81.8% vs 81.3%), and only the recall-preserving end separates them."
+    },
+    {
+     "run": "dogbin_003",
+     "key": "352205b000ed4c6a82418f55769eab04",
+     "date": "2026-08-03",
+     "dataset": "dogbin_v3 (sequence-clean split + dashboard-flagged hard negatives folded in as extra negatives)",
+     "metrics": {
+      "accuracy_top1": 0.9126,
+      "roc_auc": 0.9278,
+      "sweep_fp_rejected_at_t0.5_heldout": 0.7032,
+      "sweep_fp_rejected_at_full_dog_recall": 0.4543
+     },
+     "note": "Converged: early-stopped at epoch 281/500, best at 181, patience 100. The first dog-bin run that is both leak-free AND finished. Far better than dogbin_001 as a gate -- on real sweep false positives it rejects 70.3% at t=0.5 with median P(dog) 0.0190, against dogbin_001's 16% at median 0.9998. NOT PROMOTED, for two reasons. (1) The first measurement was contaminated: 360 of the 1072 flagged crops in data/hard_negatives/crops are the same detections rebuild_crop_dataset.py folded into dogbin_v3 as extra negatives -- 297 in train, 63 in val. The collision is invisible by filename (dataset uses flag_<image_id>_<det>.jpg, the flag dir uses <ts>_<image_id>_<conf>.jpg) and only shows up when matching on image_id. Removing them moved rejection at t=0.5 from 0.7740 [0.747,0.799] to 0.7032 [0.669,0.736] -- disjoint intervals -- and median P(dog) from 0.0043 to 0.0190. eval_dogbin.py now excludes them automatically. (2) At the only threshold that loses no dogs (t=0.0086, val recall 1.0000) it rejects just 45.4% [0.418,0.491] of real false positives. Every headline figure is quoted at t>=0.5, which costs 5 of 326 val dogs; on a one-pass sweep a missed dog is unrecoverable. To promote: harvest a batch of flagged false positives that has never been passed to --extra-negatives, hold it out permanently, and quote rejection at a recall-preserving threshold measured against production dogs rather than 326 annotator crops."
+    },
+    {
+     "run": "dogbin_002",
+     "key": "5180117841c746ac8697e413d16a8e8c",
+     "date": "2026-08-02",
+     "dataset": "leash_binary_v2 (leak-free; renamed dogbin_v2 after training)",
+     "metrics": {
+      "accuracy_top1": 0.9421
+     },
+     "note": "TERMINATED, not converged. Best fitness at epoch 248 (top-1 0.9421) against a 0.7283 majority-class prior; the run died at epoch 329 of 500 when a `git stash -u` swept away the leash_models symlink and the results-CSV path stopped resolving. Patience was 100 and it stopped 80 epochs after its best, so it was still short of an honest early stop. Never evaluated as a gate on sweep negatives. (An earlier note said best epoch 299: that came from argmax over top-1, which breaks ties toward the LAST epoch, while ultralytics updates best on strict > and keeps the FIRST.)"
+    },
+    {
+     "run": "dogbin_001",
+     "key": "0780d9935b6445ab9ab17f540c872387",
+     "date": "2026-08-02",
+     "dataset": "leash_binary_v1 (renamed dogbin_v1) - SEQUENCE-LEAKED",
+     "metrics": {
+      "accuracy_top1": 0.9652,
+      "roc_auc_as_split": 0.9686,
+      "roc_auc_sequence_clean": 0.9213
+     },
+     "note": "Rejected as a gate. The headline number is inflated by leakage and it fails on the distribution it must actually survive."
+    }
+   ],
+   "stage": 2,
+   "short": "Dog gate",
+   "emits": "crops confirmed to be dogs",
+   "key_metric": "acceptance_rejected_at_full_dog_recall"
+  },
+  "leash-models": {
+   "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
+   "best": {
+    "run": "leash_v2_001",
+    "key": "e0ce94c019a64d9e9962b339dd1547da",
+    "date": "2026-08-03",
+    "dataset": "leash_v2",
+    "weights": "leash-models/leash_v2_001/weights/best.pt",
+    "metrics": {
+     "balanced_accuracy_acceptance": 0.8951,
+     "roc_auc_acceptance": 0.9591,
+     "recall_leashed_acceptance": 0.8874,
+     "recall_unleashed_acceptance": 0.9029,
+     "balanced_accuracy_val": 0.91,
+     "accuracy_top1_val": 0.9115
+    },
+    "why": "First leash model measured on data it provably never saw: 397 crops over 312 image_ids reserved into data/leash_acceptance_set.json BEFORE leash_v2 was split, so absent from train AND val -- and val here drives early stopping, which makes it a tuning set rather than an independent one. Balanced accuracy 0.8951 against a 0.5592 majority baseline, with the two class recalls within 1.6 points of each other (leashed 0.8874, unleashed 0.9029), so it is not leaning on the majority class. ROC AUC 0.9591. Converged: early-stopped at epoch 350, best 250, patience 100. Promoted on BALANCED accuracy, not top-1: the two errors here cost the same (a mislabelled animal either way), unlike the gate upstream where a missed dog is unrecoverable.",
+    "caveat": "No like-for-like predecessor comparison exists and none can be made. The previous best, leash_03_jun_26-3, cannot be scored on this acceptance set: all 312 reserved ids are in its own training data, and eval_leash.py now refuses the run rather than printing the 0.9334 it used to. The fairest available comparison is each model on its own honest population -- leash_v2_001 0.8951 balanced / 0.9591 AUC over 397 crops (baseline 0.5592) versus leash_03_jun_26-3 0.8721 balanced / 0.9352 AUC over the 137-image sequence-clean remainder of its own val (baseline 0.7591, only 33 unleashed, so wide intervals). Better on both metrics, on a larger and better-balanced set, against a harder baseline -- but different populations, so treat the margin as directional."
+   },
+   "candidates": [
+    {
+     "run": "leash_03_jun_26-3",
+     "key": "d390653dce5640f6aa7beb4f948ce29b",
+     "date": "2026-06-03",
+     "metrics": {
+      "accuracy_top1": 0.9251,
+      "balanced_accuracy_sequence_clean": 0.8721,
+      "roc_auc_sequence_clean": 0.9352
+     },
+     "note": "SUPERSEDED by leash_v2_001. Its reported 0.9251 top-1 came from a split where 72.9% of val shared a Mapillary sequence with train and 95 image_ids sat in BOTH splits. Sequence-clean it scores 0.8686 top-1 / 0.8721 balanced / 0.9352 AUC on the 137 images that survive that filter. Also undertrained: max top-1 equals last top-1 at the final step, so it hit the 100-epoch ceiling still improving and patience=20 never fired. Cannot be scored on the current acceptance set -- all 312 reserved ids are in its training data."
+    },
+    {
+     "run": "leash_15-may_26",
+     "key": "9347f7e945584dc0816b5ebe01a108e4",
+     "date": "2026-05-15",
+     "metrics": {
+      "accuracy_top1": 0.9211
+     },
+     "note": "Runner-up. Same caveat."
+    },
+    {
+     "run": "leash_3class_003",
+     "key": "7cdc48b12035447eb11841d2fa033fc9",
+     "date": "2026-08-01",
+     "metrics": {
+      "accuracy_top1": 0.7974
+     },
+     "note": "REJECTED. The 3-class experiment (leashed/unleashed/not_a_dog) that the binary gate replaced."
+    }
+   ],
+   "stage": 3,
+   "short": "Leash classifier",
+   "emits": "leashed / unleashed",
+   "key_metric": "balanced_accuracy_acceptance",
+   "dataset": "leash_v2 (built 2026-08-03; 1,509 crops, 694/510 train, 175/130 val)"
+  }
+ },
+ "url_template": "https://www.comet.com/{workspace}/{project}/{key}"
 }
