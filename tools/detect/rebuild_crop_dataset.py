@@ -477,8 +477,13 @@ def main():
         'counts': dict(counts),
         'train_sequences': len(seq_items) - len(val_seqs),
         'val_sequences': len(val_seqs),
-        'sequences_resolved': len(seq),
-        'sequences_unresolved': len(ids) - len(seq),
+        # IMAGES, not sequences -- len(seq) is the number of image_ids that got
+        # a sequence, not the number of distinct sequences. Sitting next to the
+        # genuine train_sequences/val_sequences counts, the shared suffix read
+        # as "we resolved 2,983 sequences" when 2,983 is an image count.
+        'images_with_sequence': len(seq),
+        'images_without_sequence': len(ids) - len(seq),
+        'distinct_sequences': len(set(seq.values())),
     }
     with open(os.path.join(args.out, 'rebuild_manifest.json'), 'w') as f:
         json.dump(man, f, indent=2)

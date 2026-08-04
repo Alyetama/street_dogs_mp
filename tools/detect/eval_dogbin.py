@@ -256,10 +256,12 @@ def main():
     # is not academic: on dogbin_004 this table said 54.9% rejected where the
     # full-resolution reserved crops -- the SAME flagged detections -- said
     # 81.3%. Read the ACCEPTANCE SET table below for anything that matters.
-    if not args.thumbnails:
-        hn = []
-    else:
-        hn = load_dir(args.hard_negatives)
+    # --thumbnails governs only the built-in DEFAULT directory. An explicitly
+    # passed --hard-negatives is always scored: accepting a path and then
+    # silently ignoring it is how a reviewer ends up reading the wrong table.
+    hn_default = os.path.join(REPO, 'data', 'hard_negatives', 'crops')
+    hn_explicit = os.path.abspath(args.hard_negatives) != os.path.abspath(hn_default)
+    hn = load_dir(args.hard_negatives) if (args.thumbnails or hn_explicit) else []
     hn, contaminated = drop_trained_on(hn, args.data)
     if contaminated:
         print(f'\nEXCLUDED {len(contaminated)} flagged crop(s) that are IN the '
@@ -294,9 +296,8 @@ def main():
             print('  -> the gate is measurably WEAKER on real sweep negatives '
                   'than on annotator negatives; the curated number is '
                   'optimistic for deployment')
-    elif args.thumbnails:
-        print(f'\n(no crops under {args.hard_negatives} -- skipped the '
-              f'thumbnail check)')
+    elif args.thumbnails or hn_explicit:
+        print(f'\n(no crops under {args.hard_negatives})')
 
     # ---- THE number: the reserved acceptance set, at full resolution ------
     # Everything above is diagnostics. This table is the one a promotion may
@@ -306,23 +307,87 @@ def main():
     # --hard-negatives dir holds, which are a different distribution from
     # anything the gate meets in production.
     acc_ids = set()
-    if args.acceptance_set and os.path.exists(args.acceptance_set):
-        with open(args.acceptance_set) as fh:
-            acc_ids = set(json.load(fh).get('image_ids') or [])
+    if args.acceptance_set:
+        try:
+            with open(args.acceptance_set) as fh:
+                acc_ids = set(json.load(fh).get('image_ids') or [])
+        except OSError:
+            print(f'\nNO ACCEPTANCE NUMBER PRODUCED: no reservation file at '
+                  f'{args.acceptance_set}. Nothing in this run can support a '
+                  f'promotion -- every figure above is measured on data the '
+                  f'model was fit or early-stopped on.')
+            return 1
+        except ValueError as e:
+            print(f'\nNO ACCEPTANCE NUMBER PRODUCED: {args.acceptance_set} '
+                  f'is not readable JSON ({e}).')
+            return 1
+        if not acc_ids:
+            print(f'\nNO ACCEPTANCE NUMBER PRODUCED: {args.acceptance_set} '
+                  f'reserves no image_ids.')
+            return 1
     if acc_ids and args.acceptance_crops and os.path.isdir(args.acceptance_crops):
         acc = [f for f in load_dir(args.acceptance_crops)
                if id_of_name(f) in acc_ids]
         acc, contaminated = drop_trained_on(acc, args.data)
-        acc, _ = readable(acc)
+        # same reporting as the thumbnail path: a silently dropped crop shrinks
+        # the denominator of the number a promotion is written from
+        acc, acc_bad = readable(acc)
         if contaminated:
             print(f'\nWARNING: {len(contaminated)} reserved crop(s) are in '
                   f'the dataset -- the reservation is not protecting this '
                   f'model. Their scores are excluded, but investigate.')
+        if acc_bad:
+            print(f'\nSKIPPED {len(acc_bad)} unreadable reserved crop(s); '
+                  f'they are excluded from the acceptance counts below:')
+            for bad_path in acc_bad[:5]:
+                print(f'    {os.path.basename(bad_path)}  '
+                      f'({os.path.getsize(bad_path)} bytes)')
+            if len(acc_bad) > 5:
+                print(f'    ... and {len(acc_bad) - 5} more')
         if acc:
             a = np.array(dog_prob(model, acc, args.batch, args.imgsz,
                                   args.device))
+            seen_ids = {id_of_name(f) for f in acc}
             print(f'\nACCEPTANCE SET (reserved, never trained on, full-res): '
-                  f'{len(acc)} of {len(acc_ids)} reserved ids')
+                  f'{len(acc)} crops over {len(seen_ids)} of {len(acc_ids)} '
+                  f'reserved ids')
+            # Two very different reasons an id is absent, and conflating
+            # them hides the one that matters: a contaminated id means the
+            # reservation failed for THIS model, a missing one means the
+            # harvest is incomplete.
+            gone = len(acc_ids) - len(seen_ids)
+            n_bad = len({id_of_name(f) for f in contaminated})
+            if gone:
+                miss = gone - n_bad
+                bits = []
+                if n_bad:
+                    bits.append(f'{n_bad} excluded as trained-on')
+                if miss > 0:
+                    bits.append(f'{miss} with no crop in '
+                                f'{os.path.basename(args.acceptance_crops)}')
+                print(f'  NOTE: {gone} reserved ids not scored '
+                      f'({"; ".join(bits)})')
+            # The recall-anchored table, on the SAME axis as the val table
+            # above. Without it the promoted headline number
+            # (rejection at a threshold that loses no dog) had to be computed
+            # by hand in a throwaway script, which is not a number anyone can
+            # check against the registry.
+            print('\n  anchored on DOG RECALL (val dogs set the threshold, '
+                  'reserved crops set the rejection):')
+            print(f"  {'dog recall':>10} {'thresh':>7} {'rejected':>16} "
+                  f"{'95% CI':>16} {'dogs lost':>10}")
+            for target in (1.0, 0.999, 0.997, 0.99, 0.98, 0.95, 0.90):
+                k = math.floor((1 - target) * len(p))
+                t = float(np.sort(p)[k]) if k < len(p) else 0.0
+                kept_dog = int((p >= t).sum())
+                rej = int((a < t).sum())
+                rlo, rhi = wilson(rej, len(a))
+                print(f'  {kept_dog/len(p):>10.4f} {t:>7.4f} '
+                      f'{rej/len(a):>16.4f} [{rlo:.3f},{rhi:.3f}]'
+                      f'{len(p)-kept_dog:>10}')
+            y_a = np.r_[np.ones_like(p), np.zeros_like(a)]
+            print(f'\n  acceptance ROC AUC: '
+                  f'{roc_auc_score(y_a, np.r_[p, a]):.4f}')
             for t in (0.5, 0.9, 0.95, 0.99):
                 rej = int((a < t).sum())
                 lo, hi = wilson(rej, len(a))
@@ -332,8 +397,10 @@ def main():
         else:
             print(f'\n(no reserved crops found under {args.acceptance_crops})')
     elif acc_ids:
-        print(f'\n(acceptance set has {len(acc_ids)} ids but no crop dir at '
-              f'{args.acceptance_crops} -- pass --acceptance-crops)')
+        print(f'\nNO ACCEPTANCE NUMBER PRODUCED: {len(acc_ids)} ids reserved '
+              f'but no crop dir at {args.acceptance_crops} '
+              f'-- pass --acceptance-crops')
+        return 1
     return 0
 
 

@@ -49,9 +49,10 @@
           "roc_auc_val": 0.968,
           "acceptance_roc_auc": 0.9685,
           "acceptance_rejected_at_full_dog_recall": 0.5234,
-          "acceptance_rejected_at_t0.5": 0.8131
+          "acceptance_rejected_at_t0.5": 0.8131,
+          "acceptance_rejected_at_full_dog_recall_dogbin_003_same_population": 0.3333
         },
-        "why": "FIRST model in this project accepted on data it provably never saw: 214 of 214 reserved image_ids scored, 0 excluded by the contamination guard. The ids were reserved into data/dogbin_acceptance_set.json BEFORE dogbin_v4 was split, so the number is not a train-set score. At the only threshold that loses no dog on the val set (t=0.00151, recall 1.0000 of 330) it discards 52.3% [0.457,0.589] of real flagged false positives, against dogbin_003 45.4% and dogbin_001 16%. Acceptance-set ROC AUC 0.9685, median P(dog) on unseen negatives 0.0009. Converged: early-stopped at epoch 197, best 97, patience 100. Promoted on the recall-preserving rejection rate, NOT on top-1."
+        "why": "FIRST model in this project accepted on data it provably never saw: 214 of 214 reserved image_ids scored, 0 excluded by the contamination guard. The ids were reserved into data/dogbin_acceptance_set.json BEFORE dogbin_v4 was split, so the number is not a train-set score. At the only threshold that loses no dog on the val set (t=0.0015, recall 1.0000 of 330) it discards 52.3% [0.457,0.589] of real flagged false positives. Like for like on the SAME reserved population, dogbin_003 scores 33.3% [0.259,0.417] -- measured on the 132 of the 214 it did not train on, with 82 excluded by the contamination guard -- so the intervals do not overlap. (An earlier version of this note compared 52.3% against dogbin_003's 45.4% and dogbin_001's 16%; those two came from the ~36px dashboard-thumbnail population, not the reserved full-resolution set, and were never like for like.) Acceptance-set ROC AUC 0.9685, median P(dog) on unseen negatives 0.0009. Converged: early-stopped at epoch 197, best 97, patience 100. Promoted on the recall-preserving rejection rate, NOT on top-1."
       },
       "candidates": [
         {
@@ -79,7 +80,7 @@
             "acceptance_rejected_at_full_dog_recall": 0.4065,
             "acceptance_rejected_at_t0.5": 0.8178
           },
-          "note": "REJECTED, and the reason is worth keeping. Trained with auto_augment=None, erasing 0.4->0.1, scale 0.5->0.25, dropout=0.2, weight_decay=0.001, cos_lr=True -- chosen after rendering the augmented views and seeing RandAugment erase dogs' heads and solarise them. The pictures were persuasive and the measurement disagreed: on the SAME reserved 214 crops it loses at every recall level (full recall 40.7% vs 52.3%, 0.98 recall 68.7% vs 77.1%, 0.95 recall 77.6% vs 86.0%) and on acceptance ROC AUC (0.9581 vs 0.9685). With only 1,276 training dogs the aggressive policy was doing real regularisation work; removing it made val loss diverge EARLIER (best at epoch 14 vs 004 epoch 73) despite the added dropout and weight decay. Note five variables changed at once, so this does not isolate which mattered -- at t=0.5 the two are indistinguishable (81.8% vs 81.3%), and only the recall-preserving end separates them."
+          "note": "REJECTED, and the reason is worth keeping. Trained with auto_augment=None, erasing 0.4->0.1, scale 0.5->0.25, dropout=0.2, weight_decay=0.001, cos_lr=True -- chosen after rendering the augmented views and seeing RandAugment erase dogs' heads and solarise them. The pictures were persuasive and the measurement disagreed: on the SAME reserved 214 crops it loses at every recall level (full recall 40.7% vs 52.3%, 0.98 recall 68.7% vs 77.1%, 0.95 recall 77.6% vs 86.0%) and on acceptance ROC AUC (0.9581 vs 0.9685). With only 1,266 training dogs the aggressive policy was doing real regularisation work; removing it made val loss diverge EARLIER (best at epoch 14 vs 004 epoch 73) despite the added dropout and weight decay. Note five variables changed at once, so this does not isolate which mattered -- at t=0.5 the two are indistinguishable (81.8% vs 81.3%), and only the recall-preserving end separates them."
         },
         {
           "run": "dogbin_003",
