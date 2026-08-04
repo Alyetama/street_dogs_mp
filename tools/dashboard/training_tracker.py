@@ -523,8 +523,16 @@ def discover(root, projects=None):
             continue
         dirs[:] = []                      # a run holds no nested runs
         args = read_args(os.path.join(cur, 'args.yaml'))
-        proj = (args.get('project')
-                or os.path.basename(os.path.dirname(cur)) or '?')
+        # ultralytics with no project= writes to <runs_dir>/<task>/<name>, so
+        # the parent is the TASK ("detect"), not a project. Calling that a
+        # project puts eleven stray experiments under a heading that looks
+        # like one and is not.
+        proj = args.get('project')
+        if not proj:
+            parent = os.path.basename(os.path.dirname(cur))
+            proj = ('(no project)' if parent in ('detect', 'classify',
+                                                 'segment', 'pose', 'obb')
+                    else parent or '(no project)')
         if projects and proj not in projects:
             continue
         runs.append({'project': str(proj), 'name': os.path.basename(cur),
@@ -657,9 +665,32 @@ def _mtime(d):
     return best or (os.path.getmtime(d) if os.path.isdir(d) else 0.0)
 
 
+def canon_projects(runs, registry=None):
+    """Fold project names that differ only in case onto one spelling.
+
+    `DogDetection` and `dogdetection` are one project that ultralytics wrote
+    two ways, and left alone they split the history in half and put the same
+    work under two headings. The surviving spelling is the registry's when it
+    knows the project, so the panel and data/best_models.json agree; otherwise
+    the one more runs actually use.
+    """
+    reg = {k.lower(): k for k in ((registry or {}).get('projects') or {})}
+    counts = {}
+    for r in runs:
+        counts.setdefault(r['project'].lower(), {}).setdefault(r['project'], 0)
+        counts[r['project'].lower()][r['project']] += 1
+    winner = {}
+    for low, spellings in counts.items():
+        winner[low] = reg.get(low) or max(sorted(spellings),
+                                          key=lambda n: spellings[n])
+    for r in runs:
+        r['project'] = winner[r['project'].lower()]
+    return runs
+
+
 def collect(root, registry=None, projects=None):
     """[summary] newest first."""
-    runs = discover(root, projects)
+    runs = canon_projects(discover(root, projects), registry)
     claims = attach_live(runs, live_trainings())
     out = [summarize(r, claims.get(r['dir']), registry) for r in runs]
     out.sort(key=lambda s: (s['live'], s['mtime']), reverse=True)

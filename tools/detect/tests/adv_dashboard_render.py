@@ -1026,6 +1026,38 @@ def check_training_tracker():
         if got8 != ['my_run', 'train', 'val']:
             bad.append(f't8 discovery dropped default-named runs: {got8}')
 
+        # t10 one project written two ways is one project. Left alone,
+        # DogDetection and dogdetection split 42 runs across two headings.
+        # through collect(), not by calling canon_projects directly: testing
+        # the function alone leaves the WIRING uncovered, and this check
+        # stayed green with the fold removed from collect().
+        d10 = os.path.join(tmp, 'cased')
+        for proj, name in (('DogDetection', 'a'), ('dogdetection', 'b'),
+                           ('dogdetection', 'c')):
+            rd = os.path.join(d10, proj, name)
+            os.makedirs(rd, exist_ok=True)
+            with open(os.path.join(rd, 'args.yaml'), 'w') as fh:
+                fh.write(f'name: {name}\nproject: {proj}\n')
+        got10 = {r['project'] for r in
+                 tt.collect(d10, registry={'projects': {'dogdetection': {}}})}
+        if got10 != {'dogdetection'}:
+            bad.append(f't10 case variants not folded by collect(): {got10}')
+        # with no registry the more-used spelling still wins
+        got10b = {r['project'] for r in tt.collect(d10)}
+        if got10b != {'dogdetection'}:
+            bad.append(f't10 majority spelling not chosen: {got10b}')
+
+        # t11 <runs_dir>/detect/<name> means NO project was set; "detect" is
+        # the task, and printing it as a project invents one
+        d11 = os.path.join(tmp, 'noproj', 'runs', 'detect', 'train')
+        os.makedirs(d11)
+        with open(os.path.join(d11, 'args.yaml'), 'w') as fh:
+            fh.write('name: train\n')
+        got11 = [r['project'] for r in
+                 tt.discover(os.path.join(tmp, 'noproj'))]
+        if got11 != ['(no project)']:
+            bad.append(f't11 task folder read as a project: {got11}')
+
     if bad:
         raise SystemExit('training tracker:\n  ' + '\n  '.join(bad))
     print('ok   training tracker: live claim is exclusive and save_dir-aware, '
