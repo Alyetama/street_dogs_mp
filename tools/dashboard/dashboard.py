@@ -126,6 +126,21 @@ def cfg(key, default='', env=None):
     return v if isinstance(v, str) and v else default
 
 
+def cfg_int(key, default=0, env=None):
+    """An integer config key, from a JSON number or a numeric string.
+
+    cfg() returns strings only, so a key written the natural way -- 48, not
+    "48" -- fell through to the default. It warns now, which is how this one
+    was caught, but a caller that wants a number should ask for a number.
+    """
+    raw = os.environ.get(env or ('DASHBOARD_' + key.upper()))
+    v = raw if raw else load_cfg().get(key)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def cfg_list(key, env=None):
     """A list-valued config key, from JSON or a comma-separated string."""
     raw = os.environ.get(env or ('DASHBOARD_' + key.upper()))
@@ -1480,6 +1495,7 @@ min-width:44px;text-align:center}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='conf',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
+    smallN=0,minPx=0,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1515,6 +1531,7 @@ function load(){
     if(j.error)throw 0;
     items=j.items||[];reserve=j.reserve||[];page=j.page||0;pages=j.pages||1;
     todoN=j.total_unflagged||0;flaggedN=j.flagged_total||0;
+    smallN=j.too_small||0;minPx=j.min_px||0;
     if(j.seen_total!=null)seenN=j.seen_total;
     if(j.positive_total!=null)posN=j.positive_total;
     if(j.collapsed!=null)dupN=j.collapsed;
@@ -1525,6 +1542,9 @@ function load(){
     var more=Math.max(0,todoN-items.length);
     var lab=items.length?(n(items.length)+' shown \u00b7 '+n(more)+' left'):
       'nothing left to review';
+    /* Held-back crops are stated, not silently dropped -- and the threshold
+       is named so the number can be argued with. */
+    if(smallN)lab+=' \u00b7 '+n(smallN)+' too small to judge (under '+minPx+'px)';
     $('pg').textContent=lab;$('pg2').textContent=lab;
     $('next').disabled=$('next2').disabled=!more;
     $('foot').hidden=!items.length;
@@ -3961,6 +3981,59 @@ REVIEW_SORTS = {
 }
 
 
+# ── crops too small for anyone to judge ─────────────────────────────────────
+# /hq cuts each tile from the ORIGINAL at native box resolution, so what the
+# reviewer sees is the box's true pixel size. A 17x15 box in a 1920x1080 frame
+# is ~255 pixels of animal blown up to 640 -- not a rendering problem, and not
+# a judgement any person or model can make. Asking for one is worse than
+# skipping it: a coin-flip "not a dog" can turn the whole frame into a
+# detector NEGATIVE, teaching it to miss a dog it did find.
+#
+# Off by default (0). A fresh clone behaves exactly as before.
+_SZ = {'at': 0.0, 'by_key': {}}
+SZ_TTL = 240          # the pool turns over every ~4 minutes
+
+
+def min_review_px():
+    return max(0, cfg_int('review_min_px', 0, env='REVIEW_MIN_PX'))
+
+
+def box_short_sides(keys):
+    """{(image_id, conf2): shorter side in ORIGINAL pixels}.
+
+    One query for the whole page, not two per crop like box_for. Keyed on
+    (image_id, conf x100) because that is how a crop filename names its own
+    detection everywhere else in this file -- an image with a big box and a
+    tiny one must not have the tiny crop judged by the big box's size.
+    """
+    now = time.time()
+    if now - _SZ['at'] > SZ_TTL:
+        _SZ['by_key'].clear()
+        _SZ['at'] = now
+    want = [k for k in keys if k not in _SZ['by_key']]
+    if want:
+        ids = sorted({i for i, _ in want if _ID_RE.match(i)})
+        if ids:
+            try:
+                _, det = _detect_sql()
+                lst = ','.join("'" + i + "'" for i in ids)
+                con = duckdb.connect()
+                rows = con.execute(
+                    f"SELECT CAST(image_id AS VARCHAR), "
+                    f"CAST(round(conf * 100) AS INT), "
+                    f"min(least(x2 - x1, y2 - y1)) "
+                    f"FROM {det} WHERE CAST(image_id AS VARCHAR) IN ({lst}) "
+                    f"GROUP BY 1, 2").fetchall()
+                con.close()
+                for iid, c2, side in rows:
+                    _SZ['by_key'][(iid, int(c2))] = float(side)
+            except Exception:
+                # the store is the source; if it cannot be read the floor
+                # simply does not apply. Never drop a crop on a failed lookup.
+                pass
+    return _SZ['by_key']
+
+
 def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
@@ -4044,6 +4117,22 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
                       'conf': round(int(m.group(3)) / 100.0, 2),
                       'country': iso,
                       'has_full': name in full})
+    # Hold back what cannot be judged. A crop whose geometry the store does
+    # not have yet (~9.5% of the live pool, shard not committed) is NOT
+    # dropped: unknown size is not the same fact as too small.
+    too_small = 0
+    floor = min_review_px()
+    if floor > 0 and cands:
+        sides = box_short_sides([(c['image_id'], int(round(c['conf'] * 100)))
+                                 for c in cands])
+        big = []
+        for c in cands:
+            side = sides.get((c['image_id'], int(round(c['conf'] * 100))))
+            if side is not None and side < floor:
+                too_small += 1
+                continue
+            big.append(c)
+        cands = big
     cands.sort(key=key)          # sort first: the survivor is the best copy
     # NB: not `seen_ids` -- that name holds the reviewed-and-kept ledger above,
     # and reusing it here reported the page count as the reviewed total
@@ -4125,6 +4214,8 @@ def review_payload(page=0, size=REVIEW_PAGE, sort='new', country=''):
             # images judged, not crop FILES judged -- so it is the same unit as
             # total_unflagged and the two sum to a meaningful denominator
             'pages': pages, 'flagged_total': len(flagged_ids),
+            # never a silent cap: the page says how many it is holding back
+            'too_small': too_small, 'min_px': floor,
             'positive_total': n_pos, 'seen_total': len(seen_ids),
             'collapsed': collapsed,
             # Options tallied from the live queue, NOT from the index's
