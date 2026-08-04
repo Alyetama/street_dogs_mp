@@ -1925,10 +1925,25 @@ function openLb(i){
     $('zout').onclick=function(){zoomBy(1/1.5)};
     $('zbox').onclick=function(){fitBox()};
     $('zfit').onclick=function(){fitImage()};
+    /* A fixed step per wheel EVENT is a mouse-wheel assumption. One notch is
+       one event with deltaY ~100, so 1.15x felt right; a trackpad sends a
+       stream of events with deltaY ~3, so the same step compounded to 1.15^30
+       and the image shot to 60x from one flick. Scale the step by how far the
+       wheel actually turned, normalised across deltaMode, so both devices
+       cover the same zoom for the same physical gesture. */
     $('lbw').addEventListener('wheel',function(e){
-      if(!curBox)return;
+      /* not gated on curBox: ~9.5% of the live pool has no stored geometry
+         yet (shard uncommitted), and those are exactly the crops worth
+         zooming into. A box is needed to FIT to, never to zoom. */
+      if(!$('lbi').naturalWidth)return;
       e.preventDefault();                       /* the view zooms, not the page */
-      zoomBy(e.deltaY<0?1.15:1/1.15,e);
+      var d=e.deltaY;
+      if(e.deltaMode===1)d*=16;                 /* lines -> px */
+      else if(e.deltaMode===2)d*=($('lbw').clientHeight||600);   /* pages */
+      /* a trackpad PINCH arrives as a ctrl-wheel with small deltas, and wants
+         to move faster per unit than a two-finger scroll */
+      var f=Math.exp(-d*(e.ctrlKey?0.010:0.0015));
+      zoomBy(Math.max(0.5,Math.min(2,f)),e);    /* never more than 2x per event */
     },{passive:false});
 
     $('lbi').onload=function(){if(curBox)fitBox();else fitImage()};
@@ -2002,7 +2017,10 @@ function zoomBy(f,ev){
   var px=ev?ev.clientX-r.left:w.clientWidth/2;
   var py=ev?ev.clientY-r.top :w.clientHeight/2;
   var ix=(w.scrollLeft+px)/zoom, iy=(w.scrollTop+py)/zoom;
-  zoom*=f;applyZoom();
+  /* bounded: unclamped, a fast gesture could leave the image at 6000% with
+     nothing on screen to say where you were */
+  zoom=Math.max(0.02,Math.min(16,zoom*f));
+  applyZoom();
   w.scrollLeft=ix*zoom-px;w.scrollTop=iy*zoom-py;
 }
 function fitImage(){
