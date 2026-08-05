@@ -155,6 +155,11 @@ def main():
                     help='re-predict crops already in the output file')
     ap.add_argument('--verify-buckets', action='store_true',
                     help='check the bucket edges and exit')
+    ap.add_argument('--watch', type=int, default=0, metavar='SECONDS',
+                    help='keep going: sleep this long and pick up whatever '
+                         'the sweep has written since. The live pool turns '
+                         'over at ~2 crops/s, so a single pass leaves the '
+                         'queue partly unguessed within the hour.')
     args = ap.parse_args()
 
     import torch
@@ -179,91 +184,108 @@ def main():
         print(f'bucket edges verified against {len(cats)} classes: {n}')
         return 0
 
-    names = pool(REPO)
-    skip = set() if args.refresh else already_done(args.out)
-    if not args.include_judged:
-        skip |= judged_names(REPO)
-    todo = [(n, d) for n, d in names if n not in skip]
-    todo.sort()
-    if args.limit:
-        todo = todo[:args.limit]
-    print(f'{len(names):,} crops in the pool, {len(todo):,} to predict '
-          f'({len(skip):,} already judged or done)')
-    if not todo:
-        return 0
-
     model = efficientnet_v2_s(weights=weights).eval().to(args.device)
     tf = weights.transforms()
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    ran_at = time.strftime('%Y-%m-%dT%H:%M:%S')
-    wrote = unreadable = 0
-    t0 = time.time()
-    # Appended a batch at a time and flushed, so a run killed halfway leaves
-    # every completed batch usable -- this is meant to be run in bursts.
-    with open(args.out, 'a') as fh:
-        for i in range(0, len(todo), args.batch):
-            chunk = todo[i:i + args.batch]
-            ims, keep = [], []
-            for nm, d in chunk:
-                try:
-                    with Image.open(os.path.join(d, nm)) as im:
-                        ims.append(tf(im.convert('RGB')))
-                    keep.append(nm)
-                except Exception:
-                    unreadable += 1
-            if not ims:
-                continue
-            with torch.no_grad():
-                p = model(torch.stack(ims).to(args.device)).softmax(1).cpu()
-            for j, nm in enumerate(keep):
-                probs = p[j]
-                # summed mass per bucket, not the top-1's bucket: a small
-                # crop scatters its mass across breeds and the sum is the
-                # only stable signal
-                mass = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
-                for idx in range(len(cats)):
-                    mass[bucket_of(idx)] += float(probs[idx])
-                top = torch.topk(probs, args.topk)
-                best = max(mass, key=mass.get)
-                # The name shown on the tile must belong to the bucket the
-                # tile was filed under. The overall top-1 need not: mass
-                # decides the bucket, so a crop can land in 'dog' on the sum
-                # of forty breeds while its single best guess is a rooster,
-                # and a chip reading 'cock' on a dog-filtered tile reads as
-                # a bug. Take the best class INSIDE the winning bucket.
-                in_b = [i for i in range(len(cats)) if bucket_of(i) == best]
-                bi = max(in_b, key=lambda i: float(probs[i]))
-                fh.write(json.dumps({
-                    'schema': SCHEMA,
-                    'name': nm,
-                    'bucket': best,
-                    'p': round(mass[best], 4),
-                    'mass': {k: round(v, 4) for k, v in mass.items()},
-                    # what to call it: always a member of `bucket`
-                    'label': cats[bi],
-                    'label_p': round(float(probs[bi]), 4),
-                    # the raw top-k too, so a disagreement stays inspectable
-                    'top': [[cats[int(t)], round(float(s), 4)]
-                            for s, t in zip(top.values, top.indices)],
-                    # stamped on every record so nothing downstream can read
-                    # one of these and mistake it for a decision
-                    'unverified': True,
-                    'source': 'model_suggestion',
-                    'model': MODEL_ID,
-                    'ran_at': ran_at,
-                }) + '\n')
-                wrote += 1
-            fh.flush()
-            if (i // args.batch) % 10 == 0:
-                el = time.time() - t0
-                rate = wrote / el if el else 0
-                print(f'  {wrote:,}/{len(todo):,}  {rate:.1f}/s', end='\r',
-                      flush=True)
-    el = time.time() - t0
-    print(f'\n{wrote:,} predictions -> {args.out} in {el:.0f}s '
-          f'({wrote / el:.1f}/s)' if el else '')
-    if unreadable:
-        print(f'  {unreadable:,} unreadable, skipped')
+    os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
+
+    def once(first):
+        """One pass over whatever is unpredicted right now."""
+        names = pool(REPO)
+        # --refresh means "redo them", which must apply to the FIRST pass
+        # only: on a later --watch pass it would loop over the same crops
+        # forever and never reach the new ones.
+        skip = set() if (args.refresh and first) else already_done(args.out)
+        if not args.include_judged:
+            skip |= judged_names(REPO)
+        todo = sorted((n, d) for n, d in names if n not in skip)
+        if args.limit:
+            todo = todo[:args.limit]
+        print(f'{len(names):,} crops in the pool, {len(todo):,} to predict '
+              f'({len(skip):,} already judged or done)')
+        if not todo:
+            return 0
+        ran_at = time.strftime('%Y-%m-%dT%H:%M:%S')
+        wrote = unreadable = 0
+        t0 = time.time()
+        # Appended a batch at a time and flushed, so a run killed halfway
+        # leaves every completed batch usable -- meant to be run in bursts.
+        with open(args.out, 'a') as fh:
+            for i in range(0, len(todo), args.batch):
+                ims, keep = [], []
+                for nm, d in todo[i:i + args.batch]:
+                    try:
+                        with Image.open(os.path.join(d, nm)) as im:
+                            ims.append(tf(im.convert('RGB')))
+                        keep.append(nm)
+                    except Exception:
+                        # the live pool is pruned while this runs; a crop
+                        # that vanished mid-pass is not an error
+                        unreadable += 1
+                if not ims:
+                    continue
+                with torch.no_grad():
+                    p = model(torch.stack(ims).to(args.device)).softmax(1).cpu()
+                for j, nm in enumerate(keep):
+                    probs = p[j]
+                    # summed mass per bucket, not the top-1's bucket: a small
+                    # crop scatters its mass across breeds and the sum is the
+                    # only stable signal
+                    mass = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
+                    for idx in range(len(cats)):
+                        mass[bucket_of(idx)] += float(probs[idx])
+                    top = torch.topk(probs, args.topk)
+                    best = max(mass, key=mass.get)
+                    # The name shown on the tile must belong to the bucket the
+                    # tile was filed under. The overall top-1 need not: mass
+                    # decides the bucket, so a crop can land in 'dog' on the
+                    # sum of forty breeds while its single best guess is a
+                    # rooster, and a chip reading 'cock' on a dog-filtered
+                    # tile reads as a bug. Best class INSIDE the bucket.
+                    bi = max((i2 for i2 in range(len(cats))
+                              if bucket_of(i2) == best),
+                             key=lambda i2: float(probs[i2]))
+                    fh.write(json.dumps({
+                        'schema': SCHEMA,
+                        'name': nm,
+                        'bucket': best,
+                        'p': round(mass[best], 4),
+                        'mass': {k: round(v, 4) for k, v in mass.items()},
+                        # what to call it: always a member of `bucket`
+                        'label': cats[bi],
+                        'label_p': round(float(probs[bi]), 4),
+                        # the raw top-k too, so a disagreement is inspectable
+                        'top': [[cats[int(t)], round(float(s), 4)]
+                                for s, t in zip(top.values, top.indices)],
+                        # stamped on every record so nothing downstream can
+                        # read one of these and mistake it for a decision
+                        'unverified': True,
+                        'source': 'model_suggestion',
+                        'model': MODEL_ID,
+                        'ran_at': ran_at,
+                    }) + '\n')
+                    wrote += 1
+                fh.flush()
+                if (i // args.batch) % 10 == 0:
+                    el = time.time() - t0
+                    print(f'  {wrote:,}/{len(todo):,}  '
+                          f'{wrote / el if el else 0:.1f}/s', end='\r',
+                          flush=True)
+        el = time.time() - t0
+        print(f'\n{wrote:,} predictions -> {args.out} in {el:.0f}s '
+              f'({wrote / el:.1f}/s)' if el else f'\n{wrote:,} predictions')
+        if unreadable:
+            print(f'  {unreadable:,} vanished or unreadable, skipped')
+        return wrote
+
+    once(True)
+    if args.watch:
+        print(f'watching: another pass every {args.watch}s, Ctrl-C to stop')
+        try:
+            while True:
+                time.sleep(args.watch)
+                once(False)
+        except KeyboardInterrupt:
+            print('\nstopped')
     print('These are suggestions for sorting the queue. Nothing reads this '
           'file except the review page filter.')
     return 0
