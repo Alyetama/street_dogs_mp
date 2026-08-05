@@ -6955,7 +6955,13 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       var a=[{},{}],i;
       for(i=0;i<BANDS;i++){
         var s={};
-        if(bandData)s.data=bandData[i];
+        /* large mode CANNOT hold an empty series: echarts throws inside its
+           own afterBrush when the batched point buffer is undefined, the
+           paint aborts, and the map stops redrawing entirely -- which looks
+           exactly like a freeze. Culling empties whichever bands are off
+           screen, so an empty band falls back to the ordinary path, where
+           empty is fine and costs nothing to draw. */
+        if(bandData){s.data=bandData[i];s.large=bandData[i].length>0;}
         if(size)s.symbolSize=size;
         a.push(s);
       }
@@ -6966,7 +6972,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       var out=[],i,b=bandsOf(cur.data,cur.max);
       for(i=0;i<BANDS;i++)out.push({
         name:'cells'+i,type:'scatter',coordinateSystem:'geo',symbol:'rect',z:2,
-        large:true,largeThreshold:0,symbolSize:cellSize,data:b[i],
+        large:b[i].length>0,largeThreshold:0,symbolSize:cellSize,data:b[i],
         itemStyle:{color:rampAt(RAMPS[layer],(i+0.5)/BANDS),opacity:.92},
         animation:false});
       return out;
@@ -7163,6 +7169,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     ch.on('georoam',function(){
       cellSize=cellNum(cur.res);
       ch.setOption({series:upd(null,cellSize,null)});
+      drawHud();
       if(t)clearTimeout(t);
       t=setTimeout(roamed,130);
     });
@@ -7234,14 +7241,23 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         return eeInv([(px-a[0])/s,(py-a[1])/s]);
       }catch(_){return null;}
     }
-    mapEl.addEventListener('mousemove',function(e){
-      var r=mapEl.getBoundingClientRect();
-      var c=pxToLL(e.clientX-r.left,e.clientY-r.top);
+    /* Redrawn on roam as well as on move: zooming under a still cursor
+       changes both the coordinate and the grid beneath it, and the readout
+       was left asserting the grid it had a moment ago. */
+    var hudPx=null;
+    function drawHud(){
+      if(!hudPx){hud.textContent='';return;}
+      var c=pxToLL(hudPx[0],hudPx[1]);
       if(!c||!isFinite(c[0])||Math.abs(c[0])>180||Math.abs(c[1])>90){hud.textContent='';return;}
       hud.textContent=Math.abs(c[1]).toFixed(1)+'°'+(c[1]<0?'S':'N')+' '+
         Math.abs(c[0]).toFixed(1)+'°'+(c[0]<0?'W':'E')+' · '+cur.res+'° grid';
+    }
+    mapEl.addEventListener('mousemove',function(e){
+      var r=mapEl.getBoundingClientRect();
+      hudPx=[e.clientX-r.left,e.clientY-r.top];
+      drawHud();
     });
-    mapEl.addEventListener('mouseleave',function(){hud.textContent=''});
+    mapEl.addEventListener('mouseleave',function(){hudPx=null;hud.textContent=''});
     window.addEventListener('resize',function(){ch.resize()});
   }).catch(function(){mapEl.innerHTML='<div style="color:#69727d;padding:40px;text-align:center">map data unavailable</div>'});
 })();
