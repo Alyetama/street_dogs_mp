@@ -419,11 +419,11 @@ MAP_FINE_FILE = os.path.join(OUT, 'map_points_fine.json')
 MAP_CONF_MIN = 0.5   # a sweep detection below this stays out of the dogs layer
 # Outlier rule, measured against all 32.1M harvested points (2026-08-05):
 #
-#   OFF LAND        151K points (0.47%). Sequences with interpolated GPS
+#   OFF LAND     154,611 points (0.481%). Sequences with interpolated GPS
 #                   string frames across open water.
-#   GPS FLYER        54K points (0.17%), 26K of them ON LAND and so invisible
-#                   to the land test. A Mapillary sequence is one capture
-#                   session, yet 316 of them span more than a degree -- and
+#   GPS FLYER     53,537 points (0.167%), 25,951 of them ON LAND and so
+#                   invisible to the land test. A Mapillary sequence is one
+#                   capture session, yet 338 of them span more than a degree --
 #                   every single one of those turned out to teleport between
 #                   consecutive frames, the worst by 38,000 km. Not one wide
 #                   sequence was a genuine long drive, so a span gate is safe:
@@ -432,8 +432,9 @@ MAP_CONF_MIN = 0.5   # a sweep detection below this stays out of the dogs layer
 #                   MAP_SEQ_OFF from that sequence's median are the minority
 #                   cluster -- the side that cannot be where it claims.
 #
-# Points are kept in the payload either way; the page filters, so "exclude"
-# is a view and never a deletion.
+# Together 180,562 points, 0.562% of the harvest. Points are kept in the
+# payload either way; the page filters, so "exclude" is a view and never a
+# deletion.
 MAP_SEQ_SPAN = 1.0   # deg: a capture session this wide is broken
 MAP_SEQ_OFF = 0.5    # deg: how far off its own median a frame must sit
 STAGES = [
@@ -683,12 +684,18 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
     # cells against seventy thousand.
     out_levels = {str(r): grid('pts', r, True) for r in res_list}
     dog_out_levels = {str(r): grid('dpts', r, True) for r in res_list}
+    # The ANCHOR is clean-only on purpose -- that median is what stops one
+    # teleporting sequence dragging a continent's marker into the sea. The
+    # COUNT ships both ways, because the marker's tooltip says "frames on the
+    # map" and the map's own total changes with the outlier toggle.
     regions = [{'key': r[0], 'lon': round(r[1], 3), 'lat': round(r[2], 3),
-                'n': r[3]}
+                'n': r[3], 'n_bad': r[4]}
                for r in con.execute(
-                   "SELECT region, median(lon), median(lat), count(*) "
-                   "FROM pts WHERE NOT bad "
-                   "GROUP BY region ORDER BY region").fetchall()
+                   "SELECT region, median(lon) FILTER (WHERE NOT bad), "
+                   "median(lat) FILTER (WHERE NOT bad), "
+                   "count(*) FILTER (WHERE NOT bad), "
+                   "count(*) FILTER (WHERE bad) "
+                   "FROM pts GROUP BY region ORDER BY region").fetchall()
                if r[1] is not None]
     fine = {'levels': {str(fine_res): grid('pts', fine_res, False)},
             'dog_levels': {str(fine_res): grid('dpts', fine_res, False)},
@@ -5257,8 +5264,14 @@ def build(args):
     dst = os.path.join(OUT, 'echarts.min.js')
     if os.path.exists(ECHARTS_SRC) and not os.path.exists(dst):
         shutil.copy(ECHARTS_SRC, dst)
-    with open(os.path.join(OUT, 'index.html'), 'w') as f:
+    # Atomically, because the server keeps serving through a rebuild: a page
+    # fetched mid-write got a truncated script, and a browser that had just
+    # loaded the previous script against the new map_points.json threw on
+    # every frame. The data files already replace this way; the page did not.
+    page = os.path.join(OUT, 'index.html')
+    with open(page + '.tmp', 'w') as f:
         f.write(render(ov, per, trend(), now, region_locations(args.db)))
+    os.replace(page + '.tmp', page)
     print(f"[{now:%H:%M:%S}] dashboard built · {human(ov['downloaded'])}/"
           f"{human(ov['dogs'])} downloaded ({ov['pct']:.1f}%) · "
           f"{os.path.join(OUT, 'index.html')}")
@@ -6716,11 +6729,31 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
      Hand-rolled because no CDN is allowed at runtime; forward is the
      published polynomial, inverse is 12 Newton steps on theta. */
   var EA1=1.340264,EA2=-0.081106,EA3=0.000893,EA4=0.003796,EM=Math.sqrt(3)/2,RAD=Math.PI/180;
+  /* Equal Earth is separable: y depends on latitude alone, and x is
+     longitude times a factor that also depends on latitude alone. Both
+     factors are tabulated once at 0.005° and read back with linear
+     interpolation, because echarts re-projects the ENTIRE world geometry on
+     every frame of a zoom -- 68,000 calls per wheel tick here -- and four
+     trigonometric functions per call is a cost paid sixty times a second.
+     Interpolating a smooth function at that step is accurate to ~1e-10 deg,
+     nine orders of magnitude below a pixel. */
+  var LATN=36001,LAT0=-90,LATD=180/(LATN-1),TK=new Float64Array(LATN),
+      TY=new Float64Array(LATN);
+  (function(){
+    for(var i=0;i<LATN;i++){
+      var t=Math.asin(EM*Math.sin((LAT0+i*LATD)*RAD)),t2=t*t,t6=t2*t2*t2;
+      TK[i]=Math.cos(t)/(EM*(EA1+3*EA2*t2+t6*(7*EA3+9*EA4*t2)));
+      TY[i]=t*(EA1+EA2*t2+t6*(EA3+EA4*t2));
+    }
+  })();
   /* screen y grows DOWN, the math's grows up: negate y both ways */
   function eeFwd(lp){
-    var l=lp[0]*RAD,p=lp[1]*RAD,t=Math.asin(EM*Math.sin(p)),t2=t*t,t6=t2*t2*t2;
-    return [l*Math.cos(t)/(EM*(EA1+3*EA2*t2+t6*(7*EA3+9*EA4*t2))),
-            -t*(EA1+EA2*t2+t6*(EA3+EA4*t2))];
+    var lat=lp[1];
+    if(!(lat>-90))lat=-90; else if(lat>90)lat=90;   /* also catches NaN */
+    var f=(lat-LAT0)/LATD,i=f|0;
+    if(i>LATN-2)i=LATN-2;
+    var w=f-i;
+    return [lp[0]*RAD*(TK[i]+(TK[i+1]-TK[i])*w),-(TY[i]+(TY[i+1]-TY[i])*w)];
   }
   function eeInv(xy){
     var x=xy[0],y=-xy[1],t=y,i,t2,t6,f,fp;
@@ -6773,6 +6806,27 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
   };
   var RATE_MIN=30;  /* a rate needs a denominator: cells with fewer harvested
                        frames than this stay off the hit-rate layer */
+  /* The cells are drawn as BANDS: one echarts series per colour step, each in
+     large mode. A single scatter with a visualMap builds one graphic element
+     per cell, and at 15,000 cells that is 150-190ms of work on every frame of
+     a zoom -- the jank. Large mode batches a whole series into one element,
+     but it paints every point in one colour, which would throw away the
+     density ramp. Twelve large series, each a flat colour sampled from the
+     ramp, keeps the ramp and pays the batched price: measured 1 slow frame
+     per zoom instead of 11, worst frame 57ms instead of 192ms. The ramp is
+     quantised rather than continuous, which on a log scale is invisible. */
+  var BANDS=12;
+  function rampAt(cols,t){
+    t=t<0?0:(t>1?1:t);
+    var x=t*(cols.length-1),i=x|0;
+    if(i>cols.length-2)i=cols.length-2;
+    var f=x-i,a=cols[i],b=cols[i+1],o='#',j,va,vb;
+    for(j=1;j<7;j+=2){
+      va=parseInt(a.substr(j,2),16);vb=parseInt(b.substr(j,2),16);
+      o+=('0'+Math.round(va+(vb-va)*f).toString(16)).slice(-2);
+    }
+    return o;
+  }
   Promise.all([
     fetch('world.json').then(function(r){return r.json()}),
     fetch('map_points.json').then(function(r){return r.json()}),
@@ -6855,7 +6909,8 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     var regData=(md.regions||[]).map(function(r){
       var b=byKey[r.key]||{};
       return {name:(b.name||r.key).replace(/_/g,' '),value:[r.lon,r.lat],
-        key:r.key,n:r.n,stage:b.stage||'',pct:b.pct,downloaded:b.downloaded,dogs:b.dogs};
+        key:r.key,n:r.n,nb:r.n_bad||0,stage:b.stage||'',pct:b.pct,
+        downloaded:b.downloaded,dogs:b.dogs};
     });
     /* Markers borrow the ACTIVE layer's ink rather than carrying stage
        colour on the glyph. An anchor is a region's median point, so it
@@ -6883,6 +6938,103 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         return [Math.max(Math.abs(b[0]-a[0]),1.1),Math.max(Math.abs(b[1]-a[1]),1.1)];
       }catch(e){return [3,3];}
     }
+    /* Cell size is read from here at paint time instead of being pushed in
+       with setOption. A cell is a geo-anchored rect, so it has to grow as you
+       zoom; pushing the new size through setOption meant the size only caught
+       up when the roam debounce fired, so mid-zoom the raster was drawn at the
+       previous zoom's size -- gaps opening up, then snapping shut. Now a wheel
+       tick just writes this variable and the very next frame is already
+       right. */
+    /* large mode takes a number, not a [w,h]; the larger side so that the
+       raster stays gapless where the projection stretches a cell */
+    var cellSize=3;
+    function cellNum(res){var s=cellPx(res);return Math.max(s[0],s[1]);}
+    var REG=2+BANDS;              /* the region markers sit after the bands */
+    /* series array for a partial update: pass null to leave a slot alone */
+    function upd(bandData,size,regionData){
+      var a=[{},{}],i;
+      for(i=0;i<BANDS;i++){
+        var s={};
+        if(bandData)s.data=bandData[i];
+        if(size)s.symbolSize=size;
+        a.push(s);
+      }
+      a.push(regionData?{data:regionData}:{});
+      return a;
+    }
+    function bandSeries(){
+      var out=[],i,b=bandsOf(cur.data,cur.max);
+      for(i=0;i<BANDS;i++)out.push({
+        name:'cells'+i,type:'scatter',coordinateSystem:'geo',symbol:'rect',z:2,
+        large:true,largeThreshold:0,symbolSize:cellSize,data:b[i],
+        itemStyle:{color:rampAt(RAMPS[layer],(i+0.5)/BANDS),opacity:.92},
+        animation:false});
+      return out;
+    }
+    function bandsOf(data,max){
+      var out=[],i;
+      for(i=0;i<BANDS;i++)out.push([]);
+      for(i=0;i<data.length;i++){
+        var b=Math.floor(data[i].value[2]/(max||1)*BANDS);
+        out[b<0?0:(b>BANDS-1?BANDS-1:b)].push(data[i]);
+      }
+      return out;
+    }
+    /* Only draw the cells that are on screen. echarts runs every point of the
+       series through the projection on every repaint, so at the 0.15° grid a
+       wheel tick was projecting ~72,000 points and at 0.05° a quarter of a
+       million -- while the viewport held a few hundred. Zoomed in, that is
+       the whole frame budget spent on cells nobody can see. Sampling the
+       viewport edge (rather than just the corners) because the projection
+       curves: on Equal Earth a corner is not the extreme of its own edge. */
+    function viewBox(){
+      var r=mapEl.getBoundingClientRect(),i,c,
+          x0=1e9,x1=-1e9,y0=1e9,y1=-1e9,n=0;
+      if(!r.width||!r.height)return null;
+      for(i=0;i<=8;i++){
+        var f=i/8,probes=[[r.width*f,0],[r.width*f,r.height],
+                          [0,r.height*f],[r.width,r.height*f]];
+        for(var j=0;j<4;j++){
+          c=pxToLL(probes[j][0],probes[j][1]);
+          if(!c||!isFinite(c[0])||!isFinite(c[1]))continue;
+          n++;
+          if(c[0]<x0)x0=c[0];if(c[0]>x1)x1=c[0];
+          if(c[1]<y0)y0=c[1];if(c[1]>y1)y1=c[1];
+        }
+      }
+      if(n<4)return null;   /* edges off the globe: cannot bound, draw it all */
+      var mx=(x1-x0)*0.3+1,my=(y1-y0)*0.3+1;   /* margin so a pan has cells
+                                                  ready before the next update */
+      return {x0:x0-mx,x1:x1+mx,y0:y0-my,y1:y1+my};
+    }
+    /* what the cell layer currently holds, and the box it was culled to */
+    var painted={box:null,world:true,n:0};
+    function cullTo(data,b){
+      var out=[],i,v;
+      for(i=0;i<data.length;i++){
+        v=data[i].value;
+        if(v[0]>=b.x0&&v[0]<=b.x1&&v[1]>=b.y0&&v[1]<=b.y1)out.push(data[i]);
+      }
+      return out;
+    }
+    /* Repaint only when it would change something. setOption reprocesses the
+       whole series, so calling it on every roam settle costs a second full
+       render on top of the one the roam already did -- which is worse than
+       the culling saves. Skip while the view stays inside the box the cells
+       were culled to and the set has not shrunk much. */
+    function paint(force){
+      var b=viewBox(),world=!b||(b.x1-b.x0>=350&&b.y1-b.y0>=170);
+      var data=world?cur.data:cullTo(cur.data,b);
+      if(!force){
+        if(world&&painted.world)return;
+        if(!world&&!painted.world&&painted.box
+           &&b.x0>=painted.box.x0&&b.x1<=painted.box.x1
+           &&b.y0>=painted.box.y0&&b.y1<=painted.box.y1
+           &&data.length>painted.n*0.5)return;
+      }
+      painted={box:world?null:b,world:world,n:data.length};
+      ch.setOption({series:upd(bandsOf(data,cur.max),cellSize,null)});
+    }
     var g=graticule();
     /* kept as its own object so Reset view can rebuild geo from it verbatim */
     var geoOpt={map:'world',roam:true,scaleLimit:{min:1,max:40},
@@ -6901,28 +7053,29 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       var d=p.data,rows='<b>'+d.name+'</b>';
       if(d.stage)rows+='<br><span style="color:'+(STAGE_COLOR[d.stage]||'#7d8893')+'">&#9679;</span> '+(labels[d.stage]||d.stage);
       if(d.downloaded!=null)rows+='<br>'+fmt(d.downloaded)+' / '+fmt(d.dogs)+' downloaded ('+d.pct+'%)';
-      rows+='<br>'+fmt(d.n)+' frames on the map';
+      rows+='<br>'+fmt(d.n+(clean()?0:d.nb))+' frames on the map';
+      if(!clean()&&d.nb)rows+=' <span style="color:#98a2ad">('+fmt(d.nb)+' GPS outliers)</span>';
       rows+='<br><span style="color:#69727d">click to generate its commands</span>';
       return rows;
     }
     ch.setOption({
       backgroundColor:'transparent',
+      /* No transition on any update. The cells are a raster: when the grid
+         swaps at a zoom threshold, tweening every rect from its old cell to
+         its new one sends the whole layer sliding across the map and back,
+         which is the "it flies away and returns" of a zoom. A raster should
+         cut, not dissolve. */
+      animation:false,
       tooltip:{trigger:'item',backgroundColor:'#21262d',borderColor:'#2c333b',borderWidth:1,
         textStyle:{color:'#eef1f4'},
-        formatter:function(p){return p.seriesIndex===3?tipRegion(p):tipDensity(p)}},
+        formatter:function(p){return p.seriesIndex===REG?tipRegion(p):tipDensity(p)}},
       geo:geoOpt,
-      /* the ramp is drawn as our own legend strip; the component only maps
-         value→color, and only for the density series (index 2) */
-      visualMap:{type:'continuous',show:false,min:0,max:cur.max,dimension:2,
-        seriesIndex:2,inRange:{color:RAMPS[layer]}},
       series:[
         {type:'lines',coordinateSystem:'geo',polyline:true,silent:true,z:1,
          data:g.lines,lineStyle:{color:'rgba(130,140,150,.10)',width:.7}},
         {type:'lines',coordinateSystem:'geo',polyline:true,silent:true,z:1,
-         data:[{coords:g.edge}],lineStyle:{color:'rgba(130,140,150,.28)',width:1.1}},
-        {name:'cells',type:'scatter',coordinateSystem:'geo',symbol:'rect',z:2,
-         data:cur.data,symbolSize:3,itemStyle:{opacity:.92},
-         progressive:8000,progressiveThreshold:10000},
+         data:[{coords:g.edge}],lineStyle:{color:'rgba(130,140,150,.28)',width:1.1}}
+      ].concat(bandSeries()).concat([
         /* rings, not dots: a filled dot in stage green disappears into the
            dogs layer's own green cells; a ring reads as a marker */
         {name:'regions',type:'scatter',coordinateSystem:'geo',z:3,
@@ -6931,7 +7084,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
            color:'#8a94a0',formatter:'{b}'},
          emphasis:{scale:1.6,label:{color:'#eef1f4'}},
          cursor:'pointer'}
-      ]
+      ])
     });
     function legend(){
       rampEl.style.background='linear-gradient(90deg,'+RAMPS[layer].join(',')+')';
@@ -6955,15 +7108,18 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     function apply(){
       cur=density(layer,String(cur.res));
       regRings=rings();
-      ch.setOption({visualMap:{max:cur.max,inRange:{color:RAMPS[layer]}},
-        series:[{},{},{data:cur.data,symbolSize:cellPx(cur.res)},
-                {data:(!regTog||regTog.checked)?regRings:[]}]});
+      cellSize=cellNum(cur.res);
+      /* the band colours belong to the layer, so a layer switch replaces them */
+      ch.setOption({series:[{},{}].concat(bandSeries()).concat(
+        [{data:(!regTog||regTog.checked)?regRings:[]}])});
+      paint(true);
       /* the lede is the chip's own tooltip text, so the two never drift */
       var src=mchips.filter(function(c){return c.dataset.l===layer})[0];
       if(ledeEl&&src)ledeEl.textContent=src.title;
       legend();
     }
-    ch.setOption({series:[{},{},{symbolSize:cellPx(cur.res)},{}]});  // size once geo exists
+    cellSize=cellNum(cur.res);  // sizeable only once the geo layout exists
+    ch.setOption({series:upd(null,cellSize,null)});
     legend();
     /* pick the finest grid whose cells are big enough to see; the 0.05° grid
        lives in its own file and is fetched the first time zoom warrants it */
@@ -6992,14 +7148,24 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     }
     var t=null;
     function roamed(){
-      var want=wantRes();
-      if(want!==cur.res){cur=density(layer,String(want));
-        ch.setOption({visualMap:{max:cur.max},
-          series:[{},{},{data:cur.data,symbolSize:cellPx(cur.res)},{}]});
+      var want=wantRes(),swap=want!==cur.res;
+      if(swap){
+        cur=density(layer,String(want));
+        cellSize=cellNum(cur.res);
         legend();
-      }else ch.setOption({series:[{},{},{symbolSize:cellPx(cur.res)},{}]});
+      }
+      paint(swap);
     }
-    ch.on('georoam',function(){if(t)clearTimeout(t);t=setTimeout(roamed,130)});
+    /* Two speeds, on purpose. Resizing the cells is two convertToPixel calls
+       and must land on the very next frame, so it runs on every roam event.
+       Swapping to a different grid replaces tens of thousands of points, so
+       it waits for the wheel to stop. */
+    ch.on('georoam',function(){
+      cellSize=cellNum(cur.res);
+      ch.setOption({series:upd(null,cellSize,null)});
+      if(t)clearTimeout(t);
+      t=setTimeout(roamed,130);
+    });
     /* layer chips */
     mchips.forEach(function(c){c.addEventListener('click',function(){
       if(c.dataset.l===layer)return;
@@ -7009,14 +7175,14 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     })});
     /* region markers on/off */
     if(regTog)regTog.addEventListener('change',function(){
-      ch.setOption({series:[{},{},{},{data:regTog.checked?regRings:[]}]});
+      ch.setOption({series:upd(null,null,regTog.checked?regRings:[])});
     });
     /* outliers in or out: same grid pipeline, so every layer and every zoom
        level follows without a second code path */
     if(cleanTog)cleanTog.addEventListener('change',function(){apply()});
     /* click a region dot: fill the generator and run it */
     ch.on('click',function(p){
-      if(p.seriesIndex!==3||!p.data)return;
+      if(p.seriesIndex!==REG||!p.data)return;
       var inp=document.getElementById('cmdRegion');
       if(!inp)return;
       inp.value=p.data.key;
