@@ -5553,6 +5553,14 @@ transition:color .12s,border-color .12s,background .12s}
 color:var(--tx);font-family:inherit;font-size:12px;padding:5px 10px;width:180px}
 #mapFind:focus{outline:none;border-color:rgba(232,166,69,.45)}
 #mapFind::placeholder{color:var(--dim)}
+.mreset{appearance:none;background:transparent;border:1px solid var(--bd);color:var(--mut);
+border-radius:8px;padding:5px 11px;font-size:11.5px;font-family:inherit;cursor:pointer;
+transition:color .12s,border-color .12s}
+.mreset:hover{color:var(--tx);border-color:rgba(232,166,69,.4)}
+.mreset:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+/* the lede says what the visible layer MEANS, for the reader who never
+   hovers a chip; it swaps with the layer */
+.maplede{margin:0 0 12px;font-size:11.5px;line-height:1.5;color:var(--dim);max-width:76ch}
 .maphud{position:absolute;left:12px;bottom:10px;z-index:1;pointer-events:none;
 font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;
 color:var(--mut);background:rgba(13,17,23,.62);border:1px solid var(--bd);
@@ -6210,12 +6218,18 @@ __LB_HTML__
 <details class="fold panel sec" id="f-map" open>
   <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, where the detector called dogs, and each region's stage &mdash; click a region dot to generate its commands</span></summary>
   <div class="mapbar">
-    <button type="button" class="mchip on" data-l="harvest">Harvest</button>
-    <button type="button" class="mchip" data-l="dogs">Dogs found</button>
-    <button type="button" class="mchip" data-l="rate">Hit rate</button>
-    <label class="mtog"><input type="checkbox" id="mapRegions" checked> region markers</label>
-    <input id="mapFind" list="cmdRegions" placeholder="fly to a region&hellip;" autocomplete="off">
+    <button type="button" class="mchip on" data-l="harvest"
+      title="Every Mapillary frame the harvest downloaded, binned by where it was taken. This is coverage — where you have looked, not what was found.">Harvest</button>
+    <button type="button" class="mchip" data-l="dogs"
+      title="Frames where the detection sweep called at least one dog with confidence 0.5 or better. Unreviewed model output, so some of these are goats, sheep and shadows.">Dogs found</button>
+    <button type="button" class="mchip" data-l="rate"
+      title="Dogs found ÷ harvest, per cell. Corrects for how hard each place was searched: a bright cell here means dogs were common in the frames, not just that many frames exist. Needs 30+ frames in a cell to show.">Hit rate</button>
+    <label class="mtog" title="One marker per region, placed at the median of its frames. Its colour follows the layer; its stage and download progress are in the tooltip."><input type="checkbox" id="mapRegions" checked> region markers</label>
+    <input id="mapFind" list="cmdRegions" placeholder="fly to a region&hellip;" autocomplete="off"
+      title="Jump the camera to a region">
+    <button type="button" class="mreset" id="mapReset" title="Back to the whole world at the default zoom">Reset view</button>
   </div>
+  <p class="maplede" id="mapLede">Every Mapillary frame the harvest downloaded, binned by where it was taken. This is coverage — where you have looked, not what was found.</p>
   <!-- The map roams on wheel, so hovering it while scrolling the page used to
        zoom the map instead. A scrim swallows wheel/drag until you opt in;
        echarts keeps roam:true and never has to be reconfigured. -->
@@ -6680,6 +6694,8 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
   var mchips=Array.prototype.slice.call(document.querySelectorAll('.mchip')),
       regTog=document.getElementById('mapRegions'),
       findEl=document.getElementById('mapFind'),
+      resetEl=document.getElementById('mapReset'),
+      ledeEl=document.getElementById('mapLede'),
       hud=document.getElementById('mapHud'),
       rampEl=document.getElementById('mapRamp'),
       minEl=document.getElementById('mapMin'),maxEl=document.getElementById('mapMax'),
@@ -6744,13 +6760,26 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     var regData=(md.regions||[]).map(function(r){
       var b=byKey[r.key]||{};
       return {name:(b.name||r.key).replace(/_/g,' '),value:[r.lon,r.lat],
-        key:r.key,n:r.n,stage:b.stage||'',pct:b.pct,downloaded:b.downloaded,dogs:b.dogs,
-        itemStyle:{color:STAGE_COLOR[b.stage]||'#7d8893'}};
+        key:r.key,n:r.n,stage:b.stage||'',pct:b.pct,downloaded:b.downloaded,dogs:b.dogs};
     });
-    var regRings=regData.map(function(r){
-      return Object.assign({},r,{itemStyle:{color:'rgba(19,21,26,.55)',
-        borderColor:r.itemStyle.color,borderWidth:2}});
-    });
+    /* Markers borrow the ACTIVE layer's ink rather than carrying stage
+       colour on the glyph. An anchor is a region's median point, so it
+       always lands on that region's densest ground -- a green stage dot sat
+       inside the green dogs layer and vanished, and stage green on the amber
+       harvest read as a third data colour that meant nothing on that map.
+       Stage stays where it can be read: the tooltip. The dark fill and halo
+       keep the ring legible over both a bright cell and open ocean. */
+    var RING={harvest:'#f7d9a0',dogs:'#bff0d6',rate:'#cfe6f8'};
+    function rings(){
+      var c=RING[layer];
+      return regData.map(function(r){
+        return Object.assign({},r,{itemStyle:{color:'rgba(15,18,23,.72)',
+          borderColor:c,borderWidth:1.6,
+          shadowBlur:5,shadowColor:'rgba(10,12,16,.95)'},
+          label:{color:c}});
+      });
+    }
+    var regRings=rings();
     var cur=density(layer,String(keys[0]));
     var ch=echarts.init(mapEl,null,{renderer:'canvas'});
     function cellPx(res){ /* pixel footprint of one res° cell at current zoom */
@@ -6760,6 +6789,11 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       }catch(e){return [3,3];}
     }
     var g=graticule();
+    /* kept as its own object so Reset view can rebuild geo from it verbatim */
+    var geoOpt={map:'world',roam:true,scaleLimit:{min:1,max:40},
+      projection:{project:eeFwd,unproject:eeInv},
+      itemStyle:{areaColor:'#1d232c',borderColor:'#323a44',borderWidth:.5},
+      emphasis:{disabled:true},select:{disabled:true}};
     function tipDensity(p){
       if(!p.data)return '';
       if(layer==='rate')
@@ -6781,10 +6815,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       tooltip:{trigger:'item',backgroundColor:'#21262d',borderColor:'#2c333b',borderWidth:1,
         textStyle:{color:'#eef1f4'},
         formatter:function(p){return p.seriesIndex===3?tipRegion(p):tipDensity(p)}},
-      geo:{map:'world',roam:true,scaleLimit:{min:1,max:40},
-        projection:{project:eeFwd,unproject:eeInv},
-        itemStyle:{areaColor:'#1d232c',borderColor:'#323a44',borderWidth:.5},
-        emphasis:{disabled:true},select:{disabled:true}},
+      geo:geoOpt,
       /* the ramp is drawn as our own legend strip; the component only maps
          value→color, and only for the density series (index 2) */
       visualMap:{type:'continuous',show:false,min:0,max:cur.max,dimension:2,
@@ -6825,8 +6856,13 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     }
     function apply(){
       cur=density(layer,String(cur.res));
+      regRings=rings();
       ch.setOption({visualMap:{max:cur.max,inRange:{color:RAMPS[layer]}},
-        series:[{},{},{data:cur.data,symbolSize:cellPx(cur.res)},{}]});
+        series:[{},{},{data:cur.data,symbolSize:cellPx(cur.res)},
+                {data:(!regTog||regTog.checked)?regRings:[]}]});
+      /* the lede is the chip's own tooltip text, so the two never drift */
+      var src=mchips.filter(function(c){return c.dataset.l===layer})[0];
+      if(ledeEl&&src)ledeEl.textContent=src.title;
       legend();
     }
     ch.setOption({series:[{},{},{symbolSize:cellPx(cur.res)},{}]});  // size once geo exists
@@ -6881,6 +6917,24 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       inp.value=p.data.key;
       genCommands();
       toast('commands generated for '+p.data.name+' — below');
+    });
+    /* Reset view: whole world at the resting zoom, harvest layer, markers on.
+       At rest geo.center is NULL -- echarts fits the map to the container and
+       only fills center in once you roam -- so there is no "home" pair to
+       stash and put back. Rebuilding the geo component restores that fitted
+       state exactly, at whatever size the panel is now. */
+    if(resetEl)resetEl.addEventListener('click',function(){
+      if(layer!=='harvest'){
+        layer='harvest';
+        mchips.forEach(function(x){x.classList.toggle('on',x.dataset.l==='harvest')});
+      }
+      if(regTog)regTog.checked=true;
+      if(findEl)findEl.value='';
+      ch.setOption({geo:geoOpt},{replaceMerge:['geo']});
+      ch.resize();          /* re-fit if the panel was resized while roaming */
+      apply();
+      roamed();
+      toast('map reset');
     });
     /* fly to a region by name */
     if(findEl)findEl.addEventListener('change',function(){
