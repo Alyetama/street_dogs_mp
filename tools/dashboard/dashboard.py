@@ -1331,6 +1331,14 @@ font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
 /* two verdicts, side by side and equal weight -- neither is the default, and
    a hairline keeps them from reading as one wide button */
 .acts{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--bd)}
+/* AUDIT MODE. Belongs in THIS stylesheet: /review is its own document with
+   its own <style>, and the same rules in the dashboard's block styled nothing
+   here -- the class was on the button and the button looked untouched. */
+.fbtn.on{background:rgba(232,166,69,.22)!important;
+border:1px solid rgba(232,166,69,.55)!important;color:var(--acc)!important;
+font-weight:700}
+.card.changed{box-shadow:inset 0 0 0 2px var(--acc)}
+body.auditing #country,body.auditing #unkeep{display:none}
 .fbtn{border:0;background:rgba(130,140,150,.05);color:var(--mut);padding:8px 4px;
 font-size:11.5px;cursor:pointer;font-family:inherit;font-weight:600;
 transition:background .12s,color .12s;white-space:nowrap;overflow:hidden;
@@ -1436,6 +1444,10 @@ min-width:44px;text-align:center}
     </div>
   </div>
   <div class="bar">
+    <select id="mode" title="review new crops, or check the ones you already judged">
+      <option value="queue">Unreviewed queue</option>
+      <option value="audit">Check my annotations</option>
+    </select>
     <select id="sort" title="which crops to surface first">
       <option value="low" selected>Least confident first</option>
       <option value="conf">Most confident first</option>
@@ -1496,7 +1508,7 @@ min-width:44px;text-align:center}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,
+    smallN=0,minPx=0,harvestN=0,mode='queue',
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1521,7 +1533,40 @@ function toTop(){
     window.scrollTo(0,0);          /* older engines: no options object */
   }
 }
+/* AUDIT MODE. A misannotation does not wait in a queue -- it goes into a
+   dataset as ground truth and teaches the wrong thing, and until now nothing
+   could look at one again: flagging removed a crop from the queue for good.
+   This reads the ledgers instead of the pool, shows each crop's current
+   verdict, and lets it be changed in place. */
+function loadAudit(){
+  skeleton();
+  return fetch('/api/review/annotated?page='+page+'&size='+size+
+               '&sort='+auditSort())
+  .then(function(r){if(!r.ok)throw 0;return r.json()})
+  .then(function(j){
+    if(j.error)throw 0;
+    items=j.items||[];reserve=[];page=j.page||0;pages=j.pages||1;
+    var lab=items.length?
+      (n(items.length)+' shown \u00b7 '+n(j.total)+' annotated \u00b7 '+
+       n(j.n_false_positive)+' not a dog, '+n(j.n_true_positive)+' a dog'):
+      'nothing annotated yet';
+    $('pg').textContent=lab;$('pg2').textContent=lab;
+    $('next').disabled=$('next2').disabled=page>=pages-1;
+    $('foot').hidden=pages<=1;
+    if(sel>=items.length)sel=items.length-1;
+    render();toTop();
+  }).catch(function(){
+    $('state').innerHTML='<div class="state"><b>Could not load annotations</b>'+
+      'The ledgers under data/hard_negatives and data/hard_positives could '+
+      'not be read.</div>';
+    $('grid').innerHTML='';
+  });
+}
+/* the queue's sort names are about confidence; only two of them mean
+   anything for a list that is already judged */
+function auditSort(){return (sort==='conf'||sort==='low')?sort:'recent'}
 function load(){
+  if(mode==='audit')return loadAudit();
   skeleton();
   /* returns the promise: callers (and the test harness) can await a settled
      grid instead of guessing at microtask depth */
@@ -1683,15 +1728,19 @@ function tile(c){
      saved, and the editor reads the original either way. */
   d.innerHTML='<img class="thumb zoom" loading="lazy" alt="detection crop" '+
       'src="/hq?name='+encodeURIComponent(c.name)+'" '+
-      "onerror=\"this.onerror=null;this.src='"+(c.harvested?'/review_set/':'/recent_crops/')+
+      "onerror=\"this.onerror=null;this.src='"+
+      (c.label?('/flagged?label='+encodeURIComponent(c.label)+'&name='):
+       c.harvested?'/review_set/':'/recent_crops/')+
       encodeURIComponent(c.name)+"'\">"+
     '<div class="rail"><i style="width:'+pc+'%"></i></div>'+
     '<div class="meta"><span class="id" title="'+att(c.image_id)+'">'+esc(c.image_id)+
       '</span><span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
     '<div class="acts">'+
-      '<button class="fbtn no" type="button" title="false positive (F)">'+
+      '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
+        '" type="button" title="false positive (F)">'+
         '&#9873; Not a dog</button>'+
-      '<button class="fbtn yes" type="button" title="a real dog the detector '+
+      '<button class="fbtn yes'+(c.label==='true_positive'?' on':'')+
+        '" type="button" title="a real dog the detector '+
         'was unsure about (D)">&#10003; Is a dog</button>'+
     '</div>';
   var im=d.querySelector('.thumb');
@@ -1803,6 +1852,36 @@ function cols(){
 function flag(i,viaKey,label){
   var c=items[i];if(!c||busy[c.name])return;
   label=label||'false_positive';
+  /* Auditing is not consuming. The crop keeps its place in the grid and its
+     buttons restate the verdict, so a screenful can be checked without the
+     list resequencing under the reader after every click. Re-deciding is
+     already handled server-side: flag_crop rewrites the other label's ledger
+     rather than filing one image under both. */
+  if(mode==='audit'){
+    if(busy[c.name])return;
+    busy[c.name]=1;
+    var was=c.label;
+    return fetch('/api/detect/flag',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:c.name,label:label})})
+     .then(function(r){return r.json()}).then(function(j){
+        delete busy[c.name];
+        if(!j||j.ok===false)return;
+        c.label=label;
+        var el=cardAt(i);
+        if(el){
+          var no=el.querySelector('.fbtn.no'),ys=el.querySelector('.fbtn.yes');
+          if(no)no.classList.toggle('on',label==='false_positive');
+          if(ys)ys.classList.toggle('on',label==='true_positive');
+          el.classList.toggle('changed',was!==label);
+        }
+        if(j.flagged_total!=null)flaggedN=j.flagged_total;
+        if(j.positive_total!=null)posN=j.positive_total;
+        score();
+        if(was!==label)toast('changed to '+(label==='true_positive'?
+          'a dog':'not a dog'));
+     }).catch(function(){delete busy[c.name]});
+  }
   busy[c.name]=1;
   var card=cardAt(i);
   if(card)card.classList.add('go');
@@ -2276,8 +2355,13 @@ function nav(fn){return function(){markSeen().then(fn)}}
    and 43 of the other 46 were still sitting at the head of the queue
    afterwards, never reviewed. Staying at offset 0 shows exactly the crops
    that banking uncovered -- which is also the block the prefetcher warmed. */
-function go(d){return nav(function(){page=0;sel=-1;load()})}
-$('next').onclick=$('next2').onclick=go(1);
+function go(d){
+  /* auditing pages through a fixed list -- there is nothing to bank, and the
+     list does not shrink as you look at it */
+  if(mode==='audit')return function(){page=Math.max(0,page+d);sel=-1;load()};
+  return nav(function(){page=0;sel=-1;load()});
+}
+$('next').onclick=$('next2').onclick=function(){return go(1)()};
 $('reload').onclick=nav(function(){page=0;sel=-1;load()});
 /* Restore kept: undoes every "this is a dog" decision. Names the real count
    in the prompt -- "are you sure?" over an unknown quantity is not consent.
@@ -2347,6 +2431,16 @@ function paintCountries(list,cur){
 }
 $('country').onchange=function(){var v=this.value;
   country=v;page=0;sel=-1;load()};
+/* Switching mode does NOT bank the screen, for the same reason the other view
+   controls do not: nothing on it has been judged by looking at it. Audit mode
+   also hides the controls that mean nothing there -- a country filter over
+   crops chosen by verdict, and a Next that would bank annotations as if they
+   were fresh work. */
+$('mode').onchange=function(){
+  mode=this.value;page=0;sel=-1;
+  document.body.classList.toggle('auditing',mode==='audit');
+  load();
+};
 restoreSort();
 load();loadBal();
 </script></body></html>"""
@@ -4253,6 +4347,87 @@ def box_short_sides(keys):
     return _SZ['by_key']
 
 
+ANNOT_SORTS = {
+    'recent': lambda r: -r['flagged_at'],
+    'oldest': lambda r: r['flagged_at'],
+    'conf': lambda r: (-r['conf'], -r['ts']),
+    'low': lambda r: (r['conf'], -r['ts']),
+}
+
+
+def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent'):
+    """Crops that already carry a verdict, for auditing the annotations.
+
+    A misannotation is worse than an unjudged crop: it does not sit in a queue
+    waiting, it goes into a dataset as ground truth and teaches the wrong
+    thing. Nothing in this project could look at one again -- once flagged, a
+    crop left the queue for good.
+
+    Reads the ledgers rather than the pool. The pool rotates every few
+    minutes; these crops were copied out of it when they were flagged, and
+    their originals are still in the store, so an audit works on crops the
+    live queue has long forgotten.
+    """
+    size = 100 if int(size) >= 100 else REVIEW_PAGE
+    page = max(0, int(page))
+    sort = sort if sort in ANNOT_SORTS else 'recent'
+    want = [label] if label in FLAG_LABELS else list(FLAG_LABELS)
+
+    items, seen_names = [], set()
+    for lb in want:
+        st = _store_for(lb)
+        try:
+            fh = open(st['labels'])
+        except OSError:
+            continue
+        with fh:
+            for ln in fh:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                nm = r.get('crop') or ''
+                m = _CROP_RE.match(nm)
+                if not m:
+                    continue
+                # LAST LINE WINS. The ledger is append-only and a re-decision
+                # rewrites the other label's file, but a name can still appear
+                # twice within one file; the newest line is the verdict.
+                items.append({
+                    'name': nm, 'image_id': m.group(2),
+                    'ts': int(m.group(1)),
+                    'conf': round(int(m.group(3)) / 100.0, 2),
+                    'label': lb,
+                    'flagged_at': int(r.get('flagged_at') or 0),
+                    'has_crop': True})
+    # collapse to one entry per crop, keeping the newest verdict
+    by_name = {}
+    for it in items:
+        prev = by_name.get(it['name'])
+        if prev is None or it['flagged_at'] >= prev['flagged_at']:
+            by_name[it['name']] = it
+    # and drop any whose verdict the in-memory set no longer agrees with --
+    # an undo rewrites the file, but a stale line could survive a crash
+    live = {lb: _flag_names(lb) for lb in FLAG_LABELS}
+    items = [it for it in by_name.values() if it['name'] in live[it['label']]]
+
+    items.sort(key=ANNOT_SORTS[sort])
+    total = len(items)
+    pages = max(1, (total + size - 1) // size)
+    page = min(page, pages - 1)
+    lo = page * size
+    return {'items': items[lo:lo + size], 'page': page, 'size': size,
+            'pages': pages, 'total': total, 'sort': sort, 'label': label,
+            'n_false_positive': sum(1 for i in by_name.values()
+                                    if i['label'] == FLAG_LABEL
+                                    and i['name'] in live[FLAG_LABEL]),
+            'n_true_positive': sum(1 for i in by_name.values()
+                                   if i['label'] == POS_LABEL
+                                   and i['name'] in live[POS_LABEL])}
+
+
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
@@ -4581,6 +4756,41 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split('?', 1)[0] == '/api/review/annotated':
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                self._json(annotated_payload(
+                    int(q.get('page', [0])[0]),
+                    int(q.get('size', [REVIEW_PAGE])[0]),
+                    str(q.get('label', ['all'])[0]),
+                    str(q.get('sort', ['recent'])[0])))
+            except Exception as e:
+                self._json({'items': [], 'error': str(e)})
+            return
+        if self.path.split('?', 1)[0] == '/flagged':
+            # The copy taken when the crop was flagged. The client tries /hq
+            # first (cut from the ORIGINAL), and falls back here for an image
+            # the store can no longer resolve -- which is the whole reason the
+            # copy is made at flag time.
+            q = parse_qs(urlparse(self.path).query)
+            nm = q.get('name', [''])[0]
+            lb = q.get('label', [''])[0]
+            if not _CROP_RE.match(nm or '') or lb not in FLAG_LABELS:
+                self.send_error(404)
+                return
+            try:
+                with open(os.path.join(_store_for(lb)['crops'], nm), 'rb') as f:
+                    body = f.read()
+            except OSError:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'private, max-age=86400')
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.split('?', 1)[0] == '/api/review/count':
             # Just the queue depth. review_payload does one listdir over a
             # pool capped at 3000 plus the ledgers, so asking for size=0 is
@@ -4690,15 +4900,6 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json({'ok': ok}, 200 if ok else 400)
             except Exception as e:
                 self._json({'error': str(e)}, 500)
-            return
-        if self.path.split('?', 1)[0] == '/api/review/count':
-            # Just the queue depth. review_payload does one listdir over a
-            # pool capped at 3000 plus the ledgers, so asking for size=0 is
-            # the whole computation without serialising any crop.
-            try:
-                self._json({'left': review_payload(0, 0)['total_unflagged']})
-            except Exception as e:
-                self._json({'left': None, 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/training/run':
             try:
