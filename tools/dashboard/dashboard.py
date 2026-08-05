@@ -5296,10 +5296,35 @@ def serve(args):
         if not os.path.exists(os.path.join(OUT, 'index.html')):
             raise
 
+    # A serving process holds the module it imported at startup, and its
+    # interval rebuild REGENERATES index.html from that copy. So editing this
+    # file and rebuilding by hand looked fine, and then an hour later the page
+    # silently reverted to the old one -- the map came back upside down with
+    # controls that had been added since simply missing. Whoever edits the
+    # source is not necessarily watching the server, so the server checks.
+    _src = os.path.abspath(__file__)
+    _src_mtime = os.path.getmtime(_src)
+
+    def _reexec_if_stale():
+        """Restart in place when this file changes underneath us."""
+        try:
+            if os.path.getmtime(_src) == _src_mtime:
+                return
+            with open(_src) as fh:
+                body = fh.read()
+            compile(body, _src, 'exec')   # never exec into a half-written file
+        except (OSError, SyntaxError) as e:
+            print(f'source changed but will not load ({e}); '
+                  f'staying on the running copy', file=sys.stderr)
+            return
+        print('source changed on disk -- restarting to serve it', flush=True)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
     def loop():
         cyc = 1
         while True:
             time.sleep(args.interval)
+            _reexec_if_stale()
             _do_build(
                 argparse.Namespace(db=args.db,
                                    no_refresh=False,
