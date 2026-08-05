@@ -413,6 +413,10 @@ def bar_color(pct):
 STATUS_FILE = os.path.join(OUT, 'regions_status.json')
 STATS_FILE = os.path.join(OUT, 'board_stats.json')
 MAP_FILE = os.path.join(OUT, 'map_points.json')
+# the 0.05° grid is ~4x the cells of the 0.15° one; it lives in its own file
+# the page only fetches on deep zoom, so ordinary visits never pay for it
+MAP_FINE_FILE = os.path.join(OUT, 'map_points_fine.json')
+MAP_CONF_MIN = 0.5   # a sweep detection below this stays out of the dogs layer
 STAGES = [
     'pending', 'extract', 'coverage', 'backfill', 'complete', 'downloading',
     'downloaded'
@@ -515,14 +519,24 @@ def set_stage(region, stage):
     return True
 
 
-def build_map_points(res_list=(0.5, 0.15)):
-    """Bin every ground-animal point into density grids at several resolutions.
+def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
+    """Bin the harvest AND the sweep's dog calls into density grids.
 
-    Reads ``computed_geometry`` (GeoJSON Point) from the ground-animal parquets
-    and aggregates each resolution to weighted cells; the browser renders them
-    as geo-anchored raster rects and swaps to the finer grid on zoom. Paths
-    come from the lock-free catalog snapshot, so this never contends with the
-    live catalog DB.
+    Schema 2. One pass reads ``computed_geometry`` (GeoJSON Point) from the
+    ground-animal parquets into a temp table; three things aggregate from it:
+
+      levels      harvested frames per cell, at each resolution
+      dog_levels  frames with a >= MAP_CONF_MIN dog call, joined from the
+                  sweep store by image_id -- where the detector actually
+                  fired, and (client-side, dogs/harvest) the hit rate
+      regions     one anchor point per catalog region: the MEDIAN of its
+                  points, so one bad GPS sequence cannot drag a continent's
+                  marker into the sea
+
+    The browser renders cells as geo-anchored raster rects and swaps to the
+    finer grid on zoom; ``fine_res`` goes to MAP_FINE_FILE, fetched only on
+    deep zoom. Paths come from the lock-free catalog snapshot, so this never
+    contends with the live catalog DB. READ-ONLY on the sweep store.
     """
     snap = os.path.join(REPO, 'data', 'catalog.parquet')
     if not os.path.exists(snap):
@@ -557,44 +571,84 @@ def build_map_points(res_list=(0.5, 0.15)):
         land_filter = "AND is_land(lon, lat)"
     except Exception as e:
         print('map: land mask unavailable, keeping all points:', e)
-    paths = [
-        r[0] for r in con.execute(
-            "SELECT path FROM read_parquet(?) WHERE kind='ground_animals'",
-            [snap]).fetchall()
-    ]
-    paths = [p for p in paths if os.path.exists(p)]
-    if not paths:
+    rows = con.execute(
+        "SELECT DISTINCT path, region FROM read_parquet(?) "
+        "WHERE kind='ground_animals'", [snap]).fetchall()
+    by_path = {p: r for p, r in rows if os.path.exists(p)}
+    if not by_path:
         con.close()
         return
+    con.execute("CREATE TEMP TABLE preg(path VARCHAR, region VARCHAR)")
+    con.executemany("INSERT INTO preg VALUES (?, ?)", list(by_path.items()))
+    # image_id rides along so the dogs layer can join the sweep store; region
+    # rides along so each region gets a marker anchored where its data is
     con.execute(
         f"""
       CREATE TEMP TABLE pts AS
-      SELECT lon, lat FROM (
+      SELECT lon, lat, iid, region FROM (
         SELECT TRY_CAST(json_extract(computed_geometry,'$.coordinates[0]') AS DOUBLE) lon,
-               TRY_CAST(json_extract(computed_geometry,'$.coordinates[1]') AS DOUBLE) lat
-        FROM read_parquet(?) WHERE computed_geometry IS NOT NULL)
+               TRY_CAST(json_extract(computed_geometry,'$.coordinates[1]') AS DOUBLE) lat,
+               TRY_CAST(g.image_id AS UBIGINT) iid, p.region
+        FROM read_parquet(?, filename=true, union_by_name=true) g
+        JOIN preg p ON g.filename = p.path
+        WHERE computed_geometry IS NOT NULL)
       WHERE lon BETWEEN -180 AND 180 AND lat BETWEEN -90 AND 90 {land_filter}""",
-        [paths])
+        [sorted(by_path)])
     total = con.execute("SELECT count(*) FROM pts").fetchone()[0]
-    levels = {}
-    for res in res_list:
+
+    # frames where the sweep called a dog: distinct image_ids with a
+    # confident detection, from the newest generation in the store
+    dogs_total = 0
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        import store as _store
+        det = _store._sql_src(
+            _store._store_globs(_store.get_detect_root(), 'det'))
+        gen = con.execute(f"SELECT max(gen) FROM {det}").fetchone()[0]
+        con.execute(
+            f"""
+          CREATE TEMP TABLE dpts AS
+          SELECT p.lon, p.lat FROM pts p
+          JOIN (SELECT DISTINCT TRY_CAST(image_id AS UBIGINT) iid
+                FROM {det} WHERE gen = ? AND conf >= ?) d USING (iid)""",
+            [gen, MAP_CONF_MIN])
+        dogs_total = con.execute("SELECT count(*) FROM dpts").fetchone()[0]
+    except Exception as e:
+        print('map: sweep store unavailable, no dogs layer:', e)
+        con.execute("CREATE TEMP TABLE IF NOT EXISTS dpts(lon DOUBLE, "
+                    "lat DOUBLE) ")
+
+    def grid(table, res):
         rows = con.execute(f"""
           SELECT round(floor(lon/{res})*{res}+{res / 2}, 4) x,
                  round(floor(lat/{res})*{res}+{res / 2}, 4) y, count(*) n
-          FROM pts GROUP BY 1, 2""").fetchall()
+          FROM {table} GROUP BY 1, 2""").fetchall()
         pts = [[r[0], r[1], r[2]] for r in rows]
-        levels[str(res)] = {
-            'res': res,
-            'max': max((p[2] for p in pts), default=0),
-            'points': pts
-        }
+        return {'res': res, 'max': max((p[2] for p in pts), default=0),
+                'points': pts}
+
+    levels = {str(r): grid('pts', r) for r in res_list}
+    dog_levels = {str(r): grid('dpts', r) for r in res_list}
+    regions = [{'key': r[0], 'lon': round(r[1], 3), 'lat': round(r[2], 3),
+                'n': r[3]}
+               for r in con.execute(
+                   "SELECT region, median(lon), median(lat), count(*) "
+                   "FROM pts GROUP BY region ORDER BY region").fetchall()
+               if r[1] is not None]
+    fine = {'levels': {str(fine_res): grid('pts', fine_res)},
+            'dog_levels': {str(fine_res): grid('dpts', fine_res)}}
     con.close()
-    out = {'total': total, 'levels': levels}
+
+    out = {'schema': 2, 'total': total, 'dogs_total': dogs_total,
+           'conf_min': MAP_CONF_MIN, 'fine_res': fine_res,
+           'levels': levels, 'dog_levels': dog_levels, 'regions': regions,
+           'built_at': time.strftime('%Y-%m-%d %H:%M')}
     os.makedirs(OUT, exist_ok=True)
-    tmp = MAP_FILE + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(out, f)
-    os.replace(tmp, MAP_FILE)
+    for path, payload in ((MAP_FILE, out), (MAP_FINE_FILE, fine)):
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
 
 
 # ── per-region command generator ────────────────────────────────────────────
@@ -5124,8 +5178,15 @@ def build(args):
     ov, per = query_metrics(args.db)
     record_history(per, now)
     write_board_stats(per, args.db)
-    if (getattr(args, 'images', False) and not getattr(
-            args, 'no_refresh', False)) or not os.path.exists(MAP_FILE):
+    # The atlas refreshes on its own clock. Its full-parquet scan is too
+    # heavy for every hourly build (that is what tied it to --images-every),
+    # but its dogs layer is fed by the LIVE sweep -- left to --images-every
+    # alone it would fossilize while the sweep adds positives. Cap staleness.
+    map_stale = (not os.path.exists(MAP_FILE)
+                 or not os.path.exists(MAP_FINE_FILE)
+                 or time.time() - os.path.getmtime(MAP_FILE) > 6 * 3600)
+    if map_stale or (getattr(args, 'images', False) and not getattr(
+            args, 'no_refresh', False)):
         try:
             build_map_points()
         except Exception as e:
@@ -5474,6 +5535,34 @@ padding:8px 14px;font-size:12.5px;color:var(--mut);pointer-events:none}
 .mapgate:hover .mapgb{color:var(--tx);border-color:rgba(232,166,69,.4)}
 .maplock{position:absolute;right:12px;top:12px;z-index:3}
 .maplock[hidden]{display:none}
+/* ── atlas chrome: layer chips, fly-to, surveyor HUD, ramp legend ── */
+.mapbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.mchip{appearance:none;background:transparent;border:1px solid var(--bd);color:var(--mut);
+border-radius:999px;padding:4px 13px;font-size:11.5px;font-family:inherit;cursor:pointer;
+transition:color .12s,border-color .12s,background .12s}
+.mchip:hover{color:var(--tx)}
+.mchip:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+/* the active chip wears its layer's ink: amber = harvest, green = the
+   detector, blue = the rate — the same coding the ramps use */
+.mchip.on{color:#f0b85f;border-color:rgba(240,184,95,.55);background:rgba(232,166,69,.08)}
+.mchip.on[data-l=dogs]{color:#43b581;border-color:rgba(67,181,129,.55);background:rgba(67,181,129,.08)}
+.mchip.on[data-l=rate]{color:#7fb2d8;border-color:rgba(127,178,216,.55);background:rgba(127,178,216,.08)}
+.mtog{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);cursor:pointer;margin-left:4px}
+.mtog input{accent-color:var(--acc)}
+#mapFind{margin-left:auto;background:var(--panel2);border:1px solid var(--bd);border-radius:8px;
+color:var(--tx);font-family:inherit;font-size:12px;padding:5px 10px;width:180px}
+#mapFind:focus{outline:none;border-color:rgba(232,166,69,.45)}
+#mapFind::placeholder{color:var(--dim)}
+.maphud{position:absolute;left:12px;bottom:10px;z-index:1;pointer-events:none;
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;
+color:var(--mut);background:rgba(13,17,23,.62);border:1px solid var(--bd);
+border-radius:7px;padding:3px 9px;letter-spacing:.02em}
+.maphud:empty{display:none}
+.maplegend{display:flex;align-items:center;gap:9px;margin-top:10px;font-size:11px;
+color:var(--dim);flex-wrap:wrap}
+.mramp{width:170px;height:7px;border-radius:4px;border:1px solid rgba(130,140,150,.18)}
+.mlmax{font-variant-numeric:tabular-nums;color:var(--mut)}
+.mstats{margin-left:auto;font-variant-numeric:tabular-nums;text-align:right}
 .sect{display:flex;align-items:baseline;gap:10px;font-size:15px;font-weight:620;margin:8px 0 14px}
 .sect span{font-size:12.5px;font-weight:400;color:var(--dim)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(292px,1fr));gap:13px}
@@ -6119,7 +6208,14 @@ __LB_HTML__
 </details>
 
 <details class="fold panel sec" id="f-map" open>
-  <summary class="phead"><i></i><b>Ground-animal density</b><span class="phint">every point binned to a raster · zoom in for finer 0.15° detail</span></summary>
+  <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, where the detector called dogs, and each region's stage &mdash; click a region dot to generate its commands</span></summary>
+  <div class="mapbar">
+    <button type="button" class="mchip on" data-l="harvest">Harvest</button>
+    <button type="button" class="mchip" data-l="dogs">Dogs found</button>
+    <button type="button" class="mchip" data-l="rate">Hit rate</button>
+    <label class="mtog"><input type="checkbox" id="mapRegions" checked> region markers</label>
+    <input id="mapFind" list="cmdRegions" placeholder="fly to a region&hellip;" autocomplete="off">
+  </div>
   <!-- The map roams on wheel, so hovering it while scrolling the page used to
        zoom the map instead. A scrim swallows wheel/drag until you opt in;
        echarts keeps roam:true and never has to be reconfigured. -->
@@ -6129,6 +6225,12 @@ __LB_HTML__
       <span class="mapgb">Click to interact &mdash; scroll to zoom, drag to pan</span>
     </div>
     <button class="rbtn maplock" id="mapLock" hidden>&#128274; Lock map</button>
+    <div class="maphud" id="mapHud"></div>
+  </div>
+  <div class="maplegend">
+    <span class="mlmax" id="mapMin">1</span><i class="mramp" id="mapRamp"></i><span class="mlmax" id="mapMax"></span>
+    <span id="mapRampLab">frames harvested per cell</span>
+    <span class="mstats" id="mapStats"></span>
   </div></details>
 
 <details class="fold panel sec" id="f-bars" open>
@@ -6504,11 +6606,14 @@ function genCommands(){
   }).catch(function(){cmdOut.innerHTML='<div style="color:#d8743a;padding:8px 2px">failed to generate</div>'});
 }
 if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListener('keydown',function(e){if(e.key==='Enter')genCommands()});}
-/* ── ground-animal density map (geo-anchored raster, zoom-adaptive) ── */
+/* ── atlas (Equal Earth, three layers, zoom-adaptive raster) ── */
 (function(){
+  var mapEl=document.getElementById('map');
+  if(!mapEl||typeof echarts==='undefined')return;
   /* click-to-interact gate: the scrim eats wheel and drag, so the page keeps
      scrolling past the map until the user asks for the map instead. Esc, the
      lock button, or scrolling the map out of view re-arms it. */
+  var unlockMap=function(){};
   (function(){
     var gate=document.getElementById('mapGate'),lock=document.getElementById('mapLock'),
         wrap=gate&&gate.parentNode;
@@ -6516,6 +6621,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     function setLocked(on){
       gate.hidden=!on;lock.hidden=on;
     }
+    unlockMap=function(){setLocked(false)};
     gate.addEventListener('click',function(){setLocked(false)});
     lock.addEventListener('click',function(){setLocked(true)});
     document.addEventListener('keydown',function(e){
@@ -6529,28 +6635,123 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       },{threshold:0}).observe(wrap);
     }
   })();
-  var mapEl=document.getElementById('map');
-  if(!mapEl||typeof echarts==='undefined')return;
+  /* Equal Earth (Šavrič et al. 2018), the closed-form equal-area projection.
+     Hand-rolled because no CDN is allowed at runtime; forward is the
+     published polynomial, inverse is 12 Newton steps on theta. */
+  var EA1=1.340264,EA2=-0.081106,EA3=0.000893,EA4=0.003796,EM=Math.sqrt(3)/2,RAD=Math.PI/180;
+  /* screen y grows DOWN, the math's grows up: negate y both ways */
+  function eeFwd(lp){
+    var l=lp[0]*RAD,p=lp[1]*RAD,t=Math.asin(EM*Math.sin(p)),t2=t*t,t6=t2*t2*t2;
+    return [l*Math.cos(t)/(EM*(EA1+3*EA2*t2+t6*(7*EA3+9*EA4*t2))),
+            -t*(EA1+EA2*t2+t6*(EA3+EA4*t2))];
+  }
+  function eeInv(xy){
+    var x=xy[0],y=-xy[1],t=y,i,t2,t6,f,fp;
+    for(i=0;i<12;i++){
+      t2=t*t;t6=t2*t2*t2;
+      f=t*(EA1+EA2*t2+t6*(EA3+EA4*t2))-y;
+      fp=EA1+3*EA2*t2+t6*(7*EA3+9*EA4*t2);
+      t-=f/fp;
+    }
+    t2=t*t;t6=t2*t2*t2;
+    var c=Math.cos(t);if(Math.abs(c)<1e-9)c=1e-9;
+    var s=Math.sin(t)/EM;if(s>1)s=1;if(s<-1)s=-1;
+    return [EM*x*(EA1+3*EA2*t2+t6*(7*EA3+9*EA4*t2))/c/RAD,Math.asin(s)/RAD];
+  }
+  /* graticule + projected globe edge, so the projection reads as a globe and
+     not as a warped rectangle. Sampled: meridians and the frame curve. */
+  function graticule(){
+    var lines=[],lon,lat,seg;
+    for(lon=-150;lon<=150;lon+=30){
+      seg=[];for(lat=-88;lat<=88;lat+=2)seg.push([lon,lat]);
+      lines.push({coords:seg});
+    }
+    for(lat=-60;lat<=60;lat+=30){
+      seg=[];for(lon=-180;lon<=180;lon+=3)seg.push([lon,lat]);
+      lines.push({coords:seg});
+    }
+    var edge=[];
+    for(lon=-180;lon<=180;lon+=3)edge.push([lon,88.8]);
+    for(lat=88;lat>=-88;lat-=2)edge.push([180,lat]);
+    for(lon=180;lon>=-180;lon-=3)edge.push([lon,-88.8]);
+    for(lat=-88;lat<=88;lat+=2)edge.push([-180,lat]);
+    return {lines:lines,edge:edge};
+  }
+  var mchips=Array.prototype.slice.call(document.querySelectorAll('.mchip')),
+      regTog=document.getElementById('mapRegions'),
+      findEl=document.getElementById('mapFind'),
+      hud=document.getElementById('mapHud'),
+      rampEl=document.getElementById('mapRamp'),
+      minEl=document.getElementById('mapMin'),maxEl=document.getElementById('mapMax'),
+      labEl=document.getElementById('mapRampLab'),statsEl=document.getElementById('mapStats');
+  /* the three layers wear the site's own inks: amber = the harvest, green =
+     the detector's calls, cool blue = the rate between them */
+  var RAMPS={
+    harvest:['#191024','#3b1a4e','#7c2d59','#c15a41','#e89a4d','#f0b85f','#fdf0cd'],
+    dogs:['#08211c','#0d3f31','#1a6b4c','#2f9a68','#43b581','#8ce8b6','#e2fbee'],
+    rate:['#141d2b','#1e3a5c','#2f6296','#4a8fc2','#8cc3e8','#e8f6ff']
+  };
+  var RATE_MIN=30;  /* a rate needs a denominator: cells with fewer harvested
+                       frames than this stay off the hit-rate layer */
   Promise.all([
     fetch('world.json').then(function(r){return r.json()}),
-    fetch('map_points.json').then(function(r){return r.json()})
+    fetch('map_points.json').then(function(r){return r.json()}),
+    fetch('/api/board').then(function(r){return r.json()}).catch(function(){return null})
   ]).then(function(res){
-    var world=res[0],md=res[1];
+    var world=res[0],md=res[1],board=res[2];
     echarts.registerMap('world',world);
-    var levels=md.levels||{};
+    var levels=md.levels||{},dogLevels=md.dog_levels||{};
     if(!Object.keys(levels).length&&md.points)levels[String(md.res)]={res:md.res,max:md.max,points:md.points};
+    var hasDogs=!!Object.keys(dogLevels).length;
+    if(!hasDogs)mchips.forEach(function(c){if(c.dataset.l!=='harvest')c.style.display='none'});
+    var fineRes=md.fine_res||0,fine={state:'none'};   /* none|loading|ready|failed */
     var keys=Object.keys(levels).map(parseFloat).sort(function(a,b){return b-a}); // coarse→fine
-    var cache={};
-    function lvl(k){
-      var s=String(k);
-      if(!cache[s]){
-        var L=levels[s];
-        cache[s]={res:L.res,maxLog:Math.log10((L.max||1)+1),
+    var layer='harvest',cache={};
+    function cellKey(p){return p[0]+'|'+p[1]}
+    function density(lyr,resKey){
+      var ck=lyr+'|'+resKey;
+      if(cache[ck])return cache[ck];
+      var out;
+      if(lyr==='rate'){
+        var H=(levels[resKey]||{}).points||[],D=(dogLevels[resKey]||{}).points||[],dd={};
+        D.forEach(function(p){dd[cellKey(p)]=p[2]});
+        var data=[],vals=[];
+        H.forEach(function(p){
+          if(p[2]<RATE_MIN)return;
+          var r=(dd[cellKey(p)]||0)/p[2];
+          data.push({value:[p[0],p[1],r],cnt:p[2],hits:dd[cellKey(p)]||0});
+          vals.push(r);
+        });
+        vals.sort(function(a,b){return a-b});
+        /* p99 cap: one 30-frame cell at 100% must not flatten the ramp */
+        out={res:parseFloat(resKey),max:vals.length?vals[Math.floor(vals.length*0.99)]:1,data:data};
+        if(!out.max)out.max=0.01;
+      }else{
+        var L=(lyr==='dogs'?dogLevels:levels)[resKey]||{res:parseFloat(resKey),max:0,points:[]};
+        out={res:L.res,max:Math.log10((L.max||1)+1),
           data:L.points.map(function(p){return {value:[p[0],p[1],Math.log10(p[2]+1)],cnt:p[2]}})};
       }
-      return cache[s];
+      cache[ck]=out;
+      return out;
     }
-    var cur=lvl(keys[0]);
+    /* region anchors, dressed with the board's stage + progress when it is
+       reachable; without it they still show name + frame count */
+    var byKey={},labels={};
+    if(board&&board.regions){
+      board.regions.forEach(function(r){byKey[r.key]=r});
+      labels=board.labels||{};
+    }
+    var regData=(md.regions||[]).map(function(r){
+      var b=byKey[r.key]||{};
+      return {name:(b.name||r.key).replace(/_/g,' '),value:[r.lon,r.lat],
+        key:r.key,n:r.n,stage:b.stage||'',pct:b.pct,downloaded:b.downloaded,dogs:b.dogs,
+        itemStyle:{color:STAGE_COLOR[b.stage]||'#7d8893'}};
+    });
+    var regRings=regData.map(function(r){
+      return Object.assign({},r,{itemStyle:{color:'rgba(19,21,26,.55)',
+        borderColor:r.itemStyle.color,borderWidth:2}});
+    });
+    var cur=density(layer,String(keys[0]));
     var ch=echarts.init(mapEl,null,{renderer:'canvas'});
     function cellPx(res){ /* pixel footprint of one res° cell at current zoom */
       try{
@@ -6558,27 +6759,163 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         return [Math.max(Math.abs(b[0]-a[0]),1.1),Math.max(Math.abs(b[1]-a[1]),1.1)];
       }catch(e){return [3,3];}
     }
+    var g=graticule();
+    function tipDensity(p){
+      if(!p.data)return '';
+      if(layer==='rate')
+        return '<b>'+(p.data.value[2]*100).toFixed(1)+'%</b> of '+fmt(p.data.cnt)+
+          ' frames had a dog call<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
+      return '<b>'+fmt(p.data.cnt)+'</b> '+(layer==='dogs'?'frames with a dog call':'frames harvested')+
+        '<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
+    }
+    function tipRegion(p){
+      var d=p.data,rows='<b>'+d.name+'</b>';
+      if(d.stage)rows+='<br><span style="color:'+(STAGE_COLOR[d.stage]||'#7d8893')+'">&#9679;</span> '+(labels[d.stage]||d.stage);
+      if(d.downloaded!=null)rows+='<br>'+fmt(d.downloaded)+' / '+fmt(d.dogs)+' downloaded ('+d.pct+'%)';
+      rows+='<br>'+fmt(d.n)+' frames on the map';
+      rows+='<br><span style="color:#69727d">click to generate its commands</span>';
+      return rows;
+    }
     ch.setOption({
       backgroundColor:'transparent',
-      tooltip:{trigger:'item',backgroundColor:'#21262d',borderColor:'#2c333b',borderWidth:1,textStyle:{color:'#eef1f4'},formatter:function(p){return p.data?'<b>'+fmt(p.data.cnt)+'</b> ground animals<br><span style="color:#98a2ad">'+cur.res+'° cell</span>':''}},
-      geo:{map:'world',roam:true,scaleLimit:{min:1,max:40},itemStyle:{areaColor:'#171c22',borderColor:'#2c333b',borderWidth:.5},emphasis:{disabled:true},select:{disabled:true}},
-      visualMap:{type:'continuous',min:0,max:cur.maxLog,dimension:2,calculable:true,left:14,bottom:20,itemHeight:130,itemWidth:12,text:['dense','sparse'],textStyle:{color:'#98a2ad',fontSize:11},
-        inRange:{color:['#160f3c','#451077','#7b2382','#b0357b','#e34e65','#fb8861','#fec287','#fcfdbf']}},
-      series:[{name:'ground animals',type:'scatter',coordinateSystem:'geo',symbol:'rect',
-        data:cur.data,symbolSize:3,itemStyle:{opacity:.92},progressive:6000,progressiveThreshold:10000}]
+      tooltip:{trigger:'item',backgroundColor:'#21262d',borderColor:'#2c333b',borderWidth:1,
+        textStyle:{color:'#eef1f4'},
+        formatter:function(p){return p.seriesIndex===3?tipRegion(p):tipDensity(p)}},
+      geo:{map:'world',roam:true,scaleLimit:{min:1,max:40},
+        projection:{project:eeFwd,unproject:eeInv},
+        itemStyle:{areaColor:'#1d232c',borderColor:'#323a44',borderWidth:.5},
+        emphasis:{disabled:true},select:{disabled:true}},
+      /* the ramp is drawn as our own legend strip; the component only maps
+         value→color, and only for the density series (index 2) */
+      visualMap:{type:'continuous',show:false,min:0,max:cur.max,dimension:2,
+        seriesIndex:2,inRange:{color:RAMPS[layer]}},
+      series:[
+        {type:'lines',coordinateSystem:'geo',polyline:true,silent:true,z:1,
+         data:g.lines,lineStyle:{color:'rgba(130,140,150,.10)',width:.7}},
+        {type:'lines',coordinateSystem:'geo',polyline:true,silent:true,z:1,
+         data:[{coords:g.edge}],lineStyle:{color:'rgba(130,140,150,.28)',width:1.1}},
+        {name:'cells',type:'scatter',coordinateSystem:'geo',symbol:'rect',z:2,
+         data:cur.data,symbolSize:3,itemStyle:{opacity:.92},
+         progressive:8000,progressiveThreshold:10000},
+        /* rings, not dots: a filled dot in stage green disappears into the
+           dogs layer's own green cells; a ring reads as a marker */
+        {name:'regions',type:'scatter',coordinateSystem:'geo',z:3,
+         symbolSize:9,data:regRings,
+         label:{show:true,position:'bottom',distance:3,fontSize:9,
+           color:'#8a94a0',formatter:'{b}'},
+         emphasis:{scale:1.6,label:{color:'#eef1f4'}},
+         cursor:'pointer'}
+      ]
     });
-    ch.setOption({series:[{symbolSize:cellPx(cur.res)}]});   // size once geo exists
+    function legend(){
+      rampEl.style.background='linear-gradient(90deg,'+RAMPS[layer].join(',')+')';
+      if(layer==='rate'){
+        minEl.textContent='0%';
+        maxEl.textContent=(cur.max*100).toFixed(cur.max<0.1?1:0)+'%';
+        labEl.textContent='share of harvested frames with a dog call ≥ '+(md.conf_min||0.5)+' — cells with ≥ '+RATE_MIN+' frames';
+      }else{
+        minEl.textContent='1';
+        maxEl.textContent=fmt(Math.round(Math.pow(10,cur.max)-1));
+        labEl.textContent=(layer==='dogs'?'frames with a dog call ≥ '+(md.conf_min||0.5):'frames harvested')+' per '+cur.res+'° cell';
+      }
+      var s=fmt(md.total)+' frames';
+      if(hasDogs)s+=' · '+fmt(md.dogs_total)+' with a dog call';
+      s+=' · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
+      statsEl.textContent=s;
+    }
+    function apply(){
+      cur=density(layer,String(cur.res));
+      ch.setOption({visualMap:{max:cur.max,inRange:{color:RAMPS[layer]}},
+        series:[{},{},{data:cur.data,symbolSize:cellPx(cur.res)},{}]});
+      legend();
+    }
+    ch.setOption({series:[{},{},{symbolSize:cellPx(cur.res)},{}]});  // size once geo exists
+    legend();
+    /* pick the finest grid whose cells are big enough to see; the 0.05° grid
+       lives in its own file and is fetched the first time zoom warrants it */
+    function wantRes(){
+      var want=keys[0],i;
+      for(i=0;i<keys.length;i++)if(cellPx(keys[i])[0]>=1.9)want=keys[i];
+      if(fineRes&&cellPx(fineRes)[0]>=1.9){
+        if(fine.state==='ready')want=fineRes;
+        else if(fine.state==='none'){
+          fine.state='loading';
+          fetch('map_points_fine.json').then(function(r){return r.json()}).then(function(f){
+            var k=String(fineRes);
+            if((f.levels||{})[k]){
+              levels[k]=f.levels[k];
+              if((f.dog_levels||{})[k])dogLevels[k]=f.dog_levels[k];
+              keys.push(fineRes);fine.state='ready';roamed();
+            }else fine.state='failed';
+          }).catch(function(){fine.state='failed'});
+        }
+      }
+      return want;
+    }
     var t=null;
-    ch.on('georoam',function(){
-      if(t)clearTimeout(t);
-      t=setTimeout(function(){
-        var g=ch.getOption().geo[0],want=keys[0];
-        for(var i=0;i<keys.length;i++)if(g.zoom>=(i===0?0:4.5*i))want=keys[i];
-        var L=lvl(want),upd={series:[{symbolSize:cellPx(L.res)}]};
-        if(L!==cur){cur=L;upd.visualMap={max:L.maxLog};upd.series[0].data=L.data;}
-        ch.setOption(upd);
-      },130);
+    function roamed(){
+      var want=wantRes();
+      if(want!==cur.res){cur=density(layer,String(want));
+        ch.setOption({visualMap:{max:cur.max},
+          series:[{},{},{data:cur.data,symbolSize:cellPx(cur.res)},{}]});
+        legend();
+      }else ch.setOption({series:[{},{},{symbolSize:cellPx(cur.res)},{}]});
+    }
+    ch.on('georoam',function(){if(t)clearTimeout(t);t=setTimeout(roamed,130)});
+    /* layer chips */
+    mchips.forEach(function(c){c.addEventListener('click',function(){
+      if(c.dataset.l===layer)return;
+      layer=c.dataset.l;
+      mchips.forEach(function(x){x.classList.toggle('on',x===c)});
+      apply();
+    })});
+    /* region markers on/off */
+    if(regTog)regTog.addEventListener('change',function(){
+      ch.setOption({series:[{},{},{},{data:regTog.checked?regRings:[]}]});
     });
+    /* click a region dot: fill the generator and run it */
+    ch.on('click',function(p){
+      if(p.seriesIndex!==3||!p.data)return;
+      var inp=document.getElementById('cmdRegion');
+      if(!inp)return;
+      inp.value=p.data.key;
+      genCommands();
+      toast('commands generated for '+p.data.name+' — below');
+    });
+    /* fly to a region by name */
+    if(findEl)findEl.addEventListener('change',function(){
+      var q=findEl.value.trim().toLowerCase().replace(/ /g,'_');
+      if(!q)return;
+      var hit=regData.filter(function(r){return r.key.toLowerCase()===q||r.key.toLowerCase().indexOf(q)===0})[0];
+      if(!hit){toast('no region called '+findEl.value);return;}
+      unlockMap();
+      /* with a custom projection, geo.center is in PROJECTED coordinates --
+         lon/lat here pans the camera off the globe into blank space */
+      ch.setOption({geo:{center:eeFwd(hit.value),zoom:5}});
+      roamed();
+      findEl.blur();
+    });
+    /* surveyor HUD. echarts 5.6 hands convertFromPixel's input to unproject
+       BEFORE undoing the view transform, so that path returns garbage;
+       invert it ourselves from two convertToPixel anchors instead. */
+    function pxToLL(px,py){
+      try{
+        var a=ch.convertToPixel({geoIndex:0},[0,0]);        /* projects to (0,0) */
+        var b=ch.convertToPixel({geoIndex:0},[90,45]);
+        var f=eeFwd([90,45]);
+        var s=(b[0]-a[0])/f[0];
+        if(!isFinite(s)||!s)return null;
+        return eeInv([(px-a[0])/s,(py-a[1])/s]);
+      }catch(_){return null;}
+    }
+    mapEl.addEventListener('mousemove',function(e){
+      var r=mapEl.getBoundingClientRect();
+      var c=pxToLL(e.clientX-r.left,e.clientY-r.top);
+      if(!c||!isFinite(c[0])||Math.abs(c[0])>180||Math.abs(c[1])>90){hud.textContent='';return;}
+      hud.textContent=Math.abs(c[1]).toFixed(1)+'°'+(c[1]<0?'S':'N')+' '+
+        Math.abs(c[0]).toFixed(1)+'°'+(c[0]<0?'W':'E')+' · '+cur.res+'° grid';
+    });
+    mapEl.addEventListener('mouseleave',function(){hud.textContent=''});
     window.addEventListener('resize',function(){ch.resize()});
   }).catch(function(){mapEl.innerHTML='<div style="color:#69727d;padding:40px;text-align:center">map data unavailable</div>'});
 })();
