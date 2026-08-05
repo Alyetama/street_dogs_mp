@@ -6462,7 +6462,7 @@ __LB_HTML__
 </details>
 
 <details class="fold panel sec" id="f-map" open>
-  <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, where the detector called dogs, and each region's stage &mdash; click a region dot to generate its commands</span></summary>
+  <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, where the detector called dogs, and each region's stage &mdash; click any country for its numbers</span></summary>
   <div class="mapbar">
     <button type="button" class="mchip on" data-l="harvest"
       title="Every Mapillary frame the harvest downloaded, binned by where it was taken. This is coverage — where you have looked, not what was found.">Harvest</button>
@@ -6470,7 +6470,7 @@ __LB_HTML__
       title="Frames where the detection sweep called at least one dog with confidence 0.5 or better. Unreviewed model output, so some of these are goats, sheep and shadows.">Dogs found</button>
     <button type="button" class="mchip" data-l="rate"
       title="Dogs found ÷ harvest, per cell. Corrects for how hard each place was searched: a bright cell here means dogs were common in the frames, not just that many frames exist. Needs 30+ frames in a cell to show.">Hit rate</button>
-    <label class="mtog" title="One marker per region, placed at the median of its frames. Its colour follows the layer; its stage and download progress are in the tooltip."><input type="checkbox" id="mapRegions" checked> region markers</label>
+    <label class="mtog" title="One marker per region, placed at the median of its frames. Its colour follows the layer; its stage and download progress are in the tooltip. Turn them off if they are in the way of the map."><input type="checkbox" id="mapRegions" checked> region markers</label>
     <label class="mtog" id="mapCleanWrap" title="Hides frames whose GPS cannot be right: points out at sea, and frames sitting a continent away from the rest of their own capture session. Untick to see them."><input type="checkbox" id="mapClean" checked> exclude GPS outliers</label>
     <input id="mapFind" list="cmdRegions" placeholder="fly to a region&hellip;" autocomplete="off"
       title="Jump the camera to a region">
@@ -7244,7 +7244,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       if(d.downloaded!=null)rows+='<br>'+fmt(d.downloaded)+' / '+fmt(d.dogs)+' downloaded ('+d.pct+'%)';
       rows+='<br>'+fmt(d.n+(clean()?0:d.nb))+' frames on the map';
       if(!clean()&&d.nb)rows+=' <span style="color:#98a2ad">('+fmt(d.nb)+' GPS outliers)</span>';
-      rows+='<br><span style="color:#69727d">click to generate its commands</span>';
+      rows+='<br><span style="color:#69727d">click for its numbers</span>';
       return rows;
     }
     ch.setOption({
@@ -7584,30 +7584,19 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       }
       return null;
     }
-    /* zr sees the click before the series handler does, so the decision waits
-       a tick: a click on a region marker is a command-generator click and
-       must not also swap the card underneath it. */
-    var clickTaken=false;
+    /* Every click on the map answers the same question -- which country is
+       this -- so it is answered here and nowhere else. A click used to have
+       to wait a tick first, to see whether a region marker had claimed it
+       for the command generator; that deferral is what made the card feel
+       slow, and a click that landed on a marker did nothing at all. Since
+       the markers sit on their region's densest ground, that was much of the
+       map. The generator is still there, above, driven by its own box. */
+    buildCIdx();     /* ~26K vertices: built now so the first click is not
+                        the one that pays for it */
     ch.getZr().on('click',function(e){
-      var x=e.offsetX,y=e.offsetY;
-      setTimeout(function(){
-        if(clickTaken){clickTaken=false;return;}
-        var c=pxToLL(x,y),nm=c?countryAt(c[0],c[1]):null;
-        if(!nm||nm===popName){closePop();return;}
-        popName=nm;showCountry(nm);
-      },0);
-    });
-    ch.on('click',function(p){
-      /* Only a region marker generates commands. This fires for the cell
-         bands too, and without the guard a click on a cell reached
-         p.data.key on a point that has none. */
-      if(p.seriesIndex!==REG||!p.data)return;
-      clickTaken=true;                 /* so the card does not also swap */
-      var inp=document.getElementById('cmdRegion');
-      if(!inp)return;
-      inp.value=p.data.key;
-      genCommands();
-      toast('commands generated for '+p.data.name+' — below');
+      var c=pxToLL(e.offsetX,e.offsetY),nm=c?countryAt(c[0],c[1]):null;
+      if(!nm||nm===popName){closePop();return;}
+      popName=nm;showCountry(nm);
     });
     /* Reset view: whole world at the resting zoom, harvest layer, markers on.
        At rest geo.center is NULL -- echarts fits the map to the container and

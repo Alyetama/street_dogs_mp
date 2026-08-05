@@ -1071,6 +1071,18 @@ def main():
         return 0
     if not os.path.exists(INDEX):
         raise SystemExit(f'{INDEX} missing — run dashboard.py build first')
+    # This whole file judges a BUILT page. Read a stale one and it will
+    # cheerfully pass while the source it is supposed to be guarding is
+    # broken: that is exactly what happened when an apostrophe escaped as
+    # \\' in the non-raw template emitted a bare quote, killed every handler
+    # on the page, and this test -- run before the rebuild -- said ok.
+    src = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
+    if os.path.exists(src) and os.path.getmtime(src) > os.path.getmtime(INDEX):
+        raise SystemExit(
+            'STALE PAGE: tools/dashboard/dashboard.py is newer than\n'
+            f'  {INDEX}\n'
+            'so this run would grade the previous build. Rebuild first:\n'
+            '  python tools/dashboard/dashboard.py build --no-refresh')
     html = open(INDEX, encoding='utf-8').read()
     check_whole_script(html)
     check_markup(html)
