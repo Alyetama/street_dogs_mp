@@ -1339,6 +1339,8 @@ border:1px solid rgba(232,166,69,.55)!important;color:var(--acc)!important;
 font-weight:700}
 .card.changed{box-shadow:inset 0 0 0 2px var(--acc)}
 body.auditing #country,body.auditing #unkeep{display:none}
+#verdict{display:none}
+body.auditing #verdict{display:inline-block}
 .fbtn{border:0;background:rgba(130,140,150,.05);color:var(--mut);padding:8px 4px;
 font-size:11.5px;cursor:pointer;font-family:inherit;font-weight:600;
 transition:background .12s,color .12s;white-space:nowrap;overflow:hidden;
@@ -1448,6 +1450,11 @@ min-width:44px;text-align:center}
       <option value="queue">Unreviewed queue</option>
       <option value="audit">Check my annotations</option>
     </select>
+    <select id="verdict" title="which verdict to check">
+      <option value="all">Both verdicts</option>
+      <option value="false_positive">Only &ldquo;not a dog&rdquo;</option>
+      <option value="true_positive">Only &ldquo;is a dog&rdquo;</option>
+    </select>
     <select id="sort" title="which crops to surface first">
       <option value="low" selected>Least confident first</option>
       <option value="conf">Most confident first</option>
@@ -1508,7 +1515,7 @@ min-width:44px;text-align:center}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1541,15 +1548,18 @@ function toTop(){
 function loadAudit(){
   skeleton();
   return fetch('/api/review/annotated?page='+page+'&size='+size+
-               '&sort='+auditSort())
+               '&sort='+auditSort()+'&label='+encodeURIComponent(verdict))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
     if(j.error)throw 0;
     items=j.items||[];reserve=[];page=j.page||0;pages=j.pages||1;
+    var only=verdict==='false_positive'?' marked not a dog':
+             verdict==='true_positive'?' marked a dog':' annotated';
     var lab=items.length?
-      (n(items.length)+' shown \u00b7 '+n(j.total)+' annotated \u00b7 '+
-       n(j.n_false_positive)+' not a dog, '+n(j.n_true_positive)+' a dog'):
-      'nothing annotated yet';
+      (n(items.length)+' shown \u00b7 '+n(j.total)+only+
+       (verdict==='all'?' \u00b7 '+n(j.n_false_positive)+' not a dog, '+
+        n(j.n_true_positive)+' a dog':'')):
+      (verdict==='all'?'nothing annotated yet':'none with that verdict');
     $('pg').textContent=lab;$('pg2').textContent=lab;
     $('next').disabled=$('next2').disabled=page>=pages-1;
     $('foot').hidden=pages<=1;
@@ -2441,6 +2451,10 @@ $('mode').onchange=function(){
   document.body.classList.toggle('auditing',mode==='audit');
   load();
 };
+/* A flip made while this filter is on leaves the tile where it is rather than
+   yanking it out from under the pointer -- it carries the changed border, and
+   the next load drops it. */
+$('verdict').onchange=function(){verdict=this.value;page=0;sel=-1;load()};
 restoreSort();
 load();loadBal();
 </script></body></html>"""
