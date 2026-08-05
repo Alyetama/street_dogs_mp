@@ -153,6 +153,14 @@ def cfg_list(key, env=None):
         return [str(x).strip() for x in v if str(x).strip()]
     return []
 
+# Regions the DASHBOARD does not show. Display only: the catalog, the
+# harvest, the sweep and every command still know about them, and nothing
+# here deletes a row. Both are empty in practice -- between them 130
+# manifest rows, no downloaded images and no ground animals at all -- so
+# they contributed two permanently-0% cards, two flat bars, two markers on
+# the map and two entries in every region list, and no information.
+HIDE_REGIONS = frozenset(cfg_list('hide_regions') or ('Arctic', 'Antarctica'))
+
 REGION_SQL = """
 WITH f AS (
   SELECT region,
@@ -352,7 +360,7 @@ def query_metrics(db):
         'all_data': r[1],
         'dogs': man.get(r[0], r[2]),
         'downloaded': jpg.get(r[0], r[3]),
-    } for r in rows]
+    } for r in rows if r[0] not in HIDE_REGIONS]
     for p in per:
         p['pct'] = (p['downloaded'] / p['dogs'] * 100) if p['dogs'] else 0
     per.sort(key=lambda p: p['dogs'], reverse=True)
@@ -715,7 +723,10 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
     rows = con.execute(
         "SELECT DISTINCT path, region FROM read_parquet(?) "
         "WHERE kind='ground_animals'", [snap]).fetchall()
-    by_path = {p: r for p, r in rows if os.path.exists(p)}
+    # hidden regions never enter the map at all -- not as cells, not as a
+    # marker, and not in the country totals the card reads
+    by_path = {p: r for p, r in rows
+               if os.path.exists(p) and r not in HIDE_REGIONS}
     if not by_path:
         con.close()
         return
@@ -975,7 +986,7 @@ def region_locations(db):
         'region': r.replace('_', ' '),
         'data': data.get(r, []),
         'img': img.get(r, [])
-    } for r in sorted(set(data) | set(img))]
+    } for r in sorted(set(data) | set(img)) if r not in HIDE_REGIONS]
 
 
 def render_locations(locs):
