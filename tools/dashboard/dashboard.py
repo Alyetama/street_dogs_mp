@@ -7218,7 +7218,15 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     }
     var g=graticule();
     /* kept as its own object so Reset view can rebuild geo from it verbatim */
-    var geoOpt={map:'world',roam:true,scaleLimit:{min:1,max:40},
+    /* center:[0,0] is not cosmetic. Left to fit, echarts centres on the
+       PROJECTED BOUNDING BOX OF THE DATA, and world.json carries no
+       Antarctica -- so the resting centre sat 0.138 units north of the
+       origin the clamp bounds are built around. The first drag then snapped
+       the map ~25px to meet a bound it had always been outside of, and
+       Reset put it back outside again. Fitting at the origin makes the
+       resting view, Reset and the clamp agree on one point, and frames the
+       globe symmetrically in the panel besides. */
+    var geoOpt={map:'world',roam:true,center:[0,0],scaleLimit:{min:1,max:40},
       projection:{project:eeFwd,unproject:eeInv},
       itemStyle:{areaColor:'#1d232c',borderColor:'#323a44',borderWidth:.5},
       emphasis:{disabled:true},select:{disabled:true}};
@@ -7317,7 +7325,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
        resting zoom -- correct, since the whole world is already in view.
        geo.center is in PROJECTED units, so the bounds are the projected
        extent of the globe, not 180/90. */
-    var WX=eeFwd([180,0])[0],WY=Math.abs(eeFwd([0,90])[1]);
+    var WY=Math.abs(eeFwd([0,90])[1]);
     function pxPerUnit(){
       try{
         var a=ch.convertToPixel({geoIndex:0},[0,0]),
@@ -7328,16 +7336,30 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     }
     function clampCenter(){
       var g;
-      try{g=ch.getOption().geo[0];}catch(_){return;}
-      /* null centre is the resting fit, which is already inside by
-         construction -- and writing one would pin the camera for good */
+      /* getOption() DEEP CLONES the whole option -- every one of the tens of
+         thousands of cell objects -- to hand back two numbers, and this runs
+         once per drag mousemove. Read the live component instead. */
+      try{g=ch.getModel().getComponent('geo').option;}catch(_){return;}
       if(!g||!g.center)return;
       var s=pxPerUnit();
       if(!s)return;
       var r=mapEl.getBoundingClientRect();
-      var mx=Math.max(0,WX-(r.width/2)/s),my=Math.max(0,WY-(r.height/2)/s),
-          cx=Math.min(mx,Math.max(-mx,g.center[0])),
+      if(!r.width||!r.height)return;   /* fold shut: nothing to measure */
+      var hw=(r.width/2)/s,hh=(r.height/2)/s;
+      var my=Math.max(0,WY-hh),
           cy=Math.min(my,Math.max(-my,g.center[1]));
+      /* Equal Earth is not a rectangle. Its half-width falls from 2.707 at
+         the equator to 1.604 at the poles, so bounding x by the globe's
+         bounding BOX let the viewport sit in a corner wedge that holds no
+         map at all: at zoom 14 with the camera against that bound, 0.4% of
+         the panel was inside the globe and the nearest ink was four panel
+         widths away. Bound x by the NARROWEST row actually on screen, so
+         every visible row spans the panel. */
+      var latA=eeInv([0,cy-hh])[1],latB=eeInv([0,cy+hh])[1],
+          lat=Math.max(Math.abs(latA),Math.abs(latB));
+      if(!isFinite(lat)||lat>90)lat=90;
+      var mx=Math.max(0,Math.abs(eeFwd([180,lat])[0])-hw),
+          cx=Math.min(mx,Math.max(-mx,g.center[0]));
       if(cx!==g.center[0]||cy!==g.center[1])
         ch.setOption({geo:{center:[cx,cy]}});
     }
@@ -7655,8 +7677,19 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
        into a corner left a quarter of the panel empty. The clamp only ran on
        roam, and a resize is not one. Repaint too: the viewport the cells were
        culled to is the old one. */
-    window.addEventListener('resize',function(){
+    function refit(){
+      var r=mapEl.getBoundingClientRect();
+      if(!r.width||!r.height)return;   /* fold shut: nothing to measure */
       ch.resize();clampCenter();paint(true);drawHud();
+    }
+    window.addEventListener('resize',refit);
+    /* Reopening the fold is a viewport change too. While it was shut the
+       panel measured 0x0, so a resize in the meantime clamped against
+       nothing; the generic fold handler only calls resize(), which refits
+       the geo but leaves the centre where it was. */
+    var mfold=document.getElementById('f-map');
+    if(mfold)mfold.addEventListener('toggle',function(){
+      if(mfold.open)refit();
     });
   }).catch(function(){mapEl.innerHTML='<div style="color:#69727d;padding:40px;text-align:center">map data unavailable</div>'});
 })();
