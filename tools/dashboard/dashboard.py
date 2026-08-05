@@ -417,6 +417,25 @@ MAP_FILE = os.path.join(OUT, 'map_points.json')
 # the page only fetches on deep zoom, so ordinary visits never pay for it
 MAP_FINE_FILE = os.path.join(OUT, 'map_points_fine.json')
 MAP_CONF_MIN = 0.5   # a sweep detection below this stays out of the dogs layer
+# Outlier rule, measured against all 32.1M harvested points (2026-08-05):
+#
+#   OFF LAND        151K points (0.47%). Sequences with interpolated GPS
+#                   string frames across open water.
+#   GPS FLYER        54K points (0.17%), 26K of them ON LAND and so invisible
+#                   to the land test. A Mapillary sequence is one capture
+#                   session, yet 316 of them span more than a degree -- and
+#                   every single one of those turned out to teleport between
+#                   consecutive frames, the worst by 38,000 km. Not one wide
+#                   sequence was a genuine long drive, so a span gate is safe:
+#                   the widest continuous sequence in the whole harvest spans
+#                   0.44 deg. Inside a wide sequence, frames further than
+#                   MAP_SEQ_OFF from that sequence's median are the minority
+#                   cluster -- the side that cannot be where it claims.
+#
+# Points are kept in the payload either way; the page filters, so "exclude"
+# is a view and never a deletion.
+MAP_SEQ_SPAN = 1.0   # deg: a capture session this wide is broken
+MAP_SEQ_OFF = 0.5    # deg: how far off its own median a frame must sit
 STAGES = [
     'pending', 'extract', 'coverage', 'backfill', 'complete', 'downloading',
     'downloaded'
@@ -543,13 +562,15 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
         return
     con = duckdb.connect()
     con.execute("PRAGMA threads=4")  # stay polite to the running jobs
+    con.execute("SET memory_limit='8GB'")
     con.execute("INSTALL json; LOAD json;")
-    # Per-point land filter: a few Mapillary sequences carry bad/interpolated
+    # Per-point land test: a few Mapillary sequences carry bad/interpolated
     # GPS that strings their images across open ocean (with spurious animal
-    # detections), drawing fake lines on the map. Drop anything not on land --
-    # tested per point, so coastal cities (whose 0.5° cell center may sit just
-    # offshore) are kept.
-    land_filter = ""
+    # detections), drawing fake lines on the map. Tested per point, so coastal
+    # cities (whose 0.5° cell center may sit just offshore) are kept. This
+    # used to be a WHERE clause; it is now one half of the outlier flag, so
+    # the page can show what it hides.
+    sea_test = "false"
     try:
         import numpy as np
         import pyarrow as pa
@@ -568,9 +589,9 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
                             _is_land, ['DOUBLE', 'DOUBLE'],
                             'BOOLEAN',
                             type='arrow')
-        land_filter = "AND is_land(lon, lat)"
+        sea_test = "NOT is_land(lon, lat)"
     except Exception as e:
-        print('map: land mask unavailable, keeping all points:', e)
+        print('map: land mask unavailable, no sea outliers:', e)
     rows = con.execute(
         "SELECT DISTINCT path, region FROM read_parquet(?) "
         "WHERE kind='ground_animals'", [snap]).fetchall()
@@ -581,24 +602,47 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
     con.execute("CREATE TEMP TABLE preg(path VARCHAR, region VARCHAR)")
     con.executemany("INSERT INTO preg VALUES (?, ?)", list(by_path.items()))
     # image_id rides along so the dogs layer can join the sweep store; region
-    # rides along so each region gets a marker anchored where its data is
+    # rides along so each region gets a marker anchored where its data is;
+    # sequence rides along so a frame can be judged against its own session
     con.execute(
-        f"""
-      CREATE TEMP TABLE pts AS
-      SELECT lon, lat, iid, region FROM (
+        """
+      CREATE TEMP TABLE raw AS
+      SELECT lon, lat, iid, region, seq FROM (
         SELECT TRY_CAST(json_extract(computed_geometry,'$.coordinates[0]') AS DOUBLE) lon,
                TRY_CAST(json_extract(computed_geometry,'$.coordinates[1]') AS DOUBLE) lat,
-               TRY_CAST(g.image_id AS UBIGINT) iid, p.region
+               TRY_CAST(g.image_id AS UBIGINT) iid, p.region,
+               CAST(g.sequence AS VARCHAR) seq
         FROM read_parquet(?, filename=true, union_by_name=true) g
         JOIN preg p ON g.filename = p.path
         WHERE computed_geometry IS NOT NULL)
-      WHERE lon BETWEEN -180 AND 180 AND lat BETWEEN -90 AND 90 {land_filter}""",
+      WHERE lon BETWEEN -180 AND 180 AND lat BETWEEN -90 AND 90""",
         [sorted(by_path)])
-    total = con.execute("SELECT count(*) FROM pts").fetchone()[0]
+    # one row per capture session: where it sat, and how far it wandered
+    con.execute("""
+      CREATE TEMP TABLE sq AS
+      SELECT seq, median(lon) mlon, median(lat) mlat,
+             greatest(max(lat) - min(lat), max(lon) - min(lon)) span
+      FROM raw WHERE seq IS NOT NULL GROUP BY seq""")
+    # A sequence with no id cannot be judged against itself, so coalesce to
+    # false: an unjudgeable frame is kept, never quietly called an outlier.
+    con.execute(f"""
+      CREATE TEMP TABLE pts AS
+      SELECT r.lon, r.lat, r.iid, r.region,
+             ({sea_test}) OR coalesce(
+                s.span > {MAP_SEQ_SPAN}
+                AND greatest(abs(r.lon - s.mlon),
+                             abs(r.lat - s.mlat)) > {MAP_SEQ_OFF},
+                false) AS bad
+      FROM raw r LEFT JOIN sq s USING (seq)""")
+    con.execute("DROP TABLE raw")
+    con.execute("DROP TABLE sq")
+    total, outlier_total = con.execute(
+        "SELECT count(*) FILTER (WHERE NOT bad), count(*) FILTER (WHERE bad) "
+        "FROM pts").fetchone()
 
     # frames where the sweep called a dog: distinct image_ids with a
     # confident detection, from the newest generation in the store
-    dogs_total = 0
+    dogs_total = dogs_outlier_total = 0
     try:
         sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
         import store as _store
@@ -608,40 +652,58 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
         con.execute(
             f"""
           CREATE TEMP TABLE dpts AS
-          SELECT p.lon, p.lat FROM pts p
+          SELECT p.lon, p.lat, p.bad FROM pts p
           JOIN (SELECT DISTINCT TRY_CAST(image_id AS UBIGINT) iid
                 FROM {det} WHERE gen = ? AND conf >= ?) d USING (iid)""",
             [gen, MAP_CONF_MIN])
-        dogs_total = con.execute("SELECT count(*) FROM dpts").fetchone()[0]
+        dogs_total, dogs_outlier_total = con.execute(
+            "SELECT count(*) FILTER (WHERE NOT bad), "
+            "count(*) FILTER (WHERE bad) FROM dpts").fetchone()
     except Exception as e:
         print('map: sweep store unavailable, no dogs layer:', e)
         con.execute("CREATE TEMP TABLE IF NOT EXISTS dpts(lon DOUBLE, "
-                    "lat DOUBLE) ")
+                    "lat DOUBLE, bad BOOLEAN)")
 
-    def grid(table, res):
+    def grid(table, res, bad):
+        """Cells at one resolution, from the clean points or the outliers."""
         rows = con.execute(f"""
           SELECT round(floor(lon/{res})*{res}+{res / 2}, 4) x,
                  round(floor(lat/{res})*{res}+{res / 2}, 4) y, count(*) n
-          FROM {table} GROUP BY 1, 2""").fetchall()
+          FROM {table} WHERE bad = {'true' if bad else 'false'}
+          GROUP BY 1, 2""").fetchall()
         pts = [[r[0], r[1], r[2]] for r in rows]
         return {'res': res, 'max': max((p[2] for p in pts), default=0),
                 'points': pts}
 
-    levels = {str(r): grid('pts', r) for r in res_list}
-    dog_levels = {str(r): grid('dpts', r) for r in res_list}
+    levels = {str(r): grid('pts', r, False) for r in res_list}
+    dog_levels = {str(r): grid('dpts', r, False) for r in res_list}
+    # The outlier grids ship alongside rather than instead: the page merges
+    # them back in when the box is unticked, so nothing is hidden that cannot
+    # be shown again without a rebuild. They are small -- a few thousand
+    # cells against seventy thousand.
+    out_levels = {str(r): grid('pts', r, True) for r in res_list}
+    dog_out_levels = {str(r): grid('dpts', r, True) for r in res_list}
     regions = [{'key': r[0], 'lon': round(r[1], 3), 'lat': round(r[2], 3),
                 'n': r[3]}
                for r in con.execute(
                    "SELECT region, median(lon), median(lat), count(*) "
-                   "FROM pts GROUP BY region ORDER BY region").fetchall()
+                   "FROM pts WHERE NOT bad "
+                   "GROUP BY region ORDER BY region").fetchall()
                if r[1] is not None]
-    fine = {'levels': {str(fine_res): grid('pts', fine_res)},
-            'dog_levels': {str(fine_res): grid('dpts', fine_res)}}
+    fine = {'levels': {str(fine_res): grid('pts', fine_res, False)},
+            'dog_levels': {str(fine_res): grid('dpts', fine_res, False)},
+            'out_levels': {str(fine_res): grid('pts', fine_res, True)},
+            'dog_out_levels': {str(fine_res): grid('dpts', fine_res, True)}}
     con.close()
 
-    out = {'schema': 2, 'total': total, 'dogs_total': dogs_total,
+    out = {'schema': 3, 'total': total, 'dogs_total': dogs_total,
+           'outlier_total': outlier_total,
+           'dogs_outlier_total': dogs_outlier_total,
+           'seq_span': MAP_SEQ_SPAN, 'seq_off': MAP_SEQ_OFF,
            'conf_min': MAP_CONF_MIN, 'fine_res': fine_res,
-           'levels': levels, 'dog_levels': dog_levels, 'regions': regions,
+           'levels': levels, 'dog_levels': dog_levels,
+           'out_levels': out_levels, 'dog_out_levels': dog_out_levels,
+           'regions': regions,
            'built_at': time.strftime('%Y-%m-%d %H:%M')}
     os.makedirs(OUT, exist_ok=True)
     for path, payload in ((MAP_FILE, out), (MAP_FINE_FILE, fine)):
@@ -6225,6 +6287,7 @@ __LB_HTML__
     <button type="button" class="mchip" data-l="rate"
       title="Dogs found ÷ harvest, per cell. Corrects for how hard each place was searched: a bright cell here means dogs were common in the frames, not just that many frames exist. Needs 30+ frames in a cell to show.">Hit rate</button>
     <label class="mtog" title="One marker per region, placed at the median of its frames. Its colour follows the layer; its stage and download progress are in the tooltip."><input type="checkbox" id="mapRegions" checked> region markers</label>
+    <label class="mtog" id="mapCleanWrap" title="Hides frames whose GPS cannot be right: points out at sea, and frames sitting a continent away from the rest of their own capture session. Untick to see them."><input type="checkbox" id="mapClean" checked> exclude GPS outliers</label>
     <input id="mapFind" list="cmdRegions" placeholder="fly to a region&hellip;" autocomplete="off"
       title="Jump the camera to a region">
     <button type="button" class="mreset" id="mapReset" title="Back to the whole world at the default zoom">Reset view</button>
@@ -6693,6 +6756,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
   }
   var mchips=Array.prototype.slice.call(document.querySelectorAll('.mchip')),
       regTog=document.getElementById('mapRegions'),
+      cleanTog=document.getElementById('mapClean'),
       findEl=document.getElementById('mapFind'),
       resetEl=document.getElementById('mapReset'),
       ledeEl=document.getElementById('mapLede'),
@@ -6716,20 +6780,50 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
   ]).then(function(res){
     var world=res[0],md=res[1],board=res[2];
     echarts.registerMap('world',world);
-    var levels=md.levels||{},dogLevels=md.dog_levels||{};
+    var levels=md.levels||{},dogLevels=md.dog_levels||{},
+        outLevels=md.out_levels||{},dogOutLevels=md.dog_out_levels||{};
     if(!Object.keys(levels).length&&md.points)levels[String(md.res)]={res:md.res,max:md.max,points:md.points};
     var hasDogs=!!Object.keys(dogLevels).length;
     if(!hasDogs)mchips.forEach(function(c){if(c.dataset.l!=='harvest')c.style.display='none'});
+    /* an older map_points.json has no outlier grids; hide the control rather
+       than offer a toggle that would do nothing */
+    var hasOut=!!Object.keys(outLevels).length;
+    if(!hasOut){
+      var cw=document.getElementById('mapCleanWrap');
+      if(cw)cw.style.display='none';
+      if(cleanTog)cleanTog.checked=true;
+    }
     var fineRes=md.fine_res||0,fine={state:'none'};   /* none|loading|ready|failed */
     var keys=Object.keys(levels).map(parseFloat).sort(function(a,b){return b-a}); // coarse→fine
     var layer='harvest',cache={};
     function cellKey(p){return p[0]+'|'+p[1]}
+    function clean(){return !cleanTog||cleanTog.checked}
+    /* The clean grid and the outlier grid are separate files of cells, and a
+       cell can appear in both (a real street with one bad frame in it), so
+       showing outliers means SUMMING per cell, not concatenating -- a
+       concatenation would draw two rects on the same spot and report the
+       smaller count on hover. */
+    function pointsOf(base,extra,resKey){
+      var L=base[resKey];
+      if(clean()||!L)return L||{res:parseFloat(resKey),max:0,points:[]};
+      var X=(extra||{})[resKey];
+      if(!X||!X.points.length)return L;
+      var by={},outp=[],mx=0;
+      L.points.forEach(function(p){by[cellKey(p)]=[p[0],p[1],p[2]]});
+      X.points.forEach(function(p){
+        var k=cellKey(p),h=by[k];
+        if(h)h[2]+=p[2]; else by[k]=[p[0],p[1],p[2]];
+      });
+      for(var k in by){outp.push(by[k]);if(by[k][2]>mx)mx=by[k][2];}
+      return {res:L.res,max:mx,points:outp};
+    }
     function density(lyr,resKey){
-      var ck=lyr+'|'+resKey;
+      var ck=lyr+'|'+resKey+'|'+(clean()?'c':'a');
       if(cache[ck])return cache[ck];
       var out;
       if(lyr==='rate'){
-        var H=(levels[resKey]||{}).points||[],D=(dogLevels[resKey]||{}).points||[],dd={};
+        var H=pointsOf(levels,outLevels,resKey).points,
+            D=pointsOf(dogLevels,dogOutLevels,resKey).points,dd={};
         D.forEach(function(p){dd[cellKey(p)]=p[2]});
         var data=[],vals=[];
         H.forEach(function(p){
@@ -6743,7 +6837,8 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         out={res:parseFloat(resKey),max:vals.length?vals[Math.floor(vals.length*0.99)]:1,data:data};
         if(!out.max)out.max=0.01;
       }else{
-        var L=(lyr==='dogs'?dogLevels:levels)[resKey]||{res:parseFloat(resKey),max:0,points:[]};
+        var L=lyr==='dogs'?pointsOf(dogLevels,dogOutLevels,resKey)
+                          :pointsOf(levels,outLevels,resKey);
         out={res:L.res,max:Math.log10((L.max||1)+1),
           data:L.points.map(function(p){return {value:[p[0],p[1],Math.log10(p[2]+1)],cnt:p[2]}})};
       }
@@ -6849,9 +6944,12 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         maxEl.textContent=fmt(Math.round(Math.pow(10,cur.max)-1));
         labEl.textContent=(layer==='dogs'?'frames with a dog call ≥ '+(md.conf_min||0.5):'frames harvested')+' per '+cur.res+'° cell';
       }
-      var s=fmt(md.total)+' frames';
-      if(hasDogs)s+=' · '+fmt(md.dogs_total)+' with a dog call';
+      var s=fmt(md.total+(clean()?0:(md.outlier_total||0)))+' frames';
+      if(hasDogs)s+=' · '+fmt(md.dogs_total+(clean()?0:(md.dogs_outlier_total||0)))+' with a dog call';
       s+=' · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
+      if(hasOut)s+=clean()
+        ? ' · '+fmt(md.outlier_total||0)+' GPS outliers hidden'
+        : ' · showing '+fmt(md.outlier_total||0)+' GPS outliers';
       statsEl.textContent=s;
     }
     function apply(){
@@ -6881,6 +6979,10 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
             if((f.levels||{})[k]){
               levels[k]=f.levels[k];
               if((f.dog_levels||{})[k])dogLevels[k]=f.dog_levels[k];
+              /* without these the toggle would silently stop working at the
+                 deepest zoom, which is exactly where a stray point shows */
+              if((f.out_levels||{})[k])outLevels[k]=f.out_levels[k];
+              if((f.dog_out_levels||{})[k])dogOutLevels[k]=f.dog_out_levels[k];
               keys.push(fineRes);fine.state='ready';roamed();
             }else fine.state='failed';
           }).catch(function(){fine.state='failed'});
@@ -6909,6 +7011,9 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     if(regTog)regTog.addEventListener('change',function(){
       ch.setOption({series:[{},{},{},{data:regTog.checked?regRings:[]}]});
     });
+    /* outliers in or out: same grid pipeline, so every layer and every zoom
+       level follows without a second code path */
+    if(cleanTog)cleanTog.addEventListener('change',function(){apply()});
     /* click a region dot: fill the generator and run it */
     ch.on('click',function(p){
       if(p.seriesIndex!==3||!p.data)return;
@@ -6929,6 +7034,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         mchips.forEach(function(x){x.classList.toggle('on',x.dataset.l==='harvest')});
       }
       if(regTog)regTog.checked=true;
+      if(cleanTog&&hasOut)cleanTog.checked=true;
       if(findEl)findEl.value='';
       ch.setOption({geo:geoOpt},{replaceMerge:['geo']});
       ch.resize();          /* re-fit if the panel was resized while roaming */
