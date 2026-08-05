@@ -1539,34 +1539,23 @@ border-radius:8px;padding:5px 9px;font-size:12.5px;font-family:inherit;cursor:po
 .hint{color:var(--dim);font-size:11.5px;padding-bottom:14px;display:flex;
 flex-wrap:wrap;gap:6px 14px;align-items:center}
 /* ── balance strip: one bar, two lines, no card chrome ── */
-.bal{display:flex;align-items:center;gap:13px;padding:11px 0 13px;
-border-top:1px solid var(--bd)}
-.balbar{position:relative;flex:1;min-width:120px;height:6px;border-radius:4px;
+.bal{display:flex;align-items:center;gap:18px;padding:11px 0 13px;
+border-top:1px solid var(--bd);cursor:default}
+.balnum{display:flex;flex-direction:column;line-height:1.02;flex:none}
+.balnum b{font-size:27px;font-weight:680;color:var(--tx);
+font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.balnum span{font-size:10.5px;color:var(--dim);margin-top:3px}
+.bal.ok .balnum b{color:var(--green)}
+.balcol{flex:1;min-width:150px}
+.balbar{position:relative;height:9px;border-radius:5px;
 background:rgba(130,140,150,.16);overflow:hidden}
-/* negatives already in the dataset */
+/* ONE fill: how much of the not-dog side is standing, counting both what is
+   in the built dataset and what your flags have already earned */
 .balbar i{display:block;height:100%;width:0;background:var(--red);
-transition:width .45s ease}
-/* negatives earned by flags not yet folded into a rebuild -- lighter, so
-   "banked but not built" never reads as "already in the training set" */
-.balbar b{position:absolute;top:0;height:100%;width:0;
-background:repeating-linear-gradient(90deg,rgba(216,116,58,.55) 0 3px,
-transparent 3px 6px);transition:width .45s ease,left .45s ease}
-.baltx{font-size:12px;color:var(--mut);white-space:nowrap;
+border-radius:5px;transition:width .45s ease}
+.baltx{font-size:11.5px;color:var(--dim);margin-top:6px;
 font-variant-numeric:tabular-nums}
-.baltx b{color:var(--tx);font-weight:650}
-.balsub{display:block;font-size:11px;color:var(--dim)}
-.ballg{display:flex;flex-wrap:wrap;gap:3px 13px;font-size:11px;color:var(--dim);
-margin-top:4px}
-.ballg span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-.ballg i{width:10px;height:8px;border-radius:2px;flex:none}
-.ballg .s1{background:var(--red)}
-/* identical gradient to .balbar b, or the legend would be a lie */
-.ballg .s2{background:repeating-linear-gradient(90deg,rgba(216,116,58,.55) 0 3px,
-transparent 3px 6px);box-shadow:inset 0 0 0 1px rgba(216,116,58,.3)}
-.ballg .s3{background:rgba(130,140,150,.16)}
-/* s4 draws no bar segment -- the reserved crops are outside the training set
-   entirely, so an outline says "accounted for, not counted here" */
-.ballg .s4{background:transparent;box-shadow:inset 0 0 0 1px rgba(130,140,150,.5)}
+.baltx b{color:var(--mut);font-weight:650}
 .bal.ok .balbar i{background:var(--green)}
 @media(max-width:700px){.bal{flex-wrap:wrap}.baltx{white-space:normal}}
 kbd{background:var(--panel2);border:1px solid var(--bd);border-bottom-width:2px;
@@ -1758,14 +1747,16 @@ min-width:44px;text-align:center}
 
 <!-- Training-set balance. The queue tells you what is left to look at; this
      tells you what the looking is FOR, and when to stop. -->
+<!-- The count leads, because it is the only thing here anyone acts on. The
+     bar behind it is ONE fill: it used to be cut into segments with a
+     four-entry legend, which spent the whole panel explaining its own
+     bookkeeping instead of answering "how much longer". The breakdown still
+     exists, on hover. -->
 <div class="bal" id="bal" hidden>
-  <div class="balbar"><i id="balFill"></i><b id="balPend"></b></div>
-  <div class="baltx">
-    <span id="balMain">&mdash;</span>
-    <!-- the bar has three fills and nothing said which was which; swatches
-         here carry the exact same backgrounds so the mapping is readable
-         without hovering or guessing -->
-    <span class="ballg" id="balLg"></span>
+  <div class="balnum"><b id="balNum">&mdash;</b><span id="balNumU">crops left to judge</span></div>
+  <div class="balcol">
+    <div class="balbar"><i id="balFill"></i></div>
+    <div class="baltx"><span id="balMain">&mdash;</span></div>
   </div>
 </div>
 
@@ -1971,10 +1962,10 @@ function paintBal(){
   var el=$('bal');el.hidden=false;
   if(b.ok===false){
     el.className='bal';
-    $('balFill').style.width='0%';$('balPend').style.width='0%';
-    $('balMain').innerHTML='<b>Dataset not found</b>';
-    $('balSub')&&($('balSub').textContent='');
-    $('balLg').textContent=b.error||('missing '+(b.dataset||'dataset'));
+    $('balFill').style.width='0%';
+    $('balNum').textContent='—';$('balNumU').textContent='dataset not found';
+    $('balMain').textContent=b.error||('missing '+(b.dataset||'dataset'));
+    el.title='';
     return;
   }
   /* the server's measured value, never a copy: this line used to carry its
@@ -1985,13 +1976,13 @@ function paintBal(){
   var pend=Math.round((b.new_flags||0)*y);
   var pendPos=Math.round((b.new_positive_flags||0)*y);
   var have=b.not_dog||0, want=(b.dog||0)+pendPos;   /* positives raise the bar */
+  /* One fill, one meaning: not-dog crops standing against the dog target,
+     counting both those already built into the dataset and those your flags
+     have earned since. Splitting the two put the difference between
+     bookkeeping states in front of the number that matters. */
   var got=Math.min(want,have+pend);
-  var pctHave=want?Math.min(100,100*have/want):0;
-  var pctGot =want?Math.min(100,100*got /want):0;
-  $('balFill').style.width=pctHave.toFixed(1)+'%';
-  var pb=$('balPend');
-  pb.style.left=pctHave.toFixed(1)+'%';
-  pb.style.width=Math.max(0,pctGot-pctHave).toFixed(1)+'%';
+  var pct=want?Math.min(100,100*got/want):0;
+  $('balFill').style.width=pct.toFixed(1)+'%';
   var short=Math.max(0,want-have-pend);
   /* JUDGEMENTS, not flags. Dividing the shortfall by the yield answers a
      different question -- how many more NOT-DOGS are needed -- and that only
@@ -2007,47 +1998,35 @@ function paintBal(){
   el.className='bal'+(short?'':' ok');
   var ds=b.dataset||'the dataset';
   if(!short){
-    $('balMain').innerHTML='<b>Balanced.</b> '+n(have+pend)+' not-dog vs '+
+    $('balNum').textContent='0';
+    $('balNumU').textContent='crops left to judge';
+    $('balMain').innerHTML='<b>Balanced.</b> '+n(got)+' not-dog against '+
       n(want)+' dog';
-    $('balMain').title='';
   }else if(need===null){
     /* every judgement adds to both sides at the same rate: reviewing alone
-       cannot close this, and saying a number would be a lie */
-    $('balMain').innerHTML='<b>Not closing.</b> as many of your verdicts are '+
-      'dogs as not-dogs';
-    $('balMain').title='Both classes are growing at the same rate, so more '+
-      'reviewing does not move the balance. '+n(short)+' not-dog crops short.';
+       cannot close this, and a number here would be a lie */
+    $('balNum').textContent='—';
+    $('balNumU').textContent='not closing';
+    $('balMain').innerHTML='<b>'+n(short)+'</b> not-dog crops short, but as '+
+      'many of your verdicts are dogs as not-dogs';
   }else{
-    /* both numbers, in one line, in their own units -- the legend counts
-       CROPS and this used to count FLAGS, and nothing said so */
-    $('balMain').innerHTML='<b>'+n(need)+'</b> more crops to judge &mdash; '+
-      n(short)+' not-dog crops short';
-    $('balMain').title=n(short)+' more not-dog crops would balance '+n(want)+
-      ' dog crops. About '+Math.round(y*100)+'% of what you flag survives '+
-      'into the dataset (the rest is held back for acceptance, near-'+
-      'duplicate, under the size floor, or ambiguous)'+
-      (share?', and '+Math.round(share*100)+'% of what you judge comes back '+
-        '"a dog", which raises the target':'')+
-      ' — about '+n(need)+' more judgements.';
+    $('balNum').textContent=n(need);
+    $('balNumU').textContent='crops left to judge';
+    $('balMain').innerHTML='<b>'+Math.round(pct)+'%</b> of the way &mdash; '+
+      n(got)+' of '+n(want)+' not-dog crops';
   }
-  /* one legend entry per fill, each naming the number it draws */
-  var togo=Math.max(0,want-have-pend);
-  var L=[['s1',n(have),'in '+ds],
-         ['s2',n(pend),'banked from '+n(b.new_flags||0)+' new flag'+
-                       ((b.new_flags||0)===1?'':'s')+', not built yet']];
-  if(togo)L.push(['s3',n(togo),'not-dog crops still to find'+
-    (pendPos?' (target +'+n(pendPos)+' from crops you marked as dogs)':'')]);
-  else L.push(['s3','0','not-dog crops still to find']);
-  /* Name the reservation. Roughly a third of what you flag is withheld as the
-     acceptance set and never trains, so the target is far higher than "one
-     flag, one crop" -- without saying so the panel just looks pessimistic. */
-  if(b.reserved_ids)L.push(['s4',n(b.reserved_ids),
-    'reserved to test the gate, never trained on']);
-  $('balLg').innerHTML=L.map(function(x){
-    return '<span><i class="'+x[0]+'"></i><b>'+x[1]+'</b> '+esc(x[2])+'</span>';
-  }).join('');
-  $('balFill').title=n(have)+' not-dog crops already in '+ds;
-  $('balPend').title=n(pend)+' negatives earned from flags since that build';
+  /* The breakdown that used to occupy four legend swatches. It explains the
+     number rather than competing with it, so it lives on hover. */
+  el.title=n(have)+' not-dog crops in '+ds+', plus '+n(pend)+' earned from '+
+    n(nf)+' flag'+(nf===1?'':'s')+' since that build, against '+n(want)+
+    ' dog crops'+(pendPos?' (+'+n(pendPos)+' from crops you marked as dogs)':'')+
+    '.\n\nAbout '+Math.round(y*100)+'% of what you flag survives into the '+
+    'dataset — the rest is held back for acceptance, near-duplicate, under '+
+    'the size floor, or ambiguous'+
+    (share?'; and '+Math.round(share*100)+'% of what you judge comes back "a '+
+      'dog", which raises the target':'')+
+    (b.reserved_ids?'.\n\n'+n(b.reserved_ids)+' crops are reserved to test '+
+      'the gate and never trained on.':'.');
 }
 /* a verdict immediately banks yield_per_flag of a crop; reflect it without a
    round trip. Negatives close the gap, positives widen it. */
