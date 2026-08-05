@@ -2742,15 +2742,46 @@ $('unkeep').onclick=function(){
    options on the way back in, so a stale value left by an older build -- or
    anything else that ends up in storage -- cannot put the page into a sort
    the server does not know. */
-var SORT_KEY='sdReviewSort';
-function restoreSort(){
-  var el=$('sort');if(!el)return;
-  var v=null;
-  try{v=localStorage.getItem(SORT_KEY)}catch(_){}
-  if(!v)return;
+var SORT_KEY='sdReviewSort';          /* the older single-key store */
+var PREFS_KEY='sdReview';
+function loadPrefs(){
+  var o=null;
+  try{o=JSON.parse(localStorage.getItem(PREFS_KEY))}catch(_){}
+  if(o&&typeof o==='object')return o;
+  /* carry a sort chosen under the old key forward, so the one preference
+     that already survived a visit does not get dropped by this change */
+  var s=null;try{s=localStorage.getItem(SORT_KEY)}catch(_){}
+  return s?{sort:s}:{};
+}
+function savePref(k,v){
+  var o=loadPrefs();o[k]=v;
+  try{localStorage.setItem(PREFS_KEY,JSON.stringify(o))}catch(_){}
+}
+/* Applies a stored value only if the control actually offers it. A value left
+   by an older build -- or anything else that ends up in storage -- must not
+   put the page into a state the server does not know. */
+function restoreSel(id,val){
+  var el=$(id);
+  if(!el||val==null)return null;
   for(var i=0;i<el.options.length;i++){
-    if(el.options[i].value===v){sort=v;el.value=v;return;}
+    if(el.options[i].value===String(val)){el.value=String(val);return el.value;}
   }
+  return null;
+}
+function restorePrefs(){
+  var o=loadPrefs(),v;
+  if((v=restoreSel('sort',o.sort))!==null)sort=v;
+  if((v=restoreSel('size',o.size))!==null)size=parseInt(v,10)||size;
+  if((v=restoreSel('verdict',o.verdict))!==null)verdict=v;
+  if((v=restoreSel('mode',o.mode))!==null){
+    mode=v;
+    document.body.classList.toggle('auditing',mode==='audit');
+  }
+  /* The country <select> is built from the response, so its options do not
+     exist yet. Carry the value into the first request instead and let
+     paintCountries either select it or, if the pool no longer holds that
+     country, clear it -- see the self-heal there. */
+  if(o.country)country=o.country;
 }
 /* CHANGING THE VIEW IS NOT REVIEWING.
    markSeen() banks every crop on screen -- it is how "I am done with these"
@@ -2759,10 +2790,9 @@ function restoreSort(){
    me this differently", and banking first threw the current screenful out of
    the queue unjudged. Switching 50 -> 100 quietly consumed 50 crops. */
 $('sort').onchange=function(){var v=this.value;
-  try{localStorage.setItem(SORT_KEY,v)}catch(_){}
-  sort=v;page=0;sel=-1;load()};
+  savePref('sort',v);sort=v;page=0;sel=-1;load()};
 $('size').onchange=function(){var v=parseInt(this.value,10)||50;
-  size=v;page=0;sel=-1;load()};
+  savePref('size',v);size=v;page=0;sel=-1;load()};
 /* Rebuilt from every response so the hourly refresh reaches an open tab, but
    only when the option set actually CHANGED -- rewriting the <select> on each
    page turn would drop the open dropdown and reset the caret mid-click. */
@@ -2782,25 +2812,37 @@ function paintCountries(list,cur){
     }
     el.innerHTML=html;
   }
+  /* A remembered country the pool no longer holds would filter every request
+     down to nothing, and the <select> cannot even show it -- the option does
+     not exist -- so the page would look unfiltered while returning an empty
+     queue forever. Drop it and reload, once. */
+  if(cur&&!countryName){
+    country='';savePref('country','');
+    $('country').value='';
+    if(!countryHealed){countryHealed=true;load();}
+    return;
+  }
   if(cur!=null)$('country').value=cur;
 }
+var countryHealed=false;
 $('country').onchange=function(){var v=this.value;
-  country=v;page=0;sel=-1;load()};
+  savePref('country',v);country=v;page=0;sel=-1;load()};
 /* Switching mode does NOT bank the screen, for the same reason the other view
    controls do not: nothing on it has been judged by looking at it. Audit mode
    also hides the controls that mean nothing there -- a country filter over
    crops chosen by verdict, and a Next that would bank annotations as if they
    were fresh work. */
 $('mode').onchange=function(){
-  mode=this.value;page=0;sel=-1;
+  mode=this.value;savePref('mode',mode);page=0;sel=-1;
   document.body.classList.toggle('auditing',mode==='audit');
   load();
 };
 /* A flip made while this filter is on leaves the tile where it is rather than
    yanking it out from under the pointer -- it carries the changed border, and
    the next load drops it. */
-$('verdict').onchange=function(){verdict=this.value;page=0;sel=-1;load()};
-restoreSort();
+$('verdict').onchange=function(){verdict=this.value;
+  savePref('verdict',verdict);page=0;sel=-1;load()};
+restorePrefs();
 load();loadBal();
 </script></body></html>"""
 
