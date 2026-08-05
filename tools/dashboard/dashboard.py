@@ -1518,9 +1518,15 @@ border-radius:8px;padding:4px 10px;transition:color .12s,border-color .12s}
 
 /* ── toolbar ── */
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 0 13px}
-.rbtn{background:rgba(232,166,69,.13);border:1px solid rgba(232,166,69,.34);
+.rbtn{display:inline-flex;align-items:center;gap:6px;
+background:rgba(232,166,69,.13);border:1px solid rgba(232,166,69,.34);
 color:var(--acc);border-radius:8px;padding:5px 12px;font-size:12.5px;font-weight:600;
 cursor:pointer;font-family:inherit;font-variant-numeric:tabular-nums;transition:background .12s}
+/* Drawn, not typed. The arrows were text glyphs, and a font renders them at
+   whatever weight and baseline it likes -- next to 600-weight 12.5px they
+   came out as a thin squiggle riding high above the label. A stroked icon
+   takes its weight from stroke-width and its position from the flex row. */
+.bico{width:14px;height:14px;flex:none}
 .rbtn:hover{background:rgba(232,166,69,.23)}
 .rbtn[disabled]{opacity:.35;cursor:default;background:rgba(130,140,150,.08);
 border-color:var(--bd);color:var(--dim)}
@@ -1739,10 +1745,10 @@ min-width:44px;text-align:center}
     </select>
     <select id="size"><option value="50">50 per page</option>
       <option value="100">100 per page</option></select>
-    <button class="rbtn quiet" id="reload" title="pull in detections found since this page loaded">&#8635; Refresh pool</button>
+    <button class="rbtn quiet" id="reload" title="pull in detections found since this page loaded"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh pool</button>
     <!-- destructive, and deliberately NOT beside Prev/Next: a mis-click there
          would throw away every keep decision made so far -->
-    <button class="rbtn danger" id="unkeep" title="put every crop you already judged a dog back into the queue">&#8630; Restore kept</button>
+    <button class="rbtn danger" id="unkeep" title="put every crop you already judged a dog back into the queue"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Restore kept</button>
     <span class="sp"></span>
     <span class="cnt" id="pg">&mdash;</span>
     <button class="rbtn quiet" id="next" title="bank this screen and bring up the next unjudged crops">Next &rsaquo;</button>
@@ -2106,7 +2112,7 @@ function render(){
   if(!items.length){
     $('state').innerHTML='<div class="state"><b>Queue is clear</b>'+
       'Every detection in the pool has been judged. New crops appear here as the '+
-      'sweep finds them.<div><button class="rbtn" id="rl2">&#8635; Check for more</button></div></div>';
+      'sweep finds them.<div><button class="rbtn" id="rl2">'+ICO_REFRESH+'Check for more</button></div></div>';
     $('rl2').onclick=load;return;
   }
   $('state').innerHTML='';
@@ -2742,6 +2748,7 @@ $('unkeep').onclick=function(){
    options on the way back in, so a stale value left by an older build -- or
    anything else that ends up in storage -- cannot put the page into a sort
    the server does not know. */
+var ICO_REFRESH='<svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
 var SORT_KEY='sdReviewSort';          /* the older single-key store */
 var PREFS_KEY='sdReview';
 function loadPrefs(){
