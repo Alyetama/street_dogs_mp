@@ -539,6 +539,125 @@ def set_stage(region, stage):
     return True
 
 
+WORLD_JSON = os.path.join(OUT, 'world.json')
+
+
+def country_totals(fine, res):
+    """Per-country totals, keyed by the names the MAP uses.
+
+    Joined against world.json rather than the Natural Earth shapefile next
+    door, because the page identifies a country by whatever name echarts
+    reports for the polygon that was clicked -- matching any other source
+    means maintaining a synonym table for every "United States" vs "United
+    States of America" the two disagree on.
+
+    The join is per CELL at the finest grid, not per point: 270K centres
+    against 217 polygons through a spatial index, instead of 32M. A cell is
+    ~5.5 km, so a count is exact and only its attribution is approximate --
+    a cell straddling a border lands wholly in whichever country holds its
+    centre. Returns {} rather than raising if geopandas is absent; the popup
+    is a convenience and the map has to draw without it.
+    """
+    if not os.path.exists(WORLD_JSON):
+        return {}
+    try:
+        import geopandas as gpd
+        import pandas as pd
+    except Exception as e:
+        print('map: no geopandas, skipping country totals:', e)
+        return {}
+    # Order IS the output layout -- slot n here is index n in every row, and
+    # the page reads [frames, outlier frames, dog frames, outlier dog frames].
+    keys = ('levels', 'out_levels', 'dog_levels', 'dog_out_levels')
+    rk = str(res)
+    seen = {}
+    for slot, k in enumerate(keys):
+        for x, y, n in ((fine.get(k) or {}).get(rk, {}).get('points') or []):
+            row = seen.get((x, y))
+            if row is None:
+                row = seen[(x, y)] = [0, 0, 0, 0]
+            row[slot] += n
+    if not seen:
+        return {}
+    try:
+        from shapely.geometry import shape
+        # Built by hand, not gpd.read_file: echarts' map JSON omits the
+        # per-feature "type": "Feature", and the GeoJSON reader answers a
+        # frame of zero rows for it rather than failing.
+        with open(WORLD_JSON) as fh:
+            doc = json.load(fh)
+        def rings_ok(polys):
+            """Drop empty parts. world.json ships one (China) whose 15
+            polygons include a 13th with no rings at all; shapely raises on
+            it, and one raise used to cost every country."""
+            out = []
+            for poly in polys:
+                keep = [r for r in poly if r and len(r) >= 4]
+                if keep:
+                    out.append(keep)
+            return out
+
+        names, geoms, skipped = [], [], []
+        for f in doc.get('features') or []:
+            nm = (f.get('properties') or {}).get('name')
+            geo = f.get('geometry')
+            if not nm or not geo:
+                continue
+            try:
+                if geo.get('type') == 'MultiPolygon':
+                    parts = rings_ok(geo.get('coordinates') or [])
+                    if not parts:
+                        continue
+                    geo = {'type': 'MultiPolygon', 'coordinates': parts}
+                elif geo.get('type') == 'Polygon':
+                    parts = rings_ok([geo.get('coordinates') or []])
+                    if not parts:
+                        continue
+                    geo = {'type': 'Polygon', 'coordinates': parts[0]}
+                g = shape(geo)
+                if not g.is_valid:
+                    g = g.buffer(0)
+                if g.is_empty:
+                    continue
+            except Exception:            # one bad outline is not 216 others
+                skipped.append(nm)
+                continue
+            names.append(nm)
+            geoms.append(g)
+        if skipped:
+            print(f'map: {len(skipped)} country outline(s) unusable: '
+                  f'{", ".join(sorted(skipped)[:5])}')
+        if not names:
+            print('map: world.json has no named features, skipping countries')
+            return {}
+        world = gpd.GeoDataFrame({'name': names}, geometry=geoms,
+                                 crs='EPSG:4326')
+        cells = list(seen)
+        pts = gpd.GeoDataFrame(
+            {'i': range(len(cells))},
+            geometry=gpd.points_from_xy([c[0] for c in cells],
+                                        [c[1] for c in cells]),
+            crs=world.crs)
+        j = gpd.sjoin(pts, world, how='inner', predicate='within')
+        j = j[~j.index.duplicated(keep='first')]   # a border point hits twice
+    except Exception as e:
+        print('map: country join failed:', e)
+        return {}
+    out = {}
+    for i, nm in zip(j['i'], j['name']):
+        if not isinstance(nm, str) or not nm:
+            continue
+        row = seen[cells[i]]
+        acc = out.get(nm)
+        if acc is None:
+            acc = out[nm] = [0, 0, 0, 0, 0]
+        for s in range(4):
+            acc[s] += row[s]
+        acc[4] += 1                                # cells with any frame
+    # [frames, outlier frames, dog frames, outlier dog frames, cells]
+    return {k: v for k, v in out.items() if v[0] or v[1]}
+
+
 def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
     """Bin the harvest AND the sweep's dog calls into density grids.
 
@@ -701,6 +820,7 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
             'dog_levels': {str(fine_res): grid('dpts', fine_res, False)},
             'out_levels': {str(fine_res): grid('pts', fine_res, True)},
             'dog_out_levels': {str(fine_res): grid('dpts', fine_res, True)}}
+    countries = country_totals(fine, fine_res)
     con.close()
 
     out = {'schema': 3, 'total': total, 'dogs_total': dogs_total,
@@ -710,7 +830,8 @@ def build_map_points(res_list=(0.5, 0.15), fine_res=0.05):
            'conf_min': MAP_CONF_MIN, 'fine_res': fine_res,
            'levels': levels, 'dog_levels': dog_levels,
            'out_levels': out_levels, 'dog_out_levels': dog_out_levels,
-           'regions': regions,
+           'regions': regions, 'countries': countries,
+           'country_res': fine_res,
            'built_at': time.strftime('%Y-%m-%d %H:%M')}
     os.makedirs(OUT, exist_ok=True)
     for path, payload in ((MAP_FILE, out), (MAP_FINE_FILE, fine)):
@@ -5666,6 +5787,31 @@ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;
 color:var(--mut);background:rgba(13,17,23,.62);border:1px solid var(--bd);
 border-radius:7px;padding:3px 9px;letter-spacing:.02em}
 .maphud:empty{display:none}
+/* country card: sits inside the map, opposite the lock button so the two
+   never collide, and never taller than the panel it floats in */
+.cpop{position:absolute;left:12px;top:12px;z-index:4;width:250px;
+max-height:calc(100% - 24px);overflow:auto;background:#161b22;
+border:1px solid var(--bd);border-radius:12px;padding:12px 13px 11px;
+box-shadow:0 10px 28px rgba(0,0,0,.45)}
+.cpop[hidden]{display:none}
+.cpx{position:absolute;right:6px;top:5px;background:none;border:0;color:var(--dim);
+font-size:17px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:6px}
+.cpx:hover{color:var(--tx)}
+.cpx:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.cpname{font-size:13.5px;font-weight:620;color:var(--tx);padding-right:18px;
+margin-bottom:1px}
+.cprank{font-size:10.5px;color:var(--dim);margin-bottom:9px}
+.cpbig{font-size:21px;font-weight:640;font-variant-numeric:tabular-nums;
+line-height:1.15}
+.cpunit{font-size:10.5px;color:var(--mut);margin-bottom:9px}
+.cprow{display:flex;justify-content:space-between;gap:10px;font-size:11px;
+padding:3px 0;border-top:1px solid rgba(130,140,150,.10)}
+.cprow span:first-child{color:var(--dim)}
+.cprow span:last-child{color:var(--mut);font-variant-numeric:tabular-nums}
+.cpbar{height:4px;border-radius:3px;background:rgba(130,140,150,.14);
+margin:2px 0 9px;overflow:hidden}
+.cpbar i{display:block;height:100%;border-radius:3px}
+.cpnote{font-size:10.5px;color:var(--dim);margin-top:8px;line-height:1.45}
 .maplegend{display:flex;align-items:center;gap:9px;margin-top:10px;font-size:11px;
 color:var(--dim);flex-wrap:wrap}
 .mramp{width:170px;height:7px;border-radius:4px;border:1px solid rgba(130,140,150,.18)}
@@ -6341,6 +6487,10 @@ __LB_HTML__
     </div>
     <button class="rbtn maplock" id="mapLock" hidden>&#128274; Lock map</button>
     <div class="maphud" id="mapHud"></div>
+    <div class="cpop" id="mapPop" hidden>
+      <button type="button" class="cpx" id="mapPopX" aria-label="Close">&times;</button>
+      <div class="cpbody" id="mapPopBody"></div>
+    </div>
   </div>
   <div class="maplegend">
     <span class="mlmax" id="mapMin">1</span><i class="mramp" id="mapRamp"></i><span class="mlmax" id="mapMax"></span>
@@ -7111,9 +7261,15 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
            dogs layer's own green cells; a ring reads as a marker */
         {name:'regions',type:'scatter',coordinateSystem:'geo',z:3,
          symbolSize:9,data:regRings,
-         label:{show:true,position:'bottom',distance:3,fontSize:9,
-           color:'#8a94a0',formatter:'{b}'},
-         emphasis:{scale:1.6,label:{color:'#eef1f4'}},
+         /* The label sits ON the densest part of its own region -- the
+            anchor is that region's median frame -- so plain grey text was
+            being read straight through a field of bright cells. A dark
+            halo separates the glyphs from whatever is behind them without
+            adding a box the map has to carry. */
+         label:{show:true,position:'bottom',distance:4,fontSize:9.5,
+           fontWeight:600,color:'#e8edf2',formatter:'{b}',
+           textBorderColor:'rgba(8,10,14,.92)',textBorderWidth:3},
+         emphasis:{scale:1.6,label:{color:'#fff',fontSize:11}},
          cursor:'pointer'}
       ])
     });
@@ -7238,6 +7394,10 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       layer=c.dataset.l;
       mchips.forEach(function(x){x.classList.toggle('on',x===c)});
       apply();
+      /* the card is a view of the active layer, so it follows the tab --
+         without this, clicking the same country after a switch read as a
+         second click on it and just closed the card */
+      if(popName)showCountry(popName);
     })});
     /* region markers on/off */
     if(regTog)regTog.addEventListener('change',function(){
@@ -7245,10 +7405,182 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     });
     /* outliers in or out: same grid pipeline, so every layer and every zoom
        level follows without a second code path */
-    if(cleanTog)cleanTog.addEventListener('change',function(){apply()});
-    /* click a region dot: fill the generator and run it */
+    if(cleanTog)cleanTog.addEventListener('change',function(){
+      apply();
+      if(popName)showCountry(popName);
+    });
+    /* ── country card ── click a country, read it in the terms of the layer
+       you are looking at. The totals are joined per 0.05° cell at build
+       time, so a count is exact and only its attribution is approximate
+       where a cell straddles a border. */
+    var CT=md.countries||{},cRes=md.country_res||0.05;
+    var cRank={},cList=Object.keys(CT);
+    (function(){
+      ['n','d','rate'].forEach(function(kind){
+        var arr=cList.filter(function(k){
+          return kind==='rate'?CT[k][0]>=RATE_MIN:true;
+        }).sort(function(a,b){
+          var A=CT[a],B=CT[b];
+          if(kind==='n')return B[0]-A[0];
+          if(kind==='d')return B[2]-A[2];
+          return (B[2]/Math.max(B[0],1))-(A[2]/Math.max(A[0],1));
+        });
+        var m={};arr.forEach(function(k,i){m[k]=[i+1,arr.length]});
+        cRank[kind]=m;
+      });
+    })();
+    function pct(a,b){return b?(100*a/b):0;}
+    /* Bar scale: the leading country, not the world total. A share-of-world
+       bar is a sliver for everyone (the biggest single country is under 40%
+       of the harvest), which says nothing about how one country compares to
+       another -- the only question the card is being asked. */
+    var cMax={n:1,d:1,rate:0.0001};
+    cList.forEach(function(k){
+      var v=CT[k];
+      if(v[0]>cMax.n)cMax.n=v[0];
+      if(v[2]>cMax.d)cMax.d=v[2];
+      if(v[0]>=RATE_MIN){var r=v[2]/v[0];if(r>cMax.rate)cMax.rate=r;}
+    });
+    function popRow(k,v){
+      return '<div class="cprow"><span>'+k+'</span><span>'+v+'</span></div>';
+    }
+    function showCountry(name){
+      var v=CT[name],ink=RING[layer];
+      if(!v){
+        popBody.innerHTML='<div class="cpname">'+esc(name)+'</div>'
+          +'<div class="cpnote">No harvested frames here. The atlas only '
+          +'covers ground the sweep actually walked.</div>';
+        pop.hidden=false;return;
+      }
+      var frames=v[0]+(clean()?0:v[1]),dogs=v[2]+(clean()?0:v[3]),
+          worldF=md.total+(clean()?0:(md.outlier_total||0)),
+          worldD=md.dogs_total+(clean()?0:(md.dogs_outlier_total||0)),
+          rate=pct(dogs,frames),worldRate=pct(worldD,worldF),h='';
+      h+='<div class="cpname">'+esc(name)+'</div>';
+      var rk=cRank[layer==='harvest'?'n':(layer==='dogs'?'d':'rate')][name];
+      h+='<div class="cprank">'+(rk?('#'+rk[0]+' of '+rk[1]+' countries'
+            +(layer==='rate'?' with enough frames to rate':''))
+          :'not ranked')+'</div>';
+      if(layer==='rate'){
+        if(v[0]<RATE_MIN){
+          h+='<div class="cpnote">Only '+fmt(frames)+' frames here &mdash; '
+            +'below the '+RATE_MIN+' a rate needs to mean anything, so this '
+            +'country is left off the hit-rate layer.</div>';
+        }else{
+          h+='<div class="cpbig" style="color:'+ink+'">'+rate.toFixed(1)+'%</div>'
+            +'<div class="cpunit">of frames here had a dog call</div>'
+            +'<div class="cpbar"><i style="width:'+Math.min(100,pct(rate/100,cMax.rate))
+            +'%;background:'+ink+'"></i></div>'
+            +popRow('Dog calls',fmt(dogs))
+            +popRow('Frames',fmt(frames))
+            +popRow('Worldwide rate',worldRate.toFixed(1)+'%')
+            +'<div class="cpnote">'+(rate>=worldRate
+              ?(rate/Math.max(worldRate,0.0001)).toFixed(1)+'&times; the worldwide rate.'
+              :'Below the worldwide rate.')+'</div>';
+        }
+      }else if(layer==='dogs'){
+        h+='<div class="cpbig" style="color:'+ink+'">'+fmt(dogs)+'</div>'
+          +'<div class="cpunit">frames with a dog call &ge; '+(md.conf_min||0.5)+'</div>'
+          +'<div class="cpbar"><i style="width:'+Math.min(100,pct(dogs,cMax.d))
+          +'%;background:'+ink+'"></i></div>'
+          +popRow('Share of all dog calls',pct(dogs,worldD).toFixed(2)+'%')
+          +popRow('Frames harvested',fmt(frames))
+          +popRow('Hit rate',frames?rate.toFixed(1)+'%':'&mdash;')
+          +'<div class="cpnote">Unreviewed detector output &mdash; some of '
+          +'these are goats, sheep and shadows.</div>';
+      }else{
+        h+='<div class="cpbig" style="color:'+ink+'">'+fmt(frames)+'</div>'
+          +'<div class="cpunit">frames harvested</div>'
+          +'<div class="cpbar"><i style="width:'+Math.min(100,pct(frames,cMax.n))
+          +'%;background:'+ink+'"></i></div>'
+          +popRow('Share of the harvest',pct(frames,worldF).toFixed(2)+'%')
+          +popRow('Cells with frames',v[4].toLocaleString()+' @ '+cRes+'°')
+          +popRow('Dog calls',fmt(dogs));
+        if(!clean()&&v[1])h+=popRow('GPS outliers shown',fmt(v[1]));
+        if(clean()&&v[1])h+=popRow('GPS outliers hidden',fmt(v[1]));
+      }
+      popBody.innerHTML=h;
+      pop.hidden=false;
+    }
+    var pop=document.getElementById('mapPop'),
+        popBody=document.getElementById('mapPopBody'),
+        popX=document.getElementById('mapPopX'),popName=null;
+    function closePop(){pop.hidden=true;popName=null;}
+    if(popX)popX.addEventListener('click',closePop);
+    document.addEventListener('keydown',function(e){
+      if(e.key==='Escape'&&pop&&!pop.hidden)closePop();
+    });
+    /* Which country is under the pointer, worked out from the coordinates
+       rather than from an echarts region event. Two reasons: the geo emits
+       nothing for a region unless triggerEvent is set, and even then the
+       cells are a series ON TOP of the map, so over land -- the only place
+       worth clicking -- the click never reaches the country underneath.
+       Resolving from lon/lat treats a cell, a bare country and open sea
+       alike. world.json is already in the page; 217 bounding boxes reject
+       almost everything before any ray casting happens. */
+    var cIdx=null;
+    function buildCIdx(){
+      cIdx=[];
+      (world.features||[]).forEach(function(f){
+        var nm=(f.properties||{}).name;
+        if(!nm||!f.geometry)return;
+        var polys=f.geometry.type==='MultiPolygon'?f.geometry.coordinates
+                                                 :[f.geometry.coordinates];
+        var x0=1e9,x1=-1e9,y0=1e9,y1=-1e9,parts=[];
+        polys.forEach(function(poly){
+          if(!poly||!poly.length)return;
+          parts.push(poly);
+          poly.forEach(function(ring){
+            (ring||[]).forEach(function(pt){
+              if(pt[0]<x0)x0=pt[0];if(pt[0]>x1)x1=pt[0];
+              if(pt[1]<y0)y0=pt[1];if(pt[1]>y1)y1=pt[1];
+            });
+          });
+        });
+        if(parts.length)cIdx.push({n:nm,b:[x0,y0,x1,y1],p:parts});
+      });
+    }
+    function inRing(x,y,ring){
+      var inside=false,i,j,xi,yi,xj,yj;
+      for(i=0,j=ring.length-1;i<ring.length;j=i++){
+        xi=ring[i][0];yi=ring[i][1];xj=ring[j][0];yj=ring[j][1];
+        if(((yi>y)!==(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi)+xi))inside=!inside;
+      }
+      return inside;
+    }
+    function countryAt(x,y){
+      if(!cIdx)buildCIdx();
+      for(var k=0;k<cIdx.length;k++){
+        var c=cIdx[k],b=c.b;
+        if(x<b[0]||x>b[2]||y<b[1]||y>b[3])continue;
+        for(var m=0;m<c.p.length;m++){
+          var poly=c.p[m],hit=false;
+          /* even-odd across every ring, so a hole punches back out */
+          for(var r=0;r<poly.length;r++)if(inRing(x,y,poly[r]))hit=!hit;
+          if(hit)return c.n;
+        }
+      }
+      return null;
+    }
+    /* zr sees the click before the series handler does, so the decision waits
+       a tick: a click on a region marker is a command-generator click and
+       must not also swap the card underneath it. */
+    var clickTaken=false;
+    ch.getZr().on('click',function(e){
+      var x=e.offsetX,y=e.offsetY;
+      setTimeout(function(){
+        if(clickTaken){clickTaken=false;return;}
+        var c=pxToLL(x,y),nm=c?countryAt(c[0],c[1]):null;
+        if(!nm||nm===popName){closePop();return;}
+        popName=nm;showCountry(nm);
+      },0);
+    });
     ch.on('click',function(p){
+      /* Only a region marker generates commands. This fires for the cell
+         bands too, and without the guard a click on a cell reached
+         p.data.key on a point that has none. */
       if(p.seriesIndex!==REG||!p.data)return;
+      clickTaken=true;                 /* so the card does not also swap */
       var inp=document.getElementById('cmdRegion');
       if(!inp)return;
       inp.value=p.data.key;
