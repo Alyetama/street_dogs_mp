@@ -7152,6 +7152,39 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     cellSize=cellNum(cur.res);  // sizeable only once the geo layout exists
     ch.setOption({series:upd(null,cellSize,null)});
     legend();
+    /* Keep the world inside the frame. echarts roam has no pan bounds, so a
+       drag could carry the whole map off the panel and leave an empty field
+       with no way back but Reset. The rule is the ordinary one for a map:
+       never show emptiness past an edge. Along an axis where the map is
+       larger than the viewport, the centre may travel only as far as its own
+       edge; where it is smaller, it stays centred, which locks panning at the
+       resting zoom -- correct, since the whole world is already in view.
+       geo.center is in PROJECTED units, so the bounds are the projected
+       extent of the globe, not 180/90. */
+    var WX=eeFwd([180,0])[0],WY=Math.abs(eeFwd([0,90])[1]);
+    function pxPerUnit(){
+      try{
+        var a=ch.convertToPixel({geoIndex:0},[0,0]),
+            b=ch.convertToPixel({geoIndex:0},[90,45]),f=eeFwd([90,45]);
+        var s=(b[0]-a[0])/f[0];
+        return isFinite(s)&&s>0?s:null;
+      }catch(_){return null;}
+    }
+    function clampCenter(){
+      var g;
+      try{g=ch.getOption().geo[0];}catch(_){return;}
+      /* null centre is the resting fit, which is already inside by
+         construction -- and writing one would pin the camera for good */
+      if(!g||!g.center)return;
+      var s=pxPerUnit();
+      if(!s)return;
+      var r=mapEl.getBoundingClientRect();
+      var mx=Math.max(0,WX-(r.width/2)/s),my=Math.max(0,WY-(r.height/2)/s),
+          cx=Math.min(mx,Math.max(-mx,g.center[0])),
+          cy=Math.min(my,Math.max(-my,g.center[1]));
+      if(cx!==g.center[0]||cy!==g.center[1])
+        ch.setOption({geo:{center:[cx,cy]}});
+    }
     /* pick the finest grid whose cells are big enough to see; the 0.05° grid
        lives in its own file and is fetched the first time zoom warrants it */
     function wantRes(){
@@ -7192,6 +7225,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
        Swapping to a different grid replaces tens of thousands of points, so
        it waits for the wheel to stop. */
     ch.on('georoam',function(){
+      clampCenter();
       cellSize=cellNum(cur.res);
       ch.setOption({series:upd(null,cellSize,null)});
       drawHud();
@@ -7250,6 +7284,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       /* with a custom projection, geo.center is in PROJECTED coordinates --
          lon/lat here pans the camera off the globe into blank space */
       ch.setOption({geo:{center:eeFwd(hit.value),zoom:5}});
+      clampCenter();
       roamed();
       findEl.blur();
     });
