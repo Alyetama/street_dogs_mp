@@ -7318,7 +7318,14 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       drawHud();
     });
     mapEl.addEventListener('mouseleave',function(){hudPx=null;hud.textContent=''});
-    window.addEventListener('resize',function(){ch.resize()});
+    /* A resize refits the map, so a centre that was against an edge a moment
+       ago can now sit outside the bounds -- narrowing the window while panned
+       into a corner left a quarter of the panel empty. The clamp only ran on
+       roam, and a resize is not one. Repaint too: the viewport the cells were
+       culled to is the old one. */
+    window.addEventListener('resize',function(){
+      ch.resize();clampCenter();paint(true);drawHud();
+    });
   }).catch(function(){mapEl.innerHTML='<div style="color:#69727d;padding:40px;text-align:center">map data unavailable</div>'});
 })();
 var bEl=document.getElementById('bars');
