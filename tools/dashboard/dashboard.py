@@ -1538,7 +1538,7 @@ min-width:44px;text-align:center}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',loading=false,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1555,6 +1555,16 @@ function skeleton(){
     var d=document.createElement('div');d.className='sk';g.appendChild(d);
   }
   $('state').innerHTML='';
+  /* The grid is honest while loading -- it shows skeletons -- but the count
+     line went on describing the PREVIOUS mode, so switching to Check my
+     annotations and back read "1,642 annotated" over a queue that was still
+     arriving. And `items` still held the old list, so a keyboard F or D
+     landed on a crop from the view being left. Both are neutralised until the
+     response the page is actually waiting for lands. */
+  loading=true;
+  items=[];reserve=[];
+  $('pg').textContent=$('pg2').textContent='loading\u2026';
+  $('next').disabled=$('next2').disabled=true;
 }
 function toTop(){
   try{
@@ -1568,13 +1578,24 @@ function toTop(){
    could look at one again: flagging removed a crop from the queue for good.
    This reads the ledgers instead of the pool, shows each crop's current
    verdict, and lets it be changed in place. */
+/* EVERY loader stamps its request and drops a response the page has moved
+   past. Both write the same globals -- items, pages, the count line, the
+   pager -- so a slower fetch landing after a faster one repainted the grid
+   with the other mode's data: switching to Check my annotations and back
+   left the queue showing fifty lit verdict buttons and an "annotated" count,
+   with mode already back to queue. Same race on sort, size, verdict and
+   country, which fire the same way. */
+var reqSeq=0;
 function loadAudit(){
+  var my=++reqSeq;
   skeleton();
   return fetch('/api/review/annotated?page='+page+'&size='+size+
                '&sort='+auditSort()+'&label='+encodeURIComponent(verdict))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
+    if(my!==reqSeq)return;          /* superseded before it landed */
     if(j.error)throw 0;
+    loading=false;
     items=j.items||[];reserve=[];page=j.page||0;pages=j.pages||1;
     var only=verdict==='false_positive'?' marked not a dog':
              verdict==='true_positive'?' marked a dog':' annotated';
@@ -1589,6 +1610,8 @@ function loadAudit(){
     if(sel>=items.length)sel=items.length-1;
     render();toTop();
   }).catch(function(){
+    if(my!==reqSeq)return;          /* an old failure must not paint over a
+                                       render that has already succeeded */
     $('state').innerHTML='<div class="state"><b>Could not load annotations</b>'+
       'The ledgers under data/hard_negatives and data/hard_positives could '+
       'not be read.</div>';
@@ -1600,6 +1623,7 @@ function loadAudit(){
 function auditSort(){return (sort==='conf'||sort==='low')?sort:'recent'}
 function load(){
   if(mode==='audit')return loadAudit();
+  var my=++reqSeq;
   skeleton();
   /* returns the promise: callers (and the test harness) can await a settled
      grid instead of guessing at microtask depth */
@@ -1607,7 +1631,9 @@ function load(){
                '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
+    if(my!==reqSeq)return;          /* superseded before it landed */
     if(j.error)throw 0;
+    loading=false;
     items=j.items||[];reserve=j.reserve||[];page=j.page||0;pages=j.pages||1;
     todoN=j.total_unflagged||0;flaggedN=j.flagged_total||0;
     smallN=j.too_small||0;minPx=j.min_px||0;
@@ -1641,6 +1667,8 @@ function load(){
     toTop();
   })
   .catch(function(){
+    if(my!==reqSeq)return;          /* an old failure must not paint over a
+                                       render that has already succeeded */
     $('grid').innerHTML='';$('foot').hidden=true;
     $('state').innerHTML='<div class="state"><b>Could not reach the dashboard</b>'+
       'The review queue is served by the dashboard process. Check that it is '+
@@ -1886,6 +1914,7 @@ function cols(){
    clears the selection instead -- advancing a highlight the user never asked
    for is just the grid moving on its own. */
 function flag(i,viaKey,label){
+  if(loading)return;               /* the list under this index is on its way out */
   var c=items[i];if(!c||busy[c.name])return;
   label=label||'false_positive';
   /* Auditing is not consuming. The crop keeps its place in the grid and its
