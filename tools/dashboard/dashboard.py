@@ -1071,22 +1071,40 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None):
             # rather than filing the same image under both labels, which
             # would put one image in a dataset twice with opposite classes.
             other = POS_LABEL if label == FLAG_LABEL else FLAG_LABEL
+            moved_crop = moved_full = False
             if name in _flag_names(other):
                 _rewrite_labels(name, other)
                 _flag_names(other).discard(name)
                 ost = _store_for(other)
-                for p in (os.path.join(ost['crops'], name),
-                          os.path.join(ost['full'], name)):
+                # MOVE the copies rather than delete-and-recopy. The recopy
+                # below reads the live pool, and a crop being re-judged from
+                # the audit view left that pool minutes after it was first
+                # flagged -- so deleting here and copying from the pool lost
+                # the image entirely, leaving a ledger entry with no picture.
+                for src, dst, flag_it in (
+                        (os.path.join(ost['crops'], name),
+                         os.path.join(st['crops'], name), 'crop'),
+                        (os.path.join(ost['full'], name),
+                         os.path.join(st['full'], name), 'full')):
                     try:
-                        os.remove(p)
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        os.replace(src, dst)
+                        if flag_it == 'crop':
+                            moved_crop = True
+                        else:
+                            moved_full = True
                     except OSError:
-                        pass
+                        try:
+                            os.remove(src)
+                        except OSError:
+                            pass
             # the two copies are independent: the full frame can survive the
             # prune a beat longer than the crop, or vice versa
-            got_crop = _copy_out(os.path.join(CROPS, name),
-                                 os.path.join(st['crops'], name))
-            got_full = _copy_out(os.path.join(CROPS, 'full', name),
-                                 os.path.join(st['full'], name))
+            got_crop = moved_crop or _copy_out(
+                os.path.join(CROPS, name), os.path.join(st['crops'], name))
+            got_full = moved_full or _copy_out(
+                os.path.join(CROPS, 'full', name),
+                os.path.join(st['full'], name))
             rec = {'image_id': m.group(2),
                    'conf': round(int(m.group(3)) / 100.0, 2),
                    'ts': int(m.group(1)), 'crop': name, 'label': label,
@@ -1338,6 +1356,11 @@ font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
 border:1px solid rgba(232,166,69,.55)!important;color:var(--acc)!important;
 font-weight:700}
 .card.changed{box-shadow:inset 0 0 0 2px var(--acc)}
+/* no verdict left on it: neither button is lit, and the tile says so rather
+   than looking like a crop that was never reached */
+.card.unjudged{opacity:.62}
+.card.unjudged .meta::after{content:'no verdict';margin-left:auto;
+font-size:10px;color:var(--dim)}
 body.auditing #country,body.auditing #unkeep{display:none}
 #verdict{display:none}
 body.auditing #verdict{display:inline-block}
@@ -1747,11 +1770,14 @@ function tile(c){
       '</span><span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
     '<div class="acts">'+
       '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
-        '" type="button" title="false positive (F)">'+
+        '" type="button" title="'+(c.label==='false_positive'?
+          'click again to remove this annotation':'false positive (F)')+'">'+
         '&#9873; Not a dog</button>'+
       '<button class="fbtn yes'+(c.label==='true_positive'?' on':'')+
-        '" type="button" title="a real dog the detector '+
-        'was unsure about (D)">&#10003; Is a dog</button>'+
+        '" type="button" title="'+(c.label==='true_positive'?
+          'click again to remove this annotation':
+          'a real dog the detector was unsure about (D)')+
+        '">&#10003; Is a dog</button>'+
     '</div>';
   var im=d.querySelector('.thumb');
   im.onclick=function(){openLb(idx(c.name))};
@@ -1871,25 +1897,36 @@ function flag(i,viaKey,label){
     if(busy[c.name])return;
     busy[c.name]=1;
     var was=c.label;
+    /* Clicking the verdict a crop ALREADY has takes it back: the annotation
+       is removed and the crop returns to the unreviewed queue. Auditing is
+       for the ones you got wrong, and "wrong" includes having judged
+       something that should never have been judged at all -- a crop too
+       blurred to call, or one flagged by a mis-click. Without this the only
+       way out of a bad annotation was to assert the opposite one, which is
+       just a second guess wearing a verdict. */
+    var undo=(was===label);
     return fetch('/api/detect/flag',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:c.name,label:label})})
+      body:JSON.stringify({name:c.name,label:label,undo:undo})})
      .then(function(r){return r.json()}).then(function(j){
         delete busy[c.name];
         if(!j||j.ok===false)return;
-        c.label=label;
+        c.label=undo?null:label;
         var el=cardAt(i);
         if(el){
           var no=el.querySelector('.fbtn.no'),ys=el.querySelector('.fbtn.yes');
-          if(no)no.classList.toggle('on',label==='false_positive');
-          if(ys)ys.classList.toggle('on',label==='true_positive');
-          el.classList.toggle('changed',was!==label);
+          if(no)no.classList.toggle('on',c.label==='false_positive');
+          if(ys)ys.classList.toggle('on',c.label==='true_positive');
+          /* the border marks "this differs from what the ledger held when the
+             page loaded", which a removal does too */
+          el.classList.toggle('changed',was!==c.label);
+          el.classList.toggle('unjudged',!c.label);
         }
         if(j.flagged_total!=null)flaggedN=j.flagged_total;
         if(j.positive_total!=null)posN=j.positive_total;
         score();
-        if(was!==label)toast('changed to '+(label==='true_positive'?
-          'a dog':'not a dog'));
+        toast(undo?'annotation removed \u2014 back in the queue':
+              'changed to '+(label==='true_positive'?'a dog':'not a dog'));
      }).catch(function(){delete busy[c.name]});
   }
   busy[c.name]=1;
