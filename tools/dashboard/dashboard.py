@@ -1527,6 +1527,16 @@ cursor:pointer;font-family:inherit;font-variant-numeric:tabular-nums;transition:
    came out as a thin squiggle riding high above the label. A stroked icon
    takes its weight from stroke-width and its position from the flex row. */
 .bico{width:14px;height:14px;flex:none}
+/* The model's guess. Dashed, lower-case, and in nobody's verdict colour --
+   a reader must never mistake it for something that was decided. */
+.sg{position:absolute;left:6px;top:6px;max-width:calc(100% - 12px);
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+font-size:10px;line-height:1.5;padding:0 6px;border-radius:5px;
+background:rgba(13,17,23,.82);border:1px dashed rgba(130,140,150,.5);
+color:var(--mut);pointer-events:auto}
+.sg-dog{border-color:rgba(232,166,69,.55);color:#e8b877}
+.sg-animal{border-color:rgba(110,180,150,.5);color:#8fd0b4}
+.sg-object{border-color:rgba(130,140,150,.45);color:var(--dim)}
 .rbtn:hover{background:rgba(232,166,69,.23)}
 .rbtn[disabled]{opacity:.35;cursor:default;background:rgba(130,140,150,.08);
 border-color:var(--bd);color:var(--dim)}
@@ -1727,6 +1737,17 @@ min-width:44px;text-align:center}
       <option value="queue">Unreviewed queue</option>
       <option value="audit">Check my annotations</option>
     </select>
+    <!-- A MODEL'S GUESS, and labelled as one. It sorts the queue so a
+         reviewer can work through one kind of mistake at a time; it is never
+         written to a ledger and never becomes a label. Hidden until
+         tools/detect/triage_crops.py has actually produced something. -->
+    <select id="suggest" title="narrow the queue by what a general-purpose image model thinks each crop is — a guess to sort by, never a label" hidden>
+      <option value="">Any guess</option>
+      <option value="dog">Looks like a dog</option>
+      <option value="animal">Other animal</option>
+      <option value="object">Not an animal</option>
+      <option value="none">No guess yet</option>
+    </select>
     <select id="verdict" title="which verdict to check">
       <option value="all">Both verdicts</option>
       <option value="false_positive">Only &ldquo;not a dog&rdquo;</option>
@@ -1800,7 +1821,7 @@ min-width:44px;text-align:center}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',loading=false,
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',loading=false,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -1890,6 +1911,7 @@ function load(){
   /* returns the promise: callers (and the test harness) can await a settled
      grid instead of guessing at microtask depth */
   return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort+
+    '&suggest='+encodeURIComponent(suggest)+
                '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
@@ -1904,6 +1926,7 @@ function load(){
     if(j.positive_total!=null)posN=j.positive_total;
     if(j.collapsed!=null)dupN=j.collapsed;
     paintCountries(j.countries,j.country);
+    paintSuggest(j);
     score();
     /* "Page 3 of 47" described an offset that no longer moves. What the
        reader actually needs is how much is left after this screen. */
@@ -2081,6 +2104,12 @@ function tile(c){
     '<div class="rail"><i style="width:'+pc+'%"></i></div>'+
     '<div class="meta"><span class="id" title="'+att(c.image_id)+'">'+esc(c.image_id)+
       '</span><span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
+    /* the guess, dotted and muted so it never reads as a verdict */
+    (c.sg?'<div class="sg sg-'+c.sg+'" title="'+att('a general-purpose image '+
+        'model guessed '+(c.sgl||c.sg)+((c.sgp!=null)?' ('+Math.round(c.sgp*100)+
+        '% of its confidence on '+SG_WORD[c.sg]+')':'')+
+        '. A suggestion for sorting the queue — not a label, and not recorded.')+
+      '">'+esc(c.sgl||SG_WORD[c.sg])+'</div>':'')+
     '<div class="acts">'+
       '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
         '" type="button" title="'+(c.label==='false_positive'?
@@ -2748,6 +2777,7 @@ $('unkeep').onclick=function(){
    options on the way back in, so a stale value left by an older build -- or
    anything else that ends up in storage -- cannot put the page into a sort
    the server does not know. */
+var SG_WORD={dog:'a dog',animal:'an animal',object:'not an animal'};
 var ICO_REFRESH='<svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
 var SORT_KEY='sdReviewSort';          /* the older single-key store */
 var PREFS_KEY='sdReview';
@@ -2780,6 +2810,9 @@ function restorePrefs(){
   if((v=restoreSel('sort',o.sort))!==null)sort=v;
   if((v=restoreSel('size',o.size))!==null)size=parseInt(v,10)||size;
   if((v=restoreSel('verdict',o.verdict))!==null)verdict=v;
+  /* the options are rebuilt from the response, like country's, so the value
+     rides along in the first request instead of being matched now */
+  if(o.suggest)suggest=o.suggest;
   if((v=restoreSel('mode',o.mode))!==null){
     mode=v;
     document.body.classList.toggle('auditing',mode==='audit');
@@ -2832,6 +2865,28 @@ function paintCountries(list,cur){
   if(cur!=null)$('country').value=cur;
 }
 var countryHealed=false;
+/* Only offered once the triage tool has produced predictions: an empty
+   dropdown that silently filters nothing is worse than no dropdown. Counts
+   come from the server, tallied on the post-collapse queue, so each option
+   promises exactly what it delivers. */
+function paintSuggest(j){
+  var el=$('suggest');if(!el)return;
+  if(!j.suggest_ready){el.hidden=true;return;}
+  el.hidden=false;
+  var c=j.suggest_counts||{},L=[['','Any guess',null],
+    ['dog','Looks like a dog','dog'],['animal','Other animal','animal'],
+    ['object','Not an animal','object'],['none','No guess yet','none']];
+  var html='';
+  for(var i=0;i<L.length;i++){
+    var k=L[i][2],n2=(k===null)?null:(c[k]||0);
+    html+='<option value="'+att(L[i][0])+'">'+esc(L[i][1])+
+      (n2===null?'':' ('+n(n2)+')')+'</option>';
+  }
+  el.innerHTML=html;
+  el.value=j.suggest||'';
+}
+$('suggest').onchange=function(){var v=this.value;
+  savePref('suggest',v);suggest=v;page=0;sel=-1;load()};
 $('country').onchange=function(){var v=this.value;
   savePref('country',v);country=v;page=0;sel=-1;load()};
 /* Switching mode does NOT bank the screen, for the same reason the other view
@@ -4862,7 +4917,53 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent'):
                                    and i['name'] in live[POS_LABEL])}
 
 
-def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
+# ── model suggestions: a way to sort the queue, never a label ───────────────
+# Written by tools/detect/triage_crops.py, read here and nowhere else. The
+# file is a sibling of the ledgers, not part of them: nothing that builds a
+# training set opens it, and tools/detect/tests/adv_triage_isolation.py
+# asserts that against the source. Every record carries unverified=True.
+TRIAGE_FILE = os.path.join(OUT, 'triage.jsonl')
+TRIAGE_BUCKETS = ('dog', 'animal', 'object')
+_triage_cache = {'mtime': None, 'doc': {}}
+
+
+def triage_index():
+    """{crop name: {bucket, p, top}}, reloaded when the file changes.
+
+    Same mtime discipline as country_index(): the hourly rebuild has to reach
+    a server that has been up for days, and a triage run appends to this file
+    while that server is running.
+    """
+    try:
+        mtime = os.path.getmtime(TRIAGE_FILE)
+    except OSError:
+        return _triage_cache['doc'] if _triage_cache['mtime'] else {}
+    if _triage_cache['mtime'] != mtime:
+        doc = {}
+        try:
+            with open(TRIAGE_FILE) as fh:
+                for ln in fh:
+                    try:
+                        r = json.loads(ln)
+                    except ValueError:
+                        continue
+                    nm = isinstance(r, dict) and r.get('name')
+                    if not nm or r.get('bucket') not in TRIAGE_BUCKETS:
+                        continue
+                    # last line wins, so a --refresh re-run supersedes
+                    # prefer the in-bucket name; fall back to the overall
+                    # top-1 for records written before that field existed
+                    doc[nm] = {'b': r['bucket'], 'p': r.get('p'),
+                               'top': r.get('label')
+                               or (r.get('top') or [[None]])[0][0]}
+        except OSError:
+            doc = {}
+        _triage_cache.update(mtime=mtime, doc=doc)
+    return _triage_cache['doc']
+
+
+def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
+                   suggest=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
@@ -4940,7 +5041,9 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
     # reviewable pool.
     cdoc = country_index()
     by_country = cdoc.get('by_image') or {}
+    _tri = triage_index()
     want = (country or '').upper()
+    want_sg = suggest if suggest in TRIAGE_BUCKETS or suggest == 'none' else ''
     cands = []
     for name in names:
         m = _CROP_RE.match(name)
@@ -4950,10 +5053,15 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
         if iid in judged:      # flagged, or already looked at and kept
             continue
         iso = by_country.get(iid, '')
+        sg = _tri.get(name) or {}
         cands.append({'name': name, 'image_id': iid,
                       'ts': int(m.group(1)),
                       'conf': round(int(m.group(3)) / 100.0, 2),
                       'country': iso,
+                      # a GUESS, carried under its own keys so no reader can
+                      # confuse it with the verdict fields
+                      'sg': sg.get('b', ''), 'sgp': sg.get('p'),
+                      'sgl': sg.get('top'),
                       # harvested crops have no burned-in preview frame, so
                       # the lightbox opens on the ORIGINAL through /hq
                       'harvested': where.get(name) != CROPS,
@@ -5044,7 +5152,18 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
             tallied.add(c['image_id'])
             offer[c['country']] = offer.get(c['country'], 0) + 1
     coverage = (round(len(tallied) / len(kept), 3)) if kept else 0
-    items = [c for c in kept if c['country'] == want] if want else kept
+    # Counted on the same population the filter will select from, and after
+    # the collapse, so the number on the option is the number it delivers.
+    sg_offer = {'none': 0}
+    for c in kept:
+        k = c.get('sg') or 'none'
+        sg_offer[k] = sg_offer.get(k, 0) + 1
+    if want:
+        kept = [c for c in kept if c['country'] == want]
+    if want_sg:
+        kept = [c for c in kept
+                if (c.get('sg') or 'none') == want_sg]
+    items = kept
     total = len(items)
     pages = max(1, -(-total // size))
     page = min(page, pages - 1)
@@ -5057,6 +5176,11 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country=''):
             'pages': pages, 'flagged_total': len(flagged_ids),
             # never a silent cap: the page says how many it is holding back
             'too_small': too_small, 'min_px': floor,
+            # what the model guessed, and how many of each are in the queue.
+            # 'suggest_ready' is how the page knows whether to offer the
+            # control at all -- an empty file means nobody has run the tool.
+            'suggest': want_sg, 'suggest_counts': sg_offer,
+            'suggest_ready': bool(_tri),
             # crops only: the set's manifest sits in the same directory
             'harvested_available': sum(1 for n, d in pooled
                                        if d != CROPS and _CROP_RE.match(n)),
@@ -5178,7 +5302,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json(review_payload(int(q.get('page', 0)),
                                           int(q.get('size', REVIEW_PAGE)),
                                           str(q.get('sort', REVIEW_SORT_DEFAULT)),
-                                          str(q.get('country', ''))))
+                                          str(q.get('country', '')),
+                                          str(q.get('suggest', ''))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return

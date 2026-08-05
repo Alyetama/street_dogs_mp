@@ -239,7 +239,10 @@ function fetch(url, opts) {
 
 // ── the page's own element graph (built from the real markup ids) ───────────
 for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','next','next2','mode','verdict',
-                  'foot','grid','state','sort','size','reload','country','leftlab']) {
+                  'foot','grid','state','sort','size','reload','country','leftlab',
+                  // the model-suggestion filter; without it paintSuggest and
+                  // its onchange bind against null and kill the whole script
+                  'suggest','balNum','balNumU','balLeft']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
