@@ -1547,7 +1547,11 @@ font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 .balnum span{font-size:10.5px;color:var(--dim);margin-top:3px}
 .bal.ok .balnum b{color:var(--green)}
 .balcol{flex:1;min-width:150px}
-.balbar{position:relative;height:9px;border-radius:5px;
+.balrow{display:flex;align-items:center;gap:10px}
+.balleft{flex:none;font-size:11.5px;color:var(--mut);font-variant-numeric:tabular-nums}
+.balleft b{color:var(--tx);font-weight:650}
+.bal.ok .balleft b{color:var(--green)}
+.balbar{position:relative;flex:1;height:9px;border-radius:5px;
 background:rgba(130,140,150,.16);overflow:hidden}
 /* ONE fill: how much of the not-dog side is standing, counting both what is
    in the built dataset and what your flags have already earned */
@@ -1755,7 +1759,13 @@ min-width:44px;text-align:center}
 <div class="bal" id="bal" hidden>
   <div class="balnum"><b id="balNum">&mdash;</b><span id="balNumU">crops left to judge</span></div>
   <div class="balcol">
-    <div class="balbar"><i id="balFill"></i></div>
+    <!-- the remainder sits at the end of the track it belongs to, in the
+         track's own unit -- the big number on the left counts JUDGEMENTS,
+         this counts the not-dog CROPS the bar is still short -->
+    <div class="balrow">
+      <div class="balbar"><i id="balFill"></i></div>
+      <span class="balleft" id="balLeft"></span>
+    </div>
     <div class="baltx"><span id="balMain">&mdash;</span></div>
   </div>
 </div>
@@ -1964,6 +1974,7 @@ function paintBal(){
     el.className='bal';
     $('balFill').style.width='0%';
     $('balNum').textContent='—';$('balNumU').textContent='dataset not found';
+    $('balLeft').textContent='';
     $('balMain').textContent=b.error||('missing '+(b.dataset||'dataset'));
     el.title='';
     return;
@@ -2000,6 +2011,7 @@ function paintBal(){
   if(!short){
     $('balNum').textContent='0';
     $('balNumU').textContent='crops left to judge';
+    $('balLeft').innerHTML='<b>0</b> left';
     $('balMain').innerHTML='<b>Balanced.</b> '+n(got)+' not-dog against '+
       n(want)+' dog';
   }else if(need===null){
@@ -2007,11 +2019,16 @@ function paintBal(){
        cannot close this, and a number here would be a lie */
     $('balNum').textContent='—';
     $('balNumU').textContent='not closing';
+    $('balLeft').innerHTML='<b>'+n(short)+'</b> left';
     $('balMain').innerHTML='<b>'+n(short)+'</b> not-dog crops short, but as '+
       'many of your verdicts are dogs as not-dogs';
   }else{
     $('balNum').textContent=n(need);
     $('balNumU').textContent='crops left to judge';
+    $('balLeft').innerHTML='<b>'+n(short)+'</b> left';
+    $('balLeft').title=n(short)+' more not-dog crops fill this bar. That is '+
+      'not the same as the '+n(need)+' on the left: those are crops to JUDGE, '+
+      'and only some of what you judge ends up a usable not-dog crop.';
     $('balMain').innerHTML='<b>'+Math.round(pct)+'%</b> of the way &mdash; '+
       n(got)+' of '+n(want)+' not-dog crops';
   }
