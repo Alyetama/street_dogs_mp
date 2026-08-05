@@ -1993,23 +1993,51 @@ function paintBal(){
   pb.style.left=pctHave.toFixed(1)+'%';
   pb.style.width=Math.max(0,pctGot-pctHave).toFixed(1)+'%';
   var short=Math.max(0,want-have-pend);
-  var need=short?Math.ceil(short/y):0;
-  el.className='bal'+(need?'':' ok');
+  /* JUDGEMENTS, not flags. Dividing the shortfall by the yield answers a
+     different question -- how many more NOT-DOGS are needed -- and that only
+     equals the reviewer's workload if every future verdict is "not a dog".
+     About a fifth are not, and each of those joins the very class being
+     chased, so a judgement closes the gap by yield x (negatives - positives).
+     Mirrored from the server so banking a verdict updates it without a round
+     trip. */
+  var nf=b.new_flags||0,np=b.new_positive_flags||0,jd=nf+np;
+  var share=(jd>=(b.mix_min_sample||50))?np/jd:0;
+  var net=y*(1-2*share);
+  var need=short?(net>0?Math.ceil(short/net):null):0;
+  el.className='bal'+(short?'':' ok');
   var ds=b.dataset||'the dataset';
-  if(!need){
+  if(!short){
     $('balMain').innerHTML='<b>Balanced.</b> '+n(have+pend)+' not-dog vs '+
       n(want)+' dog';
+    $('balMain').title='';
+  }else if(need===null){
+    /* every judgement adds to both sides at the same rate: reviewing alone
+       cannot close this, and saying a number would be a lie */
+    $('balMain').innerHTML='<b>Not closing.</b> as many of your verdicts are '+
+      'dogs as not-dogs';
+    $('balMain').title='Both classes are growing at the same rate, so more '+
+      'reviewing does not move the balance. '+n(short)+' not-dog crops short.';
   }else{
-    $('balMain').innerHTML='<b>'+n(need)+'</b> more to flag for a balanced set';
+    /* both numbers, in one line, in their own units -- the legend counts
+       CROPS and this used to count FLAGS, and nothing said so */
+    $('balMain').innerHTML='<b>'+n(need)+'</b> more crops to judge &mdash; '+
+      n(short)+' not-dog crops short';
+    $('balMain').title=n(short)+' more not-dog crops would balance '+n(want)+
+      ' dog crops. About '+Math.round(y*100)+'% of what you flag survives '+
+      'into the dataset (the rest is held back for acceptance, near-'+
+      'duplicate, under the size floor, or ambiguous)'+
+      (share?', and '+Math.round(share*100)+'% of what you judge comes back '+
+        '"a dog", which raises the target':'')+
+      ' — about '+n(need)+' more judgements.';
   }
   /* one legend entry per fill, each naming the number it draws */
   var togo=Math.max(0,want-have-pend);
   var L=[['s1',n(have),'in '+ds],
          ['s2',n(pend),'banked from '+n(b.new_flags||0)+' new flag'+
                        ((b.new_flags||0)===1?'':'s')+', not built yet']];
-  if(togo)L.push(['s3',n(togo),'still to find'+
+  if(togo)L.push(['s3',n(togo),'not-dog crops still to find'+
     (pendPos?' (target +'+n(pendPos)+' from crops you marked as dogs)':'')]);
-  else L.push(['s3','0','still to find']);
+  else L.push(['s3','0','not-dog crops still to find']);
   /* Name the reservation. Roughly a third of what you flag is withheld as the
      acceptance set and never trains, so the target is far higher than "one
      flag, one crop" -- without saying so the panel just looks pessimistic. */
@@ -4424,6 +4452,10 @@ DATASET_CLASSES = ('dog', 'not_dog')
 # (ambiguous ones dropped), crops under the 64px floor go, and the
 # near-duplicate and per-sequence caps trim what is left.
 FLAG_YIELD = 0.460
+# Verdicts needed before the observed dog/not-dog mix is used to project how
+# much reviewing is left. Below this the share is noise, and a couple of
+# early "a dog" calls would swing the estimate by thousands.
+MIX_MIN_SAMPLE = 50
 
 
 def dataset_balance():
@@ -4500,6 +4532,25 @@ def dataset_balance():
     # closing it -- worth collecting, but the estimate must say so
     pending_pos = int(round(fresh_pos * FLAG_YIELD))
     still = max(0, (pos + pending_pos) - (neg + pending))
+
+    # How many more crops must be JUDGED, which is the thing the reviewer
+    # actually does. Dividing the shortfall by FLAG_YIELD answers a
+    # different question -- how many more NEGATIVES are needed -- and only
+    # matches reality if every future verdict is "not a dog". It is not:
+    # a fifth of them come back "a dog", each one adding to the class being
+    # chased. So a judgement closes the gap by yield x (negatives - positives)
+    # rather than by yield, and the honest figure is meaningfully larger.
+    judged = fresh + fresh_pos
+    # Under a small sample the observed mix is noise; fall back to the
+    # negatives-only figure rather than extrapolating from a handful.
+    share = (fresh_pos / judged) if judged >= MIX_MIN_SAMPLE else 0.0
+    net = FLAG_YIELD * (1 - 2 * share)
+    if not still:
+        judgements = 0
+    elif net > 0:
+        judgements = int(-(-still // net))
+    else:
+        judgements = None       # marking dogs at least as fast: never closes
     return {
         'dataset': os.path.basename(DATASET_DIR),
         'dog': pos,
@@ -4511,6 +4562,9 @@ def dataset_balance():
         'pending_negatives': pending,
         'pending_positives': pending_pos,
         'flags_needed': int(-(-still // FLAG_YIELD)) if still else 0,
+        'judgements_needed': judgements,
+        'positive_share': round(share, 4),
+        'mix_min_sample': MIX_MIN_SAMPLE,
         'yield_per_flag': FLAG_YIELD,
         # so the panel can explain why the target is what it is, rather than
         # the number just doubling one day with no visible reason
