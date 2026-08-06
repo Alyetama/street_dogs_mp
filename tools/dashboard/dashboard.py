@@ -41,7 +41,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import duckdb
@@ -4436,7 +4436,7 @@ def render_run_detail(key):
     r = find_run(key, runs)
     if r is not None:
         return (_past_head(r) + _compare_picker(key, runs)
-                + _charts(r) + render_confusion(r))
+                + _charts(r) + render_confusion(r) + render_mistakes(r))
     return '<div class="mnone">That run is no longer on disk.</div>'
 
 
@@ -4597,6 +4597,118 @@ def render_run_diff(a_key, b_key):
             f'<th class="dnum">change</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table>'
             f'{chart}{settings}</div>')
+
+
+# ── what a run got wrong ────────────────────────────────────────────────────
+# Written by tools/detect/run_mistakes.py, which scores a run against its own
+# val split. Read here, never computed here: a panel must not wait on
+# inference, and the answer does not change once a run has finished.
+MISTAKE_DIR = os.path.join(REPO, 'data', 'mistakes')
+_MISS = {}
+
+
+def mistakes_for(key):
+    """The cached mistakes for a run key, or None if it has not been scored."""
+    path = os.path.join(MISTAKE_DIR, str(key).replace('/', '__') + '.json')
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        _MISS.pop(key, None)
+        return None
+    hit = _MISS.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get('items'), list):
+        return None
+    _MISS[key] = (stamp, doc)
+    return doc
+
+
+def mistake_file(key, i):
+    """The absolute path of one wrong crop, or None.
+
+    Resolved from the run's OWN cache by index, so nothing the client sends is
+    ever joined onto a path. The realpath check is belt and braces for a
+    dataset that contains a symlink pointing out of itself.
+    """
+    doc = mistakes_for(key)
+    if not doc:
+        return None
+    try:
+        item = doc['items'][int(i)]
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+    root = os.path.realpath(doc.get('dataset') or '')
+    full = os.path.realpath(os.path.join(root, item.get('file') or ''))
+    if not root or not full.startswith(root + os.sep):
+        return None
+    return full if os.path.isfile(full) else None
+
+
+def render_mistakes(r):
+    """The crops a run got wrong, grouped by which way it went wrong."""
+    key = run_key(r)
+    doc = mistakes_for(key)
+    if not doc:
+        return ''
+    items = doc.get('items') or []
+    if not items:
+        return (f'<div class="wrwrap"><div class="wrhead"><b>Nothing wrong</b>'
+                f'<span class="wrsub">all {doc.get("n", 0):,} validation crops '
+                f'classified correctly</span></div></div>')
+    # one group per off-diagonal cell of the confusion matrix, so the two
+    # readings of the same fact line up: the cell counts them, this shows them
+    groups = {}
+    for i, it in enumerate(items):
+        groups.setdefault((it.get('true'), it.get('pred')), []).append((i, it))
+    order = sorted(groups, key=lambda k: -len(groups[k]))
+
+    chips = ['<button type="button" class="wrchip on" data-g="">'
+             f'all {len(items):,}</button>']
+    for t, pd in order:
+        chips.append(
+            f'<button type="button" class="wrchip" data-g="{esc_html(t)}|{esc_html(pd)}"'
+            + _t(f'crops that really were {t} and the model called {pd}')
+            + f'>{esc_html(t)} &rarr; {esc_html(pd)} '
+              f'<em>{len(groups[(t, pd)]):,}</em></button>')
+
+    tiles = []
+    for t, pd in order:
+        for i, it in groups[(t, pd)]:
+            p = it.get('p')
+            tiles.append(
+                f'<figure class="wrtile" data-g="{esc_html(t)}|{esc_html(pd)}">'
+                f'<img loading="lazy" alt="crop the model got wrong" '
+                f'src="/api/training/wrong?key={quote(key)}&amp;i={i}">'
+                f'<figcaption>'
+                # same order as the chips and as the matrix reads: what it
+                # really was, then what the model said. One line each, because
+                # a class name is as long as "unleashed" and three things on
+                # one line at 10px truncated the direction away.
+                f'<span class="wrdir"><span class="wrwas">{esc_html(t)}</span>'
+                f'<span class="wrarr">&rarr;</span>'
+                f'<span class="wrsaid">{esc_html(pd)}</span></span>'
+                f'<span class="wrp">{(p if p is not None else 0) * 100:.0f}% sure</span>'
+                f'</figcaption></figure>')
+
+    n, wrong = doc.get('n', 0), doc.get('wrong', len(items))
+    more = ('' if not doc.get('truncated') else
+            f' &middot; showing the {len(items)} it was surest about')
+    return (f'<div class="wrwrap" id="wrong">'
+            f'<div class="wrhead"><b>What it got wrong</b>'
+            f'<span class="wrsub">{wrong:,} of {n:,} validation crops, '
+            f'most confident first{more}</span></div>'
+            f'<div class="wrchips">{"".join(chips)}</div>'
+            f'<div class="wrgrid">{"".join(tiles)}</div>'
+            f'<div class="wrfoot">Sorted by how sure it was. A confident '
+            f'mistake is worth more than a hesitant one &mdash; the model is '
+            f'not undecided about these, and whatever it has learnt to see '
+            f'there it has learnt firmly.</div></div>')
 
 
 # ── confusion matrices ──────────────────────────────────────────────────────
@@ -6823,6 +6935,26 @@ class BoardHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self._json({'left': None, 'error': str(e)})
             return
+        if self.path.split('?', 1)[0] == '/api/training/wrong':
+            q = parse_qs(urlparse(self.path).query)
+            path = mistake_file(q.get('key', [''])[0], q.get('i', [''])[0])
+            if not path:
+                self.send_error(404)
+                return
+            try:
+                with open(path, 'rb') as fh:
+                    body = fh.read()
+            except OSError:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(body)))
+            # immutable: a val crop does not change under a finished run
+            self.send_header('Cache-Control', 'public, max-age=86400')
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.split('?', 1)[0] == '/api/training/diff':
             try:
                 q = parse_qs(urlparse(self.path).query)
@@ -7999,6 +8131,49 @@ text-transform:lowercase;letter-spacing:.04em}
 .dwarn{margin:10px 0 0;padding:8px 11px;border-radius:9px;font-size:12px;
 color:var(--tx);background:rgba(216,116,58,.10);
 border:1px solid rgba(216,116,58,.30)}
+/* ── what a run got wrong ──
+   The confusion matrix counts them; this is the same fact in the only form
+   you can act on. Tiles are small and dense because the value is in seeing a
+   KIND emerge across twenty of them, not in studying one. */
+.wrwrap{margin:22px 0 2px;padding-top:18px;border-top:1px solid var(--bd)}
+.wrhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:11px}
+.wrhead b{font-size:13px;color:var(--tx)}
+.wrsub{font-size:11.5px;color:var(--dim)}
+.wrchips{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}
+.wrchip{appearance:none;background:transparent;border:1px solid var(--bd);
+color:var(--mut);border-radius:999px;padding:4px 12px;font-size:11.5px;
+font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s,
+background .12s}
+.wrchip em{font-style:normal;color:var(--dim);margin-left:5px;
+font-variant-numeric:tabular-nums}
+.wrchip:hover{color:var(--tx);border-color:var(--dim)}
+.wrchip:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.wrchip.on{color:var(--tx);border-color:rgba(216,116,58,.5);
+background:rgba(216,116,58,.13)}
+.wrchip.on em{color:var(--red)}
+.wrgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(134px,1fr));
+gap:9px}
+.wrtile{margin:0;border:1px solid var(--bd);border-radius:9px;overflow:hidden;
+background:var(--panel2);transition:border-color .12s}
+.wrtile:hover{border-color:rgba(216,116,58,.45)}
+.wrtile[hidden]{display:none}
+.wrtile img{width:100%;aspect-ratio:1;object-fit:contain;display:block;
+background:#0c0e11}
+.wrtile figcaption{padding:5px 7px 6px;
+font:400 10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+font-variant-numeric:tabular-nums}
+.wrdir{display:flex;align-items:baseline;gap:4px;min-width:0}
+/* what it SAID is the mistake, so that is the word that carries the colour */
+.wrsaid{color:var(--red);font-weight:600;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.wrwas{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wrarr{color:var(--dim);flex:none;opacity:.7}
+.wrp{display:block;color:var(--mut);margin-top:1px}
+.wrfoot{margin-top:11px;font-size:11px;color:var(--dim);max-width:640px;
+line-height:1.5}
+/* the matrix's own off-diagonal cells jump here */
+.cxc.err{cursor:pointer}
+.cxc.err:hover{outline:1px solid rgba(216,116,58,.55);outline-offset:-1px}
 /* ── confusion matrix ── */
 .cxwrap{margin:18px 0 2px}
 .cxhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
@@ -8620,6 +8795,45 @@ function initTracker(){
   var det=document.getElementById('trkdet');
   /* Controls that appear inside a swapped-in detail region. Called after every
      swap, because innerHTML threw the old nodes and their listeners away. */
+  /* The chips and the matrix are two views of one fact, so they drive each
+     other: picking a direction filters the grid, and clicking an off-diagonal
+     cell of the matrix picks that direction. */
+  function wireWrong(){
+    var wrap=document.getElementById('wrong');
+    if(!wrap)return;
+    var chips=wrap.querySelectorAll('.wrchip'),
+        tiles=wrap.querySelectorAll('.wrtile');
+    function show(g){
+      [].forEach.call(chips,function(c){c.classList.toggle('on',c.dataset.g===g)});
+      [].forEach.call(tiles,function(t){t.hidden=!!g&&t.dataset.g!==g});
+    }
+    [].forEach.call(chips,function(c){
+      c.addEventListener('click',function(){show(c.dataset.g)});
+    });
+    /* an off-diagonal cell IS a direction: true class down the column,
+       predicted across the row -- the same pair the chips are keyed on */
+    var cx=document.querySelector('.cxscroll table.cx');
+    if(cx){
+      var rows=cx.querySelectorAll('tbody tr'),
+          heads=cx.querySelectorAll('thead tr:last-child .cxt');
+      [].forEach.call(rows,function(tr,i){
+        var pred=tr.querySelector('.cxl'), cells=tr.querySelectorAll('.cxc');
+        [].forEach.call(cells,function(td,j){
+          if(i===j||!heads[j]||!pred)return;
+          var g=heads[j].textContent.trim()+'|'+pred.textContent.trim();
+          if(!wrap.querySelector('.wrchip[data-g="'+g.replace(/"/g,'\\"')+'"]'))return;
+          td.classList.add('err');
+          td.title=(td.title?td.title+' ':'')+'\u2014 click to see them';
+          td.addEventListener('click',function(){
+            show(g);
+            wrap.scrollIntoView({block:'start',
+              behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?
+                'auto':'smooth'});
+          });
+        });
+      });
+    }
+  }
   function wireDetail(){
     var back=document.getElementById('trkBack');
     if(back) back.addEventListener('click',function(){
@@ -8642,6 +8856,7 @@ function initTracker(){
            selection and the periodic refresh both stay on it */
         bindCharts();
         wireDetail();
+        wireWrong();
       }).catch(function(){});
   }
   function openRun(key,tr){
@@ -8655,6 +8870,7 @@ function initTracker(){
           function(x){ x.classList.toggle('sel',x===tr); });
         bindCharts();
         wireDetail();
+        wireWrong();
         det.scrollIntoView({block:'nearest',
           behavior:(matchMedia('(prefers-reduced-motion:reduce)').matches
                     ?'auto':'smooth')});
