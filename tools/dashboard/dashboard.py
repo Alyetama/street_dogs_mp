@@ -1165,6 +1165,26 @@ TRIAGE_WATCH = cfg_int('triage_watch', 300, env='TRIAGE_WATCH')
 CONFIGURED_TRIAGE = bool(cfg('triage_python', '', env='TRIAGE_PYTHON'))
 TRIAGE_MODEL = cfg('triage_model', '', env='TRIAGE_MODEL')
 TRIAGE_DEVICE = cfg('triage_device', '', env='TRIAGE_DEVICE')
+def leash_store():
+    """The leash verdict store, or None if the tool is not present.
+
+    Loaded lazily and never fatally: leash labelling is an extra axis on the
+    review page, and a checkout without it should lose the two buttons, not
+    the page.
+    """
+    if _LEASH.get('tried'):
+        return _LEASH.get('mod')
+    _LEASH['tried'] = True
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        import leash_store
+        _LEASH['mod'] = leash_store
+    except Exception:
+        _LEASH['mod'] = None
+    return _LEASH['mod']
+
+
+_LEASH = {}
 HN_CROPS = os.path.join(HN_DIR, 'crops')
 HN_FULL = os.path.join(HN_DIR, 'full')
 HN_LABELS = os.path.join(HN_DIR, 'labels.jsonl')
@@ -1643,12 +1663,34 @@ font-weight:700}
 .card.changed{box-shadow:inset 0 0 0 2px var(--acc)}
 /* no verdict left on it: neither button is lit, and the tile says so rather
    than looking like a crop that was never reached */
+/* judged a dog and still owing a leash call: dimming it would read as
+   "done", so it keeps full weight and gets a rail instead */
+.card.awaitleash{box-shadow:inset 0 0 0 2px rgba(67,181,129,.45)}
+.card.awaitleash .acts.leash::before{content:'lead?';grid-column:1/-1;
+font-size:10px;color:var(--green);letter-spacing:.04em;margin-bottom:-2px}
 .card.unjudged{opacity:.62}
 .card.unjudged .meta::after{content:'no verdict';margin-left:auto;
 font-size:10px;color:var(--dim)}
 body.auditing #country,body.auditing #unkeep{display:none}
 #verdict{display:none}
 body.auditing #verdict{display:inline-block}
+/* The leash row. In THIS stylesheet for the reason the comment above gives:
+   /review is its own document, and these rules in the dashboard's block
+   styled nothing -- the buttons rendered as browser defaults. A second axis,
+   so it is quieter than the verdict row it sits under. */
+.acts.leash{border-top:0;padding:0 6px 6px;gap:6px;display:grid;
+grid-template-columns:1fr 1fr}
+.lbtn{appearance:none;background:transparent;color:var(--dim);
+border:1px dashed var(--bd);border-radius:7px;padding:5px 4px;font-size:11px;
+font-family:inherit;cursor:pointer;white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis;transition:color .12s,border-color .12s,background .12s}
+.lbtn:hover{color:var(--tx);border-color:var(--dim)}
+.lbtn:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.lbtn.le.on{border-style:solid;color:#5ec89a;border-color:rgba(67,181,129,.55);
+background:rgba(67,181,129,.16);font-weight:600}
+.lbtn.un.on{border-style:solid;color:var(--acc);border-color:rgba(232,166,69,.55);
+background:rgba(232,166,69,.16);font-weight:600}
+.sec.lea{color:var(--mut)}
 .fbtn{border:0;background:rgba(130,140,150,.05);color:var(--mut);padding:8px 4px;
 font-size:11.5px;cursor:pointer;font-family:inherit;font-weight:600;
 transition:background .12s,color .12s;white-space:nowrap;overflow:hidden;
@@ -1783,6 +1825,7 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
       <b class="sec pos" id="pos">&mdash;</b><span>marked dog</span>
       <b class="sec" id="seen">&mdash;</b><span>kept</span>
       <b class="sec dup" id="dups">&mdash;</b><span>repeats hidden</span>
+      <b class="sec lea" id="leashN">&mdash;</b><span title="leashed / unleashed verdicts recorded — a separate axis from the dog verdicts, kept in its own database">leash calls</span>
     </div>
   </div>
   <div class="bar">
@@ -1800,6 +1843,15 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
       <option value="animal">Other animal</option>
       <option value="object">Not an animal</option>
       <option value="none">No guess yet</option>
+    </select>
+    <!-- The leash axis, filterable on its own. "Needs a leash call" is the
+         working view: crops you have already called a dog and not yet called
+         a lead on. Hidden until the leash store exists. -->
+    <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
+      <option value="all">Any leash state</option>
+      <option value="none">Needs a leash call</option>
+      <option value="leashed">Leashed</option>
+      <option value="unleashed">Unleashed</option>
     </select>
     <select id="verdict" title="which verdict to check">
       <option value="all">Both verdicts</option>
@@ -1867,6 +1919,8 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
   <span>Flag what is <b>not</b> a dog, and mark the low-confidence ones that <b>are</b>. Moving to another page passes on the rest, so nothing you have judged comes back.</span>
   <span><kbd>&larr;</kbd><kbd>&rarr;</kbd><kbd>&uarr;</kbd><kbd>&darr;</kbd> move</span>
   <span><kbd>F</kbd> not a dog</span>
+  <span><kbd>L</kbd> leashed</span>
+  <span><kbd>N</kbd> no lead</span>
   <span><kbd>D</kbd> is a dog</span>
   <span><kbd>&#9166;</kbd> full frame &amp; edit box</span>
   <span><kbd>&#8679;</kbd>+arrows nudge box &middot; saves itself</span>
@@ -1888,8 +1942,82 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',loading=false,
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',leashf='all',loading=false,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
+/* leash verdicts for what is on screen, and whether the store exists at all.
+   LEASH_ON stays false on a checkout without the tool, and the two buttons
+   simply never render. */
+var LEASH={},LEASH_ON=false,leashN={leashed:0,unleashed:0};
+function leash(name,label){
+  if(!LEASH_ON)return;
+  /* clicking the label a crop already has takes it back -- the same gesture
+     the verdict buttons use, and the reason this is a database rather than an
+     append-only log */
+  var had=LEASH[name]===label;
+  var body=had?{name:name,remove:true}:{name:name,label:label};
+  if(had)delete LEASH[name]; else LEASH[name]=label;
+  paintLeash(name);
+  fetch('/api/review/leash',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)})
+    .then(function(r){return r.json()})
+    .catch(function(){return null})
+    .then(function(j){
+      if(!j||!j.ok){
+        /* put the button back where it was: an optimistic paint that the
+           server refused is a lie about what was recorded */
+        if(had)LEASH[name]=label; else delete LEASH[name];
+        paintLeash(name);
+        leashNote((j&&j.error)?('Leash verdict not saved: '+j.error)
+                              :'Leash verdict not saved.');
+        return;
+      }
+      leashN.leashed=j.leashed;leashN.unleashed=j.unleashed;
+      paintLeashCount();
+      var held=document.querySelector('.card.awaitleash[data-name="'+
+        name.replace(/"/g,'\\"')+'"]');
+      if(held)held.classList.remove('awaitleash');
+    });
+}
+function leashNote(msg){
+  /* the page has no general notice -- showUndo is about a verdict and offers
+     to undo it, which is the wrong thing to say when nothing was recorded */
+  var t=$('tbox');
+  if(!t){t=document.createElement('div');t.className='toast';t.id='tbox';
+    document.body.appendChild(t)}
+  t.innerHTML='';
+  var sp=document.createElement('span');sp.className='tt';sp.textContent=msg;
+  t.appendChild(sp);
+  clearTimeout(toastT);
+  toastT=setTimeout(function(){lastUndo=null;hideToast()},4000);
+}
+function paintLeash(name){
+  var card=document.querySelector('.card[data-name="'+name.replace(/"/g,'\\"')+'"]');
+  if(!card)return;
+  var le=card.querySelector('.lbtn.le'),un=card.querySelector('.lbtn.un');
+  if(le)le.classList.toggle('on',LEASH[name]==='leashed');
+  if(un)un.classList.toggle('on',LEASH[name]==='unleashed');
+}
+function paintLeashOptions(counts){
+  var sel=$('leashf');
+  if(!sel)return;
+  sel.hidden=false;
+  /* each option says how many it would show: "Needs a leash call" is the
+     number this axis is worked from, and it should be readable without
+     selecting it first */
+  var lab={all:'Any leash state',none:'Needs a leash call',
+           leashed:'Leashed',unleashed:'Unleashed'};
+  [].forEach.call(sel.options,function(o){
+    var c=counts[o.value];
+    o.textContent=lab[o.value]+(c==null?'':'  ('+n(c)+')');
+    o.disabled=(o.value!=='all'&&c===0&&leashf!==o.value);
+  });
+  sel.value=leashf;
+}
+function paintLeashCount(){
+  var e=$('leashN');
+  if(e)e.textContent=n(leashN.leashed)+' / '+n(leashN.unleashed);
+}
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
 function $(i){return document.getElementById(i)}
@@ -1940,13 +2068,17 @@ function loadAudit(){
   var my=++reqSeq;
   skeleton();
   return fetch('/api/review/annotated?page='+page+'&size='+size+
-               '&sort='+auditSort()+'&label='+encodeURIComponent(verdict))
+               '&sort='+auditSort()+'&label='+encodeURIComponent(verdict)+
+               '&leash='+encodeURIComponent(leashf))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
     if(my!==reqSeq)return;          /* superseded before it landed */
     if(j.error)throw 0;
     loading=false;
     items=j.items||[];reserve=[];page=j.page||0;pages=j.pages||1;
+    if(j.leash)LEASH=j.leash;
+    if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
+    if(j.leash_counts)paintLeashOptions(j.leash_counts);
     var only=verdict==='false_positive'?' marked not a dog':
              verdict==='true_positive'?' marked a dog':' annotated';
     var lab=items.length?
@@ -1979,6 +2111,7 @@ function load(){
      grid instead of guessing at microtask depth */
   return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort+
     '&suggest='+encodeURIComponent(suggest)+
+    '&leash='+encodeURIComponent(leashf)+
                '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
@@ -1992,6 +2125,9 @@ function load(){
     if(j.seen_total!=null)seenN=j.seen_total;
     if(j.positive_total!=null)posN=j.positive_total;
     if(j.collapsed!=null)dupN=j.collapsed;
+    if(j.leash)LEASH=j.leash;
+    if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
+    if(j.leash_counts)paintLeashOptions(j.leash_counts);
     paintCountries(j.countries,j.country);
     paintSuggest(j);
     score();
@@ -2189,13 +2325,32 @@ function tile(c){
           'click again to remove this annotation':
           'a real dog the detector was unsure about (D)')+
         '">&#10003; Is a dog</button>'+
-    '</div>';
+    '</div>'+
+    /* A SECOND axis, kept visually apart from the verdict row above it. A
+       leash label says "this is a dog, and here is whether it is on a lead" --
+       it is stored on its own and never touches the dog/not-dog ledgers. */
+    (LEASH_ON?('<div class="acts leash">'+
+      '<button class="lbtn le'+(LEASH[c.name]==='leashed'?' on':'')+
+        '" type="button" title="'+(LEASH[c.name]==='leashed'?
+          'click again to remove this leash verdict':'on a lead (L)')+
+        '">Leashed</button>'+
+      '<button class="lbtn un'+(LEASH[c.name]==='unleashed'?' on':'')+
+        '" type="button" title="'+(LEASH[c.name]==='unleashed'?
+          'click again to remove this leash verdict':'no lead (N)')+
+        '">Unleashed</button>'+
+    '</div>'):'');
   var im=d.querySelector('.thumb');
   im.onclick=function(){openLb(idx(c.name))};
   d.querySelector('.fbtn.no').onclick=function(e){
     e.stopPropagation();flag(idx(c.name),false,'false_positive')};
   d.querySelector('.fbtn.yes').onclick=function(e){
     e.stopPropagation();flag(idx(c.name),false,'true_positive')};
+  if(LEASH_ON){
+    d.querySelector('.lbtn.le').onclick=function(e){
+      e.stopPropagation();leash(c.name,'leashed')};
+    d.querySelector('.lbtn.un').onclick=function(e){
+      e.stopPropagation();leash(c.name,'unleashed')};
+  }
   /* pressing the flag button must NOT select the tile: the tile is about to
      be removed, and selecting it means the highlight lands on whatever slides
      into that index -- an auto-advance nobody asked for */
@@ -2341,25 +2496,45 @@ function flag(i,viaKey,label){
               'changed to '+(label==='true_positive'?'a dog':'not a dog'));
      }).catch(function(){delete busy[c.name]});
   }
+  /* "Is a dog" is the point at which a leash call becomes askable, so the
+     crop stays where it is instead of being consumed -- you can look again,
+     open it, fix the box and answer the lead, all on the tile you just judged.
+     Only for that verdict, only while the leash store is on, and only until it
+     has a leash call: everything else still leaves the queue on click, which
+     is what makes the queue drain. */
+  var hold=(LEASH_ON&&label==='true_positive'&&!LEASH[c.name]);
   busy[c.name]=1;
   var card=cardAt(i);
-  if(card)card.classList.add('go');
+  if(card&&!hold)card.classList.add('go');
   return fetch('/api/detect/flag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name:c.name,label:label})})
    .then(function(r){return r.json()}).then(function(j){
       delete busy[c.name];
       if(!j||j.ok===false){if(card)card.classList.remove('go');return}
+      session++;
+      todoN=Math.max(0,todoN-1);
+      if(label==='true_positive')posN++;else flaggedN++;
+      score();bumpBal(label==='true_positive'?0:1,label==='true_positive'?1:0);
+      if(hold){
+        /* judged, kept: the verdict shows on the tile and the leash row is
+           now the only thing left to answer on it */
+        c.label=label;
+        if(card){
+          var ys=card.querySelector('.fbtn.yes');
+          if(ys)ys.classList.add('on');
+          card.classList.add('awaitleash');
+        }
+        if(!viaKey)sel=-1; else mark();
+        showUndo(c,i,false,label);
+        return;
+      }
       /* Surgical removal + backfill: the rest of the grid does not re-render,
          so nothing reflows under the cursor and no image reloads. */
       items.splice(i,1);
       if(card&&card.parentNode)card.parentNode.removeChild(card);
       var nx=reserve.shift();
       if(nx){items.push(nx);$('grid').appendChild(tile(nx))}
-      session++;
-      todoN=Math.max(0,todoN-1);
-      if(label==='true_positive')posN++;else flaggedN++;
-      score();bumpBal(label==='true_positive'?0:1,label==='true_positive'?1:0);
       if(!viaKey)sel=-1;                         /* mouse: no auto-advance */
       if(sel>=items.length)sel=items.length-1;   /* stays -1 if unset */
       if(!items.length)render();else mark();
@@ -2755,6 +2930,17 @@ document.addEventListener('keydown',function(e){
     else if(e.key==='d'||e.key==='D'){var k2=sel;
       flushSave().then(function(){closeLb();if(k2>=0)flag(k2,true,'true_positive')});
       e.preventDefault()}
+    /* Leash calls work in here too, and this is the view where they should be
+       made: a lead is a few pixels wide, and at thumbnail size it is simply
+       not visible -- the same reason the dashboard-thumbnail table reads 54.9%
+       where the full-resolution crops read 81.3% for the same detections.
+       Unlike F and D these do NOT close the lightbox: deciding the leash does
+       not decide the dog, and you usually want to answer both while looking at
+       the same frame. */
+    else if((e.key==='l'||e.key==='L')&&sel>=0&&LEASH_ON){
+      leash(items[sel].name,'leashed');e.preventDefault()}
+    else if((e.key==='n'||e.key==='N')&&sel>=0&&LEASH_ON){
+      leash(items[sel].name,'unleashed');e.preventDefault()}
     return;
   }
   var c=cols(),moved=true;
@@ -2769,6 +2955,12 @@ document.addEventListener('keydown',function(e){
   else if(e.key==='ArrowUp')sel=Math.max(0,sel-c);
   else moved=false;
   if(moved){mark();e.preventDefault();return}
+  if((e.key==='l'||e.key==='L')&&sel>=0&&LEASH_ON){
+    e.preventDefault();leash(items[sel].name,'leashed');return;
+  }
+  if((e.key==='n'||e.key==='N')&&sel>=0&&LEASH_ON){
+    e.preventDefault();leash(items[sel].name,'unleashed');return;
+  }
   if((e.key==='f'||e.key==='F')&&sel>=0){
     flag(sel,true,'false_positive');e.preventDefault()}
   else if((e.key==='d'||e.key==='D')&&sel>=0){
@@ -2882,6 +3074,7 @@ function restorePrefs(){
   /* the options are rebuilt from the response, like country's, so the value
      rides along in the first request instead of being matched now */
   if(o.suggest)suggest=o.suggest;
+  if((v=restoreSel('leashf',o.leashf))!==null)leashf=v;
   if((v=restoreSel('mode',o.mode))!==null){
     mode=v;
     document.body.classList.toggle('auditing',mode==='audit');
@@ -2963,6 +3156,11 @@ $('country').onchange=function(){var v=this.value;
    also hides the controls that mean nothing there -- a country filter over
    crops chosen by verdict, and a Next that would bank annotations as if they
    were fresh work. */
+/* guarded: the control is absent on a checkout with no leash store, and an
+   unguarded assignment there throws and takes the rest of the script with it */
+if($('leashf'))$('leashf').onchange=function(){
+  leashf=this.value;savePref('leashf',leashf);page=0;sel=-1;load();
+};
 $('mode').onchange=function(){
   mode=this.value;savePref('mode',mode);page=0;sel=-1;
   document.body.classList.toggle('auditing',mode==='audit');
@@ -5605,7 +5803,8 @@ ANNOT_SORTS = {
 }
 
 
-def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent'):
+def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
+                      leash=''):
     """Crops that already carry a verdict, for auditing the annotations.
 
     A misannotation is worse than an unjudged crop: it does not sit in a queue
@@ -5664,11 +5863,23 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent'):
     items = [it for it in by_name.values() if it['name'] in live[it['label']]]
 
     items.sort(key=ANNOT_SORTS[sort])
+    # Counted before the filter narrows them, so the option can say how many
+    # it would show -- "dogs I have not called the lead on" is the number this
+    # whole axis is worked from, and it should be visible without selecting it.
+    want_leash = leash if leash in LEASH_FILTERS else 'all'
+    dogs = [it for it in items if it['label'] == POS_LABEL]
+    leash_offer = {k: len(_leash_keep(dogs, k)) for k in LEASH_FILTERS}
+    if want_leash != 'all':
+        items = _leash_keep(items, want_leash)
     total = len(items)
     pages = max(1, (total + size - 1) // size)
     page = min(page, pages - 1)
     lo = page * size
-    return {'items': items[lo:lo + size], 'page': page, 'size': size,
+    shown = items[lo:lo + size]
+    return {'items': shown, 'page': page, 'size': size,
+            'leash': _leash_for([c['name'] for c in shown]),
+            'leash_totals': _leash_counts(),
+            'leash_filter': want_leash, 'leash_counts': leash_offer,
             'pages': pages, 'total': total, 'sort': sort, 'label': label,
             'n_false_positive': sum(1 for i in by_name.values()
                                     if i['label'] == FLAG_LABEL
@@ -5787,8 +5998,47 @@ def triage_status():
             'coverage': round(have / len(pool), 3) if pool else 0}
 
 
+LEASH_FILTERS = ('all', 'none', 'leashed', 'unleashed')
+
+
+def _leash_keep(items, want, key='name'):
+    """Narrow a list of crops by leash state. 'none' = no verdict recorded.
+
+    Kept separate from the dog verdict on purpose: "a dog I have not decided
+    the lead for" is the question this whole axis exists to answer, and it is
+    not expressible as a value of the dog verdict.
+    """
+    if want not in LEASH_FILTERS or want == 'all':
+        return items
+    got = _leash_for([c[key] for c in items])
+    if want == 'none':
+        return [c for c in items if c[key] not in got]
+    return [c for c in items if got.get(c[key]) == want]
+
+
+def _leash_for(names):
+    """{crop: 'leashed'|'unleashed'} for the crops about to be shown."""
+    mod = leash_store()
+    if not mod:
+        return {}
+    try:
+        return mod.labels_for(names)
+    except Exception:
+        return {}
+
+
+def _leash_counts():
+    mod = leash_store()
+    if not mod:
+        return None            # None means "no store", not "none recorded"
+    try:
+        return mod.counts()
+    except Exception:
+        return None
+
+
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
-                   suggest=''):
+                   suggest='', leash=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
@@ -5869,6 +6119,7 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     _tri = triage_index()
     want = (country or '').upper()
     want_sg = suggest if suggest in TRIAGE_BUCKETS or suggest == 'none' else ''
+    want_leash = leash if leash in LEASH_FILTERS else 'all'
     cands = []
     for name in names:
         m = _CROP_RE.match(name)
@@ -5998,6 +6249,13 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     if want_sg:
         kept = [c for c in kept
                 if (c.get('sg') or 'none') == want_sg]
+    # after the collapse and the country/guess filters, for the same reason
+    # those are: the number an option advertises has to be the number it hands
+    # back, and every filter above this one has already removed crops
+    leash_offer = {k: len(_leash_keep(kept, k))
+                   for k in ('all', 'none', 'leashed', 'unleashed')}
+    if want_leash and want_leash != 'all':
+        kept = _leash_keep(kept, want_leash)
     items = kept
     total = len(items)
     pages = max(1, -(-total // size))
@@ -6021,6 +6279,12 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
                                        if d != CROPS and _CROP_RE.match(n)),
             'positive_total': n_pos, 'seen_total': len(seen_ids),
             'collapsed': collapsed,
+            # leash verdicts for the crops on THIS page, so a button can show
+            # what was already decided. Its own axis and its own store: a crop
+            # can be a dog and unjudged for leash, or the reverse.
+            'leash': _leash_for([c['name'] for c in items[lo:lo + 2 * size]]),
+            'leash_totals': _leash_counts(),
+            'leash_filter': want_leash, 'leash_counts': leash_offer,
             # Options tallied from the live queue, NOT from the index's
             # counts. The index spans the rolling pool plus both flag ledgers,
             # while this queue excludes everything already judged, kept, or
@@ -6309,7 +6573,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                                           int(q.get('size', REVIEW_PAGE)),
                                           str(q.get('sort', REVIEW_SORT_DEFAULT)),
                                           str(q.get('country', '')),
-                                          str(q.get('suggest', ''))))
+                                          str(q.get('suggest', '')),
+                                          str(q.get('leash', ''))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
@@ -6328,7 +6593,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     int(q.get('page', [0])[0]),
                     int(q.get('size', [REVIEW_PAGE])[0]),
                     str(q.get('label', ['all'])[0]),
-                    str(q.get('sort', ['recent'])[0])))
+                    str(q.get('sort', ['recent'])[0]),
+                    str(q.get('leash', [''])[0])))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
@@ -6563,6 +6829,30 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json(triage_control(str(data.get('action') or '')))
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)})
+            return
+        if self.path.split('?', 1)[0] == '/api/review/leash':
+            # Its own store and its own axis. Nothing here touches the
+            # dog/not-dog ledgers: those answer a different question, feed a
+            # different model, and hard_positives in particular means "a dog
+            # the detector was unsure about", not "a dog".
+            try:
+                mod = leash_store()
+                if not mod:
+                    self._json({'ok': False, 'error': 'leash store missing'})
+                    return
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                data = json.loads(self.rfile.read(n) or b'{}')
+                name = str(data.get('name') or '')
+                if data.get('remove'):
+                    body, code = mod.remove(name)
+                else:
+                    body, code = mod.record(
+                        name, str(data.get('label') or ''),
+                        copy_from={'crop': CROPS,
+                                   'full': os.path.join(CROPS, 'full')})
+                self._json(body, code)
+            except Exception as e:
+                self._json({'ok': False, 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/review/box':
             try:
