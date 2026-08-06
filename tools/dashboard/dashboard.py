@@ -1976,8 +1976,33 @@ function leash(name,label){
       paintLeashCount();
       var held=document.querySelector('.card.awaitleash[data-name="'+
         name.replace(/"/g,'\\"')+'"]');
-      if(held)held.classList.remove('awaitleash');
+      if(!held)return;
+      held.classList.remove('awaitleash');
+      /* Both axes answered, so the tile has nothing left to ask and leaves
+         like any other judged crop. It was only kept back to make the lead
+         askable; taking the lead back (had) leaves it in place, still owing
+         one. */
+      if(had){held.classList.add('awaitleash');return;}
+      releaseHeld(name);
     });
+}
+function releaseHeld(name){
+  /* the same surgical removal flag() does: splice the item, drop the node,
+     pull one from reserve so the grid stays full, and leave the rest of the
+     DOM untouched so nothing reflows under the cursor */
+  var i=idx(name);
+  if(i<0)return;
+  var card=cardAt(i);
+  items.splice(i,1);
+  if(card&&card.parentNode)card.parentNode.removeChild(card);
+  var nx=reserve.shift();
+  if(nx){items.push(nx);$('grid').appendChild(tile(nx))}
+  /* the undo toast still on screen belongs to the DOG verdict that put this
+     tile on hold; if undoing it now has to hand a reserve crop back, its
+     bookkeeping has to know that happened here */
+  if(lastUndo&&lastUndo.crop&&lastUndo.crop.name===name&&nx)lastUndo.pulled=true;
+  if(sel>=items.length)sel=items.length-1;
+  if(!items.length)render();else mark();
 }
 function leashNote(msg){
   /* the page has no general notice -- showUndo is about a verdict and offers
