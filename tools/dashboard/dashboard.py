@@ -1159,6 +1159,10 @@ TRIAGE_WATCH = cfg_int('triage_watch', 300, env='TRIAGE_WATCH')
 # Which model the Run button uses, and on what. Config rather than a constant:
 # the better model needs a GPU to be practical, and the GPU on this kind of
 # box is also the one training runs on. Empty means the tool's own defaults.
+# The Run button is only offered where a run could actually work: an
+# interpreter was named in config. A clone that never set one sees nothing,
+# exactly as before this existed.
+CONFIGURED_TRIAGE = bool(cfg('triage_python', '', env='TRIAGE_PYTHON'))
 TRIAGE_MODEL = cfg('triage_model', '', env='TRIAGE_MODEL')
 TRIAGE_DEVICE = cfg('triage_device', '', env='TRIAGE_DEVICE')
 HN_CROPS = os.path.join(HN_DIR, 'crops')
@@ -2978,7 +2982,9 @@ load();loadBal();
   var el=document.getElementById('trg');
   if(!el)return;
   function paint(j){
-    if(!j||!j.ever){el.hidden=true;return;}
+    /* shown once a run has happened OR once one could be started -- the
+       button lives in here, so hiding it on an empty file left no way back */
+    if(!j||(!j.ever&&!j.can_run)){el.hidden=true;return;}
     el.hidden=false;
     var running=!!j.running, cov=Math.round((j.coverage||0)*100),
         gap=Math.max(0,(j.pool||0)-(j.guessed||0)), state, sub='';
@@ -3004,6 +3010,9 @@ load();loadBal();
       state='Not running';
       sub=gap.toLocaleString()+' crop'+(gap===1?'':'s')+' have no guess yet';
       el.className='trg warn';
+    }else if(!j.ever){
+      state='No guesses yet';
+      sub=(j.pool||0).toLocaleString()+' crops in the queue';
     }else{
       state='Guesses up to date';
       sub=j.model?j.model.split('/').pop():'';
@@ -5758,6 +5767,11 @@ def triage_status():
     pool = review_pool_names()
     have = sum(1 for n, _ in pool if n in tri)
     return {'ever': bool(doc) or bool(tri),
+            # Whether a run could be STARTED, which is not the same fact as
+            # whether one ever has. The strip hides itself until something has
+            # run, and it carries the Run button -- so clearing the guesses hid
+            # the only control that could put them back.
+            'can_run': bool(CONFIGURED_TRIAGE),
             'running': running,
             'starting': bool(doc.get('starting')) and running,
             'stalled': stalled,
