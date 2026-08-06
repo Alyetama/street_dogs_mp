@@ -1549,13 +1549,23 @@ h1 .fl{color:var(--red)}
 .back{color:var(--mut);text-decoration:none;font-size:12.5px;border:1px solid var(--bd);
 border-radius:8px;padding:4px 10px;transition:color .12s,border-color .12s}
 .back:hover{color:var(--acc);border-color:rgba(232,166,69,.35)}
-.score{margin-left:auto;display:flex;align-items:baseline;gap:8px}
-.score b{font-size:26px;font-weight:660;letter-spacing:-.6px;font-variant-numeric:tabular-nums}
-.score b.sec{font-size:18px;color:var(--mut);font-weight:620}
-.score b.pos{color:var(--green)}
-.score b.dup{color:var(--dim)}
-.score span{font-size:12px;color:var(--dim)}
-.score .sep{width:1px;height:20px;background:var(--bd);margin:0 4px}
+/* The headline and the tally are different KINDS of number, so they are set
+   as different kinds: one is what is left to do, the rest are what has been
+   done. Ranking them by size in one row made six numbers of similar weight
+   and left the reader to find the live one. */
+.score{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;
+gap:1px}
+.score>b{font-size:26px;font-weight:660;letter-spacing:-.6px;
+font-variant-numeric:tabular-nums;line-height:1.05}
+.score>span{font-size:12px;color:var(--dim)}
+.tally{display:flex;align-items:baseline;gap:5px;flex-wrap:wrap;
+justify-content:flex-end}
+.tally b{font-size:12px;font-weight:640;color:var(--mut);
+font-variant-numeric:tabular-nums}
+.tally b+span{margin-right:5px}
+.tally span{font-size:11px;color:var(--dim)}
+.tally b.pos{color:var(--green)}
+.tally b.dup,.tally b.lea{color:var(--dim)}
 
 /* ── toolbar ── */
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 0 13px}
@@ -1570,10 +1580,9 @@ cursor:pointer;font-family:inherit;font-variant-numeric:tabular-nums;transition:
 .bico{width:14px;height:14px;flex:none}
 /* The model's guess. Dashed, lower-case, and in nobody's verdict colour --
    a reader must never mistake it for something that was decided. */
-.sg{position:absolute;left:6px;top:6px;max-width:calc(100% - 12px);
-overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-font-size:10px;line-height:1.5;padding:0 6px;border-radius:5px;
-background:rgba(13,17,23,.82);border:1px dashed rgba(130,140,150,.5);
+.sg{flex:none;max-width:46%;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap;font-size:10px;line-height:1.6;padding:0 5px;
+border-radius:4px;border:1px dashed rgba(130,140,150,.42);
 color:var(--mut);pointer-events:auto}
 .sg-dog{border-color:rgba(232,166,69,.55);color:#e8b877}
 .sg-animal{border-color:rgba(110,180,150,.5);color:#8fd0b4}
@@ -1593,6 +1602,21 @@ select{background:var(--panel2);border:1px solid var(--bd);color:var(--tx);
 border-radius:8px;padding:5px 9px;font-size:12.5px;font-family:inherit;cursor:pointer}
 .sp{flex:1}
 .cnt{color:var(--mut);font-size:12.5px;font-variant-numeric:tabular-nums}
+/* the folded legend */
+.keys{padding:7px 0 11px;border-top:1px solid var(--bd)}
+.keys summary{display:flex;align-items:center;gap:12px;cursor:pointer;
+list-style:none;color:var(--dim);font-size:11.5px}
+.keys summary::-webkit-details-marker{display:none}
+.keys summary:focus-visible{outline:2px solid var(--acc);outline-offset:3px;
+border-radius:5px}
+.klead{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.klead kbd{margin-left:7px}
+.klead kbd:first-child{margin-left:0}
+.kmore{margin-left:auto;color:var(--dim);opacity:.75}
+.kmore::after{content:' \25be'}
+.keys[open] .kmore::after{content:' \25b4'}
+.kbody{color:var(--dim);font-size:11.5px;padding-top:9px;display:flex;
+flex-wrap:wrap;gap:6px 14px;align-items:center;max-width:1180px}
 .hint{color:var(--dim);font-size:11.5px;padding-bottom:14px;display:flex;
 flex-wrap:wrap;gap:6px 14px;align-items:center}
 /* ── balance strip: one bar, two lines, no card chrome ── */
@@ -1647,13 +1671,36 @@ border-color .12s}
 .rail i{display:block;height:100%;background:var(--acc);opacity:.75}
 .thumb{width:100%;aspect-ratio:1;object-fit:contain;display:block;background:#0c0e11}
 .thumb.zoom{cursor:zoom-in}
-.meta{display:flex;justify-content:space-between;gap:6px;padding:6px 9px;
-font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+.meta{display:flex;align-items:center;justify-content:space-between;gap:6px;
+padding:5px 8px;font:400 10.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+color:var(--dim);font-variant-numeric:tabular-nums}
 .meta .id{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta .cf{color:var(--mut);font-weight:600;flex:none}
 /* two verdicts, side by side and equal weight -- neither is the default, and
    a hairline keeps them from reading as one wide button */
-.acts{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--bd)}
+/* A CONTACT SHEET. At rest a tile is a photograph and one caption line --
+   nothing else. The verdict and lead rows used to be permanent furniture: 94px
+   of every 303px tile, identical on all fifty, which is two hundred buttons on
+   screen saying the same four things while the pictures they are about get the
+   remainder. They ride over the foot of the frame now, and only when the tile
+   is under the cursor, selected, or carrying a mark. The keyboard never needed
+   them; the mouse gets them exactly where the hand already is. */
+.actwrap{position:absolute;left:0;right:0;bottom:0;padding:26px 5px 5px;
+background:linear-gradient(to top,rgba(10,12,15,.94) 46%,rgba(10,12,15,.72) 74%,
+rgba(10,12,15,0));opacity:0;transform:translateY(5px);pointer-events:none;
+transition:opacity .13s ease,transform .13s ease}
+.card:hover .actwrap,.card.sel .actwrap,.card:focus-within .actwrap,
+.card.awaitleash .actwrap,.card.changed .actwrap,.card.unjudged .actwrap,
+/* A tile that already carries a mark shows it. Hiding it until hover is right
+   for a queue -- an unjudged crop has nothing to report -- and wrong the
+   moment there IS something to report. */
+.card:has(.fbtn.on) .actwrap,.card:has(.lbtn.on) .actwrap,
+/* and audit mode is nothing BUT reading the marks: every tile there carries
+   one, and hiding all fifty made the mode useless */
+body.auditing .actwrap{
+opacity:1;transform:none;pointer-events:auto}
+@media(prefers-reduced-motion:reduce){.actwrap{transition:none}}
+.acts{display:grid;grid-template-columns:1fr 1fr;gap:5px}
 /* AUDIT MODE. Belongs in THIS stylesheet: /review is its own document with
    its own <style>, and the same rules in the dashboard's block styled nothing
    here -- the class was on the button and the button looked untouched. */
@@ -1678,7 +1725,7 @@ body.auditing #verdict{display:inline-block}
    /review is its own document, and these rules in the dashboard's block
    styled nothing -- the buttons rendered as browser defaults. A second axis,
    so it is quieter than the verdict row it sits under. */
-.acts.leash{border-top:0;padding:0 6px 6px;gap:6px;display:grid;
+.acts.leash{border-top:0;padding:5px 0 0;gap:5px;display:grid;
 grid-template-columns:1fr 1fr}
 .lbtn{appearance:none;background:transparent;color:var(--dim);
 border:1px dashed var(--bd);border-radius:7px;padding:5px 4px;font-size:11px;
@@ -1691,11 +1738,11 @@ background:rgba(67,181,129,.16);font-weight:600}
 .lbtn.un.on{border-style:solid;color:var(--acc);border-color:rgba(232,166,69,.55);
 background:rgba(232,166,69,.16);font-weight:600}
 .sec.lea{color:var(--mut)}
-.fbtn{border:0;background:rgba(130,140,150,.05);color:var(--mut);padding:8px 4px;
-font-size:11.5px;cursor:pointer;font-family:inherit;font-weight:600;
-transition:background .12s,color .12s;white-space:nowrap;overflow:hidden;
-text-overflow:ellipsis}
-.fbtn+.fbtn{border-left:1px solid var(--bd)}
+.fbtn{border:1px solid rgba(130,140,150,.22);border-radius:7px;
+background:rgba(20,24,30,.72);color:var(--mut);padding:6px 4px;
+font-size:11px;cursor:pointer;font-family:inherit;font-weight:600;
+transition:background .12s,color .12s,border-color .12s;white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis}
 /* only hover arms a button. Tinting one for the merely-selected tile read as
    "this one is already flagged". */
 .fbtn.no:hover{background:rgba(239,83,80,.2);color:#f0736a}
@@ -1818,14 +1865,19 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
     <!-- Two counts, no ratio between them: "left" is the live retained pool
          (crops age out after 24 h / 3000), "flagged" is cumulative all-time.
          A bar dividing one by the other would be a made-up percentage. -->
+    <!-- One of these six numbers is the job and five are trivia, and they
+         were set in the same weight, so the one that decides whether to keep
+         going had to be picked out of a row. The tally moves to a second,
+         quieter line under it. -->
     <div class="score">
       <b id="left">&mdash;</b><span id="leftlab">left to review</span>
-      <span class="sep"></span>
-      <b class="sec" id="done">&mdash;</b><span>flagged</span>
-      <b class="sec pos" id="pos">&mdash;</b><span>marked dog</span>
-      <b class="sec" id="seen">&mdash;</b><span>kept</span>
-      <b class="sec dup" id="dups">&mdash;</b><span>repeats hidden</span>
-      <b class="sec lea" id="leashN">&mdash;</b><span title="leashed / unleashed verdicts recorded — a separate axis from the dog verdicts, kept in its own database">leash calls</span>
+      <div class="tally">
+        <b class="sec" id="done">&mdash;</b><span>flagged</span>
+        <b class="sec pos" id="pos">&mdash;</b><span>marked dog</span>
+        <b class="sec" id="seen">&mdash;</b><span>kept</span>
+        <b class="sec dup" id="dups">&mdash;</b><span>repeats hidden</span>
+        <b class="sec lea" id="leashN">&mdash;</b><span title="leashed / unleashed verdicts recorded — a separate axis from the dog verdicts, kept in its own database">leash calls</span>
+      </div>
     </div>
   </div>
   <div class="bar">
@@ -1915,20 +1967,26 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
   <button type="button" class="trgbtn" id="trgRun">&mdash;</button>
 </div>
 
-<div class="hint">
-  <span>Flag what is <b>not</b> a dog, and mark the low-confidence ones that <b>are</b>. Moving to another page passes on the rest, so nothing you have judged comes back.</span>
-  <span><kbd>&larr;</kbd><kbd>&rarr;</kbd><kbd>&uarr;</kbd><kbd>&darr;</kbd> move</span>
-  <span><kbd>F</kbd> not a dog</span>
-  <span><kbd>L</kbd> leashed</span>
-  <span><kbd>N</kbd> no lead</span>
-  <span><kbd>D</kbd> is a dog</span>
-  <span><kbd>&#9166;</kbd> full frame &amp; edit box</span>
-  <span><kbd>&#8679;</kbd>+arrows nudge box &middot; saves itself</span>
-  <span><kbd>U</kbd> undo</span>
-  <span>The bar under each crop is detector confidence.</span>
-  <span>One crop per camera pass, and one per photo &mdash; repeat frames and
-  duplicate shots of the same animal are hidden.</span>
-</div>
+<!-- The legend is a lesson, and a lesson stops being one after the first
+     day. It kept two full lines of the viewport permanently to teach four
+     keys. Folded away, remembered open or shut, and the four keys that carry
+     the work stay on the summary line where the hand can find them. -->
+<details class="keys" id="keys">
+  <summary>
+    <span class="klead"><kbd>F</kbd> not a dog<kbd>D</kbd> is a dog<kbd>L</kbd> leashed<kbd>N</kbd> no lead</span>
+    <span class="kmore">more</span>
+  </summary>
+  <div class="kbody">
+    <span><kbd>&larr;</kbd><kbd>&rarr;</kbd><kbd>&uarr;</kbd><kbd>&darr;</kbd> move</span>
+    <span><kbd>&#9166;</kbd> full frame &amp; edit box</span>
+    <span><kbd>&#8679;</kbd>+arrows nudge box &middot; saves itself</span>
+    <span><kbd>U</kbd> undo</span>
+    <span>Flag what is <b>not</b> a dog, and mark the low-confidence ones that <b>are</b>. Moving to another page passes on the rest, so nothing you have judged comes back.</span>
+    <span>The bar under each crop is detector confidence.</span>
+    <span>One crop per camera pass, and one per photo &mdash; repeat frames and
+    duplicate shots of the same animal are hidden.</span>
+  </div>
+</details>
 
 <div class="grid" id="grid"></div>
 <div id="state"></div>
@@ -2332,14 +2390,20 @@ function tile(c){
        c.harvested?'/review_set/':'/recent_crops/')+
       encodeURIComponent(c.name)+"'\">"+
     '<div class="rail"><i style="width:'+pc+'%"></i></div>'+
+    /* One caption line, contact-sheet style: frame slug, the model's guess,
+       exposure. The guess used to be a chip pinned over the top-left of the
+       photograph -- covering the only thing on the card worth looking at, and
+       on a queue where most guesses read "nothing" it covered it for nothing.
+       Dotted and muted here so it still never reads as a verdict. */
     '<div class="meta"><span class="id" title="'+att(c.image_id)+'">'+esc(c.image_id)+
-      '</span><span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
-    /* the guess, dotted and muted so it never reads as a verdict */
-    (c.sg?'<div class="sg sg-'+c.sg+'" title="'+att('a general-purpose image '+
+      '</span>'+
+      (c.sg?'<span class="sg sg-'+c.sg+'" title="'+att('a general-purpose image '+
         'model guessed '+(c.sgl||c.sg)+((c.sgp!=null)?' ('+Math.round(c.sgp*100)+
         '% of its confidence on '+SG_WORD[c.sg]+')':'')+
         '. A suggestion for sorting the queue — not a label, and not recorded.')+
-      '">'+esc(c.sgl||SG_WORD[c.sg])+'</div>':'')+
+      '">'+esc(c.sgl||SG_WORD[c.sg])+'</span>':'')+
+      '<span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
+    '<div class="actwrap">'+
     '<div class="acts">'+
       '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
         '" type="button" title="'+(c.label==='false_positive'?
@@ -2363,7 +2427,8 @@ function tile(c){
         '" type="button" title="'+(LEASH[c.name]==='unleashed'?
           'click again to remove this leash verdict':'no lead (N)')+
         '">Unleashed</button>'+
-    '</div>'):'');
+    '</div>'):'')+
+    '</div>';
   var im=d.querySelector('.thumb');
   im.onclick=function(){openLb(idx(c.name))};
   d.querySelector('.fbtn.no').onclick=function(e){
@@ -7329,7 +7394,7 @@ TEMPLATE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="3600">
-<title>Street Dogs — Collection Progress</title>
+<title>Street Dogs — harvest to model</title>
 <script src="echarts.min.js"></script>
 <style>
 :root{--bg:#13151a;--panel2:#21262d;--bd:rgba(130,140,150,.13);
@@ -8108,8 +8173,9 @@ outline-offset:2px}
 </style></head><body><div class="wrap">
 
 <header>
-  <div><h1>Street Dogs · <span class="o">Collection Progress</span></h1>
-    <div class="sub">global Mapillary ground-animal harvest</div></div>
+  <div><h1>Street Dogs &middot; <span class="o">harvest to model</span></h1>
+    <div class="sub">worldwide Mapillary survey &mdash; collecting, detecting,
+    judging, training</div></div>
   <div class="hact">
     <!-- The count is the point: a queue depth is what makes someone open the
          page, and an empty queue should say so quietly rather than shout a
