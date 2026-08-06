@@ -4295,9 +4295,18 @@ def confusion_for(key):
     return got
 
 
-def _is_bg(label):
-    """ultralytics' own name for "nothing was here", fixed in its source."""
-    return str(label).strip().lower() == 'background'
+def _is_bg(label, diag):
+    """Is this class ultralytics' structural "nothing was here" pseudo-class?
+
+    The NAME alone is not enough. In a detection matrix `background` is a
+    bookkeeping row whose diagonal is zero by construction -- there is no
+    correctly detecting nothing -- and its rates are undefined. But a
+    classifier can be trained with a real class called background, and that
+    one has a diagonal like any other: judging by name alone reported 55
+    correct predictions and their recall as em-dashes. The structural zero is
+    the actual invariant, so test for it.
+    """
+    return str(label).strip().lower() == 'background' and not diag
 
 
 def _conf_stats(labels, matrix):
@@ -4320,7 +4329,7 @@ def _conf_stats(labels, matrix):
     # rather than a cell that has no meaning.
     prec, rec = [], []
     for i in range(n):
-        undef = _is_bg(labels[i])
+        undef = _is_bg(labels[i], matrix[i][i])
         prec.append(None if undef or not rows[i] else matrix[i][i] / rows[i])
         rec.append(None if undef or not cols[i] else matrix[i][i] / cols[i])
     return rows, cols, prec, rec
@@ -4350,7 +4359,8 @@ def render_confusion(r):
     total = sum(rows)
     if not total:
         return ''
-    correct = sum(matrix[i][i] for i in range(n) if not _is_bg(labels[i]))
+    correct = sum(matrix[i][i] for i in range(n)
+                  if not _is_bg(labels[i], matrix[i][i]))
 
     head = [f'<th class="cx"></th><th class="cx cxax" colspan="{n}">'
             f'true class &rarr;</th><th class="cx"></th>']
@@ -4381,7 +4391,7 @@ def render_confusion(r):
             # real dogs was called X". Raw counts cannot be compared between
             # columns when the classes are different sizes, and ours are.
             share = (v / cols[j]) if cols[j] else None
-            agree = (i == j) and not _is_bg(labels[i])
+            agree = (i == j) and not _is_bg(labels[i], matrix[i][i])
             hue = 'var(--green)' if agree else 'var(--red)'
             # tint follows the share, floored so a small but real mistake stays
             # visible rather than fading into the panel
@@ -4401,7 +4411,7 @@ def render_confusion(r):
         if prec[i] is None:
             why = ('Not defined for background: its diagonal is zero by '
                    'construction, so there is nothing to take a share of.'
-                   if _is_bg(labels[i]) else
+                   if _is_bg(labels[i], matrix[i][i]) else
                    f'The model never predicted {labels[i]}.')
             cells.append(f'<td class="cxn hcue"{_t(why)}>{_pct(prec[i])}</td>')
         else:
@@ -4433,7 +4443,8 @@ def render_confusion(r):
 
     src = got.get('experiment')
     note = (f' &middot; from Comet run {esc_html(src)}' if src else '')
-    bg_note = ('' if not any(_is_bg(x) for x in labels) else
+    bg_note = ('' if not any(_is_bg(labels[i], matrix[i][i])
+                            for i in range(n)) else
                ' The background row counts what the detector missed and the '
                'background column what it invented; there is no correctly '
                'detecting nothing, so that class has no precision or recall.')
