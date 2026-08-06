@@ -408,6 +408,20 @@ def _same_path(a, b):
             and os.path.abspath(str(a)) == os.path.abspath(str(b)))
 
 
+def _proj_name(p):
+    """The name of a project, given whatever was passed as ``project=``.
+
+    Ultralytics treats project= as a directory, so it is equally happy with
+    a bare `dog-bin` and an absolute path ending in `/dog-bin`, and writes back
+    exactly what it was given. Both mean the same project to a reader, so both must reduce to the
+    same key here.
+    """
+    p = str(p or '').strip()
+    if not p:
+        return p
+    return os.path.basename(os.path.normpath(p)) or p
+
+
 CLAIM_FLOOR = 40   # a shared project name alone proves nothing
 
 
@@ -434,7 +448,11 @@ def _live_score(run, lv):
         score += 100
     if _same_path(lv.get('data'), args.get('data')):
         score += 40
-    if lv.get('project') and lv['project'] == args.get('project'):
+    # compared by NAME: the command line and the run's own args.yaml can spell
+    # the same project differently (bare name vs absolute path) whenever a run
+    # is cancelled and relaunched with the path edited
+    if (lv.get('project')
+            and _proj_name(lv['project']) == _proj_name(args.get('project'))):
         score += 10
     # A run records where it writes. When that is an absolute path, it settles
     # which of two identically-named directories is the real one: the leftover
@@ -536,6 +554,14 @@ def discover(root, projects=None):
             proj = ('(no project)' if parent in ('detect', 'classify',
                                                  'segment', 'pose', 'obb')
                     else parent or '(no project)')
+        else:
+            # `project=` is a DIRECTORY, so ultralytics takes an absolute path
+            # and records it verbatim. Grouping on that raw string split one
+            # project in two: the same dog-bin, reached once by absolute path
+            # and once by bare name, became separate headings -- and since the
+            # star marks the best run WITHIN a project, each half got its own
+            # "best", so dog-bin showed two. The last component is the name.
+            proj = _proj_name(proj)
         if projects and proj not in projects:
             continue
         runs.append({'project': str(proj), 'name': os.path.basename(cur),

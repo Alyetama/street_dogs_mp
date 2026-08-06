@@ -5411,6 +5411,11 @@ class BoardHandler(SimpleHTTPRequestHandler):
     # no-cache is not no-store: the copy is kept, it just has to be
     # revalidated, so an unchanged page still answers 304.
     _NO_CACHE_PATHS = ('/', '/index.html', '/review')
+    # The built page carries the training section between these, so the server
+    # can swap in a fresh render without parsing HTML -- the section nests
+    # divs, so "up to the next </div>" would cut it in the wrong place.
+    _TRK_OPEN = b'<!--TRK-->'
+    _TRK_CLOSE = b'<!--/TRK-->'
 
     def end_headers(self):
         try:
@@ -5611,7 +5616,46 @@ class BoardHandler(SimpleHTTPRequestHandler):
             else:
                 self._json({'error': 'unknown region'}, 404)
             return
+        if self.path.split('?', 1)[0] in ('/', '/index.html'):
+            if self._serve_index_fresh():
+                return
         super().do_GET()
+
+    def _serve_index_fresh(self):
+        """index.html with the training section re-rendered for THIS request.
+
+        The page is a build artefact written on an interval, so the one section
+        whose entire purpose is to be current was baked stale into it. The
+        client polls /api/training, but on a 30s timer and not at all on load,
+        so opening the dashboard showed an hour-old "running" row -- naming a
+        run that had already been cancelled -- for the first half minute.
+        Splicing here makes the very first paint correct, and correct without
+        JavaScript.
+
+        Returns False to fall through to the plain file whenever anything is
+        off: a page built before the sentinels existed, or a render that
+        raises. Serving the page as built is a worse page, not a broken one.
+        """
+        try:
+            with open(os.path.join(OUT, 'index.html'), 'rb') as fh:
+                page = fh.read()
+        except OSError:
+            return False
+        i = page.find(self._TRK_OPEN)
+        j = page.find(self._TRK_CLOSE, i + 1) if i >= 0 else -1
+        if i < 0 or j < 0:
+            return False
+        try:
+            fresh = render_training().encode('utf-8')
+        except Exception:
+            return False
+        body = page[:i + len(self._TRK_OPEN)] + fresh + page[j:]
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
 
     def do_POST(self):
         if self.path == '/api/board':
@@ -6833,7 +6877,7 @@ outline-offset:2px}
 
 <details class="fold sec" id="f-training" open>
 <summary class="sect">Training <span>what is training now, its curves, and the runs behind it</span></summary>
-<div class="panel" id="trk">__TRAINING__</div>
+<div class="panel" id="trk"><!--TRK-->__TRAINING__<!--/TRK--></div>
 </details>
 
 <details class="fold sec" id="f-models" open>
@@ -7225,6 +7269,10 @@ var refreshTracker;
     }).catch(function(){}).then(function(){ busy=false; });
   }
   refreshTracker=refresh;
+  /* once immediately: the server splices a fresh section into the page, but a
+     tab restored from bfcache or left open across a run change starts from
+     whatever it last held */
+  refresh(true);
   setInterval(refresh,30000);
   document.addEventListener('visibilitychange',function(){
     if(!document.hidden) refresh();
