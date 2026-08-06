@@ -151,6 +151,37 @@ for _b, _, _ in PROMPTS:
     BUCKET_N[_b] = BUCKET_N.get(_b, 0) + 1
 
 
+def _oom(exc):
+    """Is this the GPU telling us there is no room?"""
+    return ('out of memory' in str(exc).lower()
+            or type(exc).__name__ == 'OutOfMemoryError')
+
+
+def _place(model, device, no_fallback=False):
+    """Put a model on `device`, dropping to the CPU if the GPU has no room.
+
+    This tool shares a card with whatever the box is training, and it is the
+    least important thing on it. Dying when a training run takes the GPU was
+    wrong twice over: the queue silently stopped being guessed, and the strip
+    read "not running" with no reason, so it looked like the dashboard had
+    failed rather than the graphics card being full. Slower beats stopped --
+    the base model does 23 crops/s on a CPU.
+    """
+    import torch
+    try:
+        return model.to(device), device
+    except Exception as e:                      # noqa: BLE001 - re-raised below
+        if no_fallback or not _oom(e) or device == 'cpu':
+            raise
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        print('CUDA is out of memory -- something else on this box has the '
+              'card. Running on the CPU instead.', flush=True)
+        return model.to('cpu'), 'cpu'
+
+
 def _owner_alive(path):
     """Is another LIVE run already publishing here?
 
@@ -278,6 +309,9 @@ def main():
                     help='CPU threads; the sweep and any training run want '
                          'the rest of them')
     ap.add_argument('--device', default='cpu', choices=('cpu', 'cuda'))
+    ap.add_argument('--no-cpu-fallback', action='store_true',
+                    help='fail instead of dropping to the CPU when the GPU is '
+                         'full (default is to fall back and keep going)')
     ap.add_argument('--model', default=SIGLIP_DEFAULT,
                     help="a SigLIP 2 id, or 'imagenet' for the old "
                          'EfficientNet backend. Bigger SigLIP is better and '
@@ -323,7 +357,9 @@ def main():
                  for b in ('dog', 'animal', 'object')}
             print(f'bucket edges verified against {len(cats)} classes: {n}')
             return 0
-        model = efficientnet_v2_s(weights=weights).eval().to(args.device)
+        model = efficientnet_v2_s(weights=weights).eval()
+        model, load_dev = _place(model, args.device, args.no_cpu_fallback)
+        args.device = load_dev
         tf = weights.transforms()
         model_id = MODEL_ID
     else:
@@ -335,7 +371,12 @@ def main():
             print(f'{len(PROMPTS)} prompts: {n}')
             return 0
         proc = AutoProcessor.from_pretrained(args.model)
-        model = AutoModel.from_pretrained(args.model).eval().to(args.device)
+        model = AutoModel.from_pretrained(args.model).eval()
+        # The GPU may already be full when this starts -- a training run takes
+        # the card and holds it for hours. Placing the model is where that is
+        # discovered, so it is where the decision to step aside belongs.
+        model, load_dev = _place(model, args.device, args.no_cpu_fallback)
+        args.device = load_dev
         model_id = args.model
         # the text side is fixed, so encode it once for the whole run
         with torch.no_grad():
@@ -344,10 +385,49 @@ def main():
             tfeat = model.get_text_features(**tok)
             tfeat = tfeat / tfeat.norm(dim=-1, keepdim=True)
 
+    # Which card this run is actually on. It can change mid-run: something
+    # else may take the GPU after we have started, and the sensible answer to
+    # that is to keep guessing on the CPU rather than to stop.
+    DEV = {'device': args.device, 'fell_back': False}
+
+    def _to_cpu():
+        """Move the model, and the cached text features with it, to the CPU."""
+        nonlocal model, tfeat
+        DEV['device'] = 'cpu'
+        DEV['fell_back'] = True
+        model = model.to('cpu')
+        if not imagenet:
+            with torch.no_grad():
+                tok = proc(text=[q[2] for q in PROMPTS], padding='max_length',
+                           max_length=64, return_tensors='pt')
+                tfeat = model.get_text_features(**tok)
+                tfeat = tfeat / tfeat.norm(dim=-1, keepdim=True)
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def score(ims):
-        """[(bucket_mass, [(bucket, name, p), ...])] for a batch of images."""
+        """[(bucket_mass, ...)] for a batch, on whichever device still has room.
+
+        A training run taking the card mid-pass used to end this process. It is
+        the least important thing on the GPU, so it steps aside instead: the
+        queue keeps being guessed, just slower.
+        """
+        try:
+            return _score_on(ims)
+        except Exception as e:
+            if args.no_cpu_fallback or DEV['fell_back'] or not _oom(e):
+                raise
+            print('\nCUDA is out of memory -- something else on this box has '
+                  'the card. Falling back to the CPU and carrying on.',
+                  flush=True)
+            _to_cpu()
+            return _score_on(ims)
+
+    def _score_on(ims):
         if imagenet:
-            batch = torch.stack([tf(im) for im in ims]).to(args.device)
+            batch = torch.stack([tf(im) for im in ims]).to(DEV['device'])
             with torch.no_grad():
                 probs = model(batch).softmax(1).cpu()
             out = []
@@ -358,7 +438,7 @@ def main():
                 out.append((mass, [(bucket_of(i), cats[i], float(row[i]))
                                    for i in range(len(cats))]))
             return out
-        px = proc(images=ims, return_tensors='pt').to(args.device)
+        px = proc(images=ims, return_tensors='pt').to(DEV['device'])
         with torch.no_grad():
             ifeat = model.get_image_features(**px)
             ifeat = ifeat / ifeat.norm(dim=-1, keepdim=True)

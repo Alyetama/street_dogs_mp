@@ -3298,6 +3298,13 @@ load();loadBal();
     }else if(j.stalled){
       state='Run stopped';
       sub='no progress for '+Math.round((j.age_s||0)/60)+' min';
+    }else if(gap>0&&j.why){
+      /* it stopped for a reason it left behind -- name it, because "not
+         running" alone sends the reader to look at the dashboard */
+      state='Guessing stopped';
+      sub=j.why+' \u00b7 '+gap.toLocaleString()+' crop'+(gap===1?'':'s')+
+          ' still have no guess';
+      el.className='trg warn';
     }else if(gap>0){
       /* no run active says nothing about coverage: do not claim "up to date"
          while the queue is only partly guessed */
@@ -6077,6 +6084,38 @@ def triage_index():
     return _triage_cache['doc']
 
 
+# Failures worth repeating back to the reader, most specific first.
+_TRIAGE_REASONS = (
+    ('out of memory', 'the GPU was full \u2014 something else on this box has it'),
+    ('No module named', 'that interpreter is missing a package it needs'),
+    ('CUDA driver', 'the CUDA driver would not initialise'),
+    ('No such file or directory', 'a file it needed was not there'),
+)
+
+
+def _triage_last_error():
+    """A short reason from the tail of the run log, or None.
+
+    The tail only, and only if it is recent: the log is appended to across
+    runs, and a reason lifted from one that ended yesterday is worse than
+    saying nothing.
+    """
+    path = os.path.join(REPO, 'data', 'triage_run.log')
+    try:
+        if time.time() - os.path.getmtime(path) > 3600:
+            return None
+        with open(path, 'rb') as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))
+            tail = fh.read().decode('utf-8', 'replace')
+    except OSError:
+        return None
+    for needle, said in _TRIAGE_REASONS:
+        if needle in tail:
+            return said
+    return None
+
+
 def _num_or(v, default):
     try:
         return float(v)
@@ -6131,6 +6170,11 @@ def triage_status():
             # run, and it carries the Run button -- so clearing the guesses hid
             # the only control that could put them back.
             'can_run': bool(CONFIGURED_TRIAGE),
+            # Why it is NOT running, when the run left a reason behind. A run
+            # can die long after the start call returned -- a GPU filling up
+            # takes as long as a model takes to load -- and the strip just went
+            # quiet, so a full graphics card looked like a broken dashboard.
+            'why': None if running else _triage_last_error(),
             'running': running,
             'starting': bool(doc.get('starting')) and running,
             'stalled': stalled,
