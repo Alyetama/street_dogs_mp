@@ -22,20 +22,27 @@ stamped on every record, and NOTHING that builds a training set reads it:
 tools/detect/tests/adv_triage_isolation.py asserts that separation against
 the source rather than trusting this comment.
 
-THE MODEL is torchvision's ImageNet-1k EfficientNet-V2-S: 1000 classes that
-happen to suit the question -- 118 domestic dog breeds, ~280 other animals,
-and 602 inanimate objects. The three buckets are derived from the class
-ORDER, which is a property of the ImageNet-1k label set (verified in
-BUCKETS below), not from a hand-written list that could drift.
+THE MODEL is SigLIP 2, zero-shot, asked our own question in our own words
+(see PROMPTS). The alternative -- an ImageNet-1k classifier -- is still one
+flag away with --model imagenet, and the measured gap between them is large;
+the table above PROMPTS has the numbers, taken against the crops a human has
+already ruled on rather than against a public benchmark.
 
-Bucket probability is the SUMMED softmax mass over a bucket's classes, not
-the top-1 label's. On a 40px crop of a dog the model often spreads its mass
-over a dozen breeds and lands top-1 on something absurd; the mass over
-"some dog" is still decisive, and that is the number the filter uses.
+Bucket probability is the SUMMED mass over a bucket's labels, not the top
+one's. A 40px dog spreads its score over several dog-ish phrasings and can
+land top-1 somewhere odd; the mass on "some kind of dog" is still decisive,
+and that is what the filter sorts by.
 
     python tools/detect/triage_crops.py --limit 200        # try it
     python tools/detect/triage_crops.py                    # everything unjudged
+    python tools/detect/triage_crops.py --watch 600        # keep it current
     python tools/detect/triage_crops.py --device cuda      # when the GPU is idle
+    python tools/detect/triage_crops.py \
+        --model google/siglip2-large-patch16-256 --refresh   # slower, better
+
+Changing --model changes what the buckets mean, so re-run with --refresh
+after a switch: the reader takes the LAST record for a crop, and a file with
+two models' opinions in it would filter by whichever ran last.
 
 Resumable: a crop already in the output is skipped, so this can be run in
 short bursts on a busy machine and picked up later.
@@ -63,6 +70,57 @@ EDGE = {DOG_LO: 'Chihuahua', DOG_HI: 'Mexican hairless',
 OUT_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage.jsonl')
 SCHEMA = 1
 MODEL_ID = 'efficientnet_v2_s.imagenet1k_v1'
+
+# ── the zero-shot backend, and why it is the default ────────────────────────
+# Measured against the 1,693 crops a human has already ruled on -- the exact
+# question this filter helps with -- ranking them by "is this a dog":
+#
+#   yolo26n-cls        AUC 0.676   423 crops/s     ImageNet-1k, nano tier
+#   efficientnet_v2_s  AUC 0.755    11 crops/s     ImageNet-1k
+#   siglip2-base       AUC 0.888   4.3 crops/s     zero-shot, our own labels
+#   siglip2-large      AUC 0.945   0.7 crops/s     zero-shot (308-crop subset)
+#
+# The ImageNet models share a ceiling the accuracy number hides: 1000 fixed
+# classes, none of which is "an empty road", and no way to abstain -- every
+# crop is forced into some label. A zero-shot model is asked OUR question in
+# OUR words, which is why the jump is so much larger than the gap in their
+# published top-1 scores.
+#
+# Each prompt declares the bucket it belongs to, so the mapping is a table
+# rather than an index range that has to be verified against a class order.
+# The short name is what the tile shows.
+SIGLIP_DEFAULT = 'google/siglip2-base-patch16-224'
+PROMPTS = [
+    ('dog', 'dog', 'a photo of a dog'),
+    ('dog', 'street dog', 'a street dog lying on the road'),
+    ('dog', 'puppy', 'a photo of a puppy'),
+    ('dog', 'dog', 'a dog walking on a street'),
+    ('animal', 'cow', 'a photo of a cow'),
+    ('animal', 'ox', 'an ox pulling a cart'),
+    ('animal', 'goat', 'a photo of a goat'),
+    ('animal', 'sheep', 'a photo of a sheep'),
+    ('animal', 'horse', 'a photo of a horse'),
+    ('animal', 'donkey', 'a photo of a donkey'),
+    ('animal', 'camel', 'a photo of a camel'),
+    ('animal', 'pig', 'a photo of a pig'),
+    ('animal', 'cat', 'a photo of a cat'),
+    ('animal', 'bird', 'a photo of a bird'),
+    ('animal', 'chicken', 'a chicken or other poultry'),
+    ('animal', 'monkey', 'a monkey or ape'),
+    ('animal', 'deer', 'a deer or antelope'),
+    ('animal', 'elephant', 'a photo of an elephant'),
+    ('animal', 'wild animal', 'a wild animal in the distance'),
+    ('object', 'car', 'a car or truck'),
+    ('object', 'motorcycle', 'a motorcycle or scooter'),
+    ('object', 'bicycle', 'a bicycle'),
+    ('object', 'person', 'a person walking'),
+    ('object', 'building', 'a building or wall'),
+    ('object', 'road', 'an empty road or pavement'),
+    ('object', 'plants', 'a tree, bush or grass'),
+    ('object', 'rubbish', 'a pile of rubbish or debris'),
+    ('object', 'sign', 'a road sign or street furniture'),
+    ('object', 'nothing', 'a blurry photo of nothing in particular'),
+]
 
 
 def bucket_of(i):
@@ -155,6 +213,10 @@ def main():
                     help='CPU threads; the sweep and any training run want '
                          'the rest of them')
     ap.add_argument('--device', default='cpu', choices=('cpu', 'cuda'))
+    ap.add_argument('--model', default=SIGLIP_DEFAULT,
+                    help="a SigLIP 2 id, or 'imagenet' for the old "
+                         'EfficientNet backend. Bigger SigLIP is better and '
+                         'much slower: base 4.3 crops/s, large 0.7 (CPU).')
     ap.add_argument('--topk', type=int, default=3)
     ap.add_argument('--include-judged', action='store_true',
                     help='also predict crops already ruled on (for measuring '
@@ -173,29 +235,82 @@ def main():
 
     import torch
     from PIL import Image
-    from torchvision.models import (efficientnet_v2_s,
-                                    EfficientNet_V2_S_Weights)
     torch.set_num_threads(max(1, args.threads))
-    weights = EfficientNet_V2_S_Weights.IMAGENET1K_V1
-    cats = weights.meta['categories']
+    imagenet = args.model == 'imagenet'
 
-    # The buckets are an assertion about the label set, so check it. A
-    # different weights enum with a different order would otherwise be
-    # silently mis-bucketed into every prediction this tool ever writes.
-    bad = [f'{i}: expected {want!r}, got {cats[i]!r}'
-           for i, want in EDGE.items() if cats[i] != want]
-    if bad:
-        raise SystemExit('ImageNet class order is not what the buckets '
-                         'assume:\n  ' + '\n  '.join(bad))
-    if args.verify_buckets:
-        n = {b: sum(1 for i in range(len(cats)) if bucket_of(i) == b)
-             for b in ('dog', 'animal', 'object')}
-        print(f'bucket edges verified against {len(cats)} classes: {n}')
-        return 0
+    if imagenet:
+        from torchvision.models import (efficientnet_v2_s,
+                                        EfficientNet_V2_S_Weights)
+        weights = EfficientNet_V2_S_Weights.IMAGENET1K_V1
+        cats = weights.meta['categories']
+        # The buckets are an assertion about the label set, so check it. A
+        # different weights enum with a different order would otherwise be
+        # silently mis-bucketed into every prediction this tool ever writes.
+        bad = [f'{i}: expected {want!r}, got {cats[i]!r}'
+               for i, want in EDGE.items() if cats[i] != want]
+        if bad:
+            raise SystemExit('ImageNet class order is not what the buckets '
+                             'assume:\n  ' + '\n  '.join(bad))
+        if args.verify_buckets:
+            n = {b: sum(1 for i in range(len(cats)) if bucket_of(i) == b)
+                 for b in ('dog', 'animal', 'object')}
+            print(f'bucket edges verified against {len(cats)} classes: {n}')
+            return 0
+        model = efficientnet_v2_s(weights=weights).eval().to(args.device)
+        tf = weights.transforms()
+        model_id = MODEL_ID
+    else:
+        from transformers import AutoModel, AutoProcessor
+        if args.verify_buckets:
+            n = {}
+            for bk, _, _ in PROMPTS:
+                n[bk] = n.get(bk, 0) + 1
+            print(f'{len(PROMPTS)} prompts: {n}')
+            return 0
+        proc = AutoProcessor.from_pretrained(args.model)
+        model = AutoModel.from_pretrained(args.model).eval().to(args.device)
+        model_id = args.model
+        # the text side is fixed, so encode it once for the whole run
+        with torch.no_grad():
+            tok = proc(text=[p for _, _, p in PROMPTS], padding='max_length',
+                       max_length=64, return_tensors='pt').to(args.device)
+            tfeat = model.get_text_features(**tok)
+            tfeat = tfeat / tfeat.norm(dim=-1, keepdim=True)
 
-    model = efficientnet_v2_s(weights=weights).eval().to(args.device)
-    tf = weights.transforms()
+    def score(ims):
+        """[(bucket_mass, [(bucket, name, p), ...])] for a batch of images."""
+        if imagenet:
+            batch = torch.stack([tf(im) for im in ims]).to(args.device)
+            with torch.no_grad():
+                probs = model(batch).softmax(1).cpu()
+            out = []
+            for row in probs:
+                mass = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
+                for idx in range(len(cats)):
+                    mass[bucket_of(idx)] += float(row[idx])
+                out.append((mass, [(bucket_of(i), cats[i], float(row[i]))
+                                   for i in range(len(cats))]))
+            return out
+        px = proc(images=ims, return_tensors='pt').to(args.device)
+        with torch.no_grad():
+            ifeat = model.get_image_features(**px)
+            ifeat = ifeat / ifeat.norm(dim=-1, keepdim=True)
+            logits = ifeat @ tfeat.T * model.logit_scale.exp() + model.logit_bias
+            # SigLIP scores each label independently (sigmoid, not softmax),
+            # so normalise across the prompt table to get a share per bucket
+            p = torch.sigmoid(logits).cpu()
+            p = p / p.sum(1, keepdim=True).clamp(min=1e-9)
+        out = []
+        for row in p:
+            mass = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
+            for j, (bk, _, _) in enumerate(PROMPTS):
+                mass[bk] += float(row[j])
+            out.append((mass, [(PROMPTS[j][0], PROMPTS[j][1], float(row[j]))
+                               for j in range(len(PROMPTS))]))
+        return out
+
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
+    print(f'model: {model_id}')
 
     def once(first):
         """One pass over whatever is unpredicted right now."""
@@ -224,7 +339,7 @@ def main():
                 for nm, d in todo[i:i + args.batch]:
                     try:
                         with Image.open(os.path.join(d, nm)) as im:
-                            ims.append(tf(im.convert('RGB')))
+                            ims.append(im.convert('RGB'))
                         keep.append(nm)
                     except Exception:
                         # the live pool is pruned while this runs; a crop
@@ -232,49 +347,41 @@ def main():
                         unreadable += 1
                 if not ims:
                     continue
-                with torch.no_grad():
-                    p = model(torch.stack(ims).to(args.device)).softmax(1).cpu()
+                scored = score(ims)
+                for im in ims:
+                    im.close()
                 for j, nm in enumerate(keep):
-                    probs = p[j]
-                    # summed mass per bucket, not the top-1's bucket: a small
-                    # crop scatters its mass across breeds and the sum is the
-                    # only stable signal
-                    mass = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
-                    for idx in range(len(cats)):
-                        mass[bucket_of(idx)] += float(probs[idx])
-                    top = torch.topk(probs, args.topk)
+                    mass, per_label = scored[j]
                     best = max(mass, key=mass.get)
-                    # The name shown on the tile must belong to the bucket the
-                    # tile was filed under. The overall top-1 need not: mass
-                    # decides the bucket, so a crop can land in 'dog' on the
-                    # sum of forty breeds while its single best guess is a
-                    # rooster, and a chip reading 'cock' on a dog-filtered
-                    # tile reads as a bug. Best class INSIDE the bucket.
-                    bi = max((i2 for i2 in range(len(cats))
-                              if bucket_of(i2) == best),
-                             key=lambda i2: float(probs[i2]))
+                    # The name on the tile must belong to the bucket the tile
+                    # was filed under. Mass decides the bucket, so a crop can
+                    # land in 'dog' on the sum of many dog-ish labels while
+                    # its single best label sits elsewhere, and a chip that
+                    # disagrees with the filter that surfaced it reads as a
+                    # bug. Best label INSIDE the winning bucket.
+                    in_b = [(nm2, pr) for bk, nm2, pr in per_label
+                            if bk == best]
+                    gname, gp = max(in_b, key=lambda t: t[1])
+                    top = sorted(per_label, key=lambda t: -t[2])[:args.topk]
                     fh.write(json.dumps({
                         'schema': SCHEMA,
                         'name': nm,
                         'bucket': best,
                         'p': round(mass[best], 4),
                         'mass': {k: round(v, 4) for k, v in mass.items()},
-                        # 'guess', never 'label': the ledgers call the
-                        # HUMAN verdict 'label', and a file that must never be
+                        # 'guess', never 'label': the ledgers call the HUMAN
+                        # verdict 'label', and a file that must never be
                         # mistaken for a ledger should not borrow its key.
-                        # Always a member of `bucket`.
-                        'guess': cats[bi],
-                        'guess_p': round(float(probs[bi]), 4),
+                        'guess': gname,
+                        'guess_p': round(gp, 4),
                         # the raw top-k too, so a disagreement is inspectable
-                        'top': [[cats[int(t)], round(float(s), 4)]
-                                for s, t in zip(top.values, top.indices)],
+                        'top': [[t[1], round(t[2], 4)] for t in top],
                         # stamped on every record so nothing downstream can
                         # read one of these and mistake it for a decision
                         'unverified': True,
                         'source': 'model_suggestion',
-                        'model': MODEL_ID,
-                        'ran_at': ran_at,
-                    }) + '\n')
+                        'model': model_id,
+                        'ran_at': ran_at,                    }) + '\n')
                     wrote += 1
                 fh.flush()
                 if (i // args.batch) % 10 == 0:
