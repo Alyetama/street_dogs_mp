@@ -403,6 +403,19 @@ def live_trainings():
     return sorted(seen.values(), key=lambda r: r['started'] or 0)
 
 
+def _incremented(requested, actual):
+    """Is `actual` ultralytics' auto-increment of `requested`?
+
+    It appends an integer to the requested name when the directory already
+    exists: dogbin_009 -> dogbin_0092. Only trailing DIGITS count, so an
+    unrelated run someone named dogbin_009_retry does not match.
+    """
+    if not requested or not actual or requested == actual:
+        return False
+    a, r = str(actual), str(requested)
+    return a.startswith(r) and a[len(r):].isdigit() and bool(a[len(r):])
+
+
 def _same_path(a, b):
     return (a and b
             and os.path.abspath(str(a)) == os.path.abspath(str(b)))
@@ -446,6 +459,15 @@ def _live_score(run, lv):
     score = 0
     if lv.get('name') and lv['name'] == args.get('name'):
         score += 100
+    elif _incremented(lv.get('name'), args.get('name')):
+        # ultralytics renames rather than overwrite: ask for dogbin_009 when
+        # that directory exists and it writes dogbin_0092, rewriting name and
+        # save_dir in the NEW run's args.yaml while the command line keeps the
+        # name you typed. Without this the abandoned directory took the whole
+        # +100 for matching a name the live process is no longer writing to,
+        # and the panel reported the husk as the running one -- measured 230
+        # against 130 for the run that was actually training.
+        score += 90
     if _same_path(lv.get('data'), args.get('data')):
         score += 40
     # compared by NAME: the command line and the run's own args.yaml can spell
@@ -463,6 +485,18 @@ def _live_score(run, lv):
         score += 80 if _same_path(sd, run['dir']) else -60
     if score < CLAIM_FLOOR:
         return None
+    # A directory that has recorded epochs is where training is happening.
+    # Exact rather than heuristic, and it is what finally separates the husk
+    # from its increment: the husk never gets a results.csv. It does NOT help
+    # in the seconds before the real run writes epoch 1 -- both have none then,
+    # and the husk's other points still win -- but it flips as soon as one
+    # lands, and a run that has trained for an hour can never lose to a
+    # directory that never trained at all.
+    try:
+        if read_results(os.path.join(run['dir'], 'results.csv')):
+            score += 40
+    except Exception:
+        pass
     # a directory created at or after the process is the likelier output; worth
     # a nudge between otherwise equal candidates, never a veto
     started, written = lv.get('started'), None

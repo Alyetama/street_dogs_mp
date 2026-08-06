@@ -4283,6 +4283,30 @@ def _past_head(r):
             f'{_metric_row(r)}</div>')
 
 
+def find_run(key, runs=None):
+    """The run a key names, preferring the one that actually ran.
+
+    run_key is project/name and is NOT unique. ultralytics honours its own
+    runs_dir, so project=dogdetection can land at <root>/runs/detect/... while
+    a stale directory of the same name sits at <root>/... -- discover()'s own
+    docstring describes this exact case, and it is live on this box.
+
+    Two resolvers disagreeing about which one they mean is worse than the
+    ambiguity itself: render_run_detail scanned in order and got the
+    405-epoch run, render_run_diff built a dict and got the 0-epoch stub, so
+    the comparison reported "epochs run 0" for a run whose own detail page,
+    one click above it, showed 405. Everything resolves through here now, and
+    the one that recorded epochs wins -- a directory with no results.csv is
+    the leftover in every case this arises from.
+    """
+    runs = training_runs() if runs is None else runs
+    hits = [r for r in runs if run_key(r) == key]
+    if not hits:
+        return None
+    # max() keeps the first on a tie, so discovery order still decides
+    return max(hits, key=lambda r: (r.get('epochs_done') or 0))
+
+
 def _compare_picker(key, runs):
     """The control that turns one run's detail into a comparison.
 
@@ -4306,10 +4330,10 @@ def _compare_picker(key, runs):
 def render_run_detail(key):
     """One run's detail region, resolved by key against what was discovered."""
     runs = training_runs()
-    for r in runs:
-        if run_key(r) == key:
-            return (_past_head(r) + _compare_picker(key, runs)
-                    + _charts(r) + render_confusion(r))
+    r = find_run(key, runs)
+    if r is not None:
+        return (_past_head(r) + _compare_picker(key, runs)
+                + _charts(r) + render_confusion(r))
     return '<div class="mnone">That run is no longer on disk.</div>'
 
 
@@ -4376,8 +4400,8 @@ def render_run_diff(a_key, b_key):
     happen.
     """
     runs = training_runs()
-    by = {run_key(r): r for r in runs}
-    a, b = by.get(a_key), by.get(b_key)
+    # the same resolver the detail view uses -- see find_run
+    a, b = find_run(a_key, runs), find_run(b_key, runs)
     if not a or not b:
         return '<div class="mnone">One of those runs is no longer on disk.</div>'
     if a_key == b_key:
@@ -4579,11 +4603,19 @@ def render_confusion(r):
     if not n or len(matrix) != n or any(len(row) != n for row in matrix):
         return ''
     rows, cols, prec, rec = _conf_stats(labels, matrix)
-    total = sum(rows)
+    # Counted down the columns of the REAL classes. Summing every cell counts
+    # the background column too, and in a detection matrix that column is the
+    # false positives the model invented -- not crops the split contains. It
+    # made one split report three different sizes: birds-yolov9e16, -yolov8n
+    # and -yolov8n2 all score against 1,121 instances and the header read
+    # 1,235, 1,251 and 1,271, moving only with each model's false-alarm count.
+    # A classify matrix has no background column, so nothing changes there.
+    real = [j for j in range(n) if not _is_bg(labels[j], matrix[j][j])]
+    total = sum(cols[j] for j in real)
     if not total:
         return ''
-    correct = sum(matrix[i][i] for i in range(n)
-                  if not _is_bg(labels[i], matrix[i][i]))
+    correct = sum(matrix[j][j] for j in real)
+    invented = sum(rows) - total
 
     head = [f'<th class="cx"></th><th class="cx cxax" colspan="{n}">'
             f'true class &rarr;</th><th class="cx"></th>']
@@ -4653,13 +4685,18 @@ def render_confusion(r):
     # stands for -- 81.7% of a class means something different at 169 than at
     # 12 -- so the bottom row carries the support instead.
     foot = ['<th class="cxl cxr hcue"'
-            + _t('How many crops in the validation set really were each class. '
-                 'The percentages above are shares of these, so a column with '
-                 'few crops moves in big jumps.')
+            + _t('How many crops in the validation set really were each class, '
+                 'and for a background column how many false alarms the model '
+                 'raised. The percentages above are shares of these, so a '
+                 'column with few crops moves in big jumps.')
             + '>crops</th>']
     for j in range(n):
+        bgcol = _is_bg(labels[j], matrix[j][j])
         foot.append(f'<td class="cxn hcue"'
-                    + _t(f'{cols[j]:,} crops in the validation set really were '
+                    + _t(f'{cols[j]:,} detections the model made where there '
+                         f'was nothing to find -- false alarms, not crops the '
+                         f'split contains.' if bgcol else
+                         f'{cols[j]:,} crops in the validation set really were '
                          f'{labels[j]}.')
                     + f'>{cols[j]:,}</td>')
     foot.append('<td class="cxn"></td>')
@@ -4674,8 +4711,10 @@ def render_confusion(r):
     return (f'<div class="cxwrap"><div class="cxhead">'
             f'<b>Confusion matrix</b>'
             f'<span class="cxsub">normalised by true class &middot; '
-            f'{total:,} validation crops &middot; '
-            f'{correct / total * 100:.1f}% correct{note}</span></div>'
+            f'{total:,} labelled instances &middot; '
+            f'{correct / total * 100:.1f}% found'
+            f'{f" &middot; {invented:,} false alarms" if invented else ""}'
+            f'{note}</span></div>'
             f'<div class="cxscroll"><table class="cx">'
             f'<thead><tr>{"".join(head)}</tr><tr>{"".join(sub)}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody>'
