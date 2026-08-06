@@ -89,9 +89,14 @@ if src is None:
 else:
     # every open() with a write mode in that file
     writes = re.findall(r"open\(\s*([^)]*?),\s*['\"]([wa][^'\"]*)['\"]", src)
-    bad = [t for t, _ in writes
-           if 'args.out' not in t and 'OUT_FILE' not in t]
-    check('t2 the writer only ever writes its own output file', not bad,
+    # Two files, both its own: the predictions, and the progress the dashboard
+    # reads. Everything else is a leak. This list is the deliberate review --
+    # adding the status file made this check fail until it was named here,
+    # which is the check doing its job.
+    OWN = ('args.out', 'OUT_FILE', 'args.status', 'STATUS_FILE',
+           'tmp_status')      # named, not a bare 'tmp' anything could hold
+    bad = [t for t, _ in writes if not any(o in t for o in OWN)]
+    check('t2 the writer only ever writes its own files', not bad,
           'other write targets: ' + '; '.join(bad))
     check('t2b the writer names no ledger path', 'labels.jsonl' not in
           src.split('def judged_names')[1].split('def ')[0].replace(

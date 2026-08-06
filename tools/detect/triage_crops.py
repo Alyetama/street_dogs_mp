@@ -68,6 +68,10 @@ EDGE = {DOG_LO: 'Chihuahua', DOG_HI: 'Mexican hairless',
         ANIMAL_HI: 'puffer', ANIMAL_HI + 1: 'abacus'}
 
 OUT_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage.jsonl')
+# Progress, for the dashboard. Separate from the predictions so a reader that
+# only wants "is it running" never has to parse a 5,000-line file, and so a
+# run that dies leaves a last known position behind rather than silence.
+STATUS_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage_status.json')
 SCHEMA = 1
 MODEL_ID = 'efficientnet_v2_s.imagenet1k_v1'
 
@@ -121,6 +125,23 @@ PROMPTS = [
     ('object', 'sign', 'a road sign or street furniture'),
     ('object', 'nothing', 'a blurry photo of nothing in particular'),
 ]
+
+
+def write_status(path, **kw):
+    """Publish where this run has got to. Atomic, because the dashboard
+    polls it while it is being written, and a half-written JSON on the wire
+    reads as 'no run' -- which is a lie about a run that is going fine."""
+    kw.setdefault('schema', 1)
+    kw.setdefault('pid', os.getpid())
+    kw['updated'] = time.time()
+    try:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        tmp_status = path + '.tmp'
+        with open(tmp_status, 'w') as fh:
+            json.dump(kw, fh)
+        os.replace(tmp_status, path)
+    except OSError:
+        pass          # progress reporting must never break the run
 
 
 def bucket_of(i):
@@ -226,6 +247,8 @@ def main():
                     help='re-predict crops already in the output file')
     ap.add_argument('--verify-buckets', action='store_true',
                     help='check the bucket edges and exit')
+    ap.add_argument('--status', default=STATUS_FILE,
+                    help='where to publish progress for the dashboard')
     ap.add_argument('--watch', type=int, default=0, metavar='SECONDS',
                     help='keep going: sleep this long and pick up whatever '
                          'the sweep has written since. The live pool turns '
@@ -312,8 +335,12 @@ def main():
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
     print(f'model: {model_id}')
 
+    started = time.time()
+    passes = [0]
+
     def once(first):
         """One pass over whatever is unpredicted right now."""
+        passes[0] += 1
         names = pool(REPO)
         # --refresh means "redo them", which must apply to the FIRST pass
         # only: on a later --watch pass it would loop over the same crops
@@ -327,6 +354,9 @@ def main():
         print(f'{len(names):,} crops in the pool, {len(todo):,} to predict '
               f'({len(skip):,} already judged or done)')
         if not todo:
+            write_status(args.status, running=bool(args.watch), model=model_id,
+                         done=0, total=0, rate=0, started=started,
+                         passes=passes[0], watch=args.watch, idle=True)
             return 0
         ran_at = time.strftime('%Y-%m-%dT%H:%M:%S')
         wrote = unreadable = 0
@@ -384,12 +414,22 @@ def main():
                         'ran_at': ran_at,                    }) + '\n')
                     wrote += 1
                 fh.flush()
+                el = time.time() - t0
+                write_status(args.status, running=True, model=model_id,
+                             done=wrote, total=len(todo),
+                             rate=round(wrote / el, 2) if el else 0,
+                             started=started, unreadable=unreadable,
+                             passes=passes[0], watch=args.watch)
                 if (i // args.batch) % 10 == 0:
-                    el = time.time() - t0
                     print(f'  {wrote:,}/{len(todo):,}  '
                           f'{wrote / el if el else 0:.1f}/s', end='\r',
                           flush=True)
         el = time.time() - t0
+        write_status(args.status, running=bool(args.watch), model=model_id,
+                     done=wrote, total=len(todo),
+                     rate=round(wrote / el, 2) if el else 0,
+                     started=started, unreadable=unreadable, passes=passes[0],
+                     watch=args.watch, idle=bool(args.watch))
         print(f'\n{wrote:,} predictions -> {args.out} in {el:.0f}s '
               f'({wrote / el:.1f}/s)' if el else f'\n{wrote:,} predictions')
         if unreadable:
@@ -405,6 +445,9 @@ def main():
                 once(False)
         except KeyboardInterrupt:
             print('\nstopped')
+    write_status(args.status, running=False, model=model_id, done=0, total=0,
+                 rate=0, started=started, passes=passes[0], watch=args.watch,
+                 finished=True)
     print('These are suggestions for sorting the queue. Nothing reads this '
           'file except the review page filter.')
     return 0

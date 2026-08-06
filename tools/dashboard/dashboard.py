@@ -4923,6 +4923,11 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent'):
 # training set opens it, and tools/detect/tests/adv_triage_isolation.py
 # asserts that against the source. Every record carries unverified=True.
 TRIAGE_FILE = os.path.join(OUT, 'triage.jsonl')
+TRIAGE_STATUS = os.path.join(OUT, 'triage_status.json')
+# A run that dies leaves its last position behind and no way to know it died,
+# so a status older than this is reported as stopped rather than running. The
+# writer touches the file every batch, which is seconds apart even on CPU.
+TRIAGE_STALE_S = 90
 TRIAGE_BUCKETS = ('dog', 'animal', 'object')
 _triage_cache = {'mtime': None, 'doc': {}}
 
@@ -4963,6 +4968,42 @@ def triage_index():
             doc = {}
         _triage_cache.update(mtime=mtime, doc=doc)
     return _triage_cache['doc']
+
+
+def triage_status():
+    """Progress of the suggestion run, plus how much of the queue it covers.
+
+    Coverage is the useful half: a finished run still leaves crops unguessed
+    because the live pool keeps growing underneath it, and that is the number
+    that decides whether the filter is worth trusting right now.
+    """
+    doc = {}
+    try:
+        with open(TRIAGE_STATUS) as fh:
+            doc = json.load(fh) or {}
+    except (OSError, ValueError):
+        doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
+    age = time.time() - float(doc.get('updated') or 0)
+    # claimed-running but silent for a while: the process is gone
+    running = bool(doc.get('running')) and age < TRIAGE_STALE_S
+    tri = triage_index()
+    pool = review_pool_names()
+    have = sum(1 for n, _ in pool if n in tri)
+    return {'ever': bool(doc) or bool(tri),
+            'running': running,
+            'stalled': bool(doc.get('running')) and not running,
+            'idle': bool(doc.get('idle')),
+            'watch': doc.get('watch') or 0,
+            'model': doc.get('model') or '',
+            'done': doc.get('done') or 0,
+            'total': doc.get('total') or 0,
+            'rate': doc.get('rate') or 0,
+            'passes': doc.get('passes') or 0,
+            'age_s': int(age) if doc else None,
+            'pool': len(pool), 'guessed': have,
+            'coverage': round(have / len(pool), 3) if pool else 0}
 
 
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
@@ -5445,6 +5486,12 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.send_header('Cache-Control', 'private, max-age=300')
             self.end_headers()
             self.wfile.write(body)
+            return
+        if self.path.split('?', 1)[0] == '/api/triage':
+            try:
+                self._json(triage_status())
+            except Exception as e:
+                self._json({'ever': False, 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/dataset':
             try:
@@ -6011,6 +6058,25 @@ padding:8px 14px;font-size:12.5px;color:var(--mut);pointer-events:none}
 .maplock{position:absolute;right:12px;top:12px;z-index:3}
 .maplock[hidden]{display:none}
 /* ── atlas chrome: layer chips, fly-to, surveyor HUD, ramp legend ── */
+/* crop-suggestion run progress */
+.trg{margin:0 0 13px;padding:10px 12px;border:1px solid var(--bd);
+border-radius:11px;background:rgba(130,140,150,.05)}
+.trg[hidden]{display:none}
+.trghead{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap}
+.trghead b{color:var(--tx);font-weight:620}
+.trgsub{color:var(--dim);font-size:11px}
+.trgpct{margin-left:auto;color:var(--mut);font-variant-numeric:tabular-nums;
+font-size:11.5px}
+.trgdot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.trg.on .trgdot{background:var(--green);animation:trgpulse 1.6s ease-in-out infinite}
+.trg.warn .trgdot{background:var(--acc)}
+@keyframes trgpulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){.trg.on .trgdot{animation:none}}
+.trgbar{height:5px;border-radius:3px;background:rgba(130,140,150,.16);
+margin-top:8px;overflow:hidden}
+.trgbar i{display:block;height:100%;width:0;border-radius:3px;
+background:var(--green);transition:width .4s ease}
+.trg.warn .trgbar i{background:var(--acc)}
 .mapbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px}
 .mchip{appearance:none;background:transparent;border:1px solid var(--bd);color:var(--mut);
 border-radius:999px;padding:4px 13px;font-size:11.5px;font-family:inherit;cursor:pointer;
@@ -6650,6 +6716,19 @@ outline-offset:2px}
        always present and goes to em-dashes when idle, so nothing jumps when
        the sweep starts. #detOn is kept (and never hidden) as the cards' box. -->
   __STOREPATH__
+  <!-- The crop-suggestion run. Same panel as the sweep because it is the
+       same kind of thing -- a long background job whose progress you would
+       otherwise have to tail a log for. Hidden entirely until one has been
+       run, so a clone that never uses it sees nothing. -->
+  <div class="trg" id="trg" hidden>
+    <div class="trghead">
+      <span class="trgdot" id="trgDot"></span>
+      <b id="trgState">&mdash;</b>
+      <span class="trgsub" id="trgSub"></span>
+      <span class="trgpct" id="trgPct"></span>
+    </div>
+    <div class="trgbar"><i id="trgFill"></i></div>
+  </div>
   <div id="detOff" class="dnone dstat">sweep idle</div>
   <div id="detOn">
     <div class="kpis" style="margin-bottom:12px">
@@ -7111,6 +7190,61 @@ var refreshTracker;
   document.addEventListener('visibilitychange',function(){
     if(!document.hidden) poll();
   });
+})();
+/* ── crop-suggestion run ── polls only while the fold is open AND the tab is
+   visible, like the sweep panel: every fetch costs a server thread, and this
+   number is interesting for minutes at a time, not milliseconds. */
+(function(){
+  var el=document.getElementById('trg');
+  if(!el)return;
+  var fold=document.getElementById('f-detect');
+  function paint(j){
+    if(!j||!j.ever){el.hidden=true;return;}
+    el.hidden=false;
+    var running=!!j.running, cov=Math.round((j.coverage||0)*100);
+    el.className='trg'+(running?' on':(j.stalled?' warn':''));
+    var state, sub='';
+    if(running&&j.total){
+      state='Guessing crops';
+      sub=(j.done||0).toLocaleString()+' of '+(j.total||0).toLocaleString()+' this pass'+
+          (j.rate?' \u00b7 '+j.rate+'/s':'');
+    }else if(running){
+      /* watching, nothing new to do: say that rather than showing 0 of 0 */
+      state='Watching for new crops';
+      sub='nothing waiting'+(j.watch?' \u00b7 rechecks every '+j.watch+'s':'');
+    }else if(j.stalled){
+      /* claimed running, then went quiet -- do not keep saying "running" */
+      state='Run stopped';
+      sub='no progress for '+Math.round((j.age_s||0)/60)+' min';
+    }else{
+      state='Guesses up to date';
+      sub=j.model?j.model.split('/').pop():'';
+    }
+    document.getElementById('trgState').textContent=state;
+    document.getElementById('trgSub').textContent=sub;
+    /* the bar is COVERAGE of the queue, not progress through one pass: a
+       finished pass still leaves crops unguessed because the pool grows
+       underneath it, and coverage is what decides if the filter is worth
+       trusting */
+    document.getElementById('trgPct').textContent=
+      (j.guessed||0).toLocaleString()+' of '+(j.pool||0).toLocaleString()+' crops guessed \u00b7 '+cov+'%';
+    document.getElementById('trgFill').style.width=cov+'%';
+  }
+  function poll(){
+    if(document.hidden)return;
+    if(fold&&!fold.open)return;
+    /* the catch is for a dropped request, NOT for bugs in paint() -- it hid
+       a ReferenceError once and the strip just sat there blank */
+    fetch('/api/triage').then(function(r){return r.json()})
+      .catch(function(){return null})
+      .then(function(j){if(j)paint(j)});
+  }
+  poll();
+  setInterval(poll,5000);
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden)poll();
+  });
+  if(fold)fold.addEventListener('toggle',function(){if(fold.open)poll()});
 })();
 function genCommands(){
   var region=(cmdRegion.value||'').trim();
