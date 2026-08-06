@@ -3192,6 +3192,12 @@ load();loadBal();
          count yet; "0 of 0" would read as nothing to do */
       state='Starting the guesser';
       sub='loading the model';
+    }else if(running&&j.total&&(j.done||0)>=j.total){
+      /* the pass finished and it is sleeping until the next look -- saying
+         "Guessing crops" through that is the same lie as saying "stopped" */
+      state='Watching for new crops';
+      sub='last pass did '+(j.total||0).toLocaleString()+
+          (j.watch?' \u00b7 looks again every '+j.watch+'s':'');
     }else if(running&&j.total){
       state='Guessing crops';
       sub=(j.done||0).toLocaleString()+' of '+(j.total||0).toLocaleString()+
@@ -5981,6 +5987,13 @@ def triage_index():
     return _triage_cache['doc']
 
 
+def _num_or(v, default):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def triage_status():
     """Progress of the suggestion run, plus how much of the queue it covers.
 
@@ -6006,13 +6019,19 @@ def triage_status():
     # it cannot match.
     _reap()
     alive = bool(triage_pids())
-    running = bool(doc.get('running')) and age < TRIAGE_STALE_S and alive
+    # A --watch run is SUPPOSED to go quiet: it finishes a pass and sleeps for
+    # its whole interval before looking again. With a 90s threshold against a
+    # 300s interval it read as stopped for 210 of every 300 seconds while
+    # perfectly healthy, so the silence a run has announced it will keep is
+    # added to the grace rather than counted against it.
+    quiet_ok = TRIAGE_STALE_S + max(0, _num_or(doc.get('watch'), 0))
+    running = bool(doc.get('running')) and age < quiet_ok and alive
     # STALLED means genuinely hung: the process is still alive but has stopped
     # writing. A DEAD pid is not stalled -- the run simply ended (a kill -9
     # leaves running=True with no chance to write finished=True), so it falls
     # through to the plain "not running" state instead of alarming with
     # "Run stopped, no progress for 114 min" when nothing is wrong.
-    stalled = bool(doc.get('running')) and alive and age >= TRIAGE_STALE_S
+    stalled = bool(doc.get('running')) and alive and age >= quiet_ok
     tri = triage_index()
     pool = review_pool_names()
     have = sum(1 for n, _ in pool if n in tri)
