@@ -127,6 +127,26 @@ PROMPTS = [
 ]
 
 
+def _owner_alive(path):
+    """Is another LIVE run already publishing here?
+
+    Two runs share one status file, so a short one-off finishing would write
+    'not running' over a --watch run that is merely between passes, and the
+    dashboard would call it stopped until the next batch. A run only reports
+    its own end if nobody else owns the file.
+    """
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+        pid = int(doc.get('pid') or 0)
+        if pid <= 0 or pid == os.getpid():
+            return False
+        os.kill(pid, 0)
+        return bool(doc.get('running'))
+    except Exception:
+        return False
+
+
 def write_status(path, **kw):
     """Publish where this run has got to. Atomic, because the dashboard
     polls it while it is being written, and a half-written JSON on the wire
@@ -445,9 +465,11 @@ def main():
                 once(False)
         except KeyboardInterrupt:
             print('\nstopped')
-    write_status(args.status, running=False, model=model_id, done=0, total=0,
-                 rate=0, started=started, passes=passes[0], watch=args.watch,
-                 finished=True)
+    # ...unless a different live run owns the file; see _owner_alive
+    if not _owner_alive(args.status):
+        write_status(args.status, running=False, model=model_id, done=0,
+                     total=0, rate=0, started=started, passes=passes[0],
+                     watch=args.watch, finished=True)
     print('These are suggestions for sorting the queue. Nothing reads this '
           'file except the review page filter.')
     return 0

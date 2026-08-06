@@ -4986,8 +4986,15 @@ def triage_status():
     if not isinstance(doc, dict):
         doc = {}
     age = time.time() - float(doc.get('updated') or 0)
-    # claimed-running but silent for a while: the process is gone
-    running = bool(doc.get('running')) and age < TRIAGE_STALE_S
+    # Claimed-running but silent, OR claimed-running by a pid that no longer
+    # exists. The pid check is the exact one and answers instantly; the age
+    # is the fallback for a run on another machine or a recycled pid.
+    alive = True
+    try:
+        os.kill(int(doc.get('pid') or 0), 0)
+    except (OSError, ValueError, TypeError):
+        alive = False
+    running = bool(doc.get('running')) and age < TRIAGE_STALE_S and alive
     tri = triage_index()
     pool = review_pool_names()
     have = sum(1 for n, _ in pool if n in tri)
@@ -7201,7 +7208,8 @@ var refreshTracker;
   function paint(j){
     if(!j||!j.ever){el.hidden=true;return;}
     el.hidden=false;
-    var running=!!j.running, cov=Math.round((j.coverage||0)*100);
+    var running=!!j.running, cov=Math.round((j.coverage||0)*100),
+        gap=Math.max(0,(j.pool||0)-(j.guessed||0));
     el.className='trg'+(running?' on':(j.stalled?' warn':''));
     var state, sub='';
     if(running&&j.total){
@@ -7216,6 +7224,13 @@ var refreshTracker;
       /* claimed running, then went quiet -- do not keep saying "running" */
       state='Run stopped';
       sub='no progress for '+Math.round((j.age_s||0)/60)+' min';
+    }else if(gap>0){
+      /* "up to date" used to cover this, and it was a lie: no run being
+         active says nothing about whether the queue is covered. At 57%
+         coverage the strip cheerfully read "Guesses up to date". */
+      state='Not running';
+      sub=gap.toLocaleString()+' crop'+(gap===1?'':'s')+' have no guess yet';
+      el.className='trg warn';
     }else{
       state='Guesses up to date';
       sub=j.model?j.model.split('/').pop():'';
