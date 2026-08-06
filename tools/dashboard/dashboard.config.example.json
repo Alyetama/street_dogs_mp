@@ -29,5 +29,6 @@
   "proxies": "proxies.txt",
   "_proxies": "Proxy list named in the generated coverage-audit command. Default 'proxies.txt' (gitignored at the repo root).",
   "triage_python": "<path to a python with torch and transformers, for the crop guesser>",
-  "triage_watch": 300
+  "triage_watch": 300,
+  "review_dup_bits": 0
 }

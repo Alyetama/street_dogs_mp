@@ -1856,7 +1856,8 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
   <span><kbd>&#8679;</kbd>+arrows nudge box &middot; saves itself</span>
   <span><kbd>U</kbd> undo</span>
   <span>The bar under each crop is detector confidence.</span>
-  <span>One crop per camera pass &mdash; repeat frames of the same animal are hidden.</span>
+  <span>One crop per camera pass, and one per photo &mdash; repeat frames and
+  duplicate shots of the same animal are hidden.</span>
 </div>
 
 <div class="grid" id="grid"></div>
@@ -2026,9 +2027,11 @@ function score(){
   var s=$('seen');if(s)s.textContent=n(seenN);
   var pz=$('pos');if(pz)pz.textContent=n(posN);
   var dz=$('dups');if(dz){dz.textContent=n(dupN);
-    dz.parentNode.title=n(dupN)+' crops hidden because another frame from the '
-      +'same Mapillary sequence is already in the queue -- same animal, same '
-      +'pass, one decision';}
+    dz.parentNode.title=n(dupN)+' crops hidden because the same picture is '
+      +'already accounted for: another frame from the same Mapillary sequence, '
+      +'or a pixel-identical copy of a crop already in the queue or already '
+      +'judged. The same photo reaches this queue through more than one '
+      +'sequence, which is how near-identical crops used to be judged twice.';}
 }
 
 /* ── training-set balance ─────────────────────────────────────────────────
@@ -3217,6 +3220,102 @@ def warm_sequences(db, ids):
 
     threading.Thread(target=work, daemon=True).start()
     return len(missing)
+
+
+# Visual-duplicate collapse: the Hamming distance between two 64-bit dHashes
+# at which they are the same picture. 0 is exact-match only; -1 turns it off.
+#
+# 0 because it was measured, twice. Every duplicate pair that survived the
+# sequence collapse sat at distance 0 -- the same photo reached through two
+# different Mapillary sequences -- and nothing sat between 1 and 5. The two
+# pairs that turned up at distance 6 were BOTH wrong on sight: a blue-toned
+# dog matched to a person sitting on the ground, and a small pale crop matched
+# to a dark silhouette. These crops are small, blurry and low-contrast, which
+# is where a 64-bit perceptual hash is weakest, so the tolerance that looks
+# generous is the one that hides a crop nobody has judged.
+DUP_BITS = cfg_int('review_dup_bits', 0, env='REVIEW_DUP_BITS')
+DUP_BANDS = 8          # 8 bands x 8 bits: see _dup_bands
+
+
+def _dup_bands(h):
+    """The 8 byte-wide slices of a 64-bit hash, tagged by position.
+
+    Two hashes differing in at most 6 bits cannot differ in all 8 bands, so
+    sharing no band proves a distance above the threshold. That turns the
+    comparison from every-crop-against-every-crop into eight dict lookups --
+    the difference between ~9 million popcounts per request and a few hundred.
+    """
+    return [(i, (h >> (8 * i)) & 0xFF) for i in range(DUP_BANDS)]
+
+
+class DupIndex:
+    """Hashes seen so far, searchable by near-equality."""
+
+    def __init__(self, bits=None):
+        self.bits = DUP_BITS if bits is None else bits
+        self.bands = {}
+        self.exact = set()
+
+    def hit(self, h):
+        """Is a hash within `bits` of this one already in the index?"""
+        if h is None or self.bits < 0:
+            return False
+        if self.bits == 0:
+            return h in self.exact       # the default: no popcount needed
+        seen = set()
+        for key in _dup_bands(h):
+            for other in self.bands.get(key, ()):
+                if other in seen:
+                    continue
+                seen.add(other)
+                if bin(h ^ other).count('1') <= self.bits:
+                    return True
+        return False
+
+    def add(self, h):
+        if h is None or self.bits < 0:
+            return
+        if self.bits == 0:
+            self.exact.add(h)
+            return
+        for key in _dup_bands(h):
+            self.bands.setdefault(key, []).append(h)
+
+
+_JUDGED_DUPS = {'at': None, 'index': None}
+
+
+def judged_dup_index():
+    """A DupIndex over the crop copies both flag ledgers keep.
+
+    The sequence collapse already stops a judged crop's own siblings coming
+    back; this is the same guarantee for the case it cannot see -- the same
+    photo reached through a different sequence. That case is the one that put
+    near-identical crops on both sides of a verdict.
+
+    Rebuilt when either ledger's crop directory changes, which is once per
+    flag, and the hashes themselves are cached by name.
+    """
+    dirs = [os.path.join(HN_DIR, 'crops'), os.path.join(HP_DIR, 'crops')]
+    try:
+        stamp = tuple(os.stat(d).st_mtime_ns if os.path.isdir(d) else 0
+                      for d in dirs)
+    except OSError:
+        stamp = None
+    if _JUDGED_DUPS['at'] == stamp and _JUDGED_DUPS['index'] is not None:
+        return _JUDGED_DUPS['index']
+    idx = DupIndex()
+    if DUP_BITS >= 0:
+        for d in dirs:
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue
+            for nm in names:
+                if nm.lower().endswith('.jpg'):
+                    idx.add(_dhash(os.path.join(d, nm), 'judged/' + nm))
+    _JUDGED_DUPS.update(at=stamp, index=idx)
+    return idx
 
 
 def _dhash(path, name):
@@ -5709,7 +5808,15 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
         sq, ts = _seq_of(smap.get(i))
         if sq and ts is not None:
             judged_seq.setdefault(sq, []).append(ts)
-    kept, seen_seq, hash_reps, collapsed = [], {}, [], 0
+    kept, seen_seq, collapsed = [], {}, 0
+    # Pool-wide, not a fallback. The perceptual hash used to run only for a
+    # crop whose sequence was unknown, so two crops from DIFFERENT sequences
+    # showing the same animal in the same frame both survived -- which is how
+    # near-identical crops ended up judged twice. Measured on the live pool:
+    # 127 of 1,742 hashable survivors had a twin, every one of them from
+    # another sequence.
+    dup_seen = DupIndex()
+    dup_judged = judged_dup_index()
 
     def near(bucket, sq, ts):
         """Another frame of this pass already accounted for, within the window."""
@@ -5722,21 +5829,23 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
         if sq and near(judged_seq, sq, ts):
             collapsed += 1
             continue
-        if sq:
-            if near(seen_seq, sq, ts):
+        if sq and near(seen_seq, sq, ts):
+            collapsed += 1
+            continue
+        # Hashed from the directory the crop is actually in. Joining CROPS
+        # unconditionally silently returned None for every harvested crop --
+        # 1,023 of 2,757, 37% of the pool -- so the hash check had no effect
+        # on more than a third of the queue.
+        h = _dhash(os.path.join(where.get(c['name'], CROPS), c['name']),
+                   c['name'])
+        if h is not None:
+            if dup_judged.hit(h) or dup_seen.hit(h):
                 collapsed += 1
                 continue
+            dup_seen.add(h)
+        if sq:
             seen_seq.setdefault(sq, []).append(ts if ts is not None else 0.0)
             c['seq'] = sq
-        else:
-            # no sequence known -- fall back to a perceptual hash so an
-            # unresolved crop is still not shown twice
-            h = _dhash(os.path.join(CROPS, c['name']), c['name'])
-            if h is not None:
-                if any(bin(h ^ r).count('1') <= 6 for r in hash_reps):
-                    collapsed += 1
-                    continue
-                hash_reps.append(h)
         kept.append(c)
 
     # Tally, then filter -- in that order, and both AFTER the collapse.
