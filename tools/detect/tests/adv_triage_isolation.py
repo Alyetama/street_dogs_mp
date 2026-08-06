@@ -10,7 +10,8 @@ not be used as training labels. Only a human verdict is ground truth.
 A comment saying so is worth very little. These checks fail the build if any
 of the following becomes true:
 
-  t1  a module that builds training data mentions the triage file
+  t1  any module under tools/ other than the writer and the dashboard
+      mentions the triage file
   t2  the triage writer opens a ledger or a dataset directory for writing
   t3  the review page's flag path lets a suggestion reach the ledger record
   t4  a triage record is missing its unverified marks
@@ -32,11 +33,18 @@ TOOLS = os.path.join(REPO, 'tools')
 TRIAGE = os.path.join(REPO, 'tools', 'detect', 'triage_crops.py')
 DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
 
-# Everything that turns human verdicts into training data. If any of these
-# ever learns to read the triage file, the separation is gone.
-BUILDERS = ('rebuild_crop_dataset.py', 'harvest_flagged.py',
-            'build_review_set.py', 'eval_dogbin.py', 'make_acceptance_set.py',
-            'build_dogbin_dataset.py', 'dedupe_crops.py')
+# WHO IS ALLOWED to know this file exists. An allowlist of builders was the
+# first attempt and it rotted immediately: three of its seven names were not
+# real files and three real builders (build_detector_negatives.py,
+# dedup_crops.py, reserve_acceptance_set.py) were never scanned, so the check
+# that was supposed to catch a leak was reading almost nothing.
+#
+# Inverted, it cannot rot. EVERY python file under tools/ is scanned, and only
+# these two may mention the triage file: the tool that writes it and the
+# dashboard that filters with it. A new script that reads it fails this test
+# until someone adds it here deliberately -- which is the review the rule
+# actually needs.
+ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py'}
 LEDGERS = (os.path.join(REPO, 'data', 'hard_negatives', 'labels.jsonl'),
            os.path.join(REPO, 'data', 'hard_positives', 'labels.jsonl'))
 TRIAGE_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage.jsonl')
@@ -59,20 +67,20 @@ def read(p):
         return None
 
 
-# ── t1 no dataset builder knows this file exists ────────────────────────────
-seen, guilty = [], []
+# ── t1 nothing but the writer and the filter knows this file exists ────────
+scanned, guilty = 0, []
 for base, _, files in os.walk(TOOLS):
     for f in files:
-        if f not in BUILDERS:
+        if not f.endswith('.py') or f in ALLOWED:
             continue
-        seen.append(f)
-        src = read(os.path.join(base, f)) or ''
-        if re.search(r'triage', src, re.I):
-            guilty.append(f)
-check('t1 no dataset builder reads the triage file', not guilty,
-      'mentions triage: ' + ', '.join(guilty))
-if not seen:
-    print('     (note: none of the known builders were found to scan)')
+        scanned += 1
+        if re.search(r'triage', read(os.path.join(base, f)) or '', re.I):
+            guilty.append(os.path.relpath(os.path.join(base, f), REPO))
+check(f't1 none of the {scanned} other tools/ modules mention the triage file',
+      not guilty, 'mentions triage: ' + ', '.join(guilty))
+check('t1b the allowlist names files that exist', all(
+    any(f in fs for _, _, fs in os.walk(TOOLS)) for f in ALLOWED),
+    'an allowed name matches no file -- the list has rotted')
 
 # ── t2 the writer never opens a ledger or dataset for writing ───────────────
 src = read(TRIAGE)

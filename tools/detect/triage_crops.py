@@ -79,6 +79,11 @@ def judged_names(repo):
 
     Read-only, and only to decide what not to bother predicting. The ledgers
     are the ground truth this tool exists to stay out of.
+
+    The key is 'crop'. This read 'name' -- the key THIS tool writes -- so it
+    matched nothing and skipped nobody: an exclusion that excluded zero
+    crops. It cost little (judged crops leave the review pool anyway, so only
+    6 overlapped) but a guard that never fires is not a guard.
     """
     out = set()
     for rel in (('data', 'hard_negatives', 'labels.jsonl'),
@@ -91,8 +96,12 @@ def judged_names(repo):
                         r = json.loads(ln)
                     except ValueError:
                         continue
-                    if isinstance(r, dict) and r.get('name'):
-                        out.add(r['name'])
+                    if isinstance(r, dict):
+                        # 'crop' is the ledgers' key; 'name' appears only in
+                        # this tool's own output
+                        nm = r.get('crop') or r.get('name')
+                        if nm:
+                            out.add(nm)
         except OSError:
             pass
     return out
@@ -250,9 +259,12 @@ def main():
                         'bucket': best,
                         'p': round(mass[best], 4),
                         'mass': {k: round(v, 4) for k, v in mass.items()},
-                        # what to call it: always a member of `bucket`
-                        'label': cats[bi],
-                        'label_p': round(float(probs[bi]), 4),
+                        # 'guess', never 'label': the ledgers call the
+                        # HUMAN verdict 'label', and a file that must never be
+                        # mistaken for a ledger should not borrow its key.
+                        # Always a member of `bucket`.
+                        'guess': cats[bi],
+                        'guess_p': round(float(probs[bi]), 4),
                         # the raw top-k too, so a disagreement is inspectable
                         'top': [[cats[int(t)], round(float(s), 4)]
                                 for s, t in zip(top.values, top.indices)],

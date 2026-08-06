@@ -4954,7 +4954,10 @@ def triage_index():
                     # prefer the in-bucket name; fall back to the overall
                     # top-1 for records written before that field existed
                     doc[nm] = {'b': r['bucket'], 'p': r.get('p'),
-                               'top': r.get('label')
+                               # 'guess' is the current key; 'label' was used
+                               # briefly and is read only so records written
+                               # then still render
+                               'top': r.get('guess') or r.get('label')
                                or (r.get('top') or [[None]])[0][0]}
         except OSError:
             doc = {}
