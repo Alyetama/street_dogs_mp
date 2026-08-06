@@ -3094,7 +3094,13 @@ _seq_lock = threading.Lock()
 _seq = None            # image_id -> sequence
 _seq_busy = False
 _dhash_cache = {}      # crop name -> 64-bit dHash
-DHASH_MAX = 8000       # bounded: the sweep writes ~4 crops/s for days
+# Bounded: the sweep writes ~4 crops/s for days. Sized for who hashes now --
+# the whole review pool (retention 3000) plus every crop both ledgers have
+# judged, which is ~1800 and grows with each flag. It used to be a handful of
+# sequence-less crops, so 8000 was generous; at ~4800 per request it was close
+# enough to the ceiling that ordinary sweep churn would trip the wipe every
+# few minutes and re-read every one of them from disk.
+DHASH_MAX = 24000
 
 
 def _epoch(v):
@@ -3234,18 +3240,25 @@ def warm_sequences(db, ids):
 # is where a 64-bit perceptual hash is weakest, so the tolerance that looks
 # generous is the one that hides a crop nobody has judged.
 DUP_BITS = cfg_int('review_dup_bits', 0, env='REVIEW_DUP_BITS')
-DUP_BANDS = 8          # 8 bands x 8 bits: see _dup_bands
+def _dup_bands(h, nb):
+    """`nb` slices of a 64-bit hash, tagged by position, as evenly as they cut.
 
-
-def _dup_bands(h):
-    """The 8 byte-wide slices of a 64-bit hash, tagged by position.
-
-    Two hashes differing in at most 6 bits cannot differ in all 8 bands, so
-    sharing no band proves a distance above the threshold. That turns the
-    comparison from every-crop-against-every-crop into eight dict lookups --
+    Two hashes differing in at most nb-1 bits cannot differ in ALL nb bands, so
+    sharing no band proves they are further apart than the tolerance. That turns
+    the comparison from every-crop-against-every-crop into nb dict lookups --
     the difference between ~9 million popcounts per request and a few hundred.
+
+    The band count is derived from the tolerance rather than fixed, because a
+    fixed one is a trap: with 8 bands the guarantee holds only to 7 bits, and a
+    tolerance of 8 or 10 set in config would have quietly started missing real
+    pairs -- measured at 3 and 12 misses per 400 -- with nothing to show for it.
     """
-    return [(i, (h >> (8 * i)) & 0xFF) for i in range(DUP_BANDS)]
+    out, lo = [], 0
+    for i in range(nb):
+        hi = 64 * (i + 1) // nb
+        out.append((i, (h >> lo) & ((1 << (hi - lo)) - 1)))
+        lo = hi
+    return out
 
 
 class DupIndex:
@@ -3253,6 +3266,8 @@ class DupIndex:
 
     def __init__(self, bits=None):
         self.bits = DUP_BITS if bits is None else bits
+        # one more band than the tolerance: see _dup_bands
+        self.nb = max(1, min(64, self.bits + 1))
         self.bands = {}
         self.exact = set()
 
@@ -3263,7 +3278,7 @@ class DupIndex:
         if self.bits == 0:
             return h in self.exact       # the default: no popcount needed
         seen = set()
-        for key in _dup_bands(h):
+        for key in _dup_bands(h, self.nb):
             for other in self.bands.get(key, ()):
                 if other in seen:
                     continue
@@ -3278,7 +3293,7 @@ class DupIndex:
         if self.bits == 0:
             self.exact.add(h)
             return
-        for key in _dup_bands(h):
+        for key in _dup_bands(h, self.nb):
             self.bands.setdefault(key, []).append(h)
 
 
@@ -3334,7 +3349,11 @@ def _dhash(path, name):
     except Exception:
         bits = None
     if len(_dhash_cache) >= DHASH_MAX:
-        _dhash_cache.clear()      # cheap to recompute; never grow without end
+        # Drop the oldest half rather than everything. A full wipe made the
+        # next request re-read every crop it had just hashed; keeping the
+        # newer half means the working set survives its own overflow.
+        for k in list(_dhash_cache)[:len(_dhash_cache) // 2]:
+            del _dhash_cache[k]
     _dhash_cache[name] = bits
     return bits
 
@@ -4244,7 +4263,9 @@ def confusion_index():
         st = os.stat(CONFUSION_FILE)
         stamp = (st.st_mtime, st.st_size)
     except OSError:
-        _CONF.update(at=None, runs={})
+        # fold too: clearing only `runs` left confusion_for() answering from a
+        # cache built out of a file that is no longer there
+        _CONF.update(at=None, runs={}, fold={})
         return _CONF['runs']
     if _CONF['at'] == stamp:
         return _CONF['runs']
@@ -5920,6 +5941,12 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
 # reports it alive. That is how a finished guesser went on claiming to be
 # "Guessing crops" with a Pause button underneath it.
 _SPAWNED = []
+# Guards the check-then-spawn in triage_control, and _SPAWNED with it. This is
+# a ThreadingHTTPServer: two tabs pressing Run land in two threads, both see no
+# process running, and both start one. Measured -- two simultaneous POSTs both
+# answered "guessing started", and two guessers then worked the same queue and
+# appended to the same file.
+_SPAWN_LOCK = threading.Lock()
 
 
 def _reap():
@@ -5991,7 +6018,15 @@ def triage_control(action):
 
     Stopping loses nothing: the guesser appends each batch to triage.jsonl as
     it goes, and a fresh run skips crops already in there.
+
+    Serialised: deciding whether one is running and starting one has to be a
+    single step, or two clicks race into two guessers.
     """
+    with _SPAWN_LOCK:
+        return _triage_control(action)
+
+
+def _triage_control(action):
     _reap()
     pids = triage_pids()
     if action == 'stop':
