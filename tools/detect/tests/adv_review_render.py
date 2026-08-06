@@ -248,7 +248,7 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   // its onchange bind against null and kill the whole script
                   'suggest','balNum','balNumU','balLeft',
                   // crop-suggestion progress strip, moved here from the dashboard
-                  'trg','trgState','trgSub','trgPct','trgFill','trgDot']) {
+                  'trg','trgState','trgSub','trgPct','trgFill','trgDot','trgRun']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }

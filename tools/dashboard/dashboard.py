@@ -1144,6 +1144,11 @@ HN_DIR = os.path.join(REPO, 'data', 'hard_negatives')
 # this process, which is right for a single-env checkout and wrong-but-loud
 # for a split one: the sweep fails on import rather than silently not starting.
 SWEEP_PYTHON = cfg('sweep_python', sys.executable, env='SWEEP_PYTHON')
+# The guesser needs torch and transformers; the dashboard does not, and on
+# this box they are different environments. Resolved from config so no
+# machine's layout ends up in a public repo.
+TRIAGE_PYTHON = cfg('triage_python', sys.executable, env='TRIAGE_PYTHON')
+TRIAGE_WATCH = cfg_int('triage_watch', 300, env='TRIAGE_WATCH')
 HN_CROPS = os.path.join(HN_DIR, 'crops')
 HN_FULL = os.path.join(HN_DIR, 'full')
 HN_LABELS = os.path.join(HN_DIR, 'labels.jsonl')
@@ -1739,6 +1744,13 @@ background:var(--green);opacity:.75;transition:width .4s ease}
 .trg.warn .trgbar i{background:var(--acc)}
 .trgpct{font-size:11px;color:var(--dim);flex:none;
 font-variant-numeric:tabular-nums;white-space:nowrap}
+.trgbtn{flex:none;appearance:none;background:transparent;color:var(--mut);
+border:1px solid var(--bd);border-radius:999px;padding:4px 13px;font-size:11.5px;
+font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
+.trgbtn:hover:not(:disabled){color:var(--tx);border-color:var(--dim)}
+.trgbtn:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.trgbtn:disabled{opacity:.5;cursor:default}
+.trgerr{flex-basis:100%;font-size:11px;color:var(--red);margin-top:6px}
 </style></head><body><div class="wrap">
 
 <header>
@@ -1832,6 +1844,7 @@ font-variant-numeric:tabular-nums;white-space:nowrap}
   <div class="trgtx"><b id="trgState">&mdash;</b><span class="trgsub" id="trgSub"></span></div>
   <div class="trgcol"><div class="trgbar"><i id="trgFill"></i></div></div>
   <span class="trgpct" id="trgPct"></span>
+  <button type="button" class="trgbtn" id="trgRun">&mdash;</button>
 </div>
 
 <div class="hint">
@@ -2955,7 +2968,12 @@ load();loadBal();
     var running=!!j.running, cov=Math.round((j.coverage||0)*100),
         gap=Math.max(0,(j.pool||0)-(j.guessed||0)), state, sub='';
     el.className='trg'+(running?' on':(j.stalled?' warn':''));
-    if(running&&j.total){
+    if(j.starting){
+      /* spawned, but the model is still loading and it has not written a
+         count yet; "0 of 0" would read as nothing to do */
+      state='Starting the guesser';
+      sub='loading the model';
+    }else if(running&&j.total){
       state='Guessing crops';
       sub=(j.done||0).toLocaleString()+' of '+(j.total||0).toLocaleString()+
           ' this pass'+(j.rate?' \u00b7 '+j.rate+'/s':'');
@@ -2980,15 +2998,66 @@ load();loadBal();
     $('trgPct').textContent=(j.guessed||0).toLocaleString()+' of '+
       (j.pool||0).toLocaleString()+' crops guessed \u00b7 '+cov+'%';
     $('trgFill').style.width=cov+'%';
+    /* the button reflects what the run IS doing, so the label is the action
+       it would take -- not the state it is in */
+    var btn=$('trgRun');
+    if(btn&&!btn.disabled){
+      btn.textContent=running?'Pause':'Run guesses';
+      btn.title=running
+        ?'Stop guessing. Everything already guessed is kept.'
+        :'Guess the crops that have none yet, then watch for new ones.';
+    }
   }
+  /* Bumped whenever the run is started or stopped. A poll issued BEFORE an
+     action can land after it and repaint the state the action just changed,
+     which showed "Not running" for a few seconds under a button already
+     reading Pause. Responses from an older generation are dropped. */
+  var gen=0;
   function poll(){
     if(document.hidden)return;
+    var mine=gen;
     /* catch is for a dropped request only, never a bug in paint() */
     fetch('/api/triage').then(function(r){return r.json()})
-      .catch(function(){return null}).then(function(j){if(j)paint(j)});
+      .catch(function(){return null})
+      .then(function(j){if(j&&mine===gen)paint(j)});
   }
   poll(); setInterval(poll,5000);
   document.addEventListener('visibilitychange',function(){if(!document.hidden)poll()});
+
+  var btn=$('trgRun');
+  if(btn) btn.addEventListener('click',function(){
+    /* what the button says is what it does: read the label, not a cached
+       flag that a poll may have moved underneath it */
+    var stopping=btn.textContent.indexOf('Pause')===0;
+    var old=document.querySelector('.trgerr');
+    if(old) old.remove();
+    gen++;
+    btn.disabled=true; btn.textContent=stopping?'Pausing\u2026':'Starting\u2026';
+    fetch('/api/triage',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:stopping?'stop':'start'})})
+      .then(function(r){return r.json()})
+      .catch(function(){return {ok:false,msg:'the dashboard did not answer'}})
+      .then(function(j){
+        btn.disabled=false;
+        if(j&&j.ok){
+          /* the server already said what happened; showing it now beats
+             waiting up to 5s for a poll to say the same thing */
+          btn.textContent=j.running?'Pause':'Run guesses';
+        }
+        if(j&&!j.ok&&j.msg){
+          /* a start that fails does so for a reason the reader can act on --
+             usually an interpreter without torch -- so say it rather than
+             silently going back to "Not running" */
+          var e=document.createElement('div');
+          e.className='trgerr'; e.textContent=j.msg;
+          el.appendChild(e);
+        }
+        /* the status file is written by the run itself, so it lags the
+           spawn; poll now for the button, and again once it has caught up */
+        poll(); setTimeout(poll,1500);
+      });
+  });
 })();
 </script></body></html>"""
 
@@ -5457,14 +5526,15 @@ def triage_status():
     if not isinstance(doc, dict):
         doc = {}
     age = time.time() - float(doc.get('updated') or 0)
-    # Claimed-running but silent, OR claimed-running by a pid that no longer
-    # exists. The pid check is the exact one and answers instantly; the age
-    # is the fallback for a run on another machine or a recycled pid.
-    alive = True
-    try:
-        os.kill(int(doc.get('pid') or 0), 0)
-    except (OSError, ValueError, TypeError):
-        alive = False
+    # Liveness comes from the process table, not from the pid in the file.
+    # os.kill(pid, 0) was the obvious check and it is wrong twice over: it
+    # succeeds for a ZOMBIE, which is a dead process the parent has not waited
+    # on, and it succeeds for whatever unrelated process later inherits a
+    # recycled pid. Scanning for a python actually running triage_crops.py
+    # answers the question that was meant -- a zombie has no command line, so
+    # it cannot match.
+    _reap()
+    alive = bool(triage_pids())
     running = bool(doc.get('running')) and age < TRIAGE_STALE_S and alive
     # STALLED means genuinely hung: the process is still alive but has stopped
     # writing. A DEAD pid is not stalled -- the run simply ended (a kill -9
@@ -5477,6 +5547,7 @@ def triage_status():
     have = sum(1 for n, _ in pool if n in tri)
     return {'ever': bool(doc) or bool(tri),
             'running': running,
+            'starting': bool(doc.get('starting')) and running,
             'stalled': stalled,
             'idle': bool(doc.get('idle')),
             'watch': doc.get('watch') or 0,
@@ -5734,24 +5805,155 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             'country_coverage': coverage}
 
 
-def sweep_pids():
-    """PIDs of running sweep processes (never matches this server)."""
+# Children this server started, kept only so they can be reaped. A Popen whose
+# object is dropped is never waited on, so when the child exits it stays in the
+# table as a zombie -- and a zombie still has a /proc entry, so os.kill(pid, 0)
+# reports it alive. That is how a finished guesser went on claiming to be
+# "Guessing crops" with a Pause button underneath it.
+_SPAWNED = []
+
+
+def _reap():
+    """Collect any spawned child that has exited. Cheap and idempotent."""
+    for proc in list(_SPAWNED):
+        try:
+            if proc.poll() is not None:
+                _SPAWNED.remove(proc)
+        except Exception:
+            _SPAWNED.remove(proc)
+
+
+def _script_pids(script, *need_args):
+    """PIDs of processes that ARE `python .../<script>`, with those arguments.
+
+    Matched on argv structure, not on the command line as one string. The
+    substring version matched any process whose command line merely CONTAINED
+    the script's name and the word python -- which is true of every shell
+    running a command that mentions it, including `pgrep -f triage_crops.py`
+    typed with a full interpreter path. Harmless while only reading, and not
+    harmless at all one function later, where the answer is handed to SIGTERM.
+
+    argv[0] must be a python, and some later argument must BE the script --
+    a `python -c` whose code quotes the filename carries it inside one large
+    argument and no longer matches.
+    """
     out = []
     try:
-        for d in os.listdir('/proc'):
-            if not d.isdigit():
-                continue
-            try:
-                with open(f'/proc/{d}/cmdline', 'rb') as f:
-                    cl = f.read().decode('utf-8', 'replace')
-            except OSError:
-                continue
-            if 'sweep.py' in cl and ' run' in cl.replace('\x00', ' '):
-                if 'python' in cl:
-                    out.append(int(d))
+        listing = os.listdir('/proc')
     except OSError:
-        pass
+        return out
+    for d in listing:
+        if not d.isdigit():
+            continue
+        try:
+            with open(f'/proc/{d}/cmdline', 'rb') as f:
+                argv = [a for a in f.read().decode('utf-8', 'replace').split('\0')
+                        if a]
+        except OSError:
+            continue
+        if len(argv) < 2 or 'python' not in os.path.basename(argv[0]):
+            continue
+        if not any(a == script or a.endswith('/' + script) for a in argv[1:]):
+            continue
+        if any(w not in argv[1:] for w in need_args):
+            continue
+        out.append(int(d))
     return out
+
+
+def sweep_pids():
+    """PIDs of running sweep processes (never matches this server)."""
+    return _script_pids('sweep.py', 'run')
+
+
+def triage_pids():
+    """PIDs running the crop guesser.
+
+    Found by scanning /proc rather than read from the status file: a killed run
+    never gets to clear its own `running: true`, so that file's pid outlives it
+    and can be recycled onto something else entirely. Signalling a pid because
+    a stale JSON named it is how you kill an unrelated process.
+    """
+    return _script_pids('triage_crops.py')
+
+
+def triage_control(action):
+    """stop = SIGTERM; start = relaunch detached in --watch mode.
+
+    Stopping loses nothing: the guesser appends each batch to triage.jsonl as
+    it goes, and a fresh run skips crops already in there.
+    """
+    _reap()
+    pids = triage_pids()
+    if action == 'stop':
+        if not pids:
+            return {'ok': True, 'running': False, 'msg': 'already stopped'}
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        return {'ok': True, 'running': False,
+                'msg': 'stopping — guesses already written are kept'}
+    if action == 'start':
+        if pids:
+            return {'ok': True, 'running': True, 'msg': 'already running'}
+        py = TRIAGE_PYTHON
+        script = os.path.join(REPO, 'tools', 'detect', 'triage_crops.py')
+        if not os.path.exists(script):
+            return {'ok': False, 'running': False, 'msg': 'triage_crops.py is missing'}
+        logp = os.path.join(REPO, 'data', 'triage_run.log')
+        try:
+            log = open(logp, 'a')
+            proc = subprocess.Popen(
+                [py, script, '--watch', str(TRIAGE_WATCH)],
+                cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                start_new_session=True)
+            _SPAWNED.append(proc)
+        except Exception as e:
+            return {'ok': False, 'running': False, 'msg': str(e)}
+        # The usual failure is a python without torch or transformers, and it
+        # dies on the import -- instantly, and after this call has already
+        # returned "started". Wait long enough to catch that and hand back the
+        # reason instead of a strip that says "not running" for no visible
+        # cause.
+        try:
+            code = proc.wait(timeout=2.5)
+            if proc in _SPAWNED:
+                _SPAWNED.remove(proc)      # wait() already reaped it
+        except subprocess.TimeoutExpired:
+            # Stamp the status file as ours before returning. The guesser
+            # rewrites it, but only once the model is loaded, which is tens of
+            # seconds -- and until then the file still describes the PREVIOUS
+            # run. A stale `updated` next to a process that is now alive is
+            # exactly the shape of "stalled", so the strip announced "Run
+            # stopped" the moment you pressed Run.
+            try:
+                tmp = TRIAGE_STATUS + '.tmp'
+                now = time.time()
+                with open(tmp, 'w') as fh:
+                    json.dump({'running': True, 'starting': True,
+                               'pid': proc.pid, 'started': now,
+                               'updated': now, 'done': 0, 'total': 0,
+                               'watch': TRIAGE_WATCH, 'schema': 1}, fh)
+                os.replace(tmp, TRIAGE_STATUS)
+            except OSError:
+                pass
+            return {'ok': True, 'running': True, 'msg': 'guessing started'}
+        tail = ''
+        try:
+            with open(logp) as fh:
+                lines = [x.strip() for x in fh.readlines() if x.strip()]
+            tail = lines[-1] if lines else ''
+        except OSError:
+            pass
+        hint = ('' if 'triage_python' in load_cfg() or
+                os.environ.get('TRIAGE_PYTHON') else
+                ' Set "triage_python" in dashboard.config.json to an '
+                'interpreter that has torch and transformers.')
+        return {'ok': False, 'running': False,
+                'msg': f'exited immediately (code {code}). {tail}{hint}'.strip()}
+    return {'ok': False, 'msg': 'unknown action'}
 
 
 def sweep_control(action):
@@ -5775,11 +5977,11 @@ def sweep_control(action):
         py = os.environ.get('SWEEP_PYTHON', SWEEP_PYTHON)
         log = open(os.path.join(REPO, 'data', 'sweep_resume.log'), 'a')
         try:
-            subprocess.Popen(
+            _SPAWNED.append(subprocess.Popen(
                 [py, os.path.join(REPO, 'tools', 'detect', 'sweep.py'),
                  'run', '--gen', '1'],
                 cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-                start_new_session=True)
+                start_new_session=True))
         except Exception as e:
             return {'ok': False, 'running': False, 'msg': str(e)}
         return {'ok': True, 'running': True, 'msg': 'resuming'}
@@ -6094,6 +6296,16 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 n = int(self.headers.get('Content-Length', 0) or 0)
                 data = json.loads(self.rfile.read(n) or b'{}')
                 self._json(sweep_control(str(data.get('action') or '')))
+            except Exception as e:
+                self._json({'ok': False, 'msg': str(e)})
+            return
+        if self.path.split('?', 1)[0] == '/api/triage':
+            # The argv is built here, from config -- nothing the client sends
+            # reaches it. The only thing it chooses is which of two words.
+            try:
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                data = json.loads(self.rfile.read(n) or b'{}')
+                self._json(triage_control(str(data.get('action') or '')))
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)})
             return

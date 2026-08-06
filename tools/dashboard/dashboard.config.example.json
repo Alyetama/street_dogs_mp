@@ -16,22 +16,18 @@
     "",
     "Nothing secret belongs here -- API keys live in the repo-root .env."
   ],
-
   "work_dir": "/path/to/work-drive/street_dogs_mp",
   "_work_dir": "Where the collector writes its outputs. Only used to build the copy-pasteable per-region commands shown in the UI, and to locate grid_runs when data/data_root.txt is absent. Unset renders as '<work-dir>'.",
-
   "image_dir": "/path/to/image-drive/grid_runs",
   "_image_dir": "Download target for new images, again only for the generated commands. Unset renders as '<image-dir>'.",
-
   "sweep_python": "/path/to/envs/yolo/bin/python",
   "_sweep_python": "Interpreter for the detection sweep -- it needs torch, TensorRT and ultralytics, which the dashboard itself does not. Defaults to the interpreter running the dashboard, which is correct for a single-env checkout.",
-
   "dogbin_dataset": "/path/to/dogbin_v3",
   "_dogbin_dataset": "Built dog/not_dog crop dataset, used only by the review page's balance tracker. No default: unset, the panel says so. The directory is expected to hold train/{dog,not_dog} and val/{dog,not_dog}.",
-
   "grid_csv": "original_global_grid_5deg.csv",
   "_grid_csv": "Grid definition named in the generated commands. The default is almost certainly what you want.",
-
   "proxies": "proxies.txt",
-  "_proxies": "Proxy list named in the generated coverage-audit command. Default 'proxies.txt' (gitignored at the repo root)."
+  "_proxies": "Proxy list named in the generated coverage-audit command. Default 'proxies.txt' (gitignored at the repo root).",
+  "triage_python": "<path to a python with torch and transformers, for the crop guesser>",
+  "triage_watch": 300
 }
