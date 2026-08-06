@@ -447,6 +447,31 @@ def test_compact():
     assert bad == []
 
 
+def test_helper_stdout_survives_progress_bar():
+    """The duckdb helper's JSON must be recoverable even when duckdb has
+    scribbled a progress bar or a warning onto the same stdout. Regression
+    for the flagged-image lookup, which took ~6s, drew a bar, and died on
+    'Extra data: line 2' -- silently breaking harvest_flagged.py."""
+    payload = '{"q": [[1, "a"], [2, "b"]]}'
+    bar = (' 24% \u2595\u2588\u2588  (~6 seconds remaining)    \n'
+           ' 51% \u2595\u2588\u2588\u2588\u2588  (~3 seconds remaining)    ')
+    cases = {
+        'clean': payload,
+        'progress before': bar + '\n' + payload,
+        'warning after': payload + '\nWarning: parquet footer thing',
+        'both': bar + '\n' + payload + '\ntrailing noise',
+        'crlf + blank lines': '\r\n' + bar + '\r\n\r\n' + payload + '\r\n',
+    }
+    for name, text in cases.items():
+        got = store._last_json_object(text)
+        assert got == {'q': [[1, 'a'], [2, 'b']]}, f'{name}: got {got!r}'
+    # nothing parseable -> None (the caller turns this into a StoreError)
+    assert store._last_json_object('') is None
+    assert store._last_json_object('24% bar only\nWarning: x') is None
+    # a bare JSON array is not a result object, must be ignored
+    assert store._last_json_object('[1,2,3]') is None
+
+
 def main():
     print(f'store self-test in {ROOT}')
     try:
@@ -464,6 +489,7 @@ def main():
         check('verify_catches_truncation', test_verify_catches_truncation)
         check('errors_table', test_errors_table)
         check('compact', test_compact)
+        check('helper_stdout_survives_progress_bar', test_helper_stdout_survives_progress_bar)
     finally:
         shutil.rmtree(ROOT, ignore_errors=True)
     print(f'\n{len(PASSES)} passed, {len(FAILURES)} failed')

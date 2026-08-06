@@ -919,10 +919,17 @@ def unique_src(detect_root=None, kind='img'):
 # Helper program for environments without an importable duckdb (dnd has
 # pyarrow but no duckdb; mp14 has duckdb). Reads {"queries": {name: sql}}
 # on stdin, emits {name: rows} JSON on stdout.
+# The helper's stdout is a JSON channel, so nothing else may write to it.
+# DuckDB's progress bar does: any query slow enough to draw one (a few
+# seconds -- the flagged-image lookup takes six) interleaved 25 lines of
+# "24% |####" with the result, and the parse died on "Extra data: line 2".
+# Turned off at the source; _run_queries also parses defensively, because
+# the next thing duckdb decides to print will not announce itself either.
 _DUCKDB_PROG = ('import json,sys\n'
                 'import duckdb\n'
                 'spec = json.load(sys.stdin)\n'
                 'con = duckdb.connect()\n'
+                'con.execute("SET enable_progress_bar=false")\n'
                 'out = {n: [list(r) for r in con.execute(q).fetchall()]\n'
                 '       for n, q in spec["queries"].items()}\n'
                 'print(json.dumps(out))\n')
@@ -964,10 +971,32 @@ def _run_queries(queries):
                           text=True)
     if proc.returncode != 0:
         raise StoreError(f'duckdb helper failed: {proc.stderr.strip()}')
-    return {
-        n: [tuple(r) for r in rows]
-        for n, rows in json.loads(proc.stdout).items()
-    }
+    doc = _last_json_object(proc.stdout)
+    if doc is None:
+        raise StoreError('duckdb helper returned no JSON; stdout began: '
+                         + repr((proc.stdout or '')[:200]))
+    return {n: [tuple(r) for r in rows] for n, rows in doc.items()}
+
+
+def _last_json_object(text):
+    """The last line of `text` that parses as a JSON object, or None.
+
+    The helper's stdout is a JSON channel, but duckdb writes progress bars and
+    the odd warning to the same stream, so the payload is not guaranteed to be
+    line one -- or the only line. Scanning from the end finds the result (which
+    the helper prints last) and steps over any stray line before or after it.
+    """
+    for line in reversed((text or '').splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
 
 
 def invariants(detect_root=None):
