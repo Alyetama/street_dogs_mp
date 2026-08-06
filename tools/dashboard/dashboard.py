@@ -4170,7 +4170,14 @@ def render_confusion(r):
         sub.append(f'<th class="cxt" title="{esc_html(labels[j])}: '
                    f'{cols[j]} in the validation set">'
                    f'{esc_html(labels[j])}</th>')
-    sub.append('<th class="cxt cxr">precision</th>')
+    sub.append(
+        '<th class="cxt cxr hcue"'
+        + _t('Of everything the model CALLED this class, the share that really '
+             'was it. Read along a row. The diagonal cell above is the other '
+             'half of the story -- recall, the share of everything that really '
+             'was this class that the model found. A model can reach high '
+             'precision by only ever calling the easy cases.')
+        + '>precision</th>')
 
     body = []
     for i in range(n):
@@ -4202,16 +4209,37 @@ def render_confusion(r):
                 f' title="{v:,} of the {cols[j]:,} true {esc_html(labels[j])} '
                 f'were {what} {esc_html(labels[i])}">'
                 f'{body_txt}</td>')
-        cells.append(f'<td class="cxn">{_pct(prec[i])}</td>')
+        if prec[i] is None:
+            why = ('Not defined for background: its diagonal is zero by '
+                   'construction, so there is nothing to take a share of.'
+                   if _is_bg(labels[i]) else
+                   f'The model never predicted {labels[i]}.')
+            cells.append(f'<td class="cxn hcue"{_t(why)}>{_pct(prec[i])}</td>')
+        else:
+            cells.append(
+                f'<td class="cxn hcue"'
+                + _t(f'The model called {rows[i]:,} crops '
+                     f'{labels[i]}; {matrix[i][i]:,} of them really were '
+                     f'({prec[i] * 100:.1f}%). The other '
+                     f'{rows[i] - matrix[i][i]:,} are the red cells across '
+                     f'this row.')
+                + f'>{_pct(prec[i])}</td>')
         body.append(f'<tr>{"".join(cells)}</tr>')
     # NOT recall: normalising down the column makes the diagonal cell recall
     # already, so a recall row printed the same two numbers a few pixels below
     # themselves. What normalising actually hides is how many crops each column
     # stands for -- 81.7% of a class means something different at 169 than at
     # 12 -- so the bottom row carries the support instead.
-    foot = ['<th class="cxl cxr">crops</th>']
+    foot = ['<th class="cxl cxr hcue"'
+            + _t('How many crops in the validation set really were each class. '
+                 'The percentages above are shares of these, so a column with '
+                 'few crops moves in big jumps.')
+            + '>crops</th>']
     for j in range(n):
-        foot.append(f'<td class="cxn">{cols[j]:,}</td>')
+        foot.append(f'<td class="cxn hcue"'
+                    + _t(f'{cols[j]:,} crops in the validation set really were '
+                         f'{labels[j]}.')
+                    + f'>{cols[j]:,}</td>')
     foot.append('<td class="cxn"></td>')
 
     src = got.get('experiment')
@@ -7050,6 +7078,13 @@ border:1px solid transparent}
 font-size:12.5px;padding:8px 10px}
 .cxfoot{margin-top:10px;font-size:11px;color:var(--dim);max-width:640px;
 line-height:1.5}
+/* there is no way to tell a label that explains itself from one that does
+   not, except the cursor */
+.cx .hcue{cursor:help}
+/* --bd is rgba(...,.13) and vanished against the panel: a cue nobody can
+   see is not a cue */
+.cx th.hcue{text-decoration:underline dotted var(--dim);
+text-underline-offset:3px}
 .tlive.past{border-color:var(--bd)}
 .tlive.past .tlhead b{font-size:15px}
 .tback{margin-left:auto;flex:none}
