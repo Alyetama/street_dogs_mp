@@ -1714,6 +1714,31 @@ min-width:44px;text-align:center}
 .lbyes:hover{background:rgba(67,181,129,.24)}
 @media(max-width:560px){.score{margin-left:0;width:100%}.grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+/* crop-suggestion run progress: this filter lives on THIS page, so its
+   progress does too. Was on the main dashboard, which is not where anyone
+   sorting the queue is looking. */
+.trg{display:flex;align-items:center;gap:14px;padding:9px 0 11px;
+border-top:1px solid var(--bd)}
+.trg[hidden]{display:none}
+.trgdot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.trg.on .trgdot{background:var(--green);animation:trgpulse 1.6s ease-in-out infinite}
+.trg.warn .trgdot{background:var(--acc)}
+@keyframes trgpulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){.trg.on .trgdot{animation:none}}
+.trgtx{display:flex;align-items:baseline;gap:8px;font-size:12px;flex:none;min-width:0}
+.trgtx b{color:var(--tx);font-weight:620;white-space:nowrap}
+.trgsub{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis}
+/* deliberately slighter than the balance bar above it: that one is the
+   task, this one is the state of a tool that helps sort the task. Same
+   width and weight made the two read as one two-part widget. */
+.trgcol{flex:1;min-width:100px}
+.trgbar{height:4px;border-radius:3px;background:rgba(130,140,150,.14);overflow:hidden}
+.trgbar i{display:block;height:100%;width:0;border-radius:3px;
+background:var(--green);opacity:.75;transition:width .4s ease}
+.trg.warn .trgbar i{background:var(--acc)}
+.trgpct{font-size:11px;color:var(--dim);flex:none;
+font-variant-numeric:tabular-nums;white-space:nowrap}
 </style></head><body><div class="wrap">
 
 <header>
@@ -1795,6 +1820,18 @@ min-width:44px;text-align:center}
     </div>
     <div class="baltx"><span id="balMain">&mdash;</span></div>
   </div>
+</div>
+
+<!-- Crop-suggestion run. Hidden until a run has produced anything, so the page
+     is unchanged for anyone who never runs tools/detect/triage_crops.py. The
+     dot pulses while a pass is live; the bar is COVERAGE of the queue, not
+     progress through one pass -- the pool grows under a finished run, and
+     coverage is what says whether the filter can be trusted right now. -->
+<div class="trg" id="trg" hidden title="progress of tools/detect/triage_crops.py, which fills the guess filter above">
+  <span class="trgdot" id="trgDot"></span>
+  <div class="trgtx"><b id="trgState">&mdash;</b><span class="trgsub" id="trgSub"></span></div>
+  <div class="trgcol"><div class="trgbar"><i id="trgFill"></i></div></div>
+  <span class="trgpct" id="trgPct"></span>
 </div>
 
 <div class="hint">
@@ -2906,6 +2943,53 @@ $('verdict').onchange=function(){verdict=this.value;
   savePref('verdict',verdict);page=0;sel=-1;load()};
 restorePrefs();
 load();loadBal();
+/* ── crop-suggestion run progress ── polls /api/triage while the tab is
+   visible. No fold to gate on here (unlike the dashboard's sweep panel), so
+   it just runs whenever the page is shown. Hidden until a run exists. */
+(function(){
+  var el=document.getElementById('trg');
+  if(!el)return;
+  function paint(j){
+    if(!j||!j.ever){el.hidden=true;return;}
+    el.hidden=false;
+    var running=!!j.running, cov=Math.round((j.coverage||0)*100),
+        gap=Math.max(0,(j.pool||0)-(j.guessed||0)), state, sub='';
+    el.className='trg'+(running?' on':(j.stalled?' warn':''));
+    if(running&&j.total){
+      state='Guessing crops';
+      sub=(j.done||0).toLocaleString()+' of '+(j.total||0).toLocaleString()+
+          ' this pass'+(j.rate?' \u00b7 '+j.rate+'/s':'');
+    }else if(running){
+      state='Watching for new crops';
+      sub='nothing waiting'+(j.watch?' \u00b7 rechecks every '+j.watch+'s':'');
+    }else if(j.stalled){
+      state='Run stopped';
+      sub='no progress for '+Math.round((j.age_s||0)/60)+' min';
+    }else if(gap>0){
+      /* no run active says nothing about coverage: do not claim "up to date"
+         while the queue is only partly guessed */
+      state='Not running';
+      sub=gap.toLocaleString()+' crop'+(gap===1?'':'s')+' have no guess yet';
+      el.className='trg warn';
+    }else{
+      state='Guesses up to date';
+      sub=j.model?j.model.split('/').pop():'';
+    }
+    $('trgState').textContent=state;
+    $('trgSub').textContent=sub;
+    $('trgPct').textContent=(j.guessed||0).toLocaleString()+' of '+
+      (j.pool||0).toLocaleString()+' crops guessed \u00b7 '+cov+'%';
+    $('trgFill').style.width=cov+'%';
+  }
+  function poll(){
+    if(document.hidden)return;
+    /* catch is for a dropped request only, never a bug in paint() */
+    fetch('/api/triage').then(function(r){return r.json()})
+      .catch(function(){return null}).then(function(j){if(j)paint(j)});
+  }
+  poll(); setInterval(poll,5000);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden)poll()});
+})();
 </script></body></html>"""
 
 # ── bulk review page (/review) + sweep control ──────────────────────────────
@@ -4995,12 +5079,18 @@ def triage_status():
     except (OSError, ValueError, TypeError):
         alive = False
     running = bool(doc.get('running')) and age < TRIAGE_STALE_S and alive
+    # STALLED means genuinely hung: the process is still alive but has stopped
+    # writing. A DEAD pid is not stalled -- the run simply ended (a kill -9
+    # leaves running=True with no chance to write finished=True), so it falls
+    # through to the plain "not running" state instead of alarming with
+    # "Run stopped, no progress for 114 min" when nothing is wrong.
+    stalled = bool(doc.get('running')) and alive and age >= TRIAGE_STALE_S
     tri = triage_index()
     pool = review_pool_names()
     have = sum(1 for n, _ in pool if n in tri)
     return {'ever': bool(doc) or bool(tri),
             'running': running,
-            'stalled': bool(doc.get('running')) and not running,
+            'stalled': stalled,
             'idle': bool(doc.get('idle')),
             'watch': doc.get('watch') or 0,
             'model': doc.get('model') or '',
@@ -6065,25 +6155,6 @@ padding:8px 14px;font-size:12.5px;color:var(--mut);pointer-events:none}
 .maplock{position:absolute;right:12px;top:12px;z-index:3}
 .maplock[hidden]{display:none}
 /* ── atlas chrome: layer chips, fly-to, surveyor HUD, ramp legend ── */
-/* crop-suggestion run progress */
-.trg{margin:0 0 13px;padding:10px 12px;border:1px solid var(--bd);
-border-radius:11px;background:rgba(130,140,150,.05)}
-.trg[hidden]{display:none}
-.trghead{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap}
-.trghead b{color:var(--tx);font-weight:620}
-.trgsub{color:var(--dim);font-size:11px}
-.trgpct{margin-left:auto;color:var(--mut);font-variant-numeric:tabular-nums;
-font-size:11.5px}
-.trgdot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
-.trg.on .trgdot{background:var(--green);animation:trgpulse 1.6s ease-in-out infinite}
-.trg.warn .trgdot{background:var(--acc)}
-@keyframes trgpulse{0%,100%{opacity:1}50%{opacity:.35}}
-@media(prefers-reduced-motion:reduce){.trg.on .trgdot{animation:none}}
-.trgbar{height:5px;border-radius:3px;background:rgba(130,140,150,.16);
-margin-top:8px;overflow:hidden}
-.trgbar i{display:block;height:100%;width:0;border-radius:3px;
-background:var(--green);transition:width .4s ease}
-.trg.warn .trgbar i{background:var(--acc)}
 .mapbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px}
 .mchip{appearance:none;background:transparent;border:1px solid var(--bd);color:var(--mut);
 border-radius:999px;padding:4px 13px;font-size:11.5px;font-family:inherit;cursor:pointer;
@@ -6723,19 +6794,6 @@ outline-offset:2px}
        always present and goes to em-dashes when idle, so nothing jumps when
        the sweep starts. #detOn is kept (and never hidden) as the cards' box. -->
   __STOREPATH__
-  <!-- The crop-suggestion run. Same panel as the sweep because it is the
-       same kind of thing -- a long background job whose progress you would
-       otherwise have to tail a log for. Hidden entirely until one has been
-       run, so a clone that never uses it sees nothing. -->
-  <div class="trg" id="trg" hidden>
-    <div class="trghead">
-      <span class="trgdot" id="trgDot"></span>
-      <b id="trgState">&mdash;</b>
-      <span class="trgsub" id="trgSub"></span>
-      <span class="trgpct" id="trgPct"></span>
-    </div>
-    <div class="trgbar"><i id="trgFill"></i></div>
-  </div>
   <div id="detOff" class="dnone dstat">sweep idle</div>
   <div id="detOn">
     <div class="kpis" style="margin-bottom:12px">
@@ -7197,69 +7255,6 @@ var refreshTracker;
   document.addEventListener('visibilitychange',function(){
     if(!document.hidden) poll();
   });
-})();
-/* ── crop-suggestion run ── polls only while the fold is open AND the tab is
-   visible, like the sweep panel: every fetch costs a server thread, and this
-   number is interesting for minutes at a time, not milliseconds. */
-(function(){
-  var el=document.getElementById('trg');
-  if(!el)return;
-  var fold=document.getElementById('f-detect');
-  function paint(j){
-    if(!j||!j.ever){el.hidden=true;return;}
-    el.hidden=false;
-    var running=!!j.running, cov=Math.round((j.coverage||0)*100),
-        gap=Math.max(0,(j.pool||0)-(j.guessed||0));
-    el.className='trg'+(running?' on':(j.stalled?' warn':''));
-    var state, sub='';
-    if(running&&j.total){
-      state='Guessing crops';
-      sub=(j.done||0).toLocaleString()+' of '+(j.total||0).toLocaleString()+' this pass'+
-          (j.rate?' \u00b7 '+j.rate+'/s':'');
-    }else if(running){
-      /* watching, nothing new to do: say that rather than showing 0 of 0 */
-      state='Watching for new crops';
-      sub='nothing waiting'+(j.watch?' \u00b7 rechecks every '+j.watch+'s':'');
-    }else if(j.stalled){
-      /* claimed running, then went quiet -- do not keep saying "running" */
-      state='Run stopped';
-      sub='no progress for '+Math.round((j.age_s||0)/60)+' min';
-    }else if(gap>0){
-      /* "up to date" used to cover this, and it was a lie: no run being
-         active says nothing about whether the queue is covered. At 57%
-         coverage the strip cheerfully read "Guesses up to date". */
-      state='Not running';
-      sub=gap.toLocaleString()+' crop'+(gap===1?'':'s')+' have no guess yet';
-      el.className='trg warn';
-    }else{
-      state='Guesses up to date';
-      sub=j.model?j.model.split('/').pop():'';
-    }
-    document.getElementById('trgState').textContent=state;
-    document.getElementById('trgSub').textContent=sub;
-    /* the bar is COVERAGE of the queue, not progress through one pass: a
-       finished pass still leaves crops unguessed because the pool grows
-       underneath it, and coverage is what decides if the filter is worth
-       trusting */
-    document.getElementById('trgPct').textContent=
-      (j.guessed||0).toLocaleString()+' of '+(j.pool||0).toLocaleString()+' crops guessed \u00b7 '+cov+'%';
-    document.getElementById('trgFill').style.width=cov+'%';
-  }
-  function poll(){
-    if(document.hidden)return;
-    if(fold&&!fold.open)return;
-    /* the catch is for a dropped request, NOT for bugs in paint() -- it hid
-       a ReferenceError once and the strip just sat there blank */
-    fetch('/api/triage').then(function(r){return r.json()})
-      .catch(function(){return null})
-      .then(function(j){if(j)paint(j)});
-  }
-  poll();
-  setInterval(poll,5000);
-  document.addEventListener('visibilitychange',function(){
-    if(!document.hidden)poll();
-  });
-  if(fold)fold.addEventListener('toggle',function(){if(fold.open)poll()});
 })();
 function genCommands(){
   var region=(cmdRegion.value||'').trim();

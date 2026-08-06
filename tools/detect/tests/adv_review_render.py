@@ -215,6 +215,10 @@ function getComputedStyle() {
 }
 function requestAnimationFrame(f) { f(); }
 function setTimeout(f, ms) { timers.push({ f, ms }); return timers.length; }
+// setInterval stubbed to a no-op handle: a real one keeps node's event
+// loop alive forever, hanging this test the moment the page starts a poll
+function setInterval() { return 0; }
+function clearInterval() {}
 function clearTimeout(h) { if (h) timers[h - 1] = null; }
 const timers = [];
 function runTimers() { const t = timers.slice(); timers.length = 0;
@@ -242,7 +246,9 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   'foot','grid','state','sort','size','reload','country','leftlab',
                   // the model-suggestion filter; without it paintSuggest and
                   // its onchange bind against null and kill the whole script
-                  'suggest','balNum','balNumU','balLeft']) {
+                  'suggest','balNum','balNumU','balLeft',
+                  // crop-suggestion progress strip, moved here from the dashboard
+                  'trg','trgState','trgSub','trgPct','trgFill','trgDot']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -256,7 +262,7 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 let API;
 try {
   API = new Function('document','window','CSS','fetch','getComputedStyle',
-    'requestAnimationFrame','setTimeout','clearTimeout','docL','navigator','Blob',
+    'requestAnimationFrame','setTimeout','clearTimeout','setInterval','clearInterval','docL','navigator','Blob',
     src + '\nreturn {load,render,flag,undo,openLb,closeLb,stepLb,tile,score,'
         + 'idx,mark,cols,hideToast,showUndo,'
         + 'markSeen,imgScale,saveBox,paintBox,fitBox,fitImage,zoomBy,'
@@ -264,7 +270,7 @@ try {
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
         + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
-    setTimeout, clearTimeout, docL, navigator, Blob);
+    setTimeout, clearTimeout, setInterval, clearInterval, docL, navigator, Blob);
 } catch (e) {
   console.log('FAIL: could not evaluate the review script: ' + e);
   process.exit(1);
