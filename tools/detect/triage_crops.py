@@ -28,17 +28,33 @@ flag away with --model imagenet, and the measured gap between them is large;
 the table above PROMPTS has the numbers, taken against the crops a human has
 already ruled on rather than against a public benchmark.
 
-Bucket probability is the SUMMED mass over a bucket's labels, not the top
-one's. A 40px dog spreads its score over several dog-ish phrasings and can
-land top-1 somewhere odd; the mass on "some kind of dog" is still decisive,
-and that is what the filter sorts by.
+Bucket probability is the MEAN mass over a bucket's labels, not the sum and
+not the top one's. Averaging is what makes the buckets comparable: a 40px dog
+spreads its score over several dog-ish phrasings, so the top label alone is
+unreliable, but SUMMING hands the decision to whichever bucket has the most
+prompts. With 4 dog, 15 animal and 10 object phrasings and the scores
+normalised across the table, an image the model has no opinion about scores
+15/29 for animal and 4/29 for dog -- it lands in "other animal" for no reason
+but the size of the list.
+
+Measured on dogbin_v5's val split (342 dog, 300 not_dog, hand-labelled):
+summing put 12.3% real dogs in the "other animal" bucket and found 87.4% of
+the dogs; averaging put 5.7% there and found 93.9%. Same model, same prompts.
 
     python tools/detect/triage_crops.py --limit 200        # try it
     python tools/detect/triage_crops.py                    # everything unjudged
     python tools/detect/triage_crops.py --watch 600        # keep it current
     python tools/detect/triage_crops.py --device cuda      # when the GPU is idle
-    python tools/detect/triage_crops.py \
-        --model google/siglip2-large-patch16-256 --refresh   # slower, better
+    python tools/detect/triage_crops.py --refresh \
+        --model google/siglip2-so400m-patch14-384 --device cuda   # the best one
+
+The default is the base model because it is the one that runs anywhere: 23
+crops/s on a CPU. siglip2-so400m-patch14-384 is materially better on the crops
+this queue is hardest on -- dark, small, low-contrast dogs -- taking the
+"other animal" bucket from 5.7% real dogs down to 2.0% and dog recall from
+93.9% to 97.7% on the same split. It costs a GPU to be practical: 24 crops/s
+on an RTX 5080 against 1.0 on the CPU, so a full pass is 16 minutes rather
+than six and a half hours.
 
 Changing --model changes what the buckets mean, so re-run with --refresh
 after a switch: the reader takes the LAST record for a crop, and a file with
@@ -125,6 +141,14 @@ PROMPTS = [
     ('object', 'sign', 'a road sign or street furniture'),
     ('object', 'nothing', 'a blurry photo of nothing in particular'),
 ]
+
+
+# How many phrasings each bucket has, so a bucket's score can be an average
+# rather than a sum. Derived, never hand-written: a table edited without
+# updating a constant beside it is a silent reweighting of every guess.
+BUCKET_N = {}
+for _b, _, _ in PROMPTS:
+    BUCKET_N[_b] = BUCKET_N.get(_b, 0) + 1
 
 
 def _owner_alive(path):
@@ -345,9 +369,11 @@ def main():
             p = p / p.sum(1, keepdim=True).clamp(min=1e-9)
         out = []
         for row in p:
-            mass = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
+            tot = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
             for j, (bk, _, _) in enumerate(PROMPTS):
-                mass[bk] += float(row[j])
+                tot[bk] += float(row[j])
+            # per-prompt average, so a bucket cannot win on prompt count alone
+            mass = {b: tot[b] / max(1, BUCKET_N[b]) for b in tot}
             out.append((mass, [(PROMPTS[j][0], PROMPTS[j][1], float(row[j]))
                                for j in range(len(PROMPTS))]))
         return out

@@ -1156,6 +1156,11 @@ TRIAGE_PYTHON = cfg('triage_python', sys.executable, env='TRIAGE_PYTHON')
 CONFUSION_PYTHON = cfg('confusion_python', '', env='CONFUSION_PYTHON')
 COMET_ENV_FILE = cfg('comet_env_file', '', env='COMET_ENV_FILE')
 TRIAGE_WATCH = cfg_int('triage_watch', 300, env='TRIAGE_WATCH')
+# Which model the Run button uses, and on what. Config rather than a constant:
+# the better model needs a GPU to be practical, and the GPU on this kind of
+# box is also the one training runs on. Empty means the tool's own defaults.
+TRIAGE_MODEL = cfg('triage_model', '', env='TRIAGE_MODEL')
+TRIAGE_DEVICE = cfg('triage_device', '', env='TRIAGE_DEVICE')
 HN_CROPS = os.path.join(HN_DIR, 'crops')
 HN_FULL = os.path.join(HN_DIR, 'full')
 HN_LABELS = os.path.join(HN_DIR, 'labels.jsonl')
@@ -6136,8 +6141,13 @@ def _triage_control(action):
         logp = os.path.join(REPO, 'data', 'triage_run.log')
         try:
             log = open(logp, 'a')
+            argv = [py, script, '--watch', str(TRIAGE_WATCH)]
+            if TRIAGE_MODEL:
+                argv += ['--model', TRIAGE_MODEL]
+            if TRIAGE_DEVICE:
+                argv += ['--device', TRIAGE_DEVICE]
             proc = subprocess.Popen(
-                [py, script, '--watch', str(TRIAGE_WATCH)],
+                argv,
                 cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
                 start_new_session=True)
             _SPAWNED.append(proc)
@@ -7301,7 +7311,6 @@ border-top:1px solid var(--bd)}
 .colbody::-webkit-scrollbar-thumb{background:rgba(130,140,150,.3);border-radius:3px}
 .colbody::-webkit-scrollbar-thumb:hover{background:rgba(232,166,69,.5)}
 .colbody{scrollbar-width:thin;scrollbar-color:rgba(130,140,150,.3) transparent}
-.more{font-size:10.5px;color:var(--dim);text-align:center;padding:2px 0 5px}
 .dotc{width:8px;height:8px;border-radius:50%;flex:none}
 .rc{background:#232830;border:1px solid rgba(130,140,150,.12);border-radius:9px;padding:9px 11px;margin-bottom:7px;cursor:grab}
 .rc:active{cursor:grabbing}.rc.drag{opacity:.35}
@@ -7889,7 +7898,6 @@ function fmt(v){v=+v;if(v>=1e9)return (v/1e9).toFixed(2)+'B';if(v>=1e6)return (v
 /* ── pipeline tracker board ── */
 var STAGE_COLOR={pending:'#7d8893',extract:'#8b7fd6',coverage:'#5b8fd6',backfill:'#4fb6c4',complete:'#b083d6',downloading:'#e8a645',downloaded:'#43b581'};
 /* cards past this many stay in the column's scroll area (see .colbody max-height) */
-var BOARD_VISIBLE=4;
 function pctColor(p){return p>=99?'#43b581':p>=70?'#e8a645':'#d8743a'}
 var COPY_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 function execCopy(t){var ta=document.createElement('textarea');ta.value=t;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';ta.style.opacity='0';document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,t.length);var ok=false;try{ok=document.execCommand('copy')}catch(e){}document.body.removeChild(ta);return ok;}
@@ -7916,11 +7924,6 @@ function brender(data){
     var body=document.createElement('div');body.className='colbody';
     items.forEach(function(r){body.appendChild(bcard(r))});
     col.appendChild(body);
-    if(items.length>BOARD_VISIBLE){
-      var m=document.createElement('div');m.className='more';
-      m.textContent='scroll for '+(items.length-BOARD_VISIBLE)+' more';
-      col.appendChild(m);
-    }
     col.addEventListener('dragover',function(e){e.preventDefault();col.classList.add('over')});
     col.addEventListener('dragleave',function(){col.classList.remove('over')});
     col.addEventListener('drop',function(e){e.preventDefault();col.classList.remove('over');if(dragKey)bmove(dragKey,s)});
