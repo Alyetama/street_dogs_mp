@@ -1148,6 +1148,13 @@ SWEEP_PYTHON = cfg('sweep_python', sys.executable, env='SWEEP_PYTHON')
 # this box they are different environments. Resolved from config so no
 # machine's layout ends up in a public repo.
 TRIAGE_PYTHON = cfg('triage_python', sys.executable, env='TRIAGE_PYTHON')
+# Confusion matrices live on Comet, so topping the cache up needs an
+# interpreter with comet_ml and a file holding the key. Both are config, and
+# BOTH must be set for the top-up to run at all -- a clone that has neither
+# should never make a surprise network call, and the panel simply shows no
+# matrix, which is what it did before any of this existed.
+CONFUSION_PYTHON = cfg('confusion_python', '', env='CONFUSION_PYTHON')
+COMET_ENV_FILE = cfg('comet_env_file', '', env='COMET_ENV_FILE')
 TRIAGE_WATCH = cfg_int('triage_watch', 300, env='TRIAGE_WATCH')
 HN_CROPS = os.path.join(HN_DIR, 'crops')
 HN_FULL = os.path.join(HN_DIR, 'full')
@@ -3352,8 +3359,12 @@ def _dhash(path, name):
         # Drop the oldest half rather than everything. A full wipe made the
         # next request re-read every crop it had just hashed; keeping the
         # newer half means the working set survives its own overflow.
+        # pop, not del: two review requests are two threads, both can take
+        # the same snapshot, and the second del would raise KeyError on a key
+        # the first already removed. dict.clear() was idempotent and this
+        # replaced it, so the property has to be put back deliberately.
         for k in list(_dhash_cache)[:len(_dhash_cache) // 2]:
-            del _dhash_cache[k]
+            _dhash_cache.pop(k, None)
     _dhash_cache[name] = bits
     return bits
 
@@ -4536,12 +4547,77 @@ def render_store_path():
             f'<span class="sphint">{hint}</span></div>')
 
 
+# At most one top-up attempt per this many seconds, however many runs finish.
+CONF_TOPUP_S = 600
+_CONF_TOPUP = {'at': 0.0}
+
+
+def confusion_topup():
+    """Fetch matrices for finished runs that have none cached, in the background.
+
+    The cache was a manual snapshot, so every run that finished after the last
+    fetch showed no confusion matrix until somebody remembered to re-run the
+    tool -- which is exactly what happened to dogbin_008. A finished run whose
+    matrix is missing is a fact the dashboard can see for itself, so it acts on
+    it.
+
+    Detached and debounced, and it never blocks the render: the worst case is
+    that the matrix appears on the next page load instead of this one.
+    """
+    if not CONFUSION_PYTHON or not COMET_ENV_FILE:
+        return False
+    now = time.time()
+    if now - _CONF_TOPUP['at'] < CONF_TOPUP_S:
+        return False
+    try:
+        have = confusion_index()
+        want = set()
+        for r in training_runs():
+            # only a run that has FINISHED has a matrix to fetch; a live one
+            # has not run its final validation yet
+            if r.get('status') in ('running', 'never_started'):
+                continue
+            if confusion_for(run_key(r)):
+                continue
+            # ultralytics writes confusion_matrix.png beside the run at the
+            # same moment it logs the numbers to Comet, so the PNG is a free
+            # local answer to "did this run ever produce one". Without this
+            # test every interrupted run, and every run never logged to Comet,
+            # counts as missing forever -- and the top-up would go back to
+            # Comet every ten minutes for a matrix that does not exist.
+            if not os.path.exists(os.path.join(r['dir'],
+                                               'confusion_matrix.png')):
+                continue
+            want.add(r['project'])
+        if not want:
+            return False
+        _CONF_TOPUP['at'] = now
+        script = os.path.join(REPO, 'tools', 'detect', 'fetch_confusion.py')
+        if not os.path.exists(script):
+            return False
+        env = dict(os.environ, COMET_ENV_FILE=COMET_ENV_FILE)
+        log = open(os.path.join(REPO, 'data', 'confusion_fetch.log'), 'a')
+        _SPAWNED.append(subprocess.Popen(
+            [CONFUSION_PYTHON, script, '--update',
+             '--projects', ','.join(sorted(want))],
+            cwd=REPO, env=env, stdout=log, stderr=log,
+            stdin=subprocess.DEVNULL, start_new_session=True))
+        return True
+    except Exception:
+        # a cache top-up is never worth failing a page render over
+        return False
+
+
 def render_training():
     """Runs on disk: what is training now, how it compares, what came before.
 
     The live run leads because it is the only part that changes while the page
     is open, and the only question with a deadline attached.
     """
+    # A finished run with no cached matrix is a fact this function can see;
+    # acting on it here means the panel repairs itself instead of waiting for
+    # someone to remember the tool. Detached, debounced, never blocking.
+    confusion_topup()
     root = training_root()
     if not root:
         return ('<div class="mnone">No training root configured. Set '

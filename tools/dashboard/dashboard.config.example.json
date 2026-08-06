@@ -30,5 +30,7 @@
   "_proxies": "Proxy list named in the generated coverage-audit command. Default 'proxies.txt' (gitignored at the repo root).",
   "triage_python": "<path to a python with torch and transformers, for the crop guesser>",
   "triage_watch": 300,
-  "review_dup_bits": 0
+  "review_dup_bits": 0,
+  "confusion_python": "<path to a python with comet_ml, for confusion-matrix fetches>",
+  "comet_env_file": "<path to the .env holding COMET_API_KEY>"
 }
