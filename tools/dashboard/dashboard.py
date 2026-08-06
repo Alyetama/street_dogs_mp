@@ -4162,7 +4162,6 @@ def render_confusion(r):
     if not total:
         return ''
     correct = sum(matrix[i][i] for i in range(n) if not _is_bg(labels[i]))
-    peak = max((matrix[i][j] for i in range(n) for j in range(n)), default=0)
 
     head = [f'<th class="cx"></th><th class="cx cxax" colspan="{n}">'
             f'true class &rarr;</th><th class="cx"></th>']
@@ -4180,24 +4179,39 @@ def render_confusion(r):
                  f'{esc_html(labels[i])}</th>']
         for j in range(n):
             v = matrix[i][j]
-            # weight by share of the largest cell, floored so a small but
-            # non-zero mistake is still visible rather than fading to nothing
-            a = 0.0 if not v else max(0.13, (v / peak) ** 0.6)
+            # Normalised down each column, which is the standard form and the
+            # one ultralytics' own confusion_matrix_normalized.png uses: a
+            # column is one true class, so the cell reads "this share of the
+            # real dogs was called X". Raw counts cannot be compared between
+            # columns when the classes are different sizes, and ours are.
+            share = (v / cols[j]) if cols[j] else None
             agree = (i == j) and not _is_bg(labels[i])
             hue = 'var(--green)' if agree else 'var(--red)'
-            share = (v / cols[j]) if cols[j] else 0
+            # tint follows the share, floored so a small but real mistake stays
+            # visible rather than fading into the panel
+            a = 0.0 if not v or share is None else max(0.13, share ** 0.6)
             what = ('correctly called' if i == j else 'wrongly called')
+            # the background diagonal is the same undefined cell the rates
+            # skip -- printing "0.0%" there says the model failed at something
+            # it was never asked to do
+            body_txt = ('&mdash;' if share is None or (i == j and not agree)
+                        else f'{share * 100:.1f}%')
             cells.append(
                 f'<td class="cxc{" dg" if agree else ""}{" z" if not v else ""}"'
                 f' style="--w:{a:.3f};--h:{hue}"'
-                f' title="{v} of the {cols[j]} true {esc_html(labels[j])} '
-                f'({share * 100:.1f}%) were {what} {esc_html(labels[i])}">'
-                f'{v:,}</td>')
+                f' title="{v:,} of the {cols[j]:,} true {esc_html(labels[j])} '
+                f'were {what} {esc_html(labels[i])}">'
+                f'{body_txt}</td>')
         cells.append(f'<td class="cxn">{_pct(prec[i])}</td>')
         body.append(f'<tr>{"".join(cells)}</tr>')
-    foot = ['<th class="cxl cxr">recall</th>']
+    # NOT recall: normalising down the column makes the diagonal cell recall
+    # already, so a recall row printed the same two numbers a few pixels below
+    # themselves. What normalising actually hides is how many crops each column
+    # stands for -- 81.7% of a class means something different at 169 than at
+    # 12 -- so the bottom row carries the support instead.
+    foot = ['<th class="cxl cxr">crops</th>']
     for j in range(n):
-        foot.append(f'<td class="cxn">{_pct(rec[j])}</td>')
+        foot.append(f'<td class="cxn">{cols[j]:,}</td>')
     foot.append('<td class="cxn"></td>')
 
     src = got.get('experiment')
@@ -4208,14 +4222,18 @@ def render_confusion(r):
                'detecting nothing, so that class has no precision or recall.')
     return (f'<div class="cxwrap"><div class="cxhead">'
             f'<b>Confusion matrix</b>'
-            f'<span class="cxsub">{total:,} validation crops &middot; '
+            f'<span class="cxsub">normalised by true class &middot; '
+            f'{total:,} validation crops &middot; '
             f'{correct / total * 100:.1f}% correct{note}</span></div>'
             f'<div class="cxscroll"><table class="cx">'
             f'<thead><tr>{"".join(head)}</tr><tr>{"".join(sub)}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody>'
             f'<tfoot><tr>{"".join(foot)}</tr></tfoot></table></div>'
-            f'<div class="cxfoot">Rows are what the model predicted, columns '
-            f'what the crop actually was. Comet labels its rows &ldquo;Actual '
+            f'<div class="cxfoot">Each column is one true class and sums to '
+            f'100%, so a cell reads &ldquo;this share of the real X was called '
+            f'Y&rdquo; &mdash; which makes the diagonal each class&rsquo;s '
+            f'recall. Hover a cell for the raw count. Rows are what the model '
+            f'predicted, columns what the crop actually was. Comet labels its rows &ldquo;Actual '
             f'Category&rdquo;; for an ultralytics matrix that is wrong, and '
             f'believing it would swap every miss with a false alarm.'
             f'{bg_note}</div>'
@@ -7012,24 +7030,24 @@ margin-bottom:9px}
 .cxhead b{font-size:13px;color:var(--tx)}
 .cxsub{font-size:11.5px;color:var(--dim)}
 .cxscroll{overflow-x:auto}
-table.cx{border-collapse:separate;border-spacing:3px;font-size:12.5px}
-table.cx th{font-weight:500;color:var(--mut);padding:3px 7px;white-space:nowrap}
-.cxax{color:var(--dim);font-size:11px;text-align:center;letter-spacing:.04em}
+table.cx{border-collapse:separate;border-spacing:4px;font-size:13px}
+table.cx th{font-weight:500;color:var(--mut);padding:4px 9px;white-space:nowrap}
+.cxax{color:var(--dim);font-size:11.5px;text-align:center;letter-spacing:.04em}
 .cxrow{text-align:right;white-space:nowrap}
-.cxt{font-size:11.5px;text-align:center}
-.cxl{text-align:right;font-size:11.5px}
-.cxr{color:var(--dim);font-size:11px}
+.cxt{font-size:12.5px;text-align:center}
+.cxl{text-align:right;font-size:12.5px}
+.cxr{color:var(--dim);font-size:11.5px}
 /* the cell tint is the count's share of the biggest cell; the hue says
    whether the cell is agreement or a mistake, so errors read warm at a
    glance without having to compare numbers */
 .cxc{text-align:center;font-variant-numeric:tabular-nums;color:var(--tx);
-min-width:72px;padding:11px 12px;border-radius:8px;
+min-width:104px;padding:20px 16px;border-radius:10px;font-size:16px;
 background:color-mix(in srgb, var(--h) calc(var(--w) * 100%), transparent);
 border:1px solid transparent}
 .cxc.dg{border-color:rgba(67,181,129,.30)}
 .cxc.z{color:var(--dim)}
 .cxn{text-align:center;font-variant-numeric:tabular-nums;color:var(--mut);
-font-size:11.5px;padding:6px 8px}
+font-size:12.5px;padding:8px 10px}
 .cxfoot{margin-top:10px;font-size:11px;color:var(--dim);max-width:640px;
 line-height:1.5}
 .tlive.past{border-color:var(--bd)}
