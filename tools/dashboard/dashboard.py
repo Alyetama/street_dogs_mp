@@ -5265,6 +5265,22 @@ class BoardHandler(SimpleHTTPRequestHandler):
     """Serve the static dashboard plus a tiny JSON board API."""
 
     db = 'data/catalog.duckdb'
+    # Documents whose markup changes whenever this file does. Served with
+    # only a Last-Modified, a browser is free to reuse them without asking
+    # -- HTTP lets it guess a lifetime from the age of the file -- so a
+    # rebuilt page kept showing the previous build until a hard reload.
+    # Every visible change here landed on disk and stayed invisible.
+    # no-cache is not no-store: the copy is kept, it just has to be
+    # revalidated, so an unchanged page still answers 304.
+    _NO_CACHE_PATHS = ('/', '/index.html', '/review')
+
+    def end_headers(self):
+        try:
+            if self.path.split('?', 1)[0] in self._NO_CACHE_PATHS:
+                self.send_header('Cache-Control', 'no-cache, must-revalidate')
+        except Exception:
+            pass          # a header is never worth failing a response over
+        SimpleHTTPRequestHandler.end_headers(self)
 
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode()
