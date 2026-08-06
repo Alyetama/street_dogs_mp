@@ -3873,12 +3873,353 @@ def _past_head(r):
             f'{_metric_row(r)}</div>')
 
 
+def _compare_picker(key, runs):
+    """The control that turns one run's detail into a comparison.
+
+    Sorted with the same project first: the comparison anyone actually wants is
+    against the run before this one, not against a detector from another
+    project scored on a different metric.
+    """
+    here = key.split('/', 1)[0]
+    others = [run_key(r) for r in runs if run_key(r) != key]
+    others.sort(key=lambda k: (k.split('/', 1)[0] != here, k))
+    if not others:
+        return ''
+    opts = ''.join(f'<option value="{esc_html(k)}">{esc_html(k)}</option>'
+                   for k in others)
+    return (f'<div class="dpick"><label for="trkCmp">Compare with</label>'
+            f'<select id="trkCmp" data-a="{esc_html(key)}">'
+            f'<option value="">&mdash; pick a run &mdash;</option>{opts}'
+            f'</select></div>')
+
+
 def render_run_detail(key):
     """One run's detail region, resolved by key against what was discovered."""
-    for r in training_runs():
+    runs = training_runs()
+    for r in runs:
         if run_key(r) == key:
-            return _past_head(r) + _charts(r)
+            return (_past_head(r) + _compare_picker(key, runs)
+                    + _charts(r) + render_confusion(r))
     return '<div class="mnone">That run is no longer on disk.</div>'
+
+
+# ── comparing two runs ──────────────────────────────────────────────────────
+# Bookkeeping, not settings: these differ between any two runs and say nothing
+# about why one won. Leaving them in buries the three lines that matter under
+# twenty that do not.
+DIFF_SKIP = frozenset((
+    'name', 'project', 'save_dir', 'exist_ok', 'resume', 'save_period',
+    'device', 'workers', 'verbose', 'plots', 'save', 'save_json', 'save_txt',
+    'source', 'show', 'val', 'split', 'time',
+))
+
+
+def _diff_args(a, b):
+    """[(key, a value, b value)] for settings the two runs did not share."""
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+        import training_tracker
+    except Exception:
+        return []
+    out = []
+    ra = training_tracker.read_args(os.path.join(a['dir'], 'args.yaml'))
+    rb = training_tracker.read_args(os.path.join(b['dir'], 'args.yaml'))
+    for k in sorted(set(ra) | set(rb)):
+        if k in DIFF_SKIP:
+            continue
+        va, vb = ra.get(k), rb.get(k)
+        if str(va) != str(vb):
+            out.append((k, va, vb))
+    return out
+
+
+def _delta(av, bv, digits=4, higher_better=True, fmt=None):
+    """B relative to A, as a signed cell that says which way is good.
+
+    Formatted with the row's own formatter when it has one: a wall clock shown
+    as "1h 55m" whose change reads "-559" makes the reader do arithmetic in a
+    unit the row never used.
+    """
+    if av is None or bv is None:
+        return '<td class="dnum dmid">&mdash;</td>'
+    d = bv - av
+    if abs(d) < 10 ** -(digits + 1):
+        return '<td class="dnum dmid">no change</td>'
+    good = (d > 0) if higher_better else (d < 0)
+    mag = fmt(abs(d)) if fmt else f'{abs(d):.{digits}f}'
+    # A change the row's own formatter cannot represent is not a change worth
+    # printing: 0.2s between two epochs both shown as "35s" came out as a
+    # portentous "-0s". The test is whether the row renders the two values
+    # identically -- comparing against fmt(0) does not work, because _hms(0)
+    # is the "--" placeholder rather than a zero.
+    if fmt and fmt(av) == fmt(bv):
+        return '<td class="dnum dmid">no change</td>'
+    return (f'<td class="dnum {"dup" if good else "ddn"}">'
+            f'{"+" if d > 0 else "&minus;"}{mag}</td>')
+
+
+def render_run_diff(a_key, b_key):
+    """Two runs side by side: what differed, and what it bought.
+
+    Resolved by exact match against discovered runs, like every other run
+    endpoint -- a directory arriving from the client is a traversal waiting to
+    happen.
+    """
+    runs = training_runs()
+    by = {run_key(r): r for r in runs}
+    a, b = by.get(a_key), by.get(b_key)
+    if not a or not b:
+        return '<div class="mnone">One of those runs is no longer on disk.</div>'
+    if a_key == b_key:
+        return '<div class="mnone">Pick two different runs to compare.</div>'
+
+    rows = []
+
+    def line(label, av, bv, fmt=None, digits=4, higher_better=True,
+             hint=''):
+        def cell(v):
+            if v is None:
+                return '<td class="dnum dmid">&mdash;</td>'
+            return f'<td class="dnum">{fmt(v) if fmt else v}</td>'
+        rows.append(f'<tr{_t(hint)}><th>{label}</th>{cell(av)}{cell(bv)}'
+                    f'{_delta(av, bv, digits, higher_better, fmt)}</tr>')
+
+    same_metric = a.get('headline_key') == b.get('headline_key')
+    mlabel = a.get('headline_label') or 'headline metric'
+    line(f'best {esc_html(mlabel)}' if same_metric else 'best (differing metric)',
+         a.get('best_headline'), b.get('best_headline'),
+         fmt=lambda v: f'{v:.4f}', digits=4,
+         hint='The peak the run reached, not where it finished.')
+    line('epochs run', a.get('epochs_done'), b.get('epochs_done'),
+         digits=0, higher_better=False,
+         hint='More epochs is not better; it is what the run cost.')
+    line('best epoch', a.get('best_epoch'), b.get('best_epoch'), digits=0,
+         higher_better=False,
+         hint='How early the peak arrived. Earlier is cheaper.')
+    line('seconds per epoch', a.get('secs_per_epoch'), b.get('secs_per_epoch'),
+         fmt=lambda v: _hms(v), digits=1, higher_better=False)
+    line('wall clock', a.get('wall_clock_s'), b.get('wall_clock_s'),
+         fmt=lambda v: _hms(v), digits=0, higher_better=False)
+    line('final validation loss', a.get('latest_val_loss'),
+         b.get('latest_val_loss'), fmt=lambda v: f'{v:.4f}', digits=4,
+         higher_better=False)
+
+    metric_note = ''
+    if not same_metric:
+        metric_note = ('<div class="dwarn">These runs are scored on different '
+                       'metrics &mdash; ' + esc_html(str(a.get("headline_key")))
+                       + ' against ' + esc_html(str(b.get("headline_key")))
+                       + '. The rows below still describe each run correctly, '
+                         'but the difference between them is not a '
+                         'comparison.</div>')
+
+    chart = ''
+    if a.get('curve') and b.get('curve') and same_metric:
+        # Padded to a common length on purpose. _pts spreads a series across
+        # the full width using ITS OWN length, which is right when every series
+        # in a chart is the same run's, and wrong here: a 180-epoch run and a
+        # 197-epoch one would both stretch edge to edge under an axis labelled
+        # 1..197, drawing the shorter run's peak at an epoch it never reached.
+        # Padding with None keeps one x scale and leaves the shorter run's
+        # tail blank, which is what actually happened.
+        span = max(len(a['curve']), len(b['curve']))
+
+        def pad(v):
+            return list(v) + [None] * (span - len(v))
+
+        chart = _chart('trk-diff', f'{a_key} vs {b_key}', mlabel,
+                       [{'name': a['name'], 'values': pad(a['curve']),
+                         'color': TRK_A},
+                        {'name': b['name'], 'values': pad(b['curve']),
+                         'color': TRK_B}], fmt='.3f')
+
+    diffs = _diff_args(a, b)
+    if diffs:
+        drows = ''.join(
+            f'<tr><th>{esc_html(k)}</th>'
+            f'<td class="dnum">{esc_html(str(va)) if va is not None else "&mdash;"}</td>'
+            f'<td class="dnum">{esc_html(str(vb)) if vb is not None else "&mdash;"}</td>'
+            f'<td></td></tr>' for k, va, vb in diffs)
+        settings = (f'<div class="dsub">settings that differ '
+                    f'({len(diffs)})</div>'
+                    f'<table class="dtab"><tbody>{drows}</tbody></table>')
+    else:
+        settings = ('<div class="dsub">settings that differ</div>'
+                    '<div class="mnone">Identical settings &mdash; whatever '
+                    'separates these two runs, it is not in args.yaml.</div>')
+
+    return (f'<div class="tlive past dcmp">'
+            f'<div class="tlhead"><span class="tst idle">vs</span>'
+            f'<b>{esc_html(a_key)} &nbsp;vs&nbsp; {esc_html(b_key)}</b>'
+            f'<button type="button" class="rbtn quiet tback" id="trkBack">'
+            f'&larr; back to the live run</button></div>'
+            f'{metric_note}'
+            f'<table class="dtab"><thead><tr><th></th>'
+            f'<th class="dnum">{esc_html(a["name"])}</th>'
+            f'<th class="dnum">{esc_html(b["name"])}</th>'
+            f'<th class="dnum">change</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>'
+            f'{chart}{settings}</div>')
+
+
+# ── confusion matrices ──────────────────────────────────────────────────────
+# Cached from Comet by tools/detect/fetch_confusion.py. Read here rather than
+# fetched: the dashboard must render without a Comet key and without a network
+# round trip in the request path.
+CONFUSION_FILE = os.path.join(REPO, 'data', 'confusion.json')
+_CONF = {'at': None, 'runs': {}, 'fold': {}}
+
+
+def confusion_index():
+    """{run key: {labels, matrix, orientation, ...}} from the cache file."""
+    try:
+        st = os.stat(CONFUSION_FILE)
+        stamp = (st.st_mtime, st.st_size)
+    except OSError:
+        _CONF.update(at=None, runs={})
+        return _CONF['runs']
+    if _CONF['at'] == stamp:
+        return _CONF['runs']
+    runs = {}
+    try:
+        with open(CONFUSION_FILE) as fh:
+            got = json.load(fh)
+        if isinstance(got, dict) and isinstance(got.get('runs'), dict):
+            runs = got['runs']
+    except (OSError, ValueError):
+        runs = {}
+    # Folded once here, not per lookup. The same project reaches this file
+    # spelled two ways -- args.yaml says `dogdetection` where Comet logged
+    # `DogDetection` -- and an exact match silently found nothing for four of
+    # the five detector runs that had a matrix waiting.
+    _CONF.update(at=stamp, runs=runs,
+                 fold={k.lower(): v for k, v in runs.items()})
+    return runs
+
+
+def confusion_for(key):
+    """The cached matrix for a run key, tolerating how the project is spelled."""
+    runs = confusion_index()
+    got = runs.get(key)
+    if got is None:
+        got = (_CONF.get('fold') or {}).get(str(key).lower())
+    return got
+
+
+def _is_bg(label):
+    """ultralytics' own name for "nothing was here", fixed in its source."""
+    return str(label).strip().lower() == 'background'
+
+
+def _conf_stats(labels, matrix):
+    """Per-class precision and recall, given rows=predicted, cols=true.
+
+    Which way round the matrix sits is the whole ballgame here: with rows as
+    the prediction, a ROW sums to everything the model called that class (so
+    precision) and a COLUMN sums to everything that truly was it (so recall).
+    Transposing them silently swaps the two, and a model that misses half the
+    dogs would read as one that over-calls them.
+    """
+    n = len(labels)
+    rows = [sum(matrix[i]) for i in range(n)]
+    cols = [sum(matrix[i][j] for i in range(n)) for j in range(n)]
+    # 'background' is not a class the model can be right about. In a detection
+    # matrix its row is the misses and its column the false alarms, and its
+    # diagonal is zero BY CONSTRUCTION -- there is no such thing as correctly
+    # detecting nothing. Computing rates off that zero printed "0.0% precision,
+    # 0.0% recall" next to background, which reads as a catastrophic failure
+    # rather than a cell that has no meaning.
+    prec, rec = [], []
+    for i in range(n):
+        undef = _is_bg(labels[i])
+        prec.append(None if undef or not rows[i] else matrix[i][i] / rows[i])
+        rec.append(None if undef or not cols[i] else matrix[i][i] / cols[i])
+    return rows, cols, prec, rec
+
+
+def _pct(x):
+    return '&mdash;' if x is None else f'{x * 100:.1f}%'
+
+
+def render_confusion(r):
+    """One run's confusion matrix, drawn in the dashboard's own palette.
+
+    Ultralytics also writes a confusion_matrix.png, and it is deliberately not
+    what is shown: it is a light-background raster of a fixed size, so it
+    cannot be themed, hovered, or read for the derived rates that are the
+    reason to look at a confusion matrix at all.
+    """
+    got = confusion_for(run_key(r))
+    if not got:
+        return ''
+    labels = got.get('labels') or []
+    matrix = got.get('matrix') or []
+    n = len(labels)
+    if not n or len(matrix) != n or any(len(row) != n for row in matrix):
+        return ''
+    rows, cols, prec, rec = _conf_stats(labels, matrix)
+    total = sum(rows)
+    if not total:
+        return ''
+    correct = sum(matrix[i][i] for i in range(n) if not _is_bg(labels[i]))
+    peak = max((matrix[i][j] for i in range(n) for j in range(n)), default=0)
+
+    head = [f'<th class="cx"></th><th class="cx cxax" colspan="{n}">'
+            f'true class &rarr;</th><th class="cx"></th>']
+    sub = ['<th class="cx cxax cxrow">predicted &darr;</th>']
+    for j in range(n):
+        sub.append(f'<th class="cxt" title="{esc_html(labels[j])}: '
+                   f'{cols[j]} in the validation set">'
+                   f'{esc_html(labels[j])}</th>')
+    sub.append('<th class="cxt cxr">precision</th>')
+
+    body = []
+    for i in range(n):
+        cells = [f'<th class="cxl" title="the model predicted '
+                 f'{esc_html(labels[i])} {rows[i]} times">'
+                 f'{esc_html(labels[i])}</th>']
+        for j in range(n):
+            v = matrix[i][j]
+            # weight by share of the largest cell, floored so a small but
+            # non-zero mistake is still visible rather than fading to nothing
+            a = 0.0 if not v else max(0.13, (v / peak) ** 0.6)
+            agree = (i == j) and not _is_bg(labels[i])
+            hue = 'var(--green)' if agree else 'var(--red)'
+            share = (v / cols[j]) if cols[j] else 0
+            what = ('correctly called' if i == j else 'wrongly called')
+            cells.append(
+                f'<td class="cxc{" dg" if agree else ""}{" z" if not v else ""}"'
+                f' style="--w:{a:.3f};--h:{hue}"'
+                f' title="{v} of the {cols[j]} true {esc_html(labels[j])} '
+                f'({share * 100:.1f}%) were {what} {esc_html(labels[i])}">'
+                f'{v:,}</td>')
+        cells.append(f'<td class="cxn">{_pct(prec[i])}</td>')
+        body.append(f'<tr>{"".join(cells)}</tr>')
+    foot = ['<th class="cxl cxr">recall</th>']
+    for j in range(n):
+        foot.append(f'<td class="cxn">{_pct(rec[j])}</td>')
+    foot.append('<td class="cxn"></td>')
+
+    src = got.get('experiment')
+    note = (f' &middot; from Comet run {esc_html(src)}' if src else '')
+    bg_note = ('' if not any(_is_bg(x) for x in labels) else
+               ' The background row counts what the detector missed and the '
+               'background column what it invented; there is no correctly '
+               'detecting nothing, so that class has no precision or recall.')
+    return (f'<div class="cxwrap"><div class="cxhead">'
+            f'<b>Confusion matrix</b>'
+            f'<span class="cxsub">{total:,} validation crops &middot; '
+            f'{correct / total * 100:.1f}% correct{note}</span></div>'
+            f'<div class="cxscroll"><table class="cx">'
+            f'<thead><tr>{"".join(head)}</tr><tr>{"".join(sub)}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody>'
+            f'<tfoot><tr>{"".join(foot)}</tr></tfoot></table></div>'
+            f'<div class="cxfoot">Rows are what the model predicted, columns '
+            f'what the crop actually was. Comet labels its rows &ldquo;Actual '
+            f'Category&rdquo;; for an ultralytics matrix that is wrong, and '
+            f'believing it would swap every miss with a false alarm.'
+            f'{bg_note}</div>'
+            f'</div>')
 
 
 def sweep_db_path():
@@ -5521,6 +5862,14 @@ class BoardHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self._json({'left': None, 'error': str(e)})
             return
+        if self.path.split('?', 1)[0] == '/api/training/diff':
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                self._json({'html': render_run_diff(q.get('a', [''])[0],
+                                                    q.get('b', [''])[0])})
+            except Exception as e:
+                self._json({'html': '', 'error': str(e)})
+            return
         if self.path.split('?', 1)[0] == '/api/training/run':
             try:
                 q = parse_qs(urlparse(self.path).query)
@@ -5666,6 +6015,14 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json({'ok': ok}, 200 if ok else 400)
             except Exception as e:
                 self._json({'error': str(e)}, 500)
+            return
+        if self.path.split('?', 1)[0] == '/api/training/diff':
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                self._json({'html': render_run_diff(q.get('a', [''])[0],
+                                                    q.get('b', [''])[0])})
+            except Exception as e:
+                self._json({'html': '', 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/training/run':
             try:
@@ -6091,6 +6448,13 @@ TEMPLATE = """<!doctype html>
 <style>
 :root{--bg:#13151a;--panel2:#21262d;--bd:rgba(130,140,150,.13);
 --tx:#eef1f4;--mut:#98a2ad;--dim:#69727d;--acc:#e8a645;--green:#43b581;
+/* used by .tst.halt, .tag.warn and the diff's down-arrow long before it was
+   declared here -- as a plain colour that silently inherited, so an
+   interrupted run never actually rendered rust. It only became visible when
+   color-mix() got hold of it: an undefined custom property makes the whole
+   declaration invalid, so every error cell in the confusion matrix came out
+   fully transparent. */
+--red:#d8743a;
 --gap:22px}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:radial-gradient(1100px 560px at 72% -12%,#1d222b 0%,#13151a 56%) fixed,#13151a;
@@ -6617,6 +6981,57 @@ font-size:10.5px;color:var(--mut)}
 .thist tbody tr.sel{background:rgba(232,166,69,.09);
 box-shadow:inset 2px 0 0 var(--acc)}
 .thist tbody tr.onair .tn b{color:var(--green)}
+/* ── comparing two runs ── */
+.dpick{display:flex;align-items:center;gap:9px;margin:12px 0 4px;font-size:12px}
+.dpick label{color:var(--mut)}
+.dpick select{background:var(--panel);color:var(--tx);border:1px solid var(--bd);
+border-radius:8px;padding:5px 9px;font-family:inherit;font-size:12px;max-width:340px}
+.dpick select:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.dtab{width:100%;border-collapse:collapse;font-size:12.5px;margin:10px 0 4px}
+.dtab th,.dtab td{padding:6px 10px;text-align:left;
+border-bottom:1px solid var(--bd)}
+.dtab thead th{color:var(--dim);font-weight:600;font-size:11px;
+text-transform:lowercase;letter-spacing:.04em}
+.dtab tbody th{color:var(--mut);font-weight:500}
+.dtab .dnum{text-align:right;font-variant-numeric:tabular-nums;color:var(--tx)}
+.dtab thead .dnum{color:var(--dim)}
+.dtab .dmid{color:var(--dim)}
+/* direction, not sentiment: green means the second run moved the number the
+   way you want for THAT row, which for wall clock is downwards */
+.dtab .dup{color:var(--green)}
+.dtab .ddn{color:var(--red)}
+.dsub{margin:16px 0 0;font-size:11px;color:var(--dim);
+text-transform:lowercase;letter-spacing:.04em}
+.dwarn{margin:10px 0 0;padding:8px 11px;border-radius:9px;font-size:12px;
+color:var(--tx);background:rgba(216,116,58,.10);
+border:1px solid rgba(216,116,58,.30)}
+/* ── confusion matrix ── */
+.cxwrap{margin:18px 0 2px}
+.cxhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+margin-bottom:9px}
+.cxhead b{font-size:13px;color:var(--tx)}
+.cxsub{font-size:11.5px;color:var(--dim)}
+.cxscroll{overflow-x:auto}
+table.cx{border-collapse:separate;border-spacing:3px;font-size:12.5px}
+table.cx th{font-weight:500;color:var(--mut);padding:3px 7px;white-space:nowrap}
+.cxax{color:var(--dim);font-size:11px;text-align:center;letter-spacing:.04em}
+.cxrow{text-align:right;white-space:nowrap}
+.cxt{font-size:11.5px;text-align:center}
+.cxl{text-align:right;font-size:11.5px}
+.cxr{color:var(--dim);font-size:11px}
+/* the cell tint is the count's share of the biggest cell; the hue says
+   whether the cell is agreement or a mistake, so errors read warm at a
+   glance without having to compare numbers */
+.cxc{text-align:center;font-variant-numeric:tabular-nums;color:var(--tx);
+min-width:72px;padding:11px 12px;border-radius:8px;
+background:color-mix(in srgb, var(--h) calc(var(--w) * 100%), transparent);
+border:1px solid transparent}
+.cxc.dg{border-color:rgba(67,181,129,.30)}
+.cxc.z{color:var(--dim)}
+.cxn{text-align:center;font-variant-numeric:tabular-nums;color:var(--mut);
+font-size:11.5px;padding:6px 8px}
+.cxfoot{margin-top:10px;font-size:11px;color:var(--dim);max-width:640px;
+line-height:1.5}
 .tlive.past{border-color:var(--bd)}
 .tlive.past .tlhead b{font-size:15px}
 .tback{margin-left:auto;flex:none}
@@ -7207,6 +7622,32 @@ function initTracker(){
      project/name and the server resolves it against the runs it already
      discovered; a path from the client is never accepted. */
   var det=document.getElementById('trkdet');
+  /* Controls that appear inside a swapped-in detail region. Called after every
+     swap, because innerHTML threw the old nodes and their listeners away. */
+  function wireDetail(){
+    var back=document.getElementById('trkBack');
+    if(back) back.addEventListener('click',function(){
+      window.__trkSel=null; refreshTracker(true);
+    });
+    var cmp=document.getElementById('trkCmp');
+    if(cmp) cmp.addEventListener('change',function(){
+      var b=cmp.value; if(!b) return;
+      openDiff(cmp.getAttribute('data-a'),b);
+    });
+  }
+  function openDiff(a,b){
+    if(!det) return;
+    fetch('/api/training/diff?a='+encodeURIComponent(a)
+          +'&b='+encodeURIComponent(b))
+      .then(function(r){return r.json()}).then(function(j){
+        if(!j||!j.html) return;
+        det.innerHTML=j.html;
+        /* the comparison is a view of the run that is still selected, so the
+           selection and the periodic refresh both stay on it */
+        bindCharts();
+        wireDetail();
+      }).catch(function(){});
+  }
   function openRun(key,tr){
     if(!det) return;
     fetch('/api/training/run?key='+encodeURIComponent(key))
@@ -7217,10 +7658,7 @@ function initTracker(){
         [].forEach.call(document.querySelectorAll('.thist tbody tr'),
           function(x){ x.classList.toggle('sel',x===tr); });
         bindCharts();
-        var back=document.getElementById('trkBack');
-        if(back) back.addEventListener('click',function(){
-          window.__trkSel=null; refreshTracker(true);
-        });
+        wireDetail();
         det.scrollIntoView({block:'nearest',
           behavior:(matchMedia('(prefers-reduced-motion:reduce)').matches
                     ?'auto':'smooth')});
