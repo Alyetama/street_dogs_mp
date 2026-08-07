@@ -56,10 +56,14 @@ ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py',
            # a module quietly growing a path from a guess to a ledger -- is
            # covered for this file by NO_LEDGER below: a test may READ the
            # guess API, and may not name a verdict store.
-           'adv_review_render.py'}
+           'adv_review_render.py',
+           # It exists to prove one guesser's run is never credited to the
+           # other, which cannot be written without naming the status file.
+           'adv_triage_backends.py'}
 # The allowlisted modules that have no business writing a verdict. dashboard.py
 # is not here: it owns the ledgers. triage_crops.py is covered by t2.
-NO_LEDGER = ('crop_search.py', 'adv_review_render.py')
+NO_LEDGER = ('crop_search.py', 'adv_review_render.py',
+             'adv_triage_backends.py')
 LEDGER_WORDS = ('hard_negatives', 'hard_positives', 'labels.jsonl',
                 'label_flags', 'leash.db', 'flag_crop')
 LEDGERS = (os.path.join(REPO, 'data', 'hard_negatives', 'labels.jsonl'),

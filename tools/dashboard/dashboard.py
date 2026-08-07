@@ -3442,6 +3442,13 @@ load();loadBal();
       sub=j.why+' \u00b7 '+gap.toLocaleString()+' crop'+(gap===1?'':'s')+
           ' still have no guess';
       el.className='trg warn';
+    }else if(j.busy_with){
+      /* the OTHER guesser has the card. Saying "Not running" here is true and
+         useless: it invites a Run press that can only be refused. */
+      state='Waiting for '+j.busy_with;
+      sub=j.busy_with+' is guessing now · they share the card'+
+          (gap>0?' · '+gap.toLocaleString()+' crop'+(gap===1?'':'s')+
+                 ' have no guess from this one':'');
     }else if(gap>0){
       /* no run active says nothing about coverage: do not claim "up to date"
          while the queue is only partly guessed */
@@ -3463,11 +3470,22 @@ load();loadBal();
     /* the button reflects what the run IS doing, so the label is the action
        it would take -- not the state it is in */
     var btn=$('trgRun');
-    if(btn&&!btn.disabled){
+    /* `dataset.busy`, not `disabled`: the guard means "a click of mine is in
+       flight, do not overwrite its label", and now that paint() also disables
+       the button for the other guesser, reading disabled would latch it off
+       forever. */
+    if(btn&&btn.dataset.busy!=='1'){
       btn.textContent=running?'Pause':'Run guesses';
       btn.title=running
         ?'Stop guessing. Everything already guessed is kept.'
         :'Guess the crops that have none yet, then watch for new ones.';
+      /* Pressing it while the other guesser holds the card can only be
+         refused, so do not offer the press. Not hidden -- a control that
+         vanishes reads as a broken page -- just plainly unavailable. */
+      var blocked=!running&&!!j.busy_with;
+      btn.disabled=blocked;
+      if(blocked)btn.title='Pause '+j.busy_with+' first — the two guessers '+
+                           'share the card.';
     }
   }
   /* Bumped whenever the run is started or stopped. A poll issued BEFORE an
@@ -3511,6 +3529,7 @@ load();loadBal();
     var old=document.querySelector('.trgerr');
     if(old) old.remove();
     gen++;
+    btn.dataset.busy='1';
     btn.disabled=true; btn.textContent=stopping?'Pausing\u2026':'Starting\u2026';
     fetch('/api/triage',{method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -3518,6 +3537,7 @@ load();loadBal();
       .then(function(r){return r.json()})
       .catch(function(){return {ok:false,msg:'the dashboard did not answer'}})
       .then(function(j){
+        btn.dataset.busy='';
         btn.disabled=false;
         if(j&&j.ok){
           /* the server already said what happened; showing it now beats
@@ -6603,20 +6623,29 @@ TRIAGE_BUCKETS = ('dog', 'animal', 'object')
 TRIAGE_BACKENDS = ('siglip', 'rfdetr')
 RFDETR_PYTHON = cfg('rfdetr_python', '', env='RFDETR_PYTHON')
 RFDETR_MODEL = cfg('rfdetr_model', 'rfdetr', env='RFDETR_MODEL')
-# Recall on the 120 crops a human has confirmed are dogs, measured with
-# tools/detect/triage_crops.py against the same set. Shown beside the choice
-# because a toggle between an accurate guesser and a much less accurate one is
-# a trap unless the page says which is which.
+# Share of the 120 crops in data/hard_positives -- ones the DETECTOR was
+# unsure about and a human then confirmed are dogs -- that each guesser files
+# under 'dog'. Both measured the same way on the same set, which is the only
+# thing that makes them comparable: the first number here was 0.98, carried
+# over from a different measurement (how many real dogs land in 'other
+# animals', 2.0%), and putting it beside RF-DETR's overstated the gap by
+# twenty points on the one screen meant to prevent exactly that.
+#
+# These are the HARD positives by construction -- detector confidence 0.05 to
+# 0.10 -- so neither number is this pipeline's accuracy on an average crop.
+# They are a like-for-like comparison between the two guessers, which is what
+# the dropdown is for.
 BACKEND_INFO = {
-    'siglip': {'label': 'SigLIP 2', 'recall': 0.98,
+    'siglip': {'label': 'SigLIP 2', 'recall': 0.75,
                'note': 'reads the whole crop, always has an opinion, and '
                        'leaves behind the vectors the search box needs'},
     'rfdetr': {'label': 'RF-DETR', 'recall': 0.56,
                'note': 'a COCO detector: names a concrete class or says '
-                       'nothing. Much weaker on these crops — most are under '
-                       '64px — but it rarely calls a non-dog a dog, so it is '
-                       'the better one for finding cows, horses and people. '
-                       'Writes no search vectors.'},
+                       'nothing. Weaker on these crops — most are under 64px '
+                       'and a detector needs pixels on target — but it rarely '
+                       'calls a non-dog a dog, so it is the better one for '
+                       'finding cows, horses and people. Writes no search '
+                       'vectors.'},
 }
 _triage_cache = {'mtime': None, 'by': {}}
 
@@ -6778,13 +6807,22 @@ def triage_status(backend='siglip'):
     # perfectly healthy, so the silence a run has announced it will keep is
     # added to the grace rather than counted against it.
     quiet_ok = TRIAGE_STALE_S + max(0, _num_or(doc.get('watch'), 0))
-    running = bool(doc.get('running')) and age < quiet_ok and alive
+    # WHOSE run this is. One status file serves both guessers, so a live run
+    # answers for the backend that started it and for no other. Without this
+    # the strip reported an RF-DETR run as SigLIP's the moment the dropdown
+    # moved -- same progress bar, same Pause button, and pressing it would
+    # have stopped a run the reader was not looking at.
+    run_backend = backend_of(doc.get('model')) if doc else None
+    live = bool(doc.get('running')) and age < quiet_ok and alive
+    running = live and run_backend == backend
     # STALLED means genuinely hung: the process is still alive but has stopped
     # writing. A DEAD pid is not stalled -- the run simply ended (a kill -9
     # leaves running=True with no chance to write finished=True), so it falls
     # through to the plain "not running" state instead of alarming with
     # "Run stopped, no progress for 114 min" when nothing is wrong.
-    stalled = bool(doc.get('running')) and alive and age >= quiet_ok
+    # ...and a stall belongs to the run that stalled, for the same reason
+    stalled = (bool(doc.get('running')) and alive and age >= quiet_ok
+               and run_backend == backend)
     tri = triage_index(backend)
     pool = review_pool_names()
     have = sum(1 for n, _ in pool if n in tri)
@@ -6793,6 +6831,13 @@ def triage_status(backend='siglip'):
             # and how each did against the crops a human has already ruled on.
             # The recall belongs on the page: switching to the weaker guesser
             # without being told it is the weaker one is a trap.
+            # The OTHER guesser, when it is the one running. Only one runs at a
+            # time -- they share a GPU and a status file -- so a Run press
+            # while the other works can only be refused, and a button that
+            # refuses without saying why is worse than one that is not there.
+            'busy_with': (BACKEND_INFO.get(run_backend, {}).get('label')
+                          or run_backend) if (live and run_backend != backend)
+                         else None,
             'backend': backend, 'backends': [
                 dict(BACKEND_INFO.get(b, {}), key=b,
                      running=(b == backend_of(doc.get('model'))
@@ -7456,6 +7501,16 @@ def triage_control(action, backend='siglip'):
         return _triage_control(action, backend)
 
 
+def _running_backend():
+    """Which guesser the live status file belongs to, or None if none is."""
+    try:
+        with open(TRIAGE_STATUS) as fh:
+            doc = json.load(fh) or {}
+    except (OSError, ValueError):
+        return None
+    return backend_of(doc.get('model')) if isinstance(doc, dict) else None
+
+
 def _triage_control(action, backend='siglip'):
     _reap()
     pids = triage_pids()
@@ -7471,6 +7526,14 @@ def _triage_control(action, backend='siglip'):
                 'msg': 'stopping — guesses already written are kept'}
     if action == 'start':
         if pids:
+            # Which guesser is already on the card. 'already running' under a
+            # dropdown set to the other one reads as a bug in the button.
+            other = _running_backend()
+            if other and other != backend:
+                return {'ok': False, 'running': False,
+                        'msg': f'the {BACKEND_INFO.get(other, {}).get("label") or other} '
+                               f'guesser is running — they share the card, so '
+                               f'pause it first'}
             return {'ok': True, 'running': True, 'msg': 'already running'}
         # Each backend has its own interpreter, because they cannot share one:
         # RF-DETR needs transformers>=5 and SigLIP 2 is loaded by the 4.x the

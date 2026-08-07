@@ -1050,8 +1050,40 @@ async function t24() {
      asked.url);
 }
 
+// ── 25. one guesser running must not be reported as the other ───────────
+// The two share ONE status file. Before this was fixed, starting RF-DETR and
+// then moving the dropdown to SigLIP showed SigLIP as running, with its
+// progress bar and a Pause button that would have killed the RF-DETR run.
+async function t25() {
+  const BASE = {ever: true, can_run: true, pool: 100, guessed: 40,
+                coverage: 0.4,
+                backends: [{key: 'siglip', label: 'SigLIP 2', recall: 0.75},
+                           {key: 'rfdetr', label: 'RF-DETR', recall: 0.56}]};
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
+           // asked about SigLIP while RF-DETR holds the card
+           '/api/triage': () => Object.assign({}, BASE, {backend: 'siglip',
+                                running: false, busy_with: 'RF-DETR'}) };
+  await API.load(); API.trgPoll(); await flush(); await flush();
+  ck(/RF-DETR/.test(byId['trgState'].textContent + byId['trgSub'].textContent),
+     't25: the strip does not say which guesser is busy: ' +
+     byId['trgState'].textContent);
+  const btn = byId['trgRun'];
+  ck(btn.disabled, 't25: Run was offered while the other guesser had the card');
+  ck(btn.textContent !== 'Pause',
+     't25: offered to Pause a run belonging to the other guesser');
+
+  // once it frees up, the button has to come back -- the disabled flag must
+  // not latch
+  RESP['/api/triage'] = () => Object.assign({}, BASE, {backend: 'siglip',
+                              running: false, busy_with: null});
+  API.trgPoll(); await flush(); await flush();
+  ck(!btn.disabled, 't25: Run stayed disabled after the card freed up');
+  ck(btn.textContent === 'Run guesses',
+     't25: button label stuck: ' + btn.textContent);
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
