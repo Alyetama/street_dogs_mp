@@ -4610,6 +4610,31 @@ def render_run_diff(a_key, b_key):
 # inference, and the answer does not change once a run has finished.
 MISTAKE_DIR = os.path.join(REPO, 'data', 'mistakes')
 _MISS = {}
+_FLAGS = {}
+
+
+def flag_store():
+    """The wrong-label store, or None if the tool is not in this checkout."""
+    if _FLAGS.get('tried'):
+        return _FLAGS.get('mod')
+    _FLAGS['tried'] = True
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        import label_flags
+        _FLAGS['mod'] = label_flags
+    except Exception:
+        _FLAGS['mod'] = None
+    return _FLAGS['mod']
+
+
+def flagged_now():
+    mod = flag_store()
+    if not mod:
+        return None
+    try:
+        return mod.flagged_files()
+    except Exception:
+        return None
 
 
 # One scoring attempt per run per this many seconds. Scoring is a minute or
@@ -4805,6 +4830,7 @@ def render_mistakes(r):
                 f'<span class="wrsub">all {doc.get("n", 0):,} validation crops '
                 f'classified correctly</span></div></div>')
     detect = doc.get('task') == 'detect'
+    flags = flagged_now()
     # A classifier's mistake is a direction between two classes, and there is
     # one group per off-diagonal cell of the confusion matrix so the two
     # readings line up. A detector's is a kind: a box it invented, or one it
@@ -4861,13 +4887,26 @@ def render_mistakes(r):
                             f'<span class="wrsaid">{esc_html(str(k[1]))}</span>'
                             f'</span>')
                 sure = f'{(p if p is not None else 0) * 100:.0f}% sure'
+            # A crop the reviewer can say is not the model's fault. Only
+            # where the label is a thing that can BE wrong: a detector's miss
+            # is about a box, not a class, and there is nothing to relabel.
+            fl = ''
+            if flags is not None and not detect:
+                f = it.get('file') or ''
+                on = ' on' if f in flags else ''
+                fl = (f'<button type="button" class="wrflag{on}" '
+                      f'data-f="{esc_html(f)}" data-was="{esc_html(str(k[0]))}"'
+                      f' data-should="{esc_html(str(k[1]))}"'
+                      + _t('the DATASET is wrong here, not the model \u2014 '
+                           'flag it and the next build leaves it out')
+                      + '>label is wrong</button>')
             tiles.append(
-                f'<figure class="wrtile" '
+                f'<figure class="wrtile{" flagged" if fl and " on" in fl else ""}" '
                 f'data-g="{esc_html(str(k[0]))}|{esc_html(str(k[1]))}">'
                 f'<img loading="lazy" alt="what the model got wrong" '
                 f'src="/api/training/wrong?key={quote(key)}&amp;i={i}">'
                 f'<figcaption>{dir_html}'
-                f'<span class="wrp">{sure}</span>'
+                f'<span class="wrp">{sure}</span>{fl}'
                 f'</figcaption></figure>')
 
     n, wrong = doc.get('n', 0), doc.get('wrong', len(items))
@@ -4892,7 +4931,8 @@ def render_mistakes(r):
     # A bounded panel with a pager. Every miss on one page ran the tiles down
     # the section with nothing holding them, and at the 240 this keeps that is
     # a page you scroll past rather than read.
-    return (f'<div class="wrwrap" id="wrong">'
+    return (f'<div class="wrwrap" id="wrong" data-run="{esc_html(key)}" '
+            f'data-dataset="{esc_html(str(doc.get("dataset") or ""))}">'
             f'<div class="wrhead"><b>What it got wrong</b>'
             f'<span class="wrsub">{sub}</span></div>'
             f'<div class="wrbox">'
@@ -4907,7 +4947,8 @@ def render_mistakes(r):
             # is drawn with the caption's own classes -- so it is a sample of
             # the thing rather than a description of it, and it cannot drift
             # out of step with what the tiles actually look like.
-            f'<div class="wrkey">{keyline}</div>'
+            f'<div class="wrkey">{keyline}'
+            f'<span class="wrkeyi wrflagn" id="wrflagn" hidden></span></div>'
             f'</div>'
             f'<details class="wrfoot"><summary>why this order</summary>'
             f'<p>Sorted by how sure it was. A confident mistake is worth more '
@@ -7356,6 +7397,30 @@ class BoardHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)})
             return
+        if self.path.split('?', 1)[0] == '/api/training/relabel':
+            # Says the DATASET is wrong here, not the model. Its own store,
+            # removable, and it never edits a dataset in place -- the next
+            # build reads the export and leaves those ids out.
+            try:
+                mod = flag_store()
+                if not mod:
+                    self._json({'ok': False, 'error': 'flag store missing'})
+                    return
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                data = json.loads(self.rfile.read(n) or b'{}')
+                f = str(data.get('file') or '')
+                if data.get('remove'):
+                    body, code = mod.remove(f)
+                else:
+                    body, code = mod.add(
+                        f, dataset=str(data.get('dataset') or ''),
+                        class_was=str(data.get('was') or ''),
+                        should_be=str(data.get('should') or ''),
+                        run=str(data.get('run') or ''))
+                self._json(body, code)
+            except Exception as e:
+                self._json({'ok': False, 'error': str(e)})
+            return
         if self.path.split('?', 1)[0] == '/api/review/leash':
             # Its own store and its own axis. Nothing here touches the
             # dog/not-dog ledgers: those answer a different question, feed a
@@ -8390,6 +8455,20 @@ text-overflow:ellipsis;white-space:nowrap}
 .wrwas{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wrarr{color:var(--dim);flex:none;opacity:.7}
 .wrp{display:block;color:var(--mut);margin-top:1px}
+/* the reviewer's own verdict on the label, so it is the one thing on the tile
+   that is a control rather than a report */
+.wrflag{display:block;width:100%;margin-top:5px;appearance:none;
+background:transparent;border:1px dashed var(--bd);border-radius:6px;
+color:var(--dim);padding:3px 4px;font-family:inherit;font-size:9.5px;
+cursor:pointer;transition:color .12s,border-color .12s,background .12s}
+.wrflag:hover{color:var(--tx);border-color:var(--dim)}
+.wrflag:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.wrflag.on{border-style:solid;color:var(--acc);
+border-color:rgba(232,166,69,.55);background:rgba(232,166,69,.15);
+font-weight:600}
+.wrtile.flagged{border-color:rgba(232,166,69,.5)}
+.wrtile.flagged img{opacity:.55}
+.wrflagn{color:var(--acc)}
 /* the key: the caption's own type and colours, so it is a sample of the
    thing rather than a description that can drift out of step with it */
 .wrkey{display:flex;gap:18px;flex-wrap:wrap;align-items:baseline;
@@ -9074,6 +9153,46 @@ function initTracker(){
     });
     /* the column count changes with the viewport, so the page size does too */
     addEventListener('resize',draw);
+
+    /* Flagging says the DATASET is wrong here, not the model. It is the one
+       control on a panel that is otherwise all report, so it looks like one
+       and it is reversible -- this is a judgement about someone else's
+       judgement and it will sometimes be the one that is wrong. */
+    var tally=document.getElementById('wrflagn'),
+        run=(document.querySelector('.wrwrap')||{}).dataset||{};
+    function saytally(n){
+      if(!tally)return;
+      tally.hidden=!n;
+      tally.textContent=n?(n.toLocaleString()+' flagged for removal'):'';
+    }
+    [].forEach.call(wrap.querySelectorAll('.wrflag'),function(b){
+      b.addEventListener('click',function(e){
+        e.stopPropagation();
+        var had=b.classList.contains('on'),tile=b.closest('.wrtile');
+        b.disabled=true;
+        b.classList.toggle('on',!had);
+        if(tile)tile.classList.toggle('flagged',!had);
+        fetch('/api/training/relabel',{method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(had?{file:b.dataset.f,remove:true}:{
+            file:b.dataset.f,was:b.dataset.was,should:b.dataset.should,
+            dataset:run.dataset||'',run:run.run||''})})
+          .then(function(r){return r.json()})
+          .catch(function(){return null})
+          .then(function(j){
+            b.disabled=false;
+            if(!j||!j.ok){
+              /* an optimistic mark the server refused is a lie about what is
+                 recorded, so put it back */
+              b.classList.toggle('on',had);
+              if(tile)tile.classList.toggle('flagged',had);
+              return;
+            }
+            saytally(j.total);
+          });
+      });
+    });
+    saytally(wrap.querySelectorAll('.wrflag.on').length);
     draw();
     /* an off-diagonal cell IS a direction: true class down the column,
        predicted across the row -- the same pair the chips are keyed on */

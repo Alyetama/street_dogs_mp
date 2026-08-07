@@ -199,6 +199,9 @@ def main():
     ap.add_argument('--hamming', type=int, default=6,
                     help='dHash distance under which two crops of the SAME '
                          'class count as duplicates. 0 disables.')
+    ap.add_argument('--keep-flagged', action='store_true',
+                    help='keep crops a reviewer flagged as mislabelled from '
+                         'the run panel (they are dropped by default)')
     ap.add_argument('--exclude-ids',
                     default=os.path.join(REPO, 'data',
                                          'dogbin_acceptance_set.json'),
@@ -256,6 +259,29 @@ def main():
             print(f'no acceptance set at {args.exclude_ids} -- nothing held out')
         except ValueError as e:
             raise SystemExit(f'{args.exclude_ids} is not readable JSON: {e}')
+    # ---- drop crops a reviewer said are mislabelled -----------------------
+    # Separate from the acceptance set and for a different reason: those are
+    # held out to keep the measurement honest, these are thrown out because
+    # the label is wrong. A crop labelled not_dog that is plainly a dog does
+    # not cost one example, it teaches the opposite of the thing you want and
+    # does so every epoch. Flagged from the run panel, kept in a store that
+    # can be undone -- see tools/detect/label_flags.py.
+    n_flag_removed = 0
+    if not args.keep_flagged:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import label_flags
+            bad = {r['image_id'] for r in label_flags.flagged_files().values()
+                   if r.get('image_id')}
+        except Exception:
+            bad = set()
+        if bad:
+            n0 = len(items)
+            items = [it for it in items if image_id_of(it[2]) not in bad]
+            n_flag_removed = n0 - len(items)
+            print(f'mislabelled: {len(bad):,} flagged image_ids, '
+                  f'{n_flag_removed:,} crops removed -> {len(items):,} left')
+
     n_before_hold, n_held_removed = len(items), 0
     if held:
         n0 = len(items)
@@ -465,6 +491,7 @@ def main():
         # question dogbin_v3's manifest could not answer.
         'acceptance_set_file': args.exclude_ids or None,
         'acceptance_set_ids': len(held),
+        'mislabelled_removed': n_flag_removed,
         'acceptance_set_crops_removed': n_held_removed,
         'dup_clusters_file': args.dup_clusters,
         'val_frac': args.val_frac,
