@@ -4698,13 +4698,23 @@ def render_mistakes(r):
 
     n, wrong = doc.get('n', 0), doc.get('wrong', len(items))
     more = ('' if not doc.get('truncated') else
-            f' &middot; showing the {len(items)} it was surest about')
+            f' &middot; the {len(items)} it was surest about')
+    # A bounded panel with a pager. Every miss on one page ran the tiles down
+    # the section with nothing holding them, and at the 240 this keeps that is
+    # a page you scroll past rather than read.
     return (f'<div class="wrwrap" id="wrong">'
             f'<div class="wrhead"><b>What it got wrong</b>'
-            f'<span class="wrsub">{wrong:,} of {n:,} validation crops, '
-            f'most confident first{more}</span></div>'
-            f'<div class="wrchips">{"".join(chips)}</div>'
+            f'<span class="wrsub">{wrong:,} of {n:,} validation crops '
+            f'&middot; surest first{more}</span></div>'
+            f'<div class="wrbox">'
+            f'<div class="wrbar"><div class="wrchips">{"".join(chips)}</div>'
+            f'<div class="wrpage"><button type="button" class="wrnav" '
+            f'data-d="-1" aria-label="previous page">&lsaquo;</button>'
+            f'<span class="wrat">&mdash;</span>'
+            f'<button type="button" class="wrnav" data-d="1" '
+            f'aria-label="next page">&rsaquo;</button></div></div>'
             f'<div class="wrgrid">{"".join(tiles)}</div>'
+            f'</div>'
             f'<div class="wrfoot">Sorted by how sure it was. A confident '
             f'mistake is worth more than a hesitant one &mdash; the model is '
             f'not undecided about these, and whatever it has learnt to see '
@@ -8139,7 +8149,23 @@ border:1px solid rgba(216,116,58,.30)}
 .wrhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:11px}
 .wrhead b{font-size:13px;color:var(--tx)}
 .wrsub{font-size:11.5px;color:var(--dim)}
-.wrchips{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}
+/* the panel that holds them: a bounded object in the section, not a run of
+   tiles down the page */
+.wrbox{background:var(--panel2);border:1px solid var(--bd);border-radius:11px;
+padding:11px 12px 12px}
+.wrbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+margin-bottom:11px}
+.wrpage{margin-left:auto;display:flex;align-items:center;gap:4px;flex:none}
+.wrat{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;
+min-width:92px;text-align:center}
+.wrnav{appearance:none;background:transparent;border:1px solid var(--bd);
+color:var(--mut);border-radius:7px;width:24px;height:24px;line-height:1;
+font-size:14px;font-family:inherit;cursor:pointer;
+transition:color .12s,border-color .12s}
+.wrnav:hover:not(:disabled){color:var(--tx);border-color:var(--dim)}
+.wrnav:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.wrnav:disabled{opacity:.35;cursor:default}
+.wrchips{display:flex;gap:7px;flex-wrap:wrap}
 .wrchip{appearance:none;background:transparent;border:1px solid var(--bd);
 color:var(--mut);border-radius:999px;padding:4px 12px;font-size:11.5px;
 font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s,
@@ -8151,8 +8177,11 @@ font-variant-numeric:tabular-nums}
 .wrchip.on{color:var(--tx);border-color:rgba(216,116,58,.5);
 background:rgba(216,116,58,.13)}
 .wrchip.on em{color:var(--red)}
-.wrgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(134px,1fr));
-gap:9px}
+.wrgrid{display:grid;grid-template-columns:repeat(8,1fr);gap:9px;
+grid-auto-rows:1fr}
+@media(max-width:1500px){.wrgrid{grid-template-columns:repeat(6,1fr)}}
+@media(max-width:1100px){.wrgrid{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:720px){.wrgrid{grid-template-columns:repeat(3,1fr)}}
 .wrtile{margin:0;border:1px solid var(--bd);border-radius:9px;overflow:hidden;
 background:var(--panel2);transition:border-color .12s}
 .wrtile:hover{border-color:rgba(216,116,58,.45)}
@@ -8802,14 +8831,42 @@ function initTracker(){
     var wrap=document.getElementById('wrong');
     if(!wrap)return;
     var chips=wrap.querySelectorAll('.wrchip'),
-        tiles=wrap.querySelectorAll('.wrtile');
-    function show(g){
-      [].forEach.call(chips,function(c){c.classList.toggle('on',c.dataset.g===g)});
-      [].forEach.call(tiles,function(t){t.hidden=!!g&&t.dataset.g!==g});
+        tiles=[].slice.call(wrap.querySelectorAll('.wrtile')),
+        grid=wrap.querySelector('.wrgrid'),
+        at=wrap.querySelector('.wrat'),
+        navs=wrap.querySelectorAll('.wrnav'),
+        group='',page=0;
+    /* rows x whatever the grid is currently laying out, so a page is always a
+       whole number of rows and the panel never changes height mid-flick */
+    function perPage(){
+      var cols=getComputedStyle(grid).gridTemplateColumns.split(' ').length;
+      return Math.max(1,cols)*2;
     }
+    function draw(){
+      var mine=tiles.filter(function(t){return !group||t.dataset.g===group});
+      var per=perPage(),pages=Math.max(1,Math.ceil(mine.length/per));
+      if(page>=pages)page=pages-1;
+      if(page<0)page=0;
+      var lo=page*per,hi=lo+per;
+      tiles.forEach(function(t){t.hidden=true});
+      mine.slice(lo,hi).forEach(function(t){t.hidden=false});
+      at.textContent=mine.length?
+        ((lo+1)+'\u2013'+Math.min(hi,mine.length)+' of '+mine.length.toLocaleString()):
+        'none';
+      navs[0].disabled=page<=0;
+      navs[1].disabled=page>=pages-1;
+      [].forEach.call(chips,function(c){c.classList.toggle('on',c.dataset.g===group)});
+    }
+    function show(g){group=g;page=0;draw()}
     [].forEach.call(chips,function(c){
       c.addEventListener('click',function(){show(c.dataset.g)});
     });
+    [].forEach.call(navs,function(b){
+      b.addEventListener('click',function(){page+=(+b.dataset.d);draw()});
+    });
+    /* the column count changes with the viewport, so the page size does too */
+    addEventListener('resize',draw);
+    draw();
     /* an off-diagonal cell IS a direction: true class down the column,
        predicted across the row -- the same pair the chips are keyed on */
     var cx=document.querySelector('.cxscroll table.cx');
