@@ -249,7 +249,10 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   'suggest','balNum','balNumU','balLeft',
                   // crop-suggestion progress strip, moved here from the dashboard
                   'trg','trgState','trgSub','trgPct','trgFill','trgDot','trgRun','leashN',
-                  'leashf','find','findterms']) {
+                  // findmsg is what says the search cannot work; leaving it
+                  // out of the stub makes paintFind's guard skip the whole
+                  // branch, so every state would 'pass' untested
+                  'leashf','find','findterms','findmsg']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -931,8 +934,41 @@ async function t22() {
      't22: a country was still offered with an empty queue');
 }
 
+// ── 23. a search that cannot work has to say so ─────────────────────────
+// The vectors belong to crop FILES and the pool rotates hourly, so coverage
+// decays to nothing whenever the guesser is stopped. Measured on the live
+// box: 4,513 vectors, 3,010 crops in the pool, zero in both -- and the page
+// reported the search as working while the queue did not move, which reads
+// as the model returning nonsense. Every state that fails to reorder the
+// queue must put a sentence on screen.
+async function t23() {
+  const FIND = {find: 'a cat', find_terms: ['a cat'], find_cover: [0, 3010]};
+  for (const [state, want] of [['cold', /embedded/], ['mismatch', /different models/],
+                               ['learning', /moment/], ['unknown', /encoded/],
+                               ['failed', /crop_search\.log/],
+                               ['novectors', /guesser/]]) {
+    RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+               Object.assign({}, FIND, {find_state: state})) };
+    await API.load(); await flush();
+    ck(!byId['findmsg'].hidden,
+       't23: ' + state + ' said nothing on screen');
+    ck(want.test(byId['findmsg'].textContent),
+       't23: ' + state + ' message unhelpful: ' + byId['findmsg'].textContent);
+    ck(/\bwarn\b/.test(byId['find'].className || ''),
+       't23: ' + state + ' left the box looking healthy');
+  }
+  // and a search that DID order the queue must not nag
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+             Object.assign({}, FIND, {find_state: 'on', find_hits: 2663,
+                                      find_cover: [2663, 3010]})) };
+  await API.load(); await flush();
+  ck(byId['findmsg'].hidden, 't23: a working search still warned');
+  ck(!/\bwarn\b/.test(byId['find'].className || ''),
+     't23: a working search kept the warning border');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

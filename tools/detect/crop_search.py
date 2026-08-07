@@ -27,6 +27,8 @@ ever multiplies.
 """
 
 import argparse
+import contextlib
+import fcntl
 import os
 import sys
 
@@ -52,6 +54,21 @@ SEED = [
 ]
 
 
+@contextlib.contextmanager
+def _locked(target):
+    """Hold an exclusive lock beside `target` for the read-modify-write."""
+    lock = target + '.lock'
+    fh = open(lock, 'w')
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
 def load_terms(path=None):
     """{term: vector} already encoded, and the model they belong to."""
     import numpy as np
@@ -75,11 +92,20 @@ def crop_model(path=None):
 
 
 def add(terms, model_id=None, path=None, quiet=False):
-    """Encode and cache these terms. Returns how many were new.
+    """Encode and cache these terms. Returns how many were encoded.
 
     Vectors are only ever compared with crop vectors from the same model, so
     a model change throws the cache away rather than silently mixing two
     spaces -- the numbers would still come out, and they would be meaningless.
+    The WORDS survive that: they are re-encoded under the new model, because
+    losing the vocabulary would leave the page's suggestion list empty every
+    time somebody changed the guesser's model.
+
+    Serialised on a lock file. The dashboard spawns one of these per unknown
+    word typed, each does load - modify - save, and two overlapping runs lose
+    whichever term was written first. Measured with two concurrent adds: 'a
+    cow' vanished, and the caller's own 300-second retry guard then refused to
+    ask for it again.
     """
     import numpy as np
     import torch
@@ -87,32 +113,38 @@ def add(terms, model_id=None, path=None, quiet=False):
     want = [t.strip() for t in terms if t and t.strip()]
     if not want:
         return 0
-    mid = model_id or crop_model(path=None)
+    mid = model_id or crop_model()
     if not mid:
         raise SystemExit('no crop vectors yet -- run triage_crops.py first')
-    have, have_model = load_terms(path)
-    if have_model and have_model != mid:
-        have = {}
-    todo = [t for t in want if t not in have]
-    if not todo:
-        return 0
-    proc = AutoProcessor.from_pretrained(mid)
-    model = AutoModel.from_pretrained(mid).eval()
-    with torch.no_grad():
-        tok = proc(text=[TEMPLATE.format(t) for t in todo],
-                   padding='max_length', max_length=64, return_tensors='pt')
-        v = model.get_text_features(**tok)
-        v = v / v.norm(dim=-1, keepdim=True)
-    v = v.cpu().to(torch.float16).numpy()
-    for i, t in enumerate(todo):
-        have[t] = v[i]
-    keys = sorted(have)
-    tmp = (path or TXT_FILE) + '.tmp.npz'
-    os.makedirs(os.path.dirname(path or TXT_FILE), exist_ok=True)
-    np.savez(tmp, terms=np.array(keys),
-             vecs=np.stack([have[k] for k in keys]).astype('float16'),
-             model=np.array(mid))
-    os.replace(tmp, path or TXT_FILE)
+    out = path or TXT_FILE
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with _locked(out):
+        # read INSIDE the lock: another run may have written since we were
+        # spawned, and the whole point is that its terms survive ours
+        have, have_model = load_terms(path)
+        if have_model and have_model != mid:
+            want = sorted(set(want) | set(have))
+            have = {}
+        todo = [t for t in want if t not in have]
+        if not todo:
+            return 0
+        proc = AutoProcessor.from_pretrained(mid)
+        model = AutoModel.from_pretrained(mid).eval()
+        with torch.no_grad():
+            tok = proc(text=[TEMPLATE.format(t) for t in todo],
+                       padding='max_length', max_length=64,
+                       return_tensors='pt')
+            v = model.get_text_features(**tok)
+            v = v / v.norm(dim=-1, keepdim=True)
+        v = v.cpu().to(torch.float16).numpy()
+        for i, t in enumerate(todo):
+            have[t] = v[i]
+        keys = sorted(have)
+        tmp = out + '.tmp.npz'
+        np.savez(tmp, terms=np.array(keys),
+                 vecs=np.stack([have[k] for k in keys]).astype('float16'),
+                 model=np.array(mid))
+        os.replace(tmp, out)
     if not quiet:
         for t in todo:
             print(f'  + {t}')

@@ -37,8 +37,15 @@ REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FLAG_DIR = os.path.join(REPO, 'data', 'label_flags')
 DB_PATH = os.path.join(FLAG_DIR, 'label_flags.db')
-# <prefix>_<image_id>_<n>.jpg, the shape rebuild_crop_dataset.py writes
-CROP_RE = re.compile(r'^[A-Za-z]+_(\d{6,})_\d+\.(?:jpg|jpeg|png)$', re.I)
+# The crop-name shapes this pipeline writes, all carrying the harvest's id:
+#   dogbin      no_1490447559311326_0.jpg   <prefix>_<image_id>_<n>
+#   leash_v2       1766261880545220_1.jpg            <image_id>_<n>
+#   detector        413652014203972.jpg              <image_id>
+# The prefix used to be required, so a flag raised on a leash run parsed to no
+# id at all: the row went in, --export dropped it for having none, and the
+# rebuild excluded nothing. The button reported success and did nothing.
+CROP_RE = re.compile(
+    r'^(?:[A-Za-z][A-Za-z0-9]*_)?(\d{6,})(?:_\d+)?\.(?:jpg|jpeg|png)$', re.I)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS flags (

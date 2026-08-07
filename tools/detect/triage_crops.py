@@ -109,7 +109,18 @@ MODEL_ID = 'efficientnet_v2_s.imagenet1k_v1'
 # Each prompt declares the bucket it belongs to, so the mapping is a table
 # rather than an index range that has to be verified against a class order.
 # The short name is what the tile shows.
-SIGLIP_DEFAULT = 'google/siglip2-base-patch16-224'
+# so400m, not base. Measured on the same 1,693 human-judged crops: base put
+# 5.7% of real dogs in 'other animals', so400m 2.0%, and 'most of the other
+# animals are dogs' was the complaint that started this.
+#
+# The dashboard can name a model in its config and does, but the DEFAULT is
+# what anyone running this by hand gets, and the two have to agree: crop
+# vectors carry the model that made them, so one pass launched without
+# --model quietly replaced a store of so400m vectors with base ones, leaving
+# them in a different space from every search word already encoded. Base is
+# still the right choice on a machine with no GPU -- pass SIGLIP_FAST.
+SIGLIP_DEFAULT = 'google/siglip2-so400m-patch14-384'
+SIGLIP_FAST = 'google/siglip2-base-patch16-224'
 PROMPTS = [
     ('dog', 'dog', 'a photo of a dog'),
     ('dog', 'street dog', 'a street dog lying on the road'),
@@ -185,7 +196,31 @@ def _place(model, device, no_fallback=False):
 VEC_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage_vecs.npz')
 
 
-def save_vectors(names, rows, model_id, path=None):
+def vectored_names(path=None, model_id=None):
+    """Crops that already have a vector FROM THIS MODEL.
+
+    A prediction and a vector are written by the same forward pass but they
+    are not the same fact, and treating them as one is what made free-text
+    search useless: a crop predicted before this file existed is 'done' by the
+    prediction ledger and has no vector, forever.
+
+    The model has to match or the answer is worse than useless. A store full
+    of base-model vectors would otherwise tell an so400m run that the whole
+    pool is covered, it would embed nothing, and the search would stay broken
+    in the one way the reader cannot see -- vectors and words in different
+    spaces, every score meaningless.
+    """
+    import numpy as np
+    try:
+        d = np.load(path or VEC_FILE, allow_pickle=False)
+        if model_id is not None and str(d['model']) != str(model_id):
+            return set()
+        return {str(x) for x in d['names']}
+    except Exception:
+        return set()
+
+
+def save_vectors(names, rows, model_id, path=None, live=None):
     """Merge this pass's crop vectors into the store, newest winning.
 
     One row per crop, L2-normalised, float16 -- 1152 dims for so400m is 2.3 kB
@@ -193,6 +228,14 @@ def save_vectors(names, rows, model_id, path=None):
     with them because a vector from one model cannot be compared with text
     encoded by another; a reader that finds a mismatch should ignore the file
     rather than return confident nonsense.
+
+    ``live`` is the pool as it stands, and vectors for crops outside it are
+    dropped. The store describes a queue that rotates -- 3,000 crops, turned
+    over in under an hour on a working harvest -- so without this it fills
+    with crops that were deleted hours ago. Measured: 4,513 vectors, 3,010
+    crops in the pool, and NOT ONE in both. Every search ranked a set disjoint
+    from the queue it was ordering, which looks exactly like a model returning
+    nonsense.
     """
     if not names:
         return 0
@@ -209,7 +252,8 @@ def save_vectors(names, rows, model_id, path=None):
     merged = {}
     if keep_v is not None:
         for i, nm in enumerate(keep_n):
-            merged[nm] = keep_v[i]
+            if live is None or nm in live:
+                merged[nm] = keep_v[i]
     for i, nm in enumerate(names):
         merged[nm] = rows[i]
     nm_all = sorted(merged)
@@ -348,7 +392,13 @@ def main():
     ap.add_argument('--threads', type=int, default=4,
                     help='CPU threads; the sweep and any training run want '
                          'the rest of them')
-    ap.add_argument('--device', default='cpu', choices=('cpu', 'cuda'))
+    # 'auto' rather than 'cpu': the dashboard's Run button passes no --device,
+    # so a cpu default meant the button ran the big model on a CPU at under
+    # 1 crop/s over a pool that rotates in an hour -- it could never catch up.
+    # 'cuda' cannot be the default either, since this repo is public and a
+    # clone without a card would only crash. _place still steps aside when a
+    # training run has the card.
+    ap.add_argument('--device', default='auto', choices=('auto', 'cpu', 'cuda'))
     ap.add_argument('--no-vectors', action='store_true',
                     help='do not keep the crop embeddings the model already '
                          'produces (they are what makes free-text search work)')
@@ -358,7 +408,10 @@ def main():
     ap.add_argument('--model', default=SIGLIP_DEFAULT,
                     help="a SigLIP 2 id, or 'imagenet' for the old "
                          'EfficientNet backend. Bigger SigLIP is better and '
-                         'much slower: base 4.3 crops/s, large 0.7 (CPU).')
+                         f'much slower on a CPU; {SIGLIP_FAST} is the one to '
+                         'pass on a machine with no GPU (measured: 253 crops/s '
+                         'for the default on this card, 4.3/s for base on the '
+                         'CPU).')
     ap.add_argument('--topk', type=int, default=3)
     ap.add_argument('--include-judged', action='store_true',
                     help='also predict crops already ruled on (for measuring '
@@ -380,6 +433,16 @@ def main():
     import torch
     from PIL import Image
     torch.set_num_threads(max(1, args.threads))
+    if args.device == 'auto':
+        args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if args.device == 'cpu' and args.model == SIGLIP_DEFAULT:
+            # Measured on this box: so400m does 17.7 crops/s on the card and
+            # well under 1 on a CPU, against a pool that turns over in an
+            # hour. Silently taking three days per pass is not a default
+            # anyone would choose, so say which knob changes it.
+            print('no CUDA device -- the default model is far too slow on a '
+                  f'CPU for a pool this size. Consider --model {SIGLIP_FAST}.',
+                  flush=True)
     imagenet = args.model == 'imagenet'
 
     if imagenet:
@@ -518,17 +581,26 @@ def main():
         """One pass over whatever is unpredicted right now."""
         passes[0] += 1
         names = pool(REPO)
+        pool_names = {n for n, _ in names}
         # --refresh means "redo them", which must apply to the FIRST pass
         # only: on a later --watch pass it would loop over the same crops
         # forever and never reach the new ones.
         skip = set() if (args.refresh and first) else already_done(args.out)
+        # A prediction is not a vector. Skipping on the prediction alone left
+        # every crop scored before the vectors existed permanently unsearchable
+        # -- and since the same forward pass produces both, re-doing one is the
+        # whole cost of getting the other.
+        owed = (set() if args.no_vectors
+                else pool_names - vectored_names(model_id=model_id))
+        skip -= owed
         if not args.include_judged:
             skip |= judged_names(REPO)
         todo = sorted((n, d) for n, d in names if n not in skip)
         if args.limit:
             todo = todo[:args.limit]
         print(f'{len(names):,} crops in the pool, {len(todo):,} to predict '
-              f'({len(skip):,} already judged or done)')
+              f'({len(skip):,} already judged or done'
+              + (f'; {len(owed):,} owe a vector' if owed else '') + ')')
         if not todo:
             write_status(args.status, running=bool(args.watch), model=model_id,
                          done=0, total=0, rate=0, started=started,
@@ -617,7 +689,10 @@ def main():
             print(f'  {unreadable:,} vanished or unreadable, skipped')
         if vec_rows and not args.no_vectors:
             try:
-                total = save_vectors(vec_names, vec_rows, model_id)
+                # `live` is this pass's pool, so vectors for crops that have
+                # since rotated out go with them
+                total = save_vectors(vec_names, vec_rows, model_id,
+                                     live=pool_names)
                 print(f'  {len(vec_rows):,} crop vectors kept '
                       f'({total:,} searchable)')
             except Exception as e:

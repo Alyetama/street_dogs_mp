@@ -1614,6 +1614,8 @@ min-width:196px}
 #find::placeholder{color:var(--dim)}
 #find:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
 #find.warn{border-color:rgba(232,166,69,.5)}
+#findmsg{flex:1 1 100%;order:99;font-weight:500;font-size:11.5px;
+  color:var(--acc);letter-spacing:.01em}
 .keys{padding:7px 0 11px;border-top:1px solid var(--bd)}
 .keys summary{display:flex;align-items:center;gap:12px;cursor:pointer;
 list-style:none;color:var(--dim);font-size:11.5px}
@@ -1917,6 +1919,10 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
            placeholder="find crops of&hellip;  e.g. a cat"
            title="type what you are looking for and the queue is reordered to bring it to the front — the same model that guesses the buckets, asked a different way">
     <datalist id="findterms"></datalist>
+    <!-- Says out loud when the search cannot work. A search that quietly
+         ordered nothing was read as the model returning nonsense, which is
+         the right conclusion from the evidence the page was giving. -->
+    <b id="findmsg" hidden></b>
     <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
       <option value="all">Any leash state</option>
       <option value="none">Needs a leash call</option>
@@ -2100,22 +2106,39 @@ function paintLeash(name){
   if(un)un.classList.toggle('on',LEASH[name]==='unleashed');
 }
 function paintFind(j){
-  var el=$('find'), dl=$('findterms');
+  var el=$('find'), dl=$('findterms'), msg=$('findmsg');
   if(!el)return;
   /* the control only exists once there is something to search */
   var ready=(j.find_terms||[]).length>0;
   el.hidden=!ready&&!j.find;
   if(dl&&ready)dl.innerHTML=(j.find_terms||[]).map(function(t){
     return '<option value="'+esc(t)+'">'}).join('');
-  el.classList.toggle('warn',j.find_state==='learning'||j.find_state==='unknown');
-  el.title=j.find_state==='learning'
-    ? 'working out what that looks like — try again in a moment'
-    : j.find_state==='unknown'
-    ? 'that term is not searchable yet'
-    : j.find_state==='on'
-    ? n(j.find_hits)+' crops ranked by how much they look like '+j.find
-    : 'type what you are looking for and the queue is reordered to bring it '+
-      'to the front';
+  var st=j.find_state, cov=j.find_cover||[0,0];
+  /* Every state that is not 'ordered the queue' gets a sentence, because the
+     one thing they have in common on screen is that the queue does not move.
+     Without this they are all the same event to a reader. */
+  var say=st==='learning'
+    ? 'working out what “'+esc(j.find)+'” looks like — try again in a moment'
+    : st==='unknown'
+    ? 'nothing has encoded “'+esc(j.find)+'” yet'
+    : st==='failed'
+    ? 'could not encode “'+esc(j.find)+'” — see data/crop_search.log'
+    : st==='cold'
+    ? 'none of the '+n(cov[1])+' crops in the queue have been embedded yet — '+
+      'start the guesser above and it embeds as it works'
+    : st==='novectors'
+    ? 'no crops have been embedded yet — start the guesser above'
+    : st==='mismatch'
+    ? 'the crops and the search words come from different models — re-run the '+
+      'guesser, and the words re-encode to match'
+    : '';
+  el.classList.toggle('warn',!!say);
+  if(msg){msg.hidden=!say;msg.textContent=say;}
+  el.title=st==='on'
+    ? n(j.find_hits)+' of '+n(cov[1])+' crops ranked by how much they look '+
+      'like '+j.find
+    : say||('type what you are looking for and the queue is reordered to '+
+            'bring it to the front');
 }
 function paintLeashOptions(counts){
   var sel=$('leashf');
@@ -4697,15 +4720,58 @@ def mistakes_python():
     return MISTAKES_PYTHON or SWEEP_PYTHON
 
 
+_DET_VAL = {}
+DET_VAL_TTL = 300
+
+
+def _detect_val_ready(data, run_dir):
+    """Does this detector's dataset yaml point at a val split with images?
+
+    The same question run_mistakes.discover() asks, asked the same way, so the
+    panel and the scorer cannot disagree about which runs are scorable.
+
+    Cached: answering means parsing a yaml and listing a split of thousands of
+    files, and the panel that asks re-renders on a timer.
+    """
+    ck = (data, run_dir)
+    hit = _DET_VAL.get(ck)
+    if hit and time.time() - hit[0] < DET_VAL_TTL:
+        return hit[1]
+    ok = False
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        import run_mistakes
+        ds = run_mistakes.resolve_data(data, run_dir, training_root())
+        ok = bool(ds) and run_mistakes._val_images(ds) > 0
+    except Exception:
+        ok = False
+    _DET_VAL[ck] = (time.time(), ok)
+    return ok
+
+
 def scorable(r):
-    """Can this run be scored: finished, classify, weights and split on disk."""
-    if r.get('task') != 'classify':
+    """Can this run be scored: finished, weights and val split still on disk.
+
+    Detectors count. run_mistakes.py grew score_detect() when the detector
+    panels turned up empty, but this gate still said classify-only, so no
+    detector was ever scored on its own: the one that has a grid was scored by
+    hand from a shell, and every other one showed 'only classification runs
+    can be scored this way' -- a sentence about a limit that no longer exists.
+    """
+    if r.get('task') not in ('classify', 'detect'):
         return False
     if r.get('status') in ('running', 'never_started'):
         return False
     ds = r.get('data') or ''
-    return (os.path.exists(os.path.join(r['dir'], 'weights', 'best.pt'))
-            and os.path.isdir(os.path.join(ds, 'val')))
+    if not os.path.exists(os.path.join(r['dir'], 'weights', 'best.pt')):
+        return False
+    if r.get('task') == 'classify':
+        return os.path.isdir(os.path.join(ds, 'val'))
+    # A detector's `data` is a yaml, and a bare `dataset.yaml` resolves against
+    # several bases -- one of which can turn up an unrelated file of that name.
+    # run_mistakes.py checks the split has images before it will score, and
+    # this has to agree with it or the panel promises a grid that never comes.
+    return _detect_val_ready(ds, r['dir'])
 
 
 def mistakes_topup(r):
@@ -4859,8 +4925,8 @@ def render_mistakes(r):
         if not scorable(r):
             why = ('still training &mdash; a run is scored once it stops'
                    if r.get('status') == 'running' else
-                   'only classification runs can be scored this way'
-                   if r.get('task') != 'classify' else
+                   'only classify and detect runs are scored this way'
+                   if r.get('task') not in ('classify', 'detect') else
                    'its weights or its validation split are no longer on disk')
             return (f'<div class="wrwrap"><div class="wrhead">'
                     f'<b>What it got wrong</b>'
@@ -6611,8 +6677,11 @@ VEC_FILE = os.path.join(OUT, 'triage_vecs.npz')
 TERM_FILE = os.path.join(OUT, 'search_terms.npz')
 _VEC = {'at': None, 'names': None, 'vecs': None, 'model': ''}
 _TERM = {'at': None, 'terms': {}, 'model': ''}
-SEARCH_RETRY_S = 300
+SEARCH_RETRY_S = 120
 _TERM_TRIED = {}
+# The single in-flight encoder: 'sent' is the batch it carries, 'want' the
+# words queued behind it, 'bad' the ones whose last attempt exited non-zero.
+_TERM_JOB = {'proc': None, 'want': set(), 'sent': set(), 'bad': set()}
 
 
 def _npz(path, state, load):
@@ -6665,38 +6734,115 @@ def search_ready():
 
 
 def search_scores(term):
-    """{crop name: similarity} for a term, or None if it is not encoded yet."""
+    """({crop name: similarity}, why) -- `why` is None when scores are usable.
+
+    The two failure modes are worth telling apart, because one is a wait and
+    the other is a job to do. 'unknown' means nobody has encoded this word
+    yet, which fixes itself. 'mismatch' means the crops and the words come
+    from different models, which nothing on this page can fix.
+    """
     term = (term or '').strip()
     if not term:
-        return None
+        return None, 'unknown'
     terms, tmodel = search_terms()
     names, vecs, cmodel = crop_vectors()
-    if names is None or term not in terms or tmodel != cmodel:
-        return None
+    if names is None:
+        return None, 'novectors'
+    if tmodel and cmodel and tmodel != cmodel:
+        return None, 'mismatch'
+    if term not in terms:
+        return None, 'unknown'
     import numpy as np
     sims = vecs.astype('float32') @ terms[term].astype('float32')
-    return {names[i]: float(sims[i]) for i in range(len(names))}
+    return {names[i]: float(sims[i]) for i in range(len(names))}, None
+
+
+def search_coverage(pooled=None):
+    """(crops with a vector, crops in the pool) -- how much of it is searchable.
+
+    A vector belongs to a crop FILE, and the review pool rotates: 3,000 crops,
+    turned over in under an hour while the harvest runs. Vectors are written
+    by the guesser as it works, so leaving it stopped lets coverage fall to
+    nothing while every part of the search still looks healthy. It did: 4,513
+    vectors, 3,010 crops in the pool, zero crops in both, and a search that
+    silently reordered nothing. This number is what makes that visible.
+    """
+    names, _, _ = crop_vectors()
+    have = set(names or ())
+    # the caller has usually just listed the pool; listing it again is five
+    # thousand stat entries per page turn for an answer already in hand
+    pool = {n for n, _ in (review_pool_names() if pooled is None else pooled)}
+    return len(pool & have), len(pool)
 
 
 def search_learn(term):
-    """Ask for a term to be encoded, in the background. True if asked."""
+    """Ask for a term to be encoded in the background. Returns what to say.
+
+    'learning' one is running, or has just been started
+    'failed'   the last attempt at this word exited badly
+    'unknown'  there is no interpreter here that could encode it
+
+    ONE encoder at a time, with the rest queued. Every unknown word spawned
+    its own process, each of which loads SigLIP; typing three words in a row
+    put three copies of it in memory and -- before crop_search.py took a lock
+    -- let them overwrite each other's work.
+
+    A failed attempt has to be sayable. The encoder needs an environment with
+    transformers in it, and when it does not have one it dies on the import in
+    under a second -- while the page went on promising an answer 'in a moment'
+    for as long as anyone cared to wait.
+    """
     term = (term or '').strip()
-    py = mistakes_python() if MISTAKES_PYTHON else TRIAGE_PYTHON
+    # TRIAGE_PYTHON, not the scorer's: encoding a word needs transformers,
+    # and the environment that made the crop vectors is the one env guaranteed
+    # to have it. MISTAKES_PYTHON is an ultralytics env and on this box has no
+    # transformers at all, so preferring it meant every newly typed word died
+    # on the import in under a second while the page said 'learning' forever.
+    py = TRIAGE_PYTHON if CONFIGURED_TRIAGE else (mistakes_python() or
+                                                  TRIAGE_PYTHON)
     script = os.path.join(REPO, 'tools', 'detect', 'crop_search.py')
     if not term or not py or not os.path.exists(script):
-        return False
+        return 'unknown'
     now = time.time()
-    if now - _TERM_TRIED.get(term, 0) < SEARCH_RETRY_S:
-        return False
-    _TERM_TRIED[term] = now
-    try:
-        log = open(os.path.join(REPO, 'data', 'crop_search.log'), 'a')
-        _SPAWNED.append(subprocess.Popen(
-            [py, script, '--add', term], cwd=REPO, stdout=log, stderr=log,
-            stdin=subprocess.DEVNULL, start_new_session=True))
-        return True
-    except Exception:
-        return False
+    with _SPAWN_LOCK:
+        job = _TERM_JOB
+        if job['proc'] is not None and job['proc'].poll() is None:
+            # one is already running: ride along with it rather than start a
+            # second copy of the model
+            job['want'].add(term)
+            return 'learning'
+        if job['proc'] is not None:
+            # it has exited: judge the batch it was carrying before starting
+            # another, or a broken environment retries in silence forever
+            if job['proc'].returncode:
+                job['bad'] |= job['sent']
+            else:
+                job['bad'] -= job['sent']
+            job.update(proc=None, sent=set())
+        if now - _TERM_TRIED.get(term, 0) < SEARCH_RETRY_S:
+            return 'failed' if term in job['bad'] else 'learning'
+        job['want'].add(term)
+        batch = sorted(job['want'])
+        # `pop`, not `del`: two threads reaching this under different terms
+        # both prune, and the second one used to raise KeyError
+        if len(_TERM_TRIED) > 512:
+            for k, _ in sorted(_TERM_TRIED.items(),
+                               key=lambda kv: kv[1])[:256]:
+                _TERM_TRIED.pop(k, None)
+        for t in batch:
+            _TERM_TRIED[t] = now
+        try:
+            log = open(os.path.join(REPO, 'data', 'crop_search.log'), 'a')
+            proc = subprocess.Popen(
+                [py, script, '--add'] + batch, cwd=REPO, stdout=log,
+                stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+            _SPAWNED.append(proc)
+            job.update(proc=proc, want=set(), sent=set(batch))
+            return 'learning'
+        except Exception:
+            job['want'].discard(term)
+            job['bad'].add(term)
+            return 'failed'
 
 
 def _leash_keep(items, want, key='name'):
@@ -6961,9 +7107,9 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     # a human's eye.
     find_state, find_hits = 'off', 0
     if want_find:
-        scores = search_scores(want_find)
+        scores, why = search_scores(want_find)
         if scores is None:
-            find_state = 'learning' if search_learn(want_find) else 'unknown'
+            find_state = search_learn(want_find) if why == 'unknown' else why
         else:
             scored = [(scores.get(c['name']), c) for c in kept]
             have = [(v, c) for v, c in scored if v is not None]
@@ -6972,7 +7118,11 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             for v, c in have:
                 c['find'] = round(v, 4)
             kept = [c for _, c in have] + miss
-            find_state, find_hits = 'on', len(have)
+            # 'on' only if it actually ordered something. A word encoded
+            # against a vector store that covers none of this queue used to
+            # report success and change nothing, which is indistinguishable
+            # from a model returning nonsense -- and is what it looked like.
+            find_state, find_hits = ('on' if have else 'cold'), len(have)
     items = kept
     total = len(items)
     pages = max(1, -(-total // size))
@@ -7004,6 +7154,8 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             'leash_filter': want_leash, 'leash_counts': leash_offer,
             'find': want_find, 'find_state': find_state,
             'find_hits': find_hits, 'find_terms': search_ready(),
+            # searchable / in the pool, so a search that can't work says why
+            'find_cover': search_coverage(pooled),
             # Options tallied from the live queue, NOT from the index's
             # counts. The index spans the rolling pool plus both flag ledgers,
             # while this queue excludes everything already judged, kept, or
