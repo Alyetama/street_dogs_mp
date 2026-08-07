@@ -44,7 +44,18 @@ DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
 # dashboard that filters with it. A new script that reads it fails this test
 # until someone adds it here deliberately -- which is the review the rule
 # actually needs.
-ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py'}
+# Being on this list means t1 SKIPS the file, so an allowlisted module could
+# reach for a ledger and t1 would never notice -- verified by appending one to
+# crop_search.py and watching the suite still pass. t1c below is what actually
+# holds these two, so the exemption buys silence about the triage file and
+# nothing else.
+ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py',
+           'crop_search.py'}
+# The allowlisted modules that have no business writing a verdict. dashboard.py
+# is not here: it owns the ledgers. triage_crops.py is covered by t2.
+NO_LEDGER = ('crop_search.py',)
+LEDGER_WORDS = ('hard_negatives', 'hard_positives', 'labels.jsonl',
+                'label_flags', 'leash.db', 'flag_crop')
 LEDGERS = (os.path.join(REPO, 'data', 'hard_negatives', 'labels.jsonl'),
            os.path.join(REPO, 'data', 'hard_positives', 'labels.jsonl'))
 TRIAGE_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage.jsonl')
@@ -78,6 +89,20 @@ for base, _, files in os.walk(TOOLS):
             guilty.append(os.path.relpath(os.path.join(base, f), REPO))
 check(f't1 none of the {scanned} other tools/ modules mention the triage file',
       not guilty, 'mentions triage: ' + ', '.join(guilty))
+# An allowlisted module is invisible to t1, so the thing t1 would have caught
+# has to be caught somewhere. A search index reads embeddings and writes
+# embeddings; the moment one of these names a ledger, it is doing something
+# else and this fails.
+_ledger_guilty = []
+for _name in NO_LEDGER:
+    for _base, _, _fs in os.walk(TOOLS):
+        if _name in _fs:
+            _txt = read(os.path.join(_base, _name))
+            for _w in LEDGER_WORDS:
+                if _w in _txt:
+                    _ledger_guilty.append(f'{_name} mentions {_w}')
+check('t1c allowlisted search modules touch no ledger', not _ledger_guilty,
+      '; '.join(_ledger_guilty))
 check('t1b the allowlist names files that exist', all(
     any(f in fs for _, _, fs in os.walk(TOOLS)) for f in ALLOWED),
     'an allowed name matches no file -- the list has rotted')
