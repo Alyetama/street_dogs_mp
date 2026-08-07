@@ -2608,26 +2608,28 @@ function paintBal(){
   if(!short){
     $('balNum').textContent='0';
     $('balNumU').textContent='crops left to judge';
-    $('balLeft').innerHTML='<b>0</b> left';
-    $('balMain').innerHTML='<b>Balanced.</b> '+n(got)+' not-dog against '+
-      n(want)+' dog';
+    $('balLeft').textContent='100%';
+    $('balMain').textContent='balanced';
   }else if(need===null){
     /* every judgement adds to both sides at the same rate: reviewing alone
        cannot close this, and a number here would be a lie */
     $('balNum').textContent='—';
     $('balNumU').textContent='not closing';
-    $('balLeft').innerHTML='<b>'+n(short)+'</b> left';
-    $('balMain').innerHTML='<b>'+n(short)+'</b> not-dog crops short, but as '+
-      'many of your verdicts are dogs as not-dogs';
+    $('balLeft').textContent=Math.round(pct)+'%';
+    $('balMain').textContent='not closing at this rate';
   }else{
     $('balNum').textContent=n(need);
     $('balNumU').textContent='crops left to judge';
-    $('balLeft').innerHTML='<b>'+n(short)+'</b> left';
+    /* One number at the end of the track, in the track's own unit. The line
+       used to carry three readings of one thing -- the crops to judge, the
+       crops the bar is short, and the percentage with its fraction spelled
+       out -- in three different units, which is what made a one-line summary
+       longer than the thing it summarised. */
+    $('balLeft').textContent=Math.round(pct)+'%';
     $('balLeft').title=n(short)+' more not-dog crops fill this bar. That is '+
       'not the same as the '+n(need)+' on the left: those are crops to JUDGE, '+
       'and only some of what you judge ends up a usable not-dog crop.';
-    $('balMain').innerHTML='<b>'+Math.round(pct)+'%</b> of the way &mdash; '+
-      n(got)+' of '+n(want)+' not-dog crops';
+    $('balMain').textContent='';
   }
   /* The breakdown that used to occupy four legend swatches. It explains the
      number rather than competing with it, so it lives on hover. */
@@ -3694,7 +3696,7 @@ load();loadBal();
       state='Guessing stopped';
       sub=j.why+' \u00b7 '+gap.toLocaleString()+' crop'+(gap===1?'':'s')+
           ' still have no guess';
-      el.className='trg warn';
+      el.className='line trg warn';
     }else if(j.busy_with){
       /* the OTHER guesser has the card. Saying "Not running" here is true and
          useless: it invites a Run press that can only be refused. */
@@ -3707,7 +3709,7 @@ load();loadBal();
          while the queue is only partly guessed */
       state='Not running';
       sub=gap.toLocaleString()+' crop'+(gap===1?'':'s')+' have no guess yet';
-      el.className='trg warn';
+      el.className='line trg warn';
     }else if(!j.ever){
       state='No guesses yet';
       sub=(j.pool||0).toLocaleString()+' crops in the queue';
@@ -3717,8 +3719,14 @@ load();loadBal();
     }
     $('trgState').textContent=state;
     $('trgSub').textContent=sub;
-    $('trgPct').textContent=(j.guessed||0).toLocaleString()+' of '+
-      (j.pool||0).toLocaleString()+' crops guessed \u00b7 '+cov+'%';
+    /* the percentage alone. "3,385 crops have no guess yet" and "1,633 of
+       5,018 crops guessed" are the same fact twice, and they sat either side
+       of the bar that is a third telling of it. The counts move to the hover,
+       where a breakdown belongs. */
+    $('trgPct').textContent=cov+'%';
+    el.title=(j.guessed||0).toLocaleString()+' of '+
+      (j.pool||0).toLocaleString()+' crops in the queue have a guess from '+
+      (j.model?String(j.model).split('/').pop():'this model')+'.';
     $('trgFill').style.width=cov+'%';
     /* the button reflects what the run IS doing, so the label is the action
        it would take -- not the state it is in */

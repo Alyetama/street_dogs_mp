@@ -1279,8 +1279,59 @@ async function t27() {
   ck(byId['npanel'].hidden, 't27: Narrow does not shut the panel again');
 }
 
+// ── 28. every state of the two lines is still a line ────────────────────
+// Both rows set className wholesale to add a state class, and 'line' is what
+// gives them their flex, their gap and their track. Two of those writes
+// predated the redesign and dropped it, so the commonest guesser state --
+// "Not running" -- shipped as run-together text with no bar, while the suite
+// stayed green because no test drove that branch.
+async function t28() {
+  const BASE = {ever: true, can_run: true, pool: 5018, guessed: 1633,
+                coverage: 0.325,
+                backends: [{key: 'siglip', label: 'SigLIP 2', recall: 0.977,
+                            clears: 0.943}]};
+  const STATES = [
+    ['not running',  {running: false}],
+    ['guessing',     {running: true, done: 176, total: 2864, rate: 39.2}],
+    ['stalled',      {running: false, stalled: true, age_s: 6840}],
+    ['stopped, why', {running: false, why: 'the GPU was full'}],
+    ['up to date',   {running: false, guessed: 5018, coverage: 1}],
+    ['waiting',      {running: false, busy_with: 'RF-DETR'}],
+  ];
+  for (const [what, extra] of STATES) {
+    RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
+             '/api/triage': () => Object.assign({}, BASE,
+                                    {backend: 'siglip'}, extra) };
+    await API.load(); API.trgPoll(); await flush(); await flush();
+    const cls = (byId['trg'].className || '').split(' ');
+    ck(cls.indexOf('line') >= 0,
+       't28: the guesser row lost its layout class while ' + what +
+       ': class="' + byId['trg'].className + '"');
+    ck(cls.indexOf('trg') >= 0,
+       't28: the guesser row lost its own class while ' + what +
+       ': class="' + byId['trg'].className + '"');
+  }
+
+  // ...and the balance row, whose painter has three exits of its own
+  for (const [what, bal] of [
+      ['no dataset', {ok: false, error: 'nope'}],
+      ['short',      {ok: true, have: 1549, want: 1652, pending: 0,
+                      judged: 900, n_pos: 100, yield_per_flag: 0.5,
+                      dataset: 'dogbin_v5'}],
+      ['balanced',   {ok: true, have: 1700, want: 1652, pending: 0,
+                      judged: 900, n_pos: 100, yield_per_flag: 0.5,
+                      dataset: 'dogbin_v5'}]]) {
+    RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+                                          {balance: bal}) };
+    await API.load(); await flush();
+    ck((byId['bal'].className || '').split(' ').indexOf('line') >= 0,
+       't28: the balance row lost its layout class while ' + what +
+       ': class="' + byId['bal'].className + '"');
+  }
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
