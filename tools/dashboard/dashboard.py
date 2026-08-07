@@ -1783,6 +1783,10 @@ font-size:10px;color:var(--green);letter-spacing:.04em;margin-bottom:-2px}
 .card.unjudged{opacity:.62}
 .card.unjudged .meta::after{content:'no verdict';margin-left:auto;
 font-size:10px;color:var(--dim)}
+/* The audit list is fetched with label= and leash= and nothing else, so
+   a group that narrows only the queue would be a control that does
+   nothing here. */
+body.auditing #ngrpLooks,body.auditing #ngrpWhere,
 body.auditing #country,body.auditing #unkeep{display:none}
 #verdict{display:none}
 body.auditing #verdict{display:inline-block}
@@ -1987,6 +1991,15 @@ color:var(--dim);transition:transform .15s}
       <option value="queue">Unreviewed queue</option>
       <option value="audit">Check my annotations</option>
     </select>
+    <!-- The audit view's own filter, and its ONLY one. It was folded into the
+         panel under "On a lead", which is not a question it answers, so the
+         one control that view has took a click to reach and sat under a
+         heading about something else. CSS shows it only while auditing. -->
+    <select id="verdict" title="which verdict to check">
+      <option value="all">Both verdicts</option>
+      <option value="false_positive">Only &ldquo;not a dog&rdquo;</option>
+      <option value="true_positive">Only &ldquo;is a dog&rdquo;</option>
+    </select>
     <button type="button" class="nbtn" id="narrow" aria-expanded="false"
             aria-controls="npanel"
             title="filters, sorting, and the guesser that fills them">Narrow<span class="ncar" aria-hidden="true">&#8250;</span></button>
@@ -2006,7 +2019,7 @@ color:var(--dim);transition:transform .15s}
        page" sat adjacent and identical, and one narrows the work while the
        other is a preference nobody sets twice. -->
   <div class="npanel" id="npanel" hidden>
-    <div class="ngrp">
+    <div class="ngrp" id="ngrpLooks">
       <span class="nlab">What it looks like</span>
       <div class="nrow">
         <!-- A MODEL'S GUESS, and labelled as one. It sorts the queue so a
@@ -2034,14 +2047,9 @@ color:var(--dim);transition:transform .15s}
           <option value="leashed">Leashed</option>
           <option value="unleashed">Unleashed</option>
         </select>
-        <select id="verdict" title="which verdict to check" hidden>
-          <option value="all">Both verdicts</option>
-          <option value="false_positive">Only &ldquo;not a dog&rdquo;</option>
-          <option value="true_positive">Only &ldquo;is a dog&rdquo;</option>
-        </select>
       </div>
     </div>
-    <div class="ngrp">
+    <div class="ngrp" id="ngrpWhere">
       <span class="nlab">Where</span>
       <div class="nrow">
         <!-- Populated from /api/review, which lists only countries the sweep
@@ -2276,24 +2284,36 @@ function paintFind(j){
    of the block below is derived from this one list, so a filter cannot appear
    in the chips and be missing from the panel, or be removable and not
    resettable. Adding one means adding one entry. */
+function optText(el,strip){
+  var o=el.options&&el.options[el.selectedIndex];
+  if(!o)return '';
+  return strip?o.text.replace(/\s*\(.*\)$/,''):o.text;
+}
+/* `where` is which VIEW each filter actually narrows, and it is not
+   decoration: the two views send different requests. The audit list is
+   fetched with label= and leash= and nothing else, so a guess or a country
+   left set from the queue narrows nothing there -- and the chip row was
+   advertising both while hiding the verdict filter, the one that does apply.
+   A chip that names a filter the request never carried is worse than no chip:
+   it explains an empty list with a cause that is not the cause. */
 var FILTERS=[
-  {id:'suggest', off:'',    say:function(el){return el.options[el.selectedIndex]
-     ?el.options[el.selectedIndex].text.replace(/\s*\(.*\)$/,''):''}},
-  {id:'gatef',   off:'all', say:function(el){return el.options[el.selectedIndex]
-     ?el.options[el.selectedIndex].text.replace(/\s*\(.*\)$/,''):''}},
-  {id:'leashf',  off:'all', say:function(el){return el.options[el.selectedIndex]
-     ?el.options[el.selectedIndex].text:''}},
-  {id:'country', off:'',    say:function(el){return el.options[el.selectedIndex]
-     ?el.options[el.selectedIndex].text.replace(/\s*\(.*\)$/,''):''}},
-  {id:'verdict', off:'all', say:function(el){return el.options[el.selectedIndex]
-     ?el.options[el.selectedIndex].text:''}}
+  {id:'suggest', off:'',    where:'queue', strip:1},
+  {id:'gatef',   off:'all', where:'queue', strip:1},
+  {id:'country', off:'',    where:'queue', strip:1},
+  {id:'leashf',  off:'all', where:'both'},
+  /* shown and hidden by CSS on body.auditing rather than by the hidden
+     attribute, so its availability is the view, not el.hidden */
+  {id:'verdict', off:'all', where:'audit', css:1}
 ];
 function activeFilters(){
   var out=[];
   for(var i=0;i<FILTERS.length;i++){
     var f=FILTERS[i],el=$(f.id);
-    if(!el||el.hidden||el.value===f.off)continue;
-    var t=f.say(el);
+    if(!el)continue;
+    if(f.where!=='both'&&f.where!==mode)continue;
+    if(!f.css&&el.hidden)continue;
+    if(el.value===f.off)continue;
+    var t=optText(el,f.strip);
     if(t)out.push({id:f.id,off:f.off,text:t});
   }
   return out;
@@ -6857,6 +6877,9 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
             'leash_totals': _leash_counts(),
             'leash_filter': want_leash, 'leash_counts': leash_offer,
             'pages': pages, 'total': total, 'sort': sort, 'label': label,
+            # what the list holds before the verdict and leash filters, so the
+            # caption can say what it was narrowed from here too
+            'pool_unfiltered': len(by_name),
             'n_false_positive': sum(1 for i in by_name.values()
                                     if i['label'] == FLAG_LABEL
                                     and i['name'] in live[FLAG_LABEL]),

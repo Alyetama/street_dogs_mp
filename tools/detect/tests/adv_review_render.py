@@ -137,8 +137,12 @@ class El {
     while ((m = re.exec(this._html))) {
       const v = /value="([^"]*)"/.exec(m[1]);
       out.push({ value: v ? v[1].replace(/&quot;/g, '"') : m[2],
+                 // a browser hands back option.text already decoded, so
+                 // the stub must too or a label reads as raw entities
                  text: m[2].replace(/&middot;/g, '·')
                            .replace(/&mdash;/g, '—')
+                           .replace(/&ldquo;/g, '\u201c')
+                           .replace(/&rdquo;/g, '\u201d')
                            .replace(/&amp;/g, '&').replace(/&lt;/g, '<')
                            .replace(/&gt;/g, '>') });
     }
@@ -353,6 +357,13 @@ const CROPS = FIX.crops;
 // markup rather than assumed, because a stub that starts everything
 // visible lets a panel 'pass' a test for being shut.
 for (const id of (FIX.hidden || [])) if (byId[id]) byId[id].hidden = true;
+// ...and the options a <select> ships in the markup. Four painters BUILD
+// their options at runtime, but #mode, #verdict, #sort and #size carry
+// theirs in the HTML -- so a stub that starts them empty makes every
+// read of a chosen option's text return '' and any test of one vacuous.
+for (const [id, html] of Object.entries(FIX.options || {}))
+  if (byId[id]) { byId[id].innerHTML = html; byId[id].value =
+    (byId[id].options[0] || {}).value || ''; }
 function payload(items, reserve, extra) {
   return Object.assign({ items, reserve: reserve || [], page: 0, pages: 2,
                          size: 50, sort: 'conf',
@@ -1330,8 +1341,55 @@ async function t28() {
   }
 }
 
+// ── 29. the chips describe the request that was actually sent ───────────
+// The two views fetch different things. The audit list is fetched with label=
+// and leash= and nothing else, so a guess or a country left set from the queue
+// narrows nothing there. The chip row advertised both anyway and hid the
+// verdict filter -- the one that does apply -- so it explained an empty list
+// with a cause that was not the cause, and offered no way to undo the real one.
+async function t29() {
+  const Q = () => ({items: [], reserve: [], page: 0, size: 50, pages: 1,
+      total_unflagged: 100, pool_unfiltered: 100, suggest_ready: true,
+      countries: [{iso: 'JPN', name: 'Japan', n: 9}], country: 'JPN',
+      suggest: 'dog'});
+  const A = () => ({items: [], page: 0, pages: 1, total: 5,
+      pool_unfiltered: 7, n_false_positive: 5, n_true_positive: 2});
+  RESP = {'/api/review': Q, '/api/review/annotated': A};
+  const fire = (id, v) => { const e = byId[id]; e.value = v;
+    if (e.onchange) e.onchange.call(e);
+    (e._listeners.change || []).forEach(f => f.call(e)); };
+
+  fire('suggest', 'dog'); await flush(); await flush();
+  ck(/Looks like a dog/.test(byId['chips'].innerHTML),
+     't29: a queue filter produced no chip: ' + byId['chips'].innerHTML);
+
+  fire('mode', 'audit'); await flush(); await flush();
+  const sent = (CALLS.filter(c => /annotated/.test(c.url)).pop() || {}).url;
+  ck(!/Looks like a dog/.test(byId['chips'].innerHTML),
+     't29: the audit view kept a chip for a filter its request does not ' +
+     'carry (' + sent + '): ' + byId['chips'].innerHTML);
+
+  fire('verdict', 'false_positive'); await flush(); await flush();
+  ck(/not a dog/.test(byId['chips'].textContent),
+     't29: the audit view shows no chip for the one filter it applies: ' +
+     byId['chips'].textContent);
+  ck(!byId['npanel'].hidden || !byId['verdict'].hidden,
+     't29: the audit view\'s only filter is behind a fold');
+
+  // and clearing it has to reach the audit request, not the queue's
+  const x = byId['chips'].querySelector('.chipx');
+  (byId['chips']._listeners.click || []).forEach(f =>
+    f.call(byId['chips'], {target: x}));
+  await flush(); await flush();
+  const after = (CALLS.filter(c => /annotated/.test(c.url)).pop() || {}).url;
+  ck(/label=all/.test(after),
+     't29: clearing the verdict chip did not clear the verdict: ' + after);
+
+  fire('mode', 'queue'); await flush(); await flush();
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
@@ -1399,8 +1457,14 @@ def main():
                             html)
         hidden += re.findall(r'<[a-z]+[^>]*\bhidden\b[^>]*\bid="(\w+)"',
                              html)
+        # The options each <select> ships in the markup, so the stub starts
+        # with the same choices the page does.
+        opts = dict(re.findall(
+            r'<select id="(\w+)"[^>]*>(.*?)</select>', html, re.S))
+        opts = {k: v.strip() for k, v in opts.items() if '<option' in v}
         with open(fx, 'w') as f:
-            json.dump({'crops': fixtures, 'hidden': sorted(set(hidden))}, f)
+            json.dump({'crops': fixtures, 'hidden': sorted(set(hidden)),
+                       'options': opts}, f)
         with open(run, 'w') as f:
             f.write(HARNESS)
         p = subprocess.run(['node', run, js, fx],
