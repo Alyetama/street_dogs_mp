@@ -5810,6 +5810,122 @@ def _db_facts(path):
 # it.
 DRIVE_TIGHT_PCT = 0.90        # used share at which a disk needs attention
 DRIVE_TIGHT_GB = 50.0         # ...or an absolute floor, whichever bites first
+# SMART is read, never started. `smartctl -H` asks the drive for the verdict it
+# already holds; it does not unmount, does not interrupt I/O and does not touch
+# the filesystem. `smartctl -t`, which would START a self-test, is deliberately
+# not used anywhere here.
+SMART_CACHE = os.path.join(REPO, 'data', 'dashboard', 'drive_smart.json')
+SMART_TTL_S = 900
+SMART_TIMEOUT_S = 12
+
+
+def _mount_devices():
+    """{mountpoint: (device, bus)} from lsblk, or {} if it is not there."""
+    out = {}
+    try:
+        got = subprocess.run(['lsblk', '-J', '-o', 'NAME,PATH,TRAN,MOUNTPOINT'],
+                             capture_output=True, text=True, timeout=15)
+        tree = json.loads(got.stdout or '{}')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return out
+
+    def walk(nodes, bus=None):
+        for n in nodes:
+            b = n.get('tran') or bus
+            if n.get('mountpoint'):
+                out[n['mountpoint']] = (n.get('path'), b)
+            walk(n.get('children') or [], b)
+    walk(tree.get('blockdevices') or [])
+    return out
+
+
+def _device_for(path, mounts):
+    """(device, bus) holding `path`, by longest mountpoint match.
+
+    realpath FIRST. One of these roots is a symlink onto another disk, and
+    matching the literal path walked up to '/' instead -- reporting the root
+    filesystem's device, and its SMART verdict, for an 18 TB drive.
+    """
+    real = os.path.realpath(path)
+    best = ''
+    for mp in mounts:
+        if (real == mp or real.startswith(mp.rstrip(os.sep) + os.sep)) \
+                and len(mp) > len(best):
+            best = mp
+    return mounts.get(best, (None, None))
+
+
+def _smart_read(dev, bus):
+    """('passed'|'failing'|'unreadable', detail) for one device.
+
+    Read-only: -H returns the drive's own stored self-assessment. USB bridges
+    often need to be told how to talk to the disk behind them, so one retry
+    with -d sat before giving up -- that is still a read.
+    """
+    if not dev or not shutil.which('smartctl'):
+        return 'unreadable', 'smartctl is not installed'
+    tries = [['smartctl', '-H', '-j', dev]]
+    if bus == 'usb':
+        tries.append(['smartctl', '-H', '-j', '-d', 'sat', dev])
+    last = ''
+    for argv in tries:
+        try:
+            got = subprocess.run(argv, capture_output=True, text=True,
+                                 timeout=SMART_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            return 'unreadable', 'smartctl could not be run'
+        try:
+            doc = json.loads(got.stdout or '{}')
+        except ValueError:
+            doc = {}
+        st = (doc.get('smart_status') or {})
+        if 'passed' in st:
+            return ('passed' if st['passed'] else 'failing',
+                    'the drive reports itself healthy' if st['passed']
+                    else 'the drive reports itself FAILING — replace it')
+        msgs = ' '.join(m.get('string', '')
+                        for m in (doc.get('smartctl') or {}).get('messages')
+                        or [])
+        last = msgs or (got.stderr or '').strip() or 'no verdict returned'
+        if 'permission' in last.lower():
+            # every device answers this way without root, so stop asking
+            return 'unreadable', 'needs root'
+    return 'unreadable', last[:120]
+
+
+def drive_smart(force=False):
+    """{device: {state, detail}}, cached — one probe per drive per 15 minutes.
+
+    Cached because the page rebuilds far more often than a disk's verdict
+    changes, and six subprocess round trips inside a page build is a cost paid
+    for nothing.
+    """
+    now = time.time()
+    if not force:
+        try:
+            with open(SMART_CACHE) as fh:
+                doc = json.load(fh)
+            if now - float(doc.get('at') or 0) < SMART_TTL_S:
+                return doc.get('by_device') or {}
+        except (OSError, ValueError, TypeError):
+            pass
+    mounts = _mount_devices()
+    by_dev = {}
+    for _label, root in sorted(_grid_roots().items()):
+        dev, bus = _device_for(root, mounts)
+        if not dev or dev in by_dev:
+            continue
+        state, detail = _smart_read(dev, bus)
+        by_dev[dev] = {'state': state, 'detail': detail, 'bus': bus}
+    try:
+        os.makedirs(os.path.dirname(SMART_CACHE), exist_ok=True)
+        tmp = SMART_CACHE + '.tmp'
+        with open(tmp, 'w') as fh:
+            json.dump({'at': now, 'by_device': by_dev}, fh)
+        os.replace(tmp, SMART_CACHE)
+    except OSError:
+        pass
+    return by_dev
 
 
 def _drive_free(path):
@@ -5822,23 +5938,24 @@ def _drive_free(path):
 
 
 def drive_health():
-    """One record per configured root: is it there, and how much room is left.
+    """One record per configured root: is it there, is it sound, is there room.
 
     Never raises. This runs inside the page build, and a drive that has gone
     away is the case it exists to report -- failing the whole dashboard
     because one root is unplugged would hide the answer behind the symptom.
     """
+    mounts = _mount_devices()
+    smart = drive_smart()
     out = []
     for label, root in sorted(_grid_roots().items()):
+        dev, bus = _device_for(root, mounts)
+        sm = smart.get(dev) or {}
         rec = {'label': label, 'root': root, 'mounted': os.path.isdir(root),
-               'cells': None, 'total': None, 'used': None, 'free': None}
+               'device': dev, 'bus': bus,
+               'smart': sm.get('state') or 'unreadable',
+               'smart_detail': sm.get('detail') or '',
+               'total': None, 'used': None, 'free': None}
         if rec['mounted']:
-            try:
-                # cheap: one listdir of cell directories, no recursion
-                with os.scandir(root) as it:
-                    rec['cells'] = sum(1 for e in it if e.is_dir())
-            except OSError:
-                rec['cells'] = None
             got = _drive_free(root)
             if got:
                 rec['total'], rec['used'], rec['free'] = got
@@ -5850,61 +5967,75 @@ def _gb(n):
     return n / (1024.0 ** 3)
 
 
+def _drive_tight(r):
+    if not r.get('total'):
+        return False
+    return (r['used'] / r['total'] >= DRIVE_TIGHT_PCT
+            or _gb(r['free']) < DRIVE_TIGHT_GB)
+
+
+def _drive_verdict(r):
+    """(rank, word, class) -- the one thing to know about this drive."""
+    if not r['mounted']:
+        return 0, 'not mounted', 'bad'
+    if r['smart'] == 'failing':
+        return 0, 'SMART failing', 'bad'
+    if _drive_tight(r):
+        return 1, 'nearly full', 'warn'
+    return 2, 'healthy', 'ok'
+
+
 def render_drives():
-    """The drives, worst first: gone, then tight, then the rest by name."""
+    """One card per root, worst first. A verdict, then the numbers behind it."""
     rows = drive_health()
     if not rows:
         return ('<div class="mnone">no data/catalog_dirs.txt &mdash; nothing '
                 'to check</div>')
+    rows.sort(key=lambda r: (_drive_verdict(r)[0], r['label']))
 
-    def tight(r):
-        if not r['total']:
-            return False
-        return (r['used'] / r['total'] >= DRIVE_TIGHT_PCT
-                or _gb(r['free']) < DRIVE_TIGHT_GB)
-
-    def rank(r):
-        return (0 if not r['mounted'] else 1 if tight(r) else 2, r['label'])
-    rows.sort(key=rank)
-    gone = sum(1 for r in rows if not r['mounted'])
-    warn = sum(1 for r in rows if r['mounted'] and tight(r))
-
-    out = []
+    cards = []
     for r in rows:
-        cls = 'drv' + ('' if r['mounted'] else ' gone') \
-            + (' tight' if r['mounted'] and tight(r) else '')
-        if not r['mounted']:
-            # The path is the actionable half: it says which disk to plug in.
-            state = ('<span class="drvstate">not mounted</span>'
-                     '<span class="drvsub">every region on it reads as zero '
-                     'until it is back</span>')
-            bar = ''
-        elif not r['total']:
-            state = '<span class="drvstate">size unreadable</span>'
-            bar = ''
-        else:
-            pct = r['used'] / r['total']
-            state = ('<b>' + f'{_gb(r["free"]):,.0f}' + ' GB</b>'
-                     '<span class="drvsub">free of '
-                     + f'{_gb(r["total"]):,.0f}' + ' GB</span>')
-            bar = ('<i class="drvbar"><i style="width:'
-                   + f'{min(100.0, pct * 100):.1f}' + '%"></i></i>'
-                   '<span class="drvpct">' + f'{pct * 100:.0f}' + '%</span>')
-        cells = ('' if r['cells'] is None
-                 else f'<span class="drvcells">{r["cells"]:,} cells</span>')
-        out.append('<div class="' + cls + '">'
-                   '<span class="drvname">' + esc_html(r['label']) + '</span>'
-                   + state + bar + cells + '</div>')
-    lead = ''
-    if gone or warn:
-        bits = []
-        if gone:
-            bits.append(f'{gone} not mounted')
-        if warn:
-            bits.append(f'{warn} nearly full')
-        lead = ('<div class="drvlead">' + esc_html(' \u00b7 '.join(bits))
-                + '</div>')
-    return lead + '<div class="drvs">' + ''.join(out) + '</div>'
+        _, word, kind = _drive_verdict(r)
+        pct = (r['used'] / r['total']) if r.get('total') else None
+        meter = ''
+        if pct is not None:
+            meter = ('<i class="dvmeter"><i style="width:'
+                     + f'{min(100.0, pct * 100):.1f}' + '%"></i></i>')
+        room = (f'<b>{_gb(r["free"]):,.0f} GB</b><span> free of '
+                f'{_gb(r["total"]):,.0f} GB &middot; '
+                f'{pct * 100:.0f}% used</span>') if pct is not None else                ('<span>capacity unreadable while unmounted</span>'
+                if not r['mounted'] else '<span>capacity unreadable</span>')
+        # SMART's own words, never paraphrased into a verdict it did not give
+        sm = {'passed': 'SMART passed',
+              'failing': 'SMART FAILING',
+              'unreadable': 'SMART unavailable'}[r['smart']]
+        smcls = {'passed': 'ok', 'failing': 'bad',
+                 'unreadable': 'dim'}[r['smart']]
+        why = f' &middot; {esc_html(r["smart_detail"])}' \
+            if r['smart'] != 'passed' and r['smart_detail'] else ''
+        cards.append(
+            f'<div class="dv {kind}">'
+            f'<div class="dvtop"><b class="dvname">{esc_html(r["label"])}</b>'
+            f'<span class="dvverdict">{word}</span></div>'
+            f'{meter}'
+            f'<div class="dvroom">{room}</div>'
+            f'<div class="dvsm {smcls}">{sm}{why}</div>'
+            f'</div>')
+
+    note = ''
+    if any(r['smart'] == 'unreadable' and r['smart_detail'] == 'needs root'
+           for r in rows):
+        # The rule is narrow on purpose: one read-only subcommand, no wildcard
+        # over smartctl's whole surface, and nothing that could start a test.
+        note = (
+            '<p class="dvnote">SMART needs root to read. It is a read-only '
+            'query &mdash; it does not unmount anything, interrupt I/O or '
+            'touch the filesystem &mdash; but the kernel still gates it. To '
+            'turn it on, add one line with <code>sudo visudo</code>:<br>'
+            '<code>' + esc_html(os.environ.get('USER') or 'you')
+            + ' ALL=(root) NOPASSWD: /usr/sbin/smartctl -H -j *</code><br>'
+            'Until then the capacity and mount checks above still hold.</p>')
+    return '<div class="dvs">' + ''.join(cards) + '</div>' + note
 
 
 def render_store_path():
@@ -9485,30 +9616,43 @@ a.cand:hover .cname{color:var(--tx)}
 border-top:1px solid var(--bd)}
 .mfoot code{background:var(--panel2);padding:1px 6px;border-radius:5px}
 /* ── drive health ─────────────────────────────────────────────────────────
-   One row per root, worst first. A missing drive gets the loudest treatment
-   on the page because it is the one failure that looks like an empty result
-   instead of an error. */
-.drvlead{font-size:12px;color:var(--red);margin:0 0 10px;font-weight:600}
-.drvs{display:grid;gap:1px;background:var(--bd);border:1px solid var(--bd);
-border-radius:9px;overflow:hidden}
-.drv{display:flex;align-items:center;gap:12px;padding:9px 13px;
-background:var(--panel);font-size:12.5px;color:var(--mut);
-font-variant-numeric:tabular-nums}
-.drvname{flex:none;min-width:84px;color:var(--tx);font-weight:640}
-.drv b{color:var(--tx);font-weight:640}
-.drvsub{color:var(--dim);font-size:11.5px}
-.drvbar{flex:1;min-width:70px;height:4px;border-radius:3px;
-background:rgba(130,140,150,.18);overflow:hidden;display:block}
-.drvbar i{display:block;height:100%;background:var(--green);border-radius:3px}
-.drvpct{flex:none;color:var(--dim);font-size:11.5px}
-.drvcells{flex:none;color:var(--dim);font-size:11.5px;margin-left:auto}
-.drv.tight .drvbar i{background:var(--acc)}
-.drv.tight b{color:var(--acc)}
-.drv.gone{background:rgba(216,116,58,.09)}
-.drv.gone .drvname{color:var(--red)}
-.drvstate{flex:none;color:var(--red);font-weight:600}
-.drv.gone .drvsub{flex:1}
-@media(max-width:640px){.drv{flex-wrap:wrap}.drvcells{margin-left:0}}
+   A verdict, then the numbers behind it. The first version was a flat list of
+   identical grey rows: six readouts of equal weight, when five of the six
+   facts on a healthy disk are things you never act on. Each drive is a card
+   now, led by the one word that decides whether to do anything, and the cards
+   sort worst first so the top of the section is the story.
+
+   The capacity meter is the only ink that carries state, and it carries it in
+   the drive's own colour -- so a glance across the grid is the whole report.
+   The cell count went: it answered a question nobody was asking. */
+.dvs{display:grid;gap:10px;
+grid-template-columns:repeat(auto-fill,minmax(232px,1fr))}
+.dv{border:1px solid var(--bd);border-radius:11px;padding:12px 13px 11px;
+background:var(--panel);display:grid;gap:8px;align-content:start}
+.dvtop{display:flex;align-items:baseline;gap:9px}
+.dvname{font-size:13.5px;font-weight:660;color:var(--tx);letter-spacing:-.1px}
+.dvverdict{margin-left:auto;font-size:10.5px;letter-spacing:.05em;
+text-transform:uppercase;color:var(--dim)}
+.dvmeter{display:block;height:5px;border-radius:3px;
+background:rgba(130,140,150,.18);overflow:hidden}
+.dvmeter i{display:block;height:100%;border-radius:3px;background:var(--green);
+transition:width .4s ease}
+.dvroom{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+.dvroom b{color:var(--tx);font-weight:650;font-size:13px}
+.dvsm{font-size:11px;color:var(--dim)}
+.dvsm.ok{color:var(--green)}
+.dvsm.bad{color:var(--red);font-weight:650}
+/* the two states worth interrupting a glance for */
+.dv.warn{border-color:rgba(232,166,69,.42)}
+.dv.warn .dvmeter i{background:var(--acc)}
+.dv.warn .dvverdict{color:var(--acc)}
+.dv.bad{border-color:rgba(216,116,58,.55);background:rgba(216,116,58,.07)}
+.dv.bad .dvmeter i{background:var(--red)}
+.dv.bad .dvverdict{color:var(--red);font-weight:650}
+.dvnote{margin:12px 0 0;font-size:11.5px;line-height:1.6;color:var(--dim);
+max-width:78ch}
+.dvnote code{font-size:11px;background:var(--panel2);border:1px solid var(--bd);
+border-radius:4px;padding:1px 5px;color:var(--mut)}
 .mnone{font-size:12px;color:var(--dim)}
 @media(max-width:760px){.pipe{padding-left:24px}.sproj{margin-left:0;width:100%}}
 @media(prefers-reduced-motion:reduce){.stg.live .dot{animation:none}}
