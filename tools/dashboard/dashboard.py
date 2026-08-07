@@ -1528,6 +1528,49 @@ def trigger_refresh(db):
 
 
 
+COPY_JS = r"""
+/* Copy that works off localhost. navigator.clipboard is undefined on a plain
+   http origin, which is exactly how this dashboard is served, so the async API
+   is tried first and a detached textarea carries the rest. Returns a promise
+   resolving to whether it landed, so the button can say. */
+function copyText(t){
+  t=String(t==null?'':t);
+  if(navigator.clipboard&&navigator.clipboard.writeText&&window.isSecureContext){
+    return navigator.clipboard.writeText(t).then(function(){return true},
+                                                 function(){return fallback(t)});
+  }
+  return Promise.resolve(fallback(t));
+  function fallback(v){
+    try{
+      var ta=document.createElement('textarea');
+      ta.value=v;
+      /* off-screen but focusable: display:none or visibility:hidden makes the
+         selection uncopyable */
+      ta.setAttribute('readonly','');
+      ta.style.position='fixed';ta.style.top='-1000px';ta.style.opacity='0';
+      document.body.appendChild(ta);
+      ta.select();ta.setSelectionRange(0,v.length);
+      var ok=document.execCommand('copy');
+      document.body.removeChild(ta);
+      return !!ok;
+    }catch(e){return false}
+  }
+}
+/* Say what happened, on the button itself, and put its own label back. */
+function copyOnto(btn,text,label){
+  if(!btn)return;
+  copyText(text).then(function(ok){
+    btn.textContent=ok?'Copied':'Press \u2318C';
+    btn.classList.toggle('done',ok);
+    clearTimeout(btn.__t);
+    btn.__t=setTimeout(function(){
+      btn.textContent=label;btn.classList.remove('done');
+    },1400);
+  });
+}
+"""
+
+
 REVIEW_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1910,6 +1953,9 @@ pointer-events:none}
 min-width:44px;text-align:center}
 .bxy{font-variant-numeric:tabular-nums;color:var(--dim)}
 .lbf{display:flex;gap:13px;align-items:center;flex-wrap:wrap;justify-content:center}
+.lbcopy{font-variant-numeric:tabular-nums}
+.lbcopy.done{color:var(--green);border-color:rgba(67,181,129,.5);
+background:rgba(67,181,129,.14)}
 .lbx{position:absolute;top:16px;right:18px}
 .lbyes{background:rgba(67,181,129,.14);border-color:rgba(67,181,129,.4);color:var(--green)}
 .lbyes:hover{background:rgba(67,181,129,.24)}
@@ -2176,6 +2222,8 @@ color:var(--dim);transition:transform .15s}
 </div>
 </div>
 <script>
+__COPY_JS__
+
 /* sel = -1 means NOTHING is selected. The page opens that way on purpose:
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
@@ -3040,6 +3088,11 @@ function openLb(i){
       '</div>'+
       '<div class="lbf">'+
         '<span class="cnt" id="lbc"></span>'+
+        /* Only here, and only here on purpose: the id is a thing you want
+           while looking hard at one crop, and a copy button on every tile in
+           a 50-crop grid would be 50 controls nobody asked for. */
+        '<button class="rbtn quiet lbcopy" id="lbcopy" '+
+          'title="copy this image\u2019s Mapillary id">Copy ID</button>'+
         '<span class="cnt bxy" id="lbxy"></span>'+
         '<span class="zoomb">'+
           '<button class="rbtn quiet" id="zout" title="zoom out">&minus;</button>'+
@@ -3056,6 +3109,12 @@ function openLb(i){
     document.body.appendChild(lb);
     document.body.style.overflow='hidden';
     $('lbx').onclick=closeLb;
+    $('lbcopy').onclick=function(e){
+      /* the footer sits over the image; a click here must not also count as
+         a click on the backdrop or the frame behind it */
+      e.stopPropagation();
+      copyOnto(this,this.dataset.id||'','Copy ID');
+    };
     /* the edit must be durable before the verdict is filed, or the crop is
        classified against a box that never reached disk */
     $('lbf').onclick=function(){var k=sel;
@@ -3099,6 +3158,11 @@ function openLb(i){
   $('lbbox').hidden=true;$('lbxy').textContent='';
   saveT=null;savingP=null;setStat('');
   $('lbc').textContent=c.image_id+' · confidence '+(+c.conf||0).toFixed(2);
+  /* the button carries the id it will copy, so stepping to the next crop
+     cannot leave it pointing at the one before */
+  var cb=$('lbcopy');
+  if(cb){cb.dataset.id=c.image_id||'';cb.textContent='Copy ID';
+    cb.classList.remove('done');}
   /* the burned-in full frame cannot be edited: it is cut from the 1280
      letterbox with the box already drawn on it. Editing needs the ORIGINAL
      plus the store's coordinates, so fall back to the old frame only when
@@ -3916,6 +3980,10 @@ load();loadBal();
   });
 })();
 </script></body></html>"""
+# Substituted at import time, so the server and the tests both read a
+# finished document -- a placeholder left in REVIEW_HTML would parse as a
+# bare identifier and only fail when a button was pressed.
+REVIEW_HTML = REVIEW_HTML.replace('__COPY_JS__', COPY_JS)
 
 # ── bulk review page (/review) + sweep control ──────────────────────────────
 
@@ -9091,6 +9159,7 @@ def render(ov, per, tr, now, locs=()):
             .replace('__LB_CSS__', LB_CSS)
             .replace('__LB_HTML__', LB_HTML)
             .replace('__LB_JS__', LB_JS)
+            .replace('__COPY_JS__', COPY_JS)
             .replace('__MODELS__', render_models())
             .replace('__TRAINING__', render_training())
             .replace('__DRIVES__', render_drives())
@@ -9293,6 +9362,9 @@ LB_CSS = """
    to DIRECT children of .lb only */
 .lb>.rbtn{position:absolute;padding:3px 11px;font-size:15px;line-height:1.35;background:rgba(33,38,45,.9)}
 .lb>.rbtn:hover{background:rgba(232,166,69,.24)}
+.lbcopy{font-variant-numeric:tabular-nums}
+.lbcopy.done{color:var(--green);border-color:rgba(67,181,129,.5);
+background:rgba(67,181,129,.14)}
 .lbflag{padding:3px 11px;font-size:11.5px}
 .lbflag.on{background:#d8743a;border-color:#d8743a;color:#15100a}
 .lbflag.on:hover{background:#c9682f}
@@ -9310,6 +9382,7 @@ LB_HTML = """
   <img id="cropLbImg" alt="full frame with the detection box drawn">
   <div class="lbfoot">
     <div class="lbcap" id="cropLbCap"></div>
+    <button class="rbtn quiet lbcopy" id="cropLbCopy" title="copy this image’s Mapillary id">Copy ID</button>
     <button class="rbtn lbflag" id="cropLbFlag" title="flag as false positive">⚑ not a dog</button>
   </div>
 </div>"""
@@ -9325,7 +9398,8 @@ function makeLightbox(cfg){
       bx=document.getElementById('cropLbClose'),
       bp=document.getElementById('cropLbPrev'),
       bn=document.getElementById('cropLbNext'),
-      bf=document.getElementById('cropLbFlag');
+      bf=document.getElementById('cropLbFlag'),
+      bc=document.getElementById('cropLbCopy');
   var list=[],at=-1,prevOv='';
   var ON='flagged as false positive — click to undo',
       OFF='flag as false positive (not a dog)';
@@ -9346,6 +9420,10 @@ function makeLightbox(cfg){
     if(img)img.src='/recent_crops/full/'+encodeURIComponent(''+c.name);
     if(cap)cap.textContent='image_id '+c.image_id+' · conf '+
       (+c.conf||0).toFixed(2)+' · '+Math.max(0,Math.round(+c.age_s||0))+'s ago';
+    /* re-armed on every step, so the button can never copy the id of the
+       crop you were looking at a moment ago */
+    if(bc){bc.dataset.id=c.image_id||'';bc.textContent='Copy ID';
+      bc.classList.remove('done');}
     var many=list.length>1?'':'none';   /* one crop: nothing to step to */
     if(bp)bp.style.display=many;
     if(bn)bn.style.display=many;
@@ -9372,6 +9450,10 @@ function makeLightbox(cfg){
   function step(d){if(lb&&!lb.hidden&&list.length)show(at+d)}
   if(lb)lb.addEventListener('click',function(e){if(e.target===lb)close()});
   if(bx)bx.addEventListener('click',function(){close()});
+  if(bc)bc.addEventListener('click',function(e){
+    e.stopPropagation();
+    copyOnto(this,this.dataset.id||'','Copy ID');
+  });
   if(bp)bp.addEventListener('click',function(){step(-1)});
   if(bn)bn.addEventListener('click',function(){step(1)});
   if(bf)bf.addEventListener('click',function(e){
@@ -10565,6 +10647,7 @@ if(rbtn)rbtn.addEventListener('click',refreshNow);
 /* ── command generator ── */
 var cmdRegion=document.getElementById('cmdRegion'),cmdOut=document.getElementById('cmdOut'),cmdGen=document.getElementById('cmdGen');
 function esc(s){return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+__COPY_JS__
 __LB_JS__
 /* ── training tracker: crosshair + tooltip, one readout for every series ── */
 /* Split deliberately. Opening a past run replaces only the detail region, so

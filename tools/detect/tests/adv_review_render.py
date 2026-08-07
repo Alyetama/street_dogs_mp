@@ -193,6 +193,8 @@ class El {
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
   addEventListener(t, f) { (this._listeners[t] = this._listeners[t] || []).push(f); }
   focus() {}
+  select() {}
+  setSelectionRange() {}
   scrollIntoView() {}
   getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth,
                                      height: this.clientHeight }; }
@@ -244,6 +246,14 @@ function attached(el) {
 }
 const document = {
   body: root,
+  // the page copies through a detached textarea when navigator.clipboard is
+  // absent, which is the case on every non-https origin -- including this one
+  execCommand(cmd) {
+    if (cmd !== 'copy') return false;
+    const ta = descendants(root).find(e => e.tagName === 'TEXTAREA');
+    if (ta) COPIED = ta.value;
+    return EXEC_OK;
+  },
   createElement: t => new El(t),
   createDocumentFragment: () => { const f = new El('frag'); f.__frag = true; return f; },
   getElementById: id => {
@@ -262,9 +272,14 @@ const window = {
   matchMedia: () => ({ matches: false }),
   addEventListener: (t, f) => (winL[t] = winL[t] || []).push(f),
   scrollTo: (a) => scrolls.push(a),
+  // false, as it is over plain http on a LAN address: the page must not take
+  // the navigator.clipboard branch, because that API is not there
+  isSecureContext: false,
 };
 const winL = {};
 const navigator = { sendBeacon: (u, b) => { beacons.push(u); return true; } };
+// No navigator.clipboard: it does not exist on a plain http origin, which is
+// how this dashboard is actually served. The page must reach the fallback.
 const Blob = function (parts, opts) { this.parts = parts; this.type = opts && opts.type; };
 function getComputedStyle() {
   return { gridTemplateColumns: new Array(COLS).fill('100px').join(' ') };
@@ -274,6 +289,9 @@ function setTimeout(f, ms) { timers.push({ f, ms }); return timers.length; }
 // IntersectionObserver: the header sheds its ambient rows once the page has
 // scrolled, and without a stub the guard skips that whole branch -- so the
 // compact behaviour would look tested while never running.
+let COPIED = null;              // what reached the clipboard
+let SECURE = false;             // http origin by default, as the box serves it
+let EXEC_OK = true;
 let IO_CB = null;
 function IntersectionObserver(cb) {
   IO_CB = cb;
@@ -1506,8 +1524,53 @@ async function t32() {
      't32: scrolling back to the top left the header compact');
 }
 
+// ── 33. the id can be copied, but only from the enlarged view ───────────
+// The id is wanted while looking hard at ONE crop. A copy button on every
+// tile in a 50-crop grid would be fifty controls nobody asked for, so it
+// lives in the lightbox — and it has to copy the crop currently shown, not
+// the one that was open before you stepped.
+async function t33() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
+           '/api/review/box': () => ({ok: false, pending: true}) };
+  await API.load(); await flush();
+  API.closeLb();                 // a previous case may have left one open
+  ck(!document.getElementById('lbcopy'),
+     't33: a copy button with nothing enlarged');
+  ck(!byId['grid'].querySelector('.lbcopy'),
+     't33: a copy button on every tile in the grid');
+
+  API.openLb(0); await flush();
+  const btn = byId['lbcopy'];
+  ck(!!btn, 't33: no copy button in the enlarged view');
+  ck(btn.dataset.id === API.st().items[0].image_id,
+     't33: the button is armed with the wrong id: ' + btn.dataset.id);
+
+  COPIED = null; EXEC_OK = true;
+  btn.onclick.call(btn, {stopPropagation() {}});
+  await flush(); await flush();
+  ck(COPIED === API.st().items[0].image_id,
+     't33: the id never reached the clipboard: ' + COPIED);
+  ck(/Copied/.test(btn.textContent),
+     't33: the button did not say it worked: ' + btn.textContent);
+
+  // stepping must re-arm it, or it copies the crop you just left
+  API.stepLb(1); await flush();
+  ck(btn.dataset.id === API.st().items[1].image_id,
+     't33: stepping left the button on the previous crop: ' + btn.dataset.id);
+  ck(btn.textContent === 'Copy ID',
+     't33: the button kept its "Copied" state across crops: ' + btn.textContent);
+
+  // and a refusal has to say so rather than claim success
+  COPIED = null; EXEC_OK = false;
+  btn.onclick.call(btn, {stopPropagation() {}});
+  await flush(); await flush();
+  ck(!/Copied/.test(btn.textContent),
+     't33: claimed a copy that the browser refused: ' + btn.textContent);
+  API.closeLb();
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
