@@ -4714,6 +4714,16 @@ def render_mistakes(r):
             f'<button type="button" class="wrnav" data-d="1" '
             f'aria-label="next page">&rsaquo;</button></div></div>'
             f'<div class="wrgrid">{"".join(tiles)}</div>'
+            # The key sits inside the panel, under the grid it explains, and
+            # is drawn with the caption's own classes -- so it is a sample of
+            # the thing rather than a description of it, and it cannot drift
+            # out of step with what the tiles actually look like.
+            f'<div class="wrkey">'
+            f'<span class="wrkeyi"><span class="wrwas">grey</span>'
+            f'what the crop really was</span>'
+            f'<span class="wrkeyi"><span class="wrarr">&rarr;</span>'
+            f'<span class="wrsaid">orange</span>what the model called it'
+            f'</span></div>'
             f'</div>'
             f'<div class="wrfoot">Sorted by how sure it was. A confident '
             f'mistake is worth more than a hesitant one &mdash; the model is '
@@ -8198,6 +8208,12 @@ text-overflow:ellipsis;white-space:nowrap}
 .wrwas{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wrarr{color:var(--dim);flex:none;opacity:.7}
 .wrp{display:block;color:var(--mut);margin-top:1px}
+/* the key: the caption's own type and colours, so it is a sample of the
+   thing rather than a description that can drift out of step with it */
+.wrkey{display:flex;gap:18px;flex-wrap:wrap;align-items:baseline;
+margin-top:11px;padding-top:10px;border-top:1px solid var(--bd);
+font:400 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.wrkeyi{display:flex;align-items:baseline;gap:5px;color:var(--dim)}
 .wrfoot{margin-top:11px;font-size:11px;color:var(--dim);max-width:640px;
 line-height:1.5}
 /* the matrix's own off-diagonal cells jump here */
