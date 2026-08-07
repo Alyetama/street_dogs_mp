@@ -256,7 +256,9 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   // paintBackends' guard skips and t24 would pass untested
                   'leashf','find','findterms','findmsg','trgModel','trgNote',
                   // the folded legend that explains the dropdown's percentage
-                  'trgNoteSum','trgNoteBasis','trgNoteWhich','trgNoteCaveat']) {
+                  'trgNoteSum','trgNoteBasis','trgNoteWhich','trgNoteCaveat',
+                  // the gate's own filter axis
+                  'gatef']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -1109,8 +1111,51 @@ async function t25() {
      't25: button label stuck: ' + btn.textContent);
 }
 
+// ── 26. the dog-bin gate is its own axis, not a rival to the guess filter ──
+// It answers the question the reviewer is answering -- is this a dog -- where
+// the guess filter answers what KIND of thing it is. So it gets its own
+// control, usable at the same time, and it must not move when the guesser
+// toggle does.
+async function t26() {
+  const GATE = {gate_ready: true, gate: 'all', gate_label: 'Dog-bin gate',
+                gate_counts: {all: 2157, dog: 887, not_dog: 796, none: 474}};
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+             Object.assign({backend: 'siglip', suggest_ready: true,
+                            buckets: [{key: 'dog', label: 'Looks like a dog'},
+                                      {key: 'animal', label: 'Other animal'},
+                                      {key: 'object', label: 'Not an animal'}]},
+                           GATE)) };
+  await API.load(); await flush();
+  const g = byId['gatef'];
+  ck(!g.hidden, 't26: the gate has no control of its own');
+  ck(/887/.test(g.innerHTML) && /796/.test(g.innerHTML) &&
+     /474/.test(g.innerHTML),
+     't26: the gate options carry no counts: ' + g.innerHTML);
+  ck(/Gate says dog/.test(g.innerHTML) && /Gate says not a dog/.test(g.innerHTML),
+     't26: the gate verdicts are not offered: ' + g.innerHTML);
+  // both axes at once: the guess filter is still there beside it
+  ck(!byId['suggest'].hidden,
+     't26: the guess filter vanished when the gate appeared');
+
+  // choosing a gate verdict has to reach the server
+  g.value = 'not_dog';
+  (g._listeners.change || []).forEach(f => f.call(g));
+  if (g.onchange) g.onchange.call(g);
+  await flush(); await flush();
+  const asked = CALLS.filter(c => /\/api\/review\?/.test(c.url)).pop();
+  ck(/gate=not_dog/.test(asked.url),
+     't26: the gate verdict never reached the queue request: ' + asked.url);
+
+  // and it must not be offered before the gate has judged anything
+  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 3), [],
+        {backend: 'siglip', suggest_ready: true, gate_ready: false});
+  await API.load(); await flush();
+  ck(byId['gatef'].hidden,
+     't26: an empty gate filter was still offered');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

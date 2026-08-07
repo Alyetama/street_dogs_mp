@@ -1931,6 +1931,12 @@ color:var(--dim);transition:transform .15s}
       <option value="object">Not an animal</option>
       <option value="none">No guess yet</option>
     </select>
+    <!-- The dog-bin gate, on its own axis rather than as a rival to the guess
+         filter above. It answers the question the REVIEWER is answering — is
+         this a dog — where the guess filter answers what kind of thing it is,
+         so the useful move is to narrow by one while reading the other.
+         Hidden until the gate has verdicts covering this queue. -->
+    <select id="gatef" title="narrow by the trained dog/not-dog gate's verdict — its own axis, and always this model whatever the guesser toggle below is set to" hidden></select>
     <!-- The leash axis, filterable on its own. "Needs a leash call" is the
          working view: crops you have already called a dog and not yet called
          a lead on. Hidden until the leash store exists. -->
@@ -2062,7 +2068,7 @@ color:var(--dim);transition:transform .15s}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',leashf='all',find='',loading=false,
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',leashf='all',find='',gatef='all',loading=false,
     /* Which guesser the guess filter is reading. Page scope, not inside the
        progress strip's closure: the queue request needs it too, and the two
        must never disagree about whose opinions are on screen. */
@@ -2192,6 +2198,26 @@ function paintFind(j){
     : say||('type what you are looking for and the queue is reordered to '+
             'bring it to the front');
 }
+function paintGate(j){
+  var el=$('gatef');if(!el)return;
+  /* only once the gate has verdicts over this queue: a dropdown that filters
+     nothing is worse than no dropdown */
+  if(!j.gate_ready){el.hidden=true;return;}
+  el.hidden=false;
+  var c=j.gate_counts||{},who=j.gate_label||'Gate';
+  var L=[['all',who+': any',null],
+         ['dog','Gate says dog','dog'],
+         ['not_dog','Gate says not a dog','not_dog'],
+         ['none','No gate verdict','none']];
+  var html='';
+  for(var i=0;i<L.length;i++){
+    var k=L[i][2],n2=(k===null)?null:(c[k]||0);
+    html+='<option value="'+att(L[i][0])+'">'+esc(L[i][1])+
+      (n2===null?'':' ('+n(n2)+')')+'</option>';
+  }
+  el.innerHTML=html;
+  el.value=j.gate||'all';
+}
 function paintLeashOptions(counts){
   var sel=$('leashf');
   if(!sel)return;
@@ -2306,6 +2332,7 @@ function load(){
   return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort+
     '&suggest='+encodeURIComponent(suggest)+
     '&leash='+encodeURIComponent(leashf)+
+    '&gate='+encodeURIComponent(gatef)+
     '&find='+encodeURIComponent(find)+
     '&backend='+encodeURIComponent(BACKEND)+
                '&country='+encodeURIComponent(country))
@@ -2326,6 +2353,7 @@ function load(){
     if(j.leash_counts)paintLeashOptions(j.leash_counts);
     paintCountries(j.countries,j.country);
     paintSuggest(j);
+    paintGate(j);
     paintFind(j);
     score();
     /* "Page 3 of 47" described an offset that no longer moves. What the
@@ -3281,6 +3309,7 @@ function restorePrefs(){
   if((v=restoreSel('leashf',o.leashf))!==null)leashf=v;
   if(typeof o.find==='string'){find=o.find;if($('find'))$('find').value=find;}
   if(typeof o.backend==='string'&&o.backend)BACKEND=o.backend;
+  if(typeof o.gatef==='string'&&o.gatef)gatef=o.gatef;
   if((v=restoreSel('mode',o.mode))!==null){
     mode=v;
     document.body.classList.toggle('auditing',mode==='audit');
@@ -3339,6 +3368,11 @@ var countryHealed=false;
    promises exactly what it delivers. */
 function paintSuggest(j){
   var el=$('suggest');if(!el)return;
+  /* The gate has its own control, so it must not also appear here: two
+     dropdowns filtering by one model's verdict is a choice the reader has to
+     work out is not a choice. Selecting it in the toggle still runs it and
+     still shows its coverage — that is what the toggle is for. */
+  if(j.backend==='dogbin'&&j.gate_ready){el.hidden=true;return;}
   if(!j.suggest_ready){el.hidden=true;return;}
   el.hidden=false;
   /* The options are the chosen guesser's own vocabulary, sent with the
@@ -3386,6 +3420,9 @@ if($('find')){
     clearTimeout(ft);find=this.value;savePref('find',find);page=0;sel=-1;load();
   });
 }
+if($('gatef'))$('gatef').onchange=function(){
+  gatef=this.value;savePref('gatef',gatef);page=0;sel=-1;load();
+};
 if($('leashf'))$('leashf').onchange=function(){
   leashf=this.value;savePref('leashf',leashf);page=0;sel=-1;load();
 };
@@ -7276,8 +7313,11 @@ def _leash_counts():
         return None
 
 
+GATE_FILTERS = ('all', 'dog', 'not_dog', 'none')
+
+
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
-                   suggest='', leash='', find='', backend='siglip'):
+                   suggest='', leash='', find='', backend='siglip', gate=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
@@ -7366,6 +7406,13 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     if not _tri and want_sg:
         want_sg = ''
     want_leash = leash if leash in LEASH_FILTERS else 'all'
+    # Always the dog-bin gate, whatever the toggle above is set to: this axis
+    # is ONE model's verdict on the reviewer's own question, not "the current
+    # guesser's opinion", so it must not move when the toggle does.
+    _gate = triage_index('dogbin')
+    want_gate = gate if gate in GATE_FILTERS else 'all'
+    if not _gate:
+        want_gate = 'all'
     want_find = (find or '').strip()
     cands = []
     for name in names:
@@ -7496,9 +7543,23 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     if want_sg:
         kept = [c for c in kept
                 if (c.get('sg') or 'none') == want_sg]
-    # after the collapse and the country/guess filters, for the same reason
-    # those are: the number an option advertises has to be the number it hands
-    # back, and every filter above this one has already removed crops
+    # The gate is its own axis, not a rival taxonomy. It answers the question
+    # the REVIEWER is answering -- is this a dog -- where the guess filter
+    # answers what kind of thing it is, so narrowing by one while reading the
+    # other is the useful move and swapping between them is not. Same shape as
+    # the leash axis, and for the same reason.
+    gate_offer = {'all': len(kept), 'none': 0, 'dog': 0, 'not_dog': 0}
+    for c in kept:
+        k = (_gate.get(c['name']) or {}).get('b') or 'none'
+        if k in gate_offer:
+            gate_offer[k] += 1
+    if want_gate and want_gate != 'all':
+        kept = [c for c in kept
+                if ((_gate.get(c['name']) or {}).get('b') or 'none')
+                == want_gate]
+    # after the collapse and the country/guess/gate filters, for the same
+    # reason those are: the number an option advertises has to be the number it
+    # hands back, and every filter above this one has already removed crops
     leash_offer = {k: len(_leash_keep(kept, k))
                    for k in ('all', 'none', 'leashed', 'unleashed')}
     if want_leash and want_leash != 'all':
@@ -7564,6 +7625,13 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             'buckets': [{'key': b, 'label': BUCKET_LABELS.get(b, b)}
                         for b in (BACKEND_INFO.get(want_backend, {})
                                   .get('buckets') or OPEN_BUCKETS)],
+            # The gate's own axis. Offered only once it has verdicts covering
+            # this queue -- an empty dropdown that filters nothing is worse
+            # than no dropdown, the same rule the guess filter follows.
+            'gate': want_gate, 'gate_counts': gate_offer,
+            'gate_ready': bool(_gate),
+            'gate_label': BACKEND_INFO.get('dogbin', {}).get('label')
+                          or 'Dog-bin gate',
             # crops only: the set's manifest sits in the same directory
             'harvested_available': sum(1 for n, d in pooled
                                        if d != CROPS and _CROP_RE.match(n)),
@@ -7926,7 +7994,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                                           str(q.get('suggest', '')),
                                           str(q.get('leash', '')),
                                           str(q.get('find', '')),
-                                          str(q.get('backend', 'siglip'))))
+                                          str(q.get('backend', 'siglip')),
+                                          str(q.get('gate', ''))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
