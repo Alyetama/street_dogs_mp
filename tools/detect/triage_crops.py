@@ -182,6 +182,46 @@ def _place(model, device, no_fallback=False):
         return model.to('cpu'), 'cpu'
 
 
+VEC_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage_vecs.npz')
+
+
+def save_vectors(names, rows, model_id, path=None):
+    """Merge this pass's crop vectors into the store, newest winning.
+
+    One row per crop, L2-normalised, float16 -- 1152 dims for so400m is 2.3 kB
+    a crop, so the whole live pool is about 12 MB. The model id is written
+    with them because a vector from one model cannot be compared with text
+    encoded by another; a reader that finds a mismatch should ignore the file
+    rather than return confident nonsense.
+    """
+    if not names:
+        return 0
+    import numpy as np
+    path = path or VEC_FILE
+    keep_n, keep_v = [], None
+    try:
+        old = np.load(path, allow_pickle=False)
+        if str(old['model']) == str(model_id):
+            keep_n = [str(x) for x in old['names']]
+            keep_v = old['vecs']
+    except Exception:
+        pass
+    merged = {}
+    if keep_v is not None:
+        for i, nm in enumerate(keep_n):
+            merged[nm] = keep_v[i]
+    for i, nm in enumerate(names):
+        merged[nm] = rows[i]
+    nm_all = sorted(merged)
+    arr = np.stack([merged[n] for n in nm_all]).astype('float16')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp.npz'
+    np.savez(tmp, names=np.array(nm_all), vecs=arr,
+             model=np.array(str(model_id)))
+    os.replace(tmp, path)
+    return len(nm_all)
+
+
 def _owner_alive(path):
     """Is another LIVE run already publishing here?
 
@@ -309,6 +349,9 @@ def main():
                     help='CPU threads; the sweep and any training run want '
                          'the rest of them')
     ap.add_argument('--device', default='cpu', choices=('cpu', 'cuda'))
+    ap.add_argument('--no-vectors', action='store_true',
+                    help='do not keep the crop embeddings the model already '
+                         'produces (they are what makes free-text search work)')
     ap.add_argument('--no-cpu-fallback', action='store_true',
                     help='fail instead of dropping to the CPU when the GPU is '
                          'full (default is to fall back and keep going)')
@@ -389,6 +432,7 @@ def main():
     # else may take the GPU after we have started, and the sensible answer to
     # that is to keep guessing on the CPU rather than to stop.
     DEV = {'device': args.device, 'fell_back': False}
+    VEC = {'last': None}
 
     def _to_cpu():
         """Move the model, and the cached text features with it, to the CPU."""
@@ -442,6 +486,11 @@ def main():
         with torch.no_grad():
             ifeat = model.get_image_features(**px)
             ifeat = ifeat / ifeat.norm(dim=-1, keepdim=True)
+            # Kept, because it is already computed and it is the only thing
+            # that makes an arbitrary typed word searchable later. Discarding
+            # it means re-running the model per query; keeping it makes a
+            # query a dot product.
+            VEC['last'] = ifeat.detach().cpu().to(torch.float16).numpy()
             logits = ifeat @ tfeat.T * model.logit_scale.exp() + model.logit_bias
             # SigLIP scores each label independently (sigmoid, not softmax),
             # so normalise across the prompt table to get a share per bucket
@@ -463,6 +512,7 @@ def main():
 
     started = time.time()
     passes = [0]
+    vec_names, vec_rows = [], []
 
     def once(first):
         """One pass over whatever is unpredicted right now."""
@@ -504,6 +554,11 @@ def main():
                 if not ims:
                     continue
                 scored = score(ims)
+                if VEC.get('last') is not None and len(VEC['last']) == len(keep):
+                    for j, nm in enumerate(keep):
+                        vec_names.append(nm)
+                        vec_rows.append(VEC['last'][j])
+                    VEC['last'] = None
                 for im in ims:
                     im.close()
                 for j, nm in enumerate(keep):
@@ -560,6 +615,14 @@ def main():
               f'({wrote / el:.1f}/s)' if el else f'\n{wrote:,} predictions')
         if unreadable:
             print(f'  {unreadable:,} vanished or unreadable, skipped')
+        if vec_rows and not args.no_vectors:
+            try:
+                total = save_vectors(vec_names, vec_rows, model_id)
+                print(f'  {len(vec_rows):,} crop vectors kept '
+                      f'({total:,} searchable)')
+            except Exception as e:
+                print(f'  vectors not written: {type(e).__name__}: {e}')
+            vec_names.clear(); vec_rows.clear()
         return wrote
 
     once(True)

@@ -1608,6 +1608,12 @@ border-radius:8px;padding:5px 9px;font-size:12.5px;font-family:inherit;cursor:po
 .sp{flex:1}
 .cnt{color:var(--mut);font-size:12.5px;font-variant-numeric:tabular-nums}
 /* the folded legend */
+#find{background:var(--panel);color:var(--tx);border:1px solid var(--bd);
+border-radius:8px;padding:5px 10px;font-family:inherit;font-size:12px;
+min-width:196px}
+#find::placeholder{color:var(--dim)}
+#find:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+#find.warn{border-color:rgba(232,166,69,.5)}
 .keys{padding:7px 0 11px;border-top:1px solid var(--bd)}
 .keys summary{display:flex;align-items:center;gap:12px;cursor:pointer;
 list-style:none;color:var(--dim);font-size:11.5px}
@@ -1904,6 +1910,13 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
     <!-- The leash axis, filterable on its own. "Needs a leash call" is the
          working view: crops you have already called a dog and not yet called
          a lead on. Hidden until the leash store exists. -->
+    <!-- Free text over the queue. Not a filter: it ORDERS, so the near
+         misses stay reachable -- they are the crops most worth a human's
+         eye. Hidden until the crops have been embedded. -->
+    <input id="find" type="search" list="findterms" hidden autocomplete="off"
+           placeholder="find crops of&hellip;  e.g. a cat"
+           title="type what you are looking for and the queue is reordered to bring it to the front — the same model that guesses the buckets, asked a different way">
+    <datalist id="findterms"></datalist>
     <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
       <option value="all">Any leash state</option>
       <option value="none">Needs a leash call</option>
@@ -2005,7 +2018,7 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',leashf='all',loading=false,
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',leashf='all',find='',loading=false,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 /* leash verdicts for what is on screen, and whether the store exists at all.
    LEASH_ON stays false on a checkout without the tool, and the two buttons
@@ -2085,6 +2098,24 @@ function paintLeash(name){
   var le=card.querySelector('.lbtn.le'),un=card.querySelector('.lbtn.un');
   if(le)le.classList.toggle('on',LEASH[name]==='leashed');
   if(un)un.classList.toggle('on',LEASH[name]==='unleashed');
+}
+function paintFind(j){
+  var el=$('find'), dl=$('findterms');
+  if(!el)return;
+  /* the control only exists once there is something to search */
+  var ready=(j.find_terms||[]).length>0;
+  el.hidden=!ready&&!j.find;
+  if(dl&&ready)dl.innerHTML=(j.find_terms||[]).map(function(t){
+    return '<option value="'+esc(t)+'">'}).join('');
+  el.classList.toggle('warn',j.find_state==='learning'||j.find_state==='unknown');
+  el.title=j.find_state==='learning'
+    ? 'working out what that looks like — try again in a moment'
+    : j.find_state==='unknown'
+    ? 'that term is not searchable yet'
+    : j.find_state==='on'
+    ? n(j.find_hits)+' crops ranked by how much they look like '+j.find
+    : 'type what you are looking for and the queue is reordered to bring it '+
+      'to the front';
 }
 function paintLeashOptions(counts){
   var sel=$('leashf');
@@ -2200,6 +2231,7 @@ function load(){
   return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort+
     '&suggest='+encodeURIComponent(suggest)+
     '&leash='+encodeURIComponent(leashf)+
+    '&find='+encodeURIComponent(find)+
                '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
@@ -2218,6 +2250,7 @@ function load(){
     if(j.leash_counts)paintLeashOptions(j.leash_counts);
     paintCountries(j.countries,j.country);
     paintSuggest(j);
+    paintFind(j);
     score();
     /* "Page 3 of 47" described an offset that no longer moves. What the
        reader actually needs is how much is left after this screen. */
@@ -3170,6 +3203,7 @@ function restorePrefs(){
      rides along in the first request instead of being matched now */
   if(o.suggest)suggest=o.suggest;
   if((v=restoreSel('leashf',o.leashf))!==null)leashf=v;
+  if(typeof o.find==='string'){find=o.find;if($('find'))$('find').value=find;}
   if((v=restoreSel('mode',o.mode))!==null){
     mode=v;
     document.body.classList.toggle('auditing',mode==='audit');
@@ -3253,6 +3287,21 @@ $('country').onchange=function(){var v=this.value;
    were fresh work. */
 /* guarded: the control is absent on a checkout with no leash store, and an
    unguarded assignment there throws and takes the rest of the script with it */
+if($('find')){
+  var ft=null;
+  $('find').addEventListener('input',function(){
+    /* debounced: every keystroke would re-rank the whole pool server-side */
+    clearTimeout(ft);
+    var v=this.value;
+    ft=setTimeout(function(){
+      if(v===find)return;
+      find=v;savePref('find',find);page=0;sel=-1;load();
+    },420);
+  });
+  $('find').addEventListener('search',function(){
+    clearTimeout(ft);find=this.value;savePref('find',find);page=0;sel=-1;load();
+  });
+}
 if($('leashf'))$('leashf').onchange=function(){
   leashf=this.value;savePref('leashf',leashf);page=0;sel=-1;load();
 };
@@ -6553,6 +6602,102 @@ def triage_status():
 
 LEASH_FILTERS = ('all', 'none', 'leashed', 'unleashed')
 
+# ── free-text search over the queue ─────────────────────────────────────────
+# The crops carry a SigLIP vector each (triage_crops.py keeps the one it
+# already computes) and terms carry one too (crop_search.py encodes them). A
+# search is therefore a dot product here -- no model in this process, and the
+# dashboard's environment has no torch to run one with.
+VEC_FILE = os.path.join(OUT, 'triage_vecs.npz')
+TERM_FILE = os.path.join(OUT, 'search_terms.npz')
+_VEC = {'at': None, 'names': None, 'vecs': None, 'model': ''}
+_TERM = {'at': None, 'terms': {}, 'model': ''}
+SEARCH_RETRY_S = 300
+_TERM_TRIED = {}
+
+
+def _npz(path, state, load):
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        state.update(at=None)
+        return False
+    if state['at'] == stamp:
+        return True
+    try:
+        import numpy as np
+        d = np.load(path, allow_pickle=False)
+    except Exception:
+        state.update(at=None)
+        return False
+    load(d)
+    state['at'] = stamp
+    return True
+
+
+def crop_vectors():
+    """(names, matrix, model) for the pool, or (None, None, '')."""
+    def load(d):
+        _VEC.update(names=[str(x) for x in d['names']], vecs=d['vecs'],
+                    model=str(d['model']))
+    if not _npz(VEC_FILE, _VEC, load):
+        return None, None, ''
+    return _VEC['names'], _VEC['vecs'], _VEC['model']
+
+
+def search_terms():
+    """({term: vector}, model) that have been encoded."""
+    def load(d):
+        _TERM.update(terms={str(t): d['vecs'][i]
+                            for i, t in enumerate(d['terms'])},
+                     model=str(d['model']))
+    if not _npz(TERM_FILE, _TERM, load):
+        return {}, ''
+    return _TERM['terms'], _TERM['model']
+
+
+def search_ready():
+    """Terms that can be searched right now, for the page's datalist."""
+    terms, tmodel = search_terms()
+    _, _, cmodel = crop_vectors()
+    # a term encoded by one model cannot be compared with crops embedded by
+    # another; the numbers would still come out and mean nothing
+    return sorted(terms) if (terms and tmodel == cmodel) else []
+
+
+def search_scores(term):
+    """{crop name: similarity} for a term, or None if it is not encoded yet."""
+    term = (term or '').strip()
+    if not term:
+        return None
+    terms, tmodel = search_terms()
+    names, vecs, cmodel = crop_vectors()
+    if names is None or term not in terms or tmodel != cmodel:
+        return None
+    import numpy as np
+    sims = vecs.astype('float32') @ terms[term].astype('float32')
+    return {names[i]: float(sims[i]) for i in range(len(names))}
+
+
+def search_learn(term):
+    """Ask for a term to be encoded, in the background. True if asked."""
+    term = (term or '').strip()
+    py = mistakes_python() if MISTAKES_PYTHON else TRIAGE_PYTHON
+    script = os.path.join(REPO, 'tools', 'detect', 'crop_search.py')
+    if not term or not py or not os.path.exists(script):
+        return False
+    now = time.time()
+    if now - _TERM_TRIED.get(term, 0) < SEARCH_RETRY_S:
+        return False
+    _TERM_TRIED[term] = now
+    try:
+        log = open(os.path.join(REPO, 'data', 'crop_search.log'), 'a')
+        _SPAWNED.append(subprocess.Popen(
+            [py, script, '--add', term], cwd=REPO, stdout=log, stderr=log,
+            stdin=subprocess.DEVNULL, start_new_session=True))
+        return True
+    except Exception:
+        return False
+
 
 def _leash_keep(items, want, key='name'):
     """Narrow a list of crops by leash state. 'none' = no verdict recorded.
@@ -6591,7 +6736,7 @@ def _leash_counts():
 
 
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
-                   suggest='', leash=''):
+                   suggest='', leash='', find=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
@@ -6673,6 +6818,7 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     want = (country or '').upper()
     want_sg = suggest if suggest in TRIAGE_BUCKETS or suggest == 'none' else ''
     want_leash = leash if leash in LEASH_FILTERS else 'all'
+    want_find = (find or '').strip()
     cands = []
     for name in names:
         m = _CROP_RE.match(name)
@@ -6809,6 +6955,24 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
                    for k in ('all', 'none', 'leashed', 'unleashed')}
     if want_leash and want_leash != 'all':
         kept = _leash_keep(kept, want_leash)
+    # Search orders the queue, it does not cut it. "Find me cats" means "put
+    # the cat-looking ones first so I can work through them", and a hard cut
+    # would also throw away the near-misses, which are exactly the crops worth
+    # a human's eye.
+    find_state, find_hits = 'off', 0
+    if want_find:
+        scores = search_scores(want_find)
+        if scores is None:
+            find_state = 'learning' if search_learn(want_find) else 'unknown'
+        else:
+            scored = [(scores.get(c['name']), c) for c in kept]
+            have = [(v, c) for v, c in scored if v is not None]
+            miss = [c for v, c in scored if v is None]
+            have.sort(key=lambda t: -t[0])
+            for v, c in have:
+                c['find'] = round(v, 4)
+            kept = [c for _, c in have] + miss
+            find_state, find_hits = 'on', len(have)
     items = kept
     total = len(items)
     pages = max(1, -(-total // size))
@@ -6838,6 +7002,8 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             'leash': _leash_for([c['name'] for c in items[lo:lo + 2 * size]]),
             'leash_totals': _leash_counts(),
             'leash_filter': want_leash, 'leash_counts': leash_offer,
+            'find': want_find, 'find_state': find_state,
+            'find_hits': find_hits, 'find_terms': search_ready(),
             # Options tallied from the live queue, NOT from the index's
             # counts. The index spans the rolling pool plus both flag ledgers,
             # while this queue excludes everything already judged, kept, or
@@ -7127,7 +7293,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                                           str(q.get('sort', REVIEW_SORT_DEFAULT)),
                                           str(q.get('country', '')),
                                           str(q.get('suggest', '')),
-                                          str(q.get('leash', ''))))
+                                          str(q.get('leash', '')),
+                                          str(q.get('find', ''))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
