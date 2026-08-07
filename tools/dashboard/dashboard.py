@@ -9221,7 +9221,10 @@ function initTracker(){
   function wireDetail(){
     var back=document.getElementById('trkBack');
     if(back) back.addEventListener('click',function(){
-      window.__trkSel=null; refreshTracker(true);
+      window.__trkSel=null;
+      var d=document.getElementById('trkdet');
+      if(d) delete d.dataset.run;
+      refreshTracker(true);
     });
     var cmp=document.getElementById('trkCmp');
     if(cmp) cmp.addEventListener('change',function(){
@@ -9243,19 +9246,29 @@ function initTracker(){
         wireWrong();
       }).catch(function(){});
   }
-  function openRun(key,tr){
+  function openRun(key,tr,quiet){
     if(!det) return;
+    /* A finished run's detail does not change while you look at it, so a
+       refresh that finds the same one already open leaves the DOM alone --
+       every rebuild reset the mistake grid to page one and dropped the
+       filter, on a 30 second timer. */
+    if(quiet&&det.dataset.run===key&&det.firstChild){
+      [].forEach.call(document.querySelectorAll('.thist tbody tr'),
+        function(x){ x.classList.toggle('sel',x===tr); });
+      return;
+    }
     fetch('/api/training/run?key='+encodeURIComponent(key))
       .then(function(r){return r.json()}).then(function(j){
         if(!j||!j.html) return;
         det.innerHTML=j.html;
+        det.dataset.run=key;
         window.__trkSel=key;
         [].forEach.call(document.querySelectorAll('.thist tbody tr'),
           function(x){ x.classList.toggle('sel',x===tr); });
         bindCharts();
         wireDetail();
         wireWrong();
-        det.scrollIntoView({block:'nearest',
+        if(!quiet)det.scrollIntoView({block:'nearest',
           behavior:(matchMedia('(prefers-reduced-motion:reduce)').matches
                     ?'auto':'smooth')});
       }).catch(function(){});
@@ -9271,7 +9284,12 @@ function initTracker(){
   if(window.__trkSel){
     var keep=document.querySelector(
       '.thist tbody tr[data-key="'+window.__trkSel.replace(/"/g,'\\"')+'"]');
-    if(keep) openRun(window.__trkSel,keep);
+    /* quiet: this is the 30s refresh putting the panel back, not a click. It
+       must not scroll the page -- the reader is somewhere, and moving them
+       there every half minute is the whole complaint -- and it must not
+       rebuild a detail that has not changed, because rebuilding it throws
+       away the mistake grid's filter and page. */
+    if(keep) openRun(window.__trkSel,keep,true);
   }
 }
 initTracker();
@@ -9288,6 +9306,12 @@ var refreshTracker;
   function refresh(force){
     /* a forced refresh (back to the live run) runs even mid-poll */
     if((busy||document.hidden)&&!force) return;
+    /* While a past run is open, leave the panel alone. Its detail does not
+       change -- the run finished -- and rebuilding it every 30 seconds threw
+       away the mistake grid's filter and page, and scrolled the reader back
+       to it. The live card resumes the moment they go back to it, which is a
+       forced refresh anyway. */
+    if(window.__trkSel&&!force) return;
     busy=true;
     fetch('/api/training').then(function(r){return r.json()}).then(function(j){
       /* keep the previous render on failure rather than blanking the panel */
