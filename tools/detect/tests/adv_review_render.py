@@ -254,7 +254,9 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   // branch, so every state would 'pass' untested
                   // the guesser toggle and its caveat line; without them
                   // paintBackends' guard skips and t24 would pass untested
-                  'leashf','find','findterms','findmsg','trgModel','trgNote']) {
+                  'leashf','find','findterms','findmsg','trgModel','trgNote',
+                  // the folded legend that explains the dropdown's percentage
+                  'trgNoteSum','trgNoteBasis','trgNoteWhich']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -1011,25 +1013,43 @@ async function t23() {
 async function t24() {
   const TRG = {ever: true, can_run: true, running: false, pool: 100,
                guessed: 100, coverage: 1};
-  const TWO = [{key: 'siglip', label: 'SigLIP 2', recall: 0.98,
+  // the real measured values, so a stale fixture cannot make a stale claim
+  // in the UI look correct
+  const TWO = [{key: 'siglip', label: 'SigLIP 2', recall: 0.75,
                 note: 'leaves behind the vectors the search box needs'},
                {key: 'rfdetr', label: 'RF-DETR', recall: 0.56,
                 note: 'writes no search vectors'}];
+  const BASIS = '120 crops a reviewer confirmed are dogs, and the share ' +
+                'each guesser files under "dog".';
   RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
            '/api/triage': () => Object.assign({}, TRG,
                                               {backend: 'siglip',
+                                               recall_basis: BASIS,
                                                backends: TWO}) };
   await API.load(); API.trgPoll(); await flush(); await flush();
   const sel = byId['trgModel'];
+  const WANT_OPT = Math.round(TWO[0].recall * 100) + '%';
   ck(!sel.hidden, 't24: two guessers offered but the control stayed hidden');
-  ck(/98%/.test(sel.innerHTML) && /56%/.test(sel.innerHTML),
+  ck(sel.innerHTML.includes(WANT_OPT) && /56%/.test(sel.innerHTML),
      't24: accuracy missing from the options: ' + sel.innerHTML);
   ck(/SigLIP 2/.test(sel.innerHTML) && /RF-DETR/.test(sel.innerHTML),
      't24: a guesser is missing from the options: ' + sel.innerHTML);
-  ck(!byId['trgNote'].hidden &&
-     /vectors/.test(byId['trgNote'].textContent),
+  ck(!byId['trgNote'].hidden,
+     't24: no legend for the guesser percentages');
+  // "75% of known dogs" is unreadable on its own -- WHICH dogs, and what did
+  // the guesser have to do to count? The summary has to answer that without
+  // being unfolded, and the body has to say what the test set is.
+  const WANT = Math.round(TWO[0].recall * 100) + '%';
+  ck(byId['trgNoteSum'].textContent.includes(WANT) &&
+     /test set/.test(byId['trgNoteSum'].textContent),
+     't24: the legend summary does not say what the number counts: ' +
+     byId['trgNoteSum'].textContent);
+  ck(/confirmed are dogs/.test(byId['trgNoteBasis'].textContent),
+     't24: the legend does not say where the test set comes from: ' +
+     byId['trgNoteBasis'].textContent);
+  ck(/vectors/.test(byId['trgNoteWhich'].textContent),
      't24: the caveat for the chosen guesser is not on screen: ' +
-     byId['trgNote'].textContent);
+     byId['trgNoteWhich'].textContent);
 
   // one guesser is not a choice
   RESP['/api/triage'] = () => Object.assign({}, TRG,

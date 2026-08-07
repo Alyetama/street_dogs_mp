@@ -1874,12 +1874,23 @@ border:1px solid var(--bd);border-radius:999px;padding:4px 10px;
 font-size:11.5px;font-family:inherit;cursor:pointer}
 #trgModel:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
 #trgModel[hidden]{display:none}
-/* The chosen guesser's caveat, on its own line under the strip: it is a
-   sentence about what this model is for, and it belongs where it is read
-   before the Run button rather than inside a title attribute. */
-.trgnote{margin:-4px 0 10px;font-size:11px;line-height:1.5;color:var(--dim);
+/* What the dropdown's percentage means, and what the chosen guesser is for.
+   Under the strip, where it is read before the Run button rather than inside
+   a title attribute nobody hovers. Folded: the summary is the answer, the
+   body is the working. */
+.trgnote{margin:-4px 0 12px;font-size:11px;line-height:1.55;color:var(--dim);
 max-width:74ch}
 .trgnote[hidden]{display:none}
+.trgnote>summary{cursor:pointer;list-style:none;color:var(--mut);
+padding:2px 0;transition:color .12s}
+.trgnote>summary::-webkit-details-marker{display:none}
+.trgnote>summary::before{content:"\203a";display:inline-block;width:12px;
+color:var(--dim);transition:transform .15s}
+.trgnote[open]>summary::before{transform:rotate(90deg)}
+.trgnote>summary:hover{color:var(--tx)}
+.trgnote>summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.trgnote p{margin:7px 0 0 12px}
+.trgnote p[hidden]{display:none}
 </style></head><body><div class="wrap">
 
 <header>
@@ -2007,7 +2018,15 @@ max-width:74ch}
   <select id="trgModel" hidden title="which model's guesses the filter above shows, and which one Run starts"></select>
   <button type="button" class="trgbtn" id="trgRun">&mdash;</button>
 </div>
-<p class="trgnote" id="trgNote" hidden></p>
+<!-- What the percentage in the dropdown means, and what this guesser is for.
+     Folded, because it is a thing you read once: the summary carries the one
+     sentence that makes the number legible, and the rest waits to be asked
+     for. -->
+<details class="trgnote" id="trgNote" hidden>
+  <summary id="trgNoteSum"></summary>
+  <p id="trgNoteBasis"></p>
+  <p id="trgNoteWhich"></p>
+</details>
 
 <!-- The legend is a lesson, and a lesson stops being one after the first
      day. It kept two full lines of the viewport permanently to teach four
@@ -3393,16 +3412,31 @@ load();loadBal();
     if(sel.dataset.sig!==want){
       sel.dataset.sig=want;
       sel.innerHTML=list.map(function(b){
-        var pct=b.recall==null?'':' · '+Math.round(b.recall*100)+
-                '% of known dogs';
+        /* 'finds' says it is a hit rate, not an error rate. Which dogs, and
+           why they are hard, is the fold below — an <option> cannot hold a
+           sentence and should not try. */
+        var pct=b.recall==null?'':' · finds '+Math.round(b.recall*100)+
+                '% of test dogs';
         return '<option value="'+esc(b.key)+'">'+esc(b.label)+pct+
                '</option>'}).join('');
     }
     if(sel.value!==BACKEND)sel.value=BACKEND;
     var cur=list.filter(function(b){return b.key===BACKEND})[0];
     if(note){
-      note.hidden=!(cur&&cur.note);
-      note.textContent=cur&&cur.note?cur.note:'';
+      note.hidden=!cur;
+      if(cur){
+        /* The summary answers the question the dropdown raises — 75% of
+           WHICH dogs — in one line. Everything else waits behind the fold. */
+        var pct=cur.recall==null?'':Math.round(cur.recall*100)+'%';
+        $('trgNoteSum').textContent=pct
+          ? cur.label+' finds '+pct+' of the dogs in a fixed test set — '+
+            'what that means'
+          : 'about '+cur.label;
+        $('trgNoteBasis').textContent=j.recall_basis||'';
+        $('trgNoteWhich').textContent=cur.note||'';
+        $('trgNoteBasis').hidden=!j.recall_basis;
+        $('trgNoteWhich').hidden=!cur.note;
+      }
     }
   }
   function paint(j){
@@ -6647,6 +6681,19 @@ BACKEND_INFO = {
                        'finding cows, horses and people. Writes no search '
                        'vectors.'},
 }
+# What the percentage beside each guesser IS. Sent to the page rather than
+# written into it, so the sentence and the numbers it explains come from one
+# place and cannot drift apart. '% of known dogs' on its own does not say
+# which dogs, or what the guesser had to do to count -- and a number nobody
+# can interpret is not the safeguard it was put there to be.
+RECALL_BASIS = (
+    'The percentage is a fixed test, the same one for both: 120 crops a '
+    'reviewer confirmed are dogs, and the share each guesser files under '
+    '"dog" rather than "other animal" or "not an animal". Those 120 are '
+    'crops the DETECTOR was unsure about — 5 to 10% confidence — and a '
+    'person then confirmed, so they are the hard cases by construction. '
+    'Neither number is how often a guesser is right about an ordinary crop; '
+    'together they say which of the two to believe when they disagree.')
 _triage_cache = {'mtime': None, 'by': {}}
 
 
@@ -6893,7 +6940,7 @@ def triage_status(backend='siglip'):
             'busy_with': (BACKEND_INFO.get(run_backend, {}).get('label')
                           or run_backend) if (live and run_backend != backend)
                          else None,
-            'backend': backend, 'backends': [
+            'backend': backend, 'recall_basis': RECALL_BASIS, 'backends': [
                 dict(BACKEND_INFO.get(b, {}), key=b,
                      running=(b == run_backend and live))
                 for b in backends_offered()],
