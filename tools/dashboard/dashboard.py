@@ -5816,6 +5816,7 @@ DRIVE_TIGHT_GB = 50.0         # ...or an absolute floor, whichever bites first
 # not used anywhere here.
 SMART_CACHE = os.path.join(REPO, 'data', 'dashboard', 'drive_smart.json')
 SMART_TTL_S = 900
+SMART_CACHE_V = 2       # bumped when the cached shape changes
 SMART_TIMEOUT_S = 12
 
 
@@ -5855,6 +5856,76 @@ def _device_for(path, mounts):
     return mounts.get(best, (None, None))
 
 
+ATA_WANT = {5: ('reallocated', 'sectors the drive had to move'),
+            197: ('pending', 'sectors it cannot read and has not moved yet'),
+            198: ('uncorrectable', 'sectors it gave up on'),
+            199: ('CRC errors', 'garbled transfers — usually the cable or the '
+                                'USB bridge, not the disk')}
+
+
+def _num(x):
+    try:
+        return int(str(x).split()[0].split('h')[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _smart_facts(doc):
+    """[(label, value, level)] — what the drive says about its own wear.
+
+    The same four questions whichever kind of disk answered: how hot, how long
+    it has been running, how worn, and how much damage it has already found.
+    NVMe and ATA report those under completely different names, so they are
+    normalised here rather than in the markup.
+    """
+    out = []
+    t = ((doc.get('temperature') or {}).get('current'))
+    # 0 is what a bridge returns when it did not really answer, not a drive
+    # sitting at freezing; showing it as a reading would be inventing one
+    if t:
+        out.append((f'{t} \u00b0C', 'temperature',
+                    'bad' if t >= 65 else 'warn' if t >= 55 else 'ok'))
+    hrs = ((doc.get('power_on_time') or {}).get('hours'))
+    if hrs:
+        yrs = hrs / 8760.0
+        out.append((f'{yrs:.1f} yr powered' if yrs >= 1
+                    else f'{hrs:,} h powered', 'how long it has been running',
+                    'ok'))
+    nv = doc.get('nvme_smart_health_information_log') or {}
+    if nv:
+        w = nv.get('percentage_used')
+        if w is not None:
+            out.append((f'{w}% worn', 'share of its rated write life used',
+                        'bad' if w >= 90 else 'warn' if w >= 80 else 'ok'))
+        sp = nv.get('available_spare')
+        if sp is not None and sp < 100:
+            out.append((f'{sp}% spare', 'spare blocks left',
+                        'bad' if sp < 20 else 'warn'))
+        me = nv.get('media_errors')
+        if me is not None:
+            out.append((f'{me:,} media error' + ('' if me == 1 else 's'),
+                        'unrecoverable data errors',
+                        'bad' if me else 'ok'))
+        us = nv.get('unsafe_shutdowns')
+        if us:
+            out.append((f'{us:,} unsafe shutdowns',
+                        'lost power with writes in flight', 'ok'))
+        return out
+    for a in ((doc.get('ata_smart_attributes') or {}).get('table') or []):
+        want = ATA_WANT.get(a.get('id'))
+        if not want:
+            continue
+        v = _num((a.get('raw') or {}).get('string'))
+        if v is None:
+            continue
+        label, why = want
+        # a zero here is the good news and worth stating; a non-zero one is
+        # the whole reason to read SMART at all
+        lvl = 'ok' if v == 0 else ('warn' if a['id'] == 199 else 'bad')
+        out.append((f'{v:,} {label}', why, lvl))
+    return out
+
+
 def _smart_read(dev, bus):
     """('passed'|'failing'|'unreadable', detail) for one device.
 
@@ -5864,43 +5935,52 @@ def _smart_read(dev, bus):
     """
     sm = shutil.which('smartctl')
     if not dev or not sm:
-        return 'unreadable', 'smartctl is not installed'
+        return 'unreadable', 'smartctl is not installed', []
     # Unprivileged first, and only then through sudo -n -- which fails
     # immediately when no rule grants it rather than waiting on a password
     # prompt no page build could answer. Without this second form the sudoers
     # rule the section asks for would change nothing: the rule permits
     # `sudo smartctl`, and nothing here was running sudo.
-    base = ['-H', '-j']
-    tries = [[sm] + base + [dev]]
-    if bus == 'usb':
-        tries.append([sm] + base + ['-d', 'sat', dev])
-    tries += [['sudo', '-n', sm] + t[1:] for t in list(tries)]
-    last = ''
+    base = ['-H', '-j', '-A']
+    # `-d sat` for every device, not just the ones lsblk calls USB. Auto
+    # detection answers for three of the six roots with a verdict and an empty
+    # attribute table -- including one on a plain SATA port -- and an empty
+    # table reads as a healthy drive with nothing to report, which is the one
+    # thing SMART must never be mistaken for.
+    tries = [[sm] + base + [dev], [sm] + base + ['-d', 'sat', dev]]
+    tries += [['sudo', '-n'] + t for t in list(tries)]
+    last, best = '', None
     for argv in tries:
         try:
             got = subprocess.run(argv, capture_output=True, text=True,
                                  timeout=SMART_TIMEOUT_S)
         except (OSError, subprocess.SubprocessError):
-            return 'unreadable', 'smartctl could not be run'
+            return 'unreadable', 'smartctl could not be run', []
         try:
             doc = json.loads(got.stdout or '{}')
         except ValueError:
             doc = {}
         st = (doc.get('smart_status') or {})
         if 'passed' in st:
-            return ('passed' if st['passed'] else 'failing',
-                    'the drive reports itself healthy' if st['passed']
-                    else 'the drive reports itself FAILING — replace it')
+            got = ('passed' if st['passed'] else 'failing',
+                   'the drive reports itself FAILING — replace it'
+                   if not st['passed'] else '', _smart_facts(doc))
+            # a verdict with no attributes behind it is worth keeping only
+            # until something fuller answers
+            if got[2]:
+                return got
+            best = best or got
+            continue
         msgs = ' '.join(m.get('string', '')
                         for m in (doc.get('smartctl') or {}).get('messages')
                         or [])
         last = msgs or (got.stderr or '').strip() or 'no verdict returned'
         if 'permission' in last.lower() and argv[0] == 'sudo':
             # sudo refused too: the rule is absent, so stop asking
-            return 'unreadable', 'needs root'
+            return best or ('unreadable', 'needs root', [])
         if 'sudo:' in last.lower() or 'a password is required' in last.lower():
-            return 'unreadable', 'needs root'
-    return 'unreadable', last[:120]
+            return best or ('unreadable', 'needs root', [])
+    return best or ('unreadable', last[:120], [])
 
 
 def drive_smart(force=False):
@@ -5915,7 +5995,10 @@ def drive_smart(force=False):
         try:
             with open(SMART_CACHE) as fh:
                 doc = json.load(fh)
-            if now - float(doc.get('at') or 0) < SMART_TTL_S:
+            # versioned: a cache written before the attributes were collected
+            # would keep every card factless until it aged out on its own
+            if (doc.get('v') == SMART_CACHE_V
+                    and now - float(doc.get('at') or 0) < SMART_TTL_S):
                 return doc.get('by_device') or {}
         except (OSError, ValueError, TypeError):
             pass
@@ -5925,13 +6008,15 @@ def drive_smart(force=False):
         dev, bus = _device_for(root, mounts)
         if not dev or dev in by_dev:
             continue
-        state, detail = _smart_read(dev, bus)
-        by_dev[dev] = {'state': state, 'detail': detail, 'bus': bus}
+        state, detail, facts = _smart_read(dev, bus)
+        by_dev[dev] = {'state': state, 'detail': detail, 'bus': bus,
+                       'facts': facts}
     try:
         os.makedirs(os.path.dirname(SMART_CACHE), exist_ok=True)
         tmp = SMART_CACHE + '.tmp'
         with open(tmp, 'w') as fh:
-            json.dump({'at': now, 'by_device': by_dev}, fh)
+            json.dump({'v': SMART_CACHE_V, 'at': now,
+                       'by_device': by_dev}, fh)
         os.replace(tmp, SMART_CACHE)
     except OSError:
         pass
@@ -5964,6 +6049,7 @@ def drive_health():
                'device': dev, 'bus': bus,
                'smart': sm.get('state') or 'unreadable',
                'smart_detail': sm.get('detail') or '',
+               'smart_facts': sm.get('facts') or [],
                'total': None, 'used': None, 'free': None}
         if rec['mounted']:
             got = _drive_free(root)
@@ -6029,12 +6115,23 @@ def render_drives():
             why = (f' &middot; {esc_html(r["smart_detail"])}'
                    if r['smart_detail'] else '')
             smrow = f'<div class="dvsm {smcls}">{sm}{why}</div>'
+        # What the drive says about its own wear. A zero here is the good
+        # news and worth stating -- "0 reallocated" is the reason to keep
+        # using the disk -- so the values are shown whatever they are, and
+        # only the ones that are not zero take a colour.
+        facts = ''.join(
+            f'<span class="dvf {lvl}" title="{esc_html(why)}">'
+            f'{esc_html(val)}</span>'
+            for val, why, lvl in (r.get('smart_facts') or []))
+        if facts:
+            facts = f'<div class="dvfacts">{facts}</div>'
         cards.append(
             f'<div class="dv {kind}">'
             f'<div class="dvtop"><b class="dvname">{esc_html(r["label"])}</b>'
             f'<span class="dvverdict">{word}</span></div>'
             f'{meter}'
             f'<div class="dvroom">{room}</div>'
+            f'{facts}'
             f'{smrow}'
             f'</div>')
 
@@ -9675,6 +9772,16 @@ background:rgba(130,140,150,.18);overflow:hidden}
 transition:width .4s ease}
 .dvroom{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
 .dvroom b{color:var(--tx);font-weight:650;font-size:13px}
+/* The drive's own numbers, as chips: they are read by scanning for the one
+   that is not grey, which a sentence of them would not allow. */
+.dvfacts{display:flex;flex-wrap:wrap;gap:4px}
+.dvf{font-size:10.5px;line-height:1.7;padding:0 6px;border-radius:4px;
+background:rgba(130,140,150,.10);border:1px solid var(--bd);color:var(--dim);
+font-variant-numeric:tabular-nums;cursor:help}
+.dvf.warn{color:var(--acc);border-color:rgba(232,166,69,.42);
+background:rgba(232,166,69,.10)}
+.dvf.bad{color:var(--red);border-color:rgba(216,116,58,.5);
+background:rgba(216,116,58,.12);font-weight:650}
 .dvsm{font-size:11px;color:var(--dim)}
 .dvsm.ok{color:var(--green)}
 .dvsm.bad{color:var(--red);font-weight:650}
@@ -10365,7 +10472,7 @@ __LB_HTML__
 </details>
 
 <details class="fold sec" id="f-drives" open>
-<summary class="sect">Drive health <span>the two ways a root fails quietly — unmounted, or out of room</span></summary>
+<summary class="sect">Drive health</summary>
 <div class="panel">__DRIVES__</div>
 </details>
 
