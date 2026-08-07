@@ -34,5 +34,6 @@
   "confusion_python": "<path to a python with comet_ml, for confusion-matrix fetches>",
   "comet_env_file": "<path to the .env holding COMET_API_KEY>",
   "triage_model": "<optional: a stronger SigLIP 2, e.g. google/siglip2-so400m-patch14-384>",
-  "triage_device": "<cpu or cuda>"
+  "triage_device": "<cpu or cuda>",
+  "mistakes_python": "<path to a python with ultralytics, for scoring a run against its val split>"
 }

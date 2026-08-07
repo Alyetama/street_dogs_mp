@@ -1154,6 +1154,11 @@ TRIAGE_PYTHON = cfg('triage_python', sys.executable, env='TRIAGE_PYTHON')
 # should never make a surprise network call, and the panel simply shows no
 # matrix, which is what it did before any of this existed.
 CONFUSION_PYTHON = cfg('confusion_python', '', env='CONFUSION_PYTHON')
+# Scoring a run against its own val split needs ultralytics and torch, which
+# is the sweep's environment rather than the dashboard's. Defaults to it for
+# that reason; a checkout with neither simply never scores and the panel says
+# so instead of pretending.
+MISTAKES_PYTHON = cfg('mistakes_python', '', env='MISTAKES_PYTHON')
 COMET_ENV_FILE = cfg('comet_env_file', '', env='COMET_ENV_FILE')
 TRIAGE_WATCH = cfg_int('triage_watch', 300, env='TRIAGE_WATCH')
 # Which model the Run button uses, and on what. Config rather than a constant:
@@ -1613,8 +1618,8 @@ border-radius:5px}
 .klead kbd{margin-left:7px}
 .klead kbd:first-child{margin-left:0}
 .kmore{margin-left:auto;color:var(--dim);opacity:.75}
-.kmore::after{content:' \25be'}
-.keys[open] .kmore::after{content:' \25b4'}
+.kmore::after{content:' ▾'}
+.keys[open] .kmore::after{content:' ▴'}
 .kbody{color:var(--dim);font-size:11.5px;padding-top:9px;display:flex;
 flex-wrap:wrap;gap:6px 14px;align-items:center;max-width:1180px}
 .hint{color:var(--dim);font-size:11.5px;padding-bottom:14px;display:flex;
@@ -4607,9 +4612,89 @@ MISTAKE_DIR = os.path.join(REPO, 'data', 'mistakes')
 _MISS = {}
 
 
+# One scoring attempt per run per this many seconds. Scoring is a minute or
+# two of CPU, and a run that fails to score should not be retried on every
+# render of its own panel.
+MISS_RETRY_S = 900
+_MISS_TRIED = {}
+
+
+def mistakes_python():
+    return MISTAKES_PYTHON or SWEEP_PYTHON
+
+
+def scorable(r):
+    """Can this run be scored: finished, classify, weights and split on disk."""
+    if r.get('task') != 'classify':
+        return False
+    if r.get('status') in ('running', 'never_started'):
+        return False
+    ds = r.get('data') or ''
+    return (os.path.exists(os.path.join(r['dir'], 'weights', 'best.pt'))
+            and os.path.isdir(os.path.join(ds, 'val')))
+
+
+def mistakes_topup(r):
+    """Score this run in the background if it has never been scored.
+
+    A finished run with weights and its split still on disk is a run whose
+    mistakes are knowable, and the panel used to show nothing at all until
+    somebody remembered the tool -- which is exactly what happened to the
+    leash runs. Triggered by opening the run, so nothing is scored that nobody
+    looked at, and detached, so the panel renders now and the grid appears on
+    the next look.
+    """
+    key = run_key(r)
+    if not scorable(r) or mistakes_for(key):
+        return False
+    py = mistakes_python()
+    script = os.path.join(REPO, 'tools', 'detect', 'run_mistakes.py')
+    if not py or not os.path.exists(script):
+        return False
+    now = time.time()
+    if now - _MISS_TRIED.get(key, 0) < MISS_RETRY_S:
+        return False
+    _MISS_TRIED[key] = now
+    try:
+        log = open(os.path.join(REPO, 'data', 'mistakes_run.log'), 'a')
+        _SPAWNED.append(subprocess.Popen(
+            [py, script, '--run', key, '--root', training_root()],
+            cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+            start_new_session=True))
+        return True
+    except Exception:
+        return False
+
+
+def mistakes_pending(key):
+    """Is a scoring run for this key still in flight?"""
+    return (time.time() - _MISS_TRIED.get(key, 0)) < MISS_RETRY_S
+
+
+def _mistake_path(key):
+    """The cache file for a run key, tolerating how the project is spelled.
+
+    The same project reaches this file two ways -- args.yaml says
+    `dogdetection` where the directory is `DogDetection` -- and an exact match
+    silently found nothing for the one detector on this box that had been
+    scored.
+    """
+    want = str(key).replace('/', '__') + '.json'
+    exact = os.path.join(MISTAKE_DIR, want)
+    if os.path.exists(exact):
+        return exact
+    try:
+        for f in os.listdir(MISTAKE_DIR):
+            if f.lower() == want.lower():
+                return os.path.join(MISTAKE_DIR, f)
+    except OSError:
+        pass
+    return exact
+
+
 def mistakes_for(key):
     """The cached mistakes for a run key, or None if it has not been scored."""
-    path = os.path.join(MISTAKE_DIR, str(key).replace('/', '__') + '.json')
+    path = _mistake_path(key)
     try:
         stamp = os.stat(path).st_mtime_ns
     except OSError:
@@ -4629,8 +4714,8 @@ def mistakes_for(key):
     return doc
 
 
-def mistake_file(key, i):
-    """The absolute path of one wrong crop, or None.
+def mistake_item(key, i):
+    """(absolute path, item) for one mistake, or (None, None).
 
     Resolved from the run's OWN cache by index, so nothing the client sends is
     ever joined onto a path. The realpath check is belt and braces for a
@@ -4638,16 +4723,54 @@ def mistake_file(key, i):
     """
     doc = mistakes_for(key)
     if not doc:
-        return None
+        return None, None
     try:
         item = doc['items'][int(i)]
     except (ValueError, TypeError, IndexError, KeyError):
-        return None
+        return None, None
     root = os.path.realpath(doc.get('dataset') or '')
     full = os.path.realpath(os.path.join(root, item.get('file') or ''))
     if not root or not full.startswith(root + os.sep):
+        return None, None
+    return (full, item) if os.path.isfile(full) else (None, None)
+
+
+def mistake_bytes(key, i):
+    """JPEG bytes for one mistake: the crop itself, or the box within a frame.
+
+    A classifier is wrong about a whole picture and the file IS the evidence.
+    A detector is wrong about a REGION of a much larger street photo, so
+    serving that photo would show a street and leave the reader hunting for
+    what the argument is about. The box is cut out, with a margin, because a
+    box with no surroundings cannot be judged either -- whether a thing is a
+    dog is partly a question about what is next to it.
+    """
+    path, item = mistake_item(key, i)
+    if not path:
         return None
-    return full if os.path.isfile(full) else None
+    box = item.get('box')
+    if not box or len(box) != 4:
+        try:
+            with open(path, 'rb') as fh:
+                return fh.read()
+        except OSError:
+            return None
+    try:
+        from PIL import Image
+        import io
+        with Image.open(path) as im:
+            W, H = im.size
+            x1, y1, x2, y2 = (float(v) for v in box)
+            pad = 0.35 * max(x2 - x1, y2 - y1) + 8
+            crop = im.convert('RGB').crop((
+                max(0, int(x1 - pad)), max(0, int(y1 - pad)),
+                min(W, int(x2 + pad)), min(H, int(y2 + pad))))
+            crop.thumbnail((512, 512))
+            buf = io.BytesIO()
+            crop.save(buf, 'JPEG', quality=86)
+            return buf.getvalue()
+    except Exception:
+        return None
 
 
 def render_mistakes(r):
@@ -4655,57 +4778,123 @@ def render_mistakes(r):
     key = run_key(r)
     doc = mistakes_for(key)
     if not doc:
-        return ''
+        # The section is part of what a finished run looks like, so it appears
+        # and says where it is up to. Returning nothing made a run that had
+        # simply never been scored indistinguishable from one that had nothing
+        # to show.
+        if not scorable(r):
+            why = ('still training &mdash; a run is scored once it stops'
+                   if r.get('status') == 'running' else
+                   'only classification runs can be scored this way'
+                   if r.get('task') != 'classify' else
+                   'its weights or its validation split are no longer on disk')
+            return (f'<div class="wrwrap"><div class="wrhead">'
+                    f'<b>What it got wrong</b>'
+                    f'<span class="wrsub">{why}</span></div></div>')
+        started = mistakes_topup(r)
+        note = ('scoring it against its validation split now &mdash; reload in '
+                'a minute' if started or mistakes_pending(key) else
+                'not scored yet. Run tools/detect/run_mistakes.py --run '
+                + esc_html(key))
+        return (f'<div class="wrwrap"><div class="wrhead">'
+                f'<b>What it got wrong</b>'
+                f'<span class="wrsub">{note}</span></div></div>')
     items = doc.get('items') or []
     if not items:
         return (f'<div class="wrwrap"><div class="wrhead"><b>Nothing wrong</b>'
                 f'<span class="wrsub">all {doc.get("n", 0):,} validation crops '
                 f'classified correctly</span></div></div>')
-    # one group per off-diagonal cell of the confusion matrix, so the two
-    # readings of the same fact line up: the cell counts them, this shows them
+    detect = doc.get('task') == 'detect'
+    # A classifier's mistake is a direction between two classes, and there is
+    # one group per off-diagonal cell of the confusion matrix so the two
+    # readings line up. A detector's is a kind: a box it invented, or one it
+    # never found. Different question, different grouping.
     groups = {}
     for i, it in enumerate(items):
-        groups.setdefault((it.get('true'), it.get('pred')), []).append((i, it))
+        k = ((it.get('kind'), it.get('cls')) if detect
+             else (it.get('true'), it.get('pred')))
+        groups.setdefault(k, []).append((i, it))
     order = sorted(groups, key=lambda k: -len(groups[k]))
+
+    def gname(k):
+        if not detect:
+            return f'{esc_html(k[0])} &rarr; {esc_html(k[1])}'
+        return ('invented a ' if k[0] == 'invented' else 'missed a ') + \
+            esc_html(str(k[1]))
+
+    def ghint(k):
+        if not detect:
+            return f'crops that really were {k[0]} and the model called {k[1]}'
+        return ('boxes it drew where the labels say there was nothing'
+                if k[0] == 'invented' else
+                'labelled boxes it never found')
 
     chips = ['<button type="button" class="wrchip on" data-g="">'
              f'all {len(items):,}</button>']
-    for t, pd in order:
+    for k in order:
         chips.append(
-            f'<button type="button" class="wrchip" data-g="{esc_html(t)}|{esc_html(pd)}"'
-            + _t(f'crops that really were {t} and the model called {pd}')
-            + f'>{esc_html(t)} &rarr; {esc_html(pd)} '
-              f'<em>{len(groups[(t, pd)]):,}</em></button>')
+            f'<button type="button" class="wrchip" '
+            f'data-g="{esc_html(str(k[0]))}|{esc_html(str(k[1]))}"'
+            + _t(ghint(k))
+            + f'>{gname(k)} <em>{len(groups[k]):,}</em></button>')
 
     tiles = []
-    for t, pd in order:
-        for i, it in groups[(t, pd)]:
+    for k in order:
+        for i, it in groups[k]:
             p = it.get('p')
+            if detect:
+                # invented is the model's doing, missed is the model's
+                # omission -- the colour marks which is the model's claim
+                lead = ('<span class="wrsaid">invented</span>'
+                        if k[0] == 'invented' else
+                        '<span class="wrwas">missed</span>')
+                dir_html = (f'<span class="wrdir">{lead}'
+                            f'<span class="wrarr">&middot;</span>'
+                            f'<span class="wrwas">{esc_html(str(k[1]))}</span>'
+                            f'</span>')
+                sure = (f'{p * 100:.0f}% sure' if p is not None
+                        else 'never fired')
+            else:
+                dir_html = (f'<span class="wrdir">'
+                            f'<span class="wrwas">{esc_html(str(k[0]))}</span>'
+                            f'<span class="wrarr">&rarr;</span>'
+                            f'<span class="wrsaid">{esc_html(str(k[1]))}</span>'
+                            f'</span>')
+                sure = f'{(p if p is not None else 0) * 100:.0f}% sure'
             tiles.append(
-                f'<figure class="wrtile" data-g="{esc_html(t)}|{esc_html(pd)}">'
-                f'<img loading="lazy" alt="crop the model got wrong" '
+                f'<figure class="wrtile" '
+                f'data-g="{esc_html(str(k[0]))}|{esc_html(str(k[1]))}">'
+                f'<img loading="lazy" alt="what the model got wrong" '
                 f'src="/api/training/wrong?key={quote(key)}&amp;i={i}">'
-                f'<figcaption>'
-                # same order as the chips and as the matrix reads: what it
-                # really was, then what the model said. One line each, because
-                # a class name is as long as "unleashed" and three things on
-                # one line at 10px truncated the direction away.
-                f'<span class="wrdir"><span class="wrwas">{esc_html(t)}</span>'
-                f'<span class="wrarr">&rarr;</span>'
-                f'<span class="wrsaid">{esc_html(pd)}</span></span>'
-                f'<span class="wrp">{(p if p is not None else 0) * 100:.0f}% sure</span>'
+                f'<figcaption>{dir_html}'
+                f'<span class="wrp">{sure}</span>'
                 f'</figcaption></figure>')
 
     n, wrong = doc.get('n', 0), doc.get('wrong', len(items))
     more = ('' if not doc.get('truncated') else
             f' &middot; the {len(items)} it was surest about')
+    if detect:
+        hit = doc.get('hit', 0)
+        sub = (f'{hit:,} of {n:,} labelled boxes found &middot; '
+               f'{wrong:,} wrong{more}')
+        keyline = (f'<span class="wrkeyi"><span class="wrsaid">invented</span>'
+                   f'a box where the labels say there was nothing</span>'
+                   f'<span class="wrkeyi"><span class="wrwas">missed</span>'
+                   f'a labelled box it never found</span>')
+    else:
+        sub = (f'{wrong:,} of {n:,} validation crops &middot; surest '
+               f'first{more}')
+        keyline = (f'<span class="wrkeyi"><span class="wrwas">grey</span>'
+                   f'what the crop really was</span>'
+                   f'<span class="wrkeyi"><span class="wrarr">&rarr;</span>'
+                   f'<span class="wrsaid">orange</span>what the model called '
+                   f'it</span>')
     # A bounded panel with a pager. Every miss on one page ran the tiles down
     # the section with nothing holding them, and at the 240 this keeps that is
     # a page you scroll past rather than read.
     return (f'<div class="wrwrap" id="wrong">'
             f'<div class="wrhead"><b>What it got wrong</b>'
-            f'<span class="wrsub">{wrong:,} of {n:,} validation crops '
-            f'&middot; surest first{more}</span></div>'
+            f'<span class="wrsub">{sub}</span></div>'
             f'<div class="wrbox">'
             f'<div class="wrbar"><div class="wrchips">{"".join(chips)}</div>'
             f'<div class="wrpage"><button type="button" class="wrnav" '
@@ -4718,17 +4907,13 @@ def render_mistakes(r):
             # is drawn with the caption's own classes -- so it is a sample of
             # the thing rather than a description of it, and it cannot drift
             # out of step with what the tiles actually look like.
-            f'<div class="wrkey">'
-            f'<span class="wrkeyi"><span class="wrwas">grey</span>'
-            f'what the crop really was</span>'
-            f'<span class="wrkeyi"><span class="wrarr">&rarr;</span>'
-            f'<span class="wrsaid">orange</span>what the model called it'
-            f'</span></div>'
+            f'<div class="wrkey">{keyline}</div>'
             f'</div>'
-            f'<div class="wrfoot">Sorted by how sure it was. A confident '
-            f'mistake is worth more than a hesitant one &mdash; the model is '
-            f'not undecided about these, and whatever it has learnt to see '
-            f'there it has learnt firmly.</div></div>')
+            f'<details class="wrfoot"><summary>why this order</summary>'
+            f'<p>Sorted by how sure it was. A confident mistake is worth more '
+            f'than a hesitant one &mdash; the model is not undecided about '
+            f'these, and whatever it has learnt to see there it has learnt '
+            f'firmly.</p></details></div>')
 
 
 # ── confusion matrices ──────────────────────────────────────────────────────
@@ -4954,14 +5139,17 @@ def render_confusion(r):
             f'<thead><tr>{"".join(head)}</tr><tr>{"".join(sub)}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody>'
             f'<tfoot><tr>{"".join(foot)}</tr></tfoot></table></div>'
-            f'<div class="cxfoot">Each column is one true class and sums to '
-            f'100%, so a cell reads &ldquo;this share of the real X was called '
-            f'Y&rdquo; &mdash; which makes the diagonal each class&rsquo;s '
-            f'recall. Hover a cell for the raw count. Rows are what the model '
-            f'predicted, columns what the crop actually was. Comet labels its rows &ldquo;Actual '
-            f'Category&rdquo;; for an ultralytics matrix that is wrong, and '
-            f'believing it would swap every miss with a false alarm.'
-            f'{bg_note}</div>'
+            # Folded. It is a note you read once to trust the orientation,
+            # not a paragraph the matrix has to be read past every time.
+            f'<details class="cxfoot"><summary>how to read this</summary>'
+            f'<p>Each column is one true class and sums to 100%, so a cell '
+            f'reads &ldquo;this share of the real X was called Y&rdquo; '
+            f'&mdash; which makes the diagonal each class&rsquo;s recall. '
+            f'Hover a cell for the raw count.</p>'
+            f'<p>Rows are what the model predicted, columns what the crop '
+            f'actually was. Comet labels its rows &ldquo;Actual Category&rdquo;; '
+            f'for an ultralytics matrix that is wrong, and believing it would '
+            f'swap every miss with a false alarm.{bg_note}</p></details>'
             f'</div>')
 
 
@@ -6957,14 +7145,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         if self.path.split('?', 1)[0] == '/api/training/wrong':
             q = parse_qs(urlparse(self.path).query)
-            path = mistake_file(q.get('key', [''])[0], q.get('i', [''])[0])
-            if not path:
-                self.send_error(404)
-                return
-            try:
-                with open(path, 'rb') as fh:
-                    body = fh.read()
-            except OSError:
+            body = mistake_bytes(q.get('key', [''])[0], q.get('i', [''])[0])
+            if not body:
                 self.send_error(404)
                 return
             self.send_response(200)
@@ -8246,6 +8428,16 @@ border:1px solid transparent}
 font-size:12.5px;padding:8px 10px}
 .cxfoot{margin-top:10px;font-size:11px;color:var(--dim);max-width:640px;
 line-height:1.5}
+.cxfoot summary,.wrfoot summary{cursor:pointer;list-style:none;
+display:inline-flex;align-items:center;gap:4px;opacity:.85}
+.cxfoot summary::-webkit-details-marker,
+.wrfoot summary::-webkit-details-marker{display:none}
+.cxfoot summary::after,.wrfoot summary::after{content:'▾'}
+.cxfoot[open] summary::after,.wrfoot[open] summary::after{content:'▴'}
+.cxfoot summary:hover,.wrfoot summary:hover{color:var(--mut)}
+.cxfoot summary:focus-visible,.wrfoot summary:focus-visible{
+outline:2px solid var(--acc);outline-offset:3px;border-radius:4px}
+.cxfoot p,.wrfoot p{margin:8px 0 0}
 /* there is no way to tell a label that explains itself from one that does
    not, except the cursor */
 .cx .hcue{cursor:help}
