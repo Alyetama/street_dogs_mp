@@ -162,6 +162,73 @@ for _b, _, _ in PROMPTS:
     BUCKET_N[_b] = BUCKET_N.get(_b, 0) + 1
 
 
+# ── RF-DETR, the second opinion ─────────────────────────────────────────────
+# A COCO detector rather than a zero-shot classifier, so it fails differently:
+# it names a concrete class or says nothing, where SigLIP always has an
+# opinion. That is the whole point of having two.
+#
+# IT IS THE WEAKER ONE ON THIS DATA, and by a lot. Measured against the 120
+# crops a human has confirmed are dogs:
+#
+#     SigLIP so400m                            ~98%  called dog
+#     RF-DETR medium, crop upscaled + padded    56%
+#     RF-DETR large,  same                      57%  (and 21% of not-dogs
+#                                                     wrongly called dog)
+#     RF-DETR medium, whole frame, dog ANYWHERE 24%
+#
+# The reason is in the data: the pool's crops have a median long side of 35px
+# and 78% are under 64px. A detector needs pixels on target; an embedding
+# model degrades gracefully. Running it on the full frame is worse still --
+# that is the small-object regime, and a 35px dog in a 1280x640 street scene
+# is exactly what detectors miss. So the crop, upscaled, is the best of the
+# three, and the dashboard shows the recall next to the choice.
+#
+# Where it EARNS its place: it calls only 5-8% of confirmed not-dogs 'dog',
+# and it puts a fifth to a third of them in a named animal class. For finding
+# more cows and horses to annotate, a detector's concrete label beats a
+# bucket.
+RFDETR_SIZES = {'rfdetr': 'RFDETRMedium', 'rfdetr-small': 'RFDETRSmall',
+                'rfdetr-nano': 'RFDETRNano', 'rfdetr-large': 'RFDETRLarge'}
+# Best of the sixteen crop preprocessings measured; see the table above.
+# Upscaling gives the detector pixels, padding gives the object a plausible
+# share of the frame, and both matter: no upscale and no pad is 27.5%.
+RFDETR_UPSCALE = 160
+RFDETR_PAD = 1.5
+RFDETR_THRESHOLD = 0.25
+# COCO's animals, minus the dog. The bucket rule is a table over class NAMES,
+# not indices -- an index table silently re-buckets everything if the class
+# order ever moves, which is the trap the ImageNet backend checks for.
+COCO_ANIMALS = ('cat', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra',
+                'giraffe', 'bird')
+
+
+def coco_bucket(name):
+    """Which of the three buckets a COCO class belongs to."""
+    if name == 'dog':
+        return 'dog'
+    return 'animal' if name in COCO_ANIMALS else 'object'
+
+
+def backend_of(model_id):
+    """Which backend produced a record, given the model it names.
+
+    Records written before backends existed carry only `model`, so the answer
+    has to be derivable from it -- 52,000 of them would otherwise vanish from
+    a filter that asks for the backend by name.
+    """
+    # Deliberately free of module constants: the dashboard has to answer this
+    # question identically about records it did not write, it cannot import
+    # this file (different environments), and a guard compares the two by
+    # running them side by side. Every RFDETR_SIZES key starts with 'rfdetr',
+    # which the same guard checks.
+    m = str(model_id or '')
+    if m.startswith('rfdetr'):
+        return 'rfdetr'
+    if m == 'imagenet' or m.startswith('efficientnet'):
+        return 'imagenet'
+    return 'siglip'
+
+
 def _oom(exc):
     """Is this the GPU telling us there is no room?"""
     return ('out of memory' in str(exc).lower()
@@ -345,8 +412,14 @@ def judged_names(repo):
     return out
 
 
-def already_done(path):
-    """Names already predicted, so a re-run resumes instead of redoing."""
+def already_done(path, backend=None):
+    """Names already predicted BY THIS BACKEND, so a re-run resumes.
+
+    Per backend, because the two are meant to be comparable: switching to
+    RF-DETR must re-guess the pool rather than inherit SigLIP's answers, and
+    switching back must not throw SigLIP's away. One file still, one record
+    per (crop, backend) -- the reader keeps the last line for each.
+    """
     out = set()
     try:
         with open(path) as fh:
@@ -355,8 +428,12 @@ def already_done(path):
                     r = json.loads(ln)
                 except ValueError:
                     continue
-                if isinstance(r, dict) and r.get('name'):
-                    out.add(r['name'])
+                if not isinstance(r, dict) or not r.get('name'):
+                    continue
+                if backend and backend_of(
+                        r.get('backend') or r.get('model')) != backend:
+                    continue
+                out.add(r['name'])
     except OSError:
         pass
     return out
@@ -406,12 +483,17 @@ def main():
                     help='fail instead of dropping to the CPU when the GPU is '
                          'full (default is to fall back and keep going)')
     ap.add_argument('--model', default=SIGLIP_DEFAULT,
-                    help="a SigLIP 2 id, or 'imagenet' for the old "
-                         'EfficientNet backend. Bigger SigLIP is better and '
-                         f'much slower on a CPU; {SIGLIP_FAST} is the one to '
-                         'pass on a machine with no GPU (measured: 253 crops/s '
-                         'for the default on this card, 4.3/s for base on the '
-                         'CPU).')
+                    help="a SigLIP 2 id, 'rfdetr' (or "
+                         + '/'.join(sorted(k for k in RFDETR_SIZES
+                                           if k != 'rfdetr'))
+                         + ") for the COCO detector, or 'imagenet' for the "
+                         'old EfficientNet. Bigger SigLIP is better and much '
+                         f'slower on a CPU; {SIGLIP_FAST} is the one to pass '
+                         'on a machine with no GPU (measured: 253 crops/s for '
+                         'the default on this card, 4.3/s for base on the '
+                         'CPU). RF-DETR needs its own environment -- it wants '
+                         'transformers>=5, which the SigLIP backend does not '
+                         'run on.')
     ap.add_argument('--topk', type=int, default=3)
     ap.add_argument('--include-judged', action='store_true',
                     help='also predict crops already ruled on (for measuring '
@@ -444,8 +526,40 @@ def main():
                   f'CPU for a pool this size. Consider --model {SIGLIP_FAST}.',
                   flush=True)
     imagenet = args.model == 'imagenet'
+    rfdetr = args.model in RFDETR_SIZES
+    # Only SigLIP puts images and text in one space, so only SigLIP can leave
+    # behind the vectors free-text search runs on. Naming the capability, not
+    # the backend, so the next one added has to answer the question.
+    embeds = not imagenet and not rfdetr
+    BACKEND = backend_of(args.model)
 
-    if imagenet:
+    if rfdetr:
+        import rfdetr as _rf
+        from rfdetr.assets.coco_classes import COCO_CLASSES
+        # The bucket rule is an assertion about the class list, so check it --
+        # a release that renamed or dropped a class would otherwise re-bucket
+        # every guess this tool ever writes, in silence.
+        # COCO_CLASSES is a {class_id: name} dict, not a list -- membership
+        # has to be tested against the NAMES or every class reads as missing.
+        known = set(COCO_CLASSES.values())
+        missing = [c for c in ('dog',) + COCO_ANIMALS if c not in known]
+        if missing:
+            raise SystemExit('COCO class names are not what the buckets '
+                             'assume, missing: ' + ', '.join(missing))
+        if args.verify_buckets:
+            n = {}
+            for c in COCO_CLASSES.values():
+                n[coco_bucket(c)] = n.get(coco_bucket(c), 0) + 1
+            print(f'{len(COCO_CLASSES)} COCO classes bucketed: {n}')
+            print('  animals: ' + ', '.join(sorted(
+                c for c in known if coco_bucket(c) == 'animal')))
+            return 0
+        model = getattr(_rf, RFDETR_SIZES[args.model])()
+        # rfdetr owns its own placement; there is no .to() to fall back with,
+        # so the shared _place() helper does not apply here.
+        model_id = args.model
+        cats = COCO_CLASSES
+    elif imagenet:
         from torchvision.models import (efficientnet_v2_s,
                                         EfficientNet_V2_S_Weights)
         weights = EfficientNet_V2_S_Weights.IMAGENET1K_V1
@@ -502,8 +616,16 @@ def main():
         nonlocal model, tfeat
         DEV['device'] = 'cpu'
         DEV['fell_back'] = True
+        if rfdetr:
+            # rfdetr wraps its own module and places it itself; there is no
+            # .to() here to move, so stepping aside is not on offer. Say so
+            # rather than raise an AttributeError inside an OOM handler.
+            raise RuntimeError(
+                'the GPU is full and the RF-DETR backend cannot fall back to '
+                'the CPU -- stop whatever has the card, or run the SigLIP '
+                'backend instead')
         model = model.to('cpu')
-        if not imagenet:
+        if embeds:
             with torch.no_grad():
                 tok = proc(text=[q[2] for q in PROMPTS], padding='max_length',
                            max_length=64, return_tensors='pt')
@@ -532,7 +654,48 @@ def main():
             _to_cpu()
             return _score_on(ims)
 
+    def _rf_prep(im):
+        """Upscale, then centre on a larger canvas.
+
+        Both halves earned their place by measurement. Upscaling gives the
+        detector pixels to work with -- the median crop's long side is 35px --
+        and padding gives the object a share of the frame closer to what a
+        scene-trained detector expects. Neither alone: raw crops score 27.5%
+        on confirmed dogs, upscaled-only 36.7%, padded-only 49.2%, both 55.8%.
+        """
+        w, h = im.size
+        if max(w, h) < RFDETR_UPSCALE:
+            s = RFDETR_UPSCALE / max(w, h)
+            im = im.resize((max(1, int(w * s)), max(1, int(h * s))),
+                           Image.BICUBIC)
+        w, h = im.size
+        canvas = Image.new('RGB', (int(w * RFDETR_PAD), int(h * RFDETR_PAD)),
+                           (114, 114, 114))
+        canvas.paste(im, ((canvas.width - w) // 2, (canvas.height - h) // 2))
+        return canvas
+
     def _score_on(ims):
+        if rfdetr:
+            out = []
+            for im in ims:
+                det = model.predict(_rf_prep(im), threshold=RFDETR_THRESHOLD)
+                # A bucket's score is the BEST detection in it, not the sum:
+                # three low-confidence cows are not evidence of one cow, and
+                # summing would let a crowded frame outvote a clear call.
+                mass = {'dog': 0.0, 'animal': 0.0, 'object': 0.0}
+                per = []
+                for k in range(len(det)):
+                    # .get, not []: cats is a dict keyed by COCO id and a
+                    # class_id outside it must not take the pass down
+                    nm = cats.get(int(det.class_id[k]))
+                    if not nm:
+                        continue
+                    p = float(det.confidence[k])
+                    b = coco_bucket(nm)
+                    mass[b] = max(mass[b], p)
+                    per.append((b, nm, p))
+                out.append((mass, per))
+            return out
         if imagenet:
             batch = torch.stack([tf(im) for im in ims]).to(DEV['device'])
             with torch.no_grad():
@@ -585,17 +748,18 @@ def main():
         # --refresh means "redo them", which must apply to the FIRST pass
         # only: on a later --watch pass it would loop over the same crops
         # forever and never reach the new ones.
-        skip = set() if (args.refresh and first) else already_done(args.out)
+        skip = (set() if (args.refresh and first)
+                else already_done(args.out, backend=BACKEND))
         # A prediction is not a vector. Skipping on the prediction alone left
         # every crop scored before the vectors existed permanently unsearchable
         # -- and since the same forward pass produces both, re-doing one is the
         # whole cost of getting the other.
         # Only a run that can actually produce a vector is allowed to re-do a
-        # crop for the sake of one. The ImageNet backend produces none, so it
-        # would have found the whole pool 'owing', re-predicted every crop,
-        # written no vectors, and found the same debt again on the next
-        # --watch pass -- forever.
-        owed = (set() if (args.no_vectors or imagenet)
+        # crop for the sake of one. The ImageNet and RF-DETR backends produce
+        # none, so either would have found the whole pool 'owing', re-predicted
+        # every crop, written no vectors, and found the same debt again on the
+        # next --watch pass -- forever.
+        owed = (set() if (args.no_vectors or not embeds)
                 else pool_names - vectored_names(model_id=model_id))
         skip -= owed
         if not args.include_judged:
@@ -640,6 +804,20 @@ def main():
                     im.close()
                 for j, nm in enumerate(keep):
                     mass, per_label = scored[j]
+                    if not per_label or not any(mass.values()):
+                        # A detector is allowed to find nothing, and that is
+                        # an answer -- 'no guess yet' is already a filter on
+                        # the page. Written anyway, with a bucket the reader
+                        # does not recognise, so the crop counts as done and
+                        # is not re-run on every pass forever.
+                        fh.write(json.dumps({
+                            'schema': SCHEMA, 'name': nm, 'bucket': 'none',
+                            'p': 0.0, 'guess': 'nothing detected',
+                            'unverified': True, 'source': 'model_suggestion',
+                            'backend': BACKEND, 'model': model_id,
+                            'ran_at': ran_at}) + '\n')
+                        wrote += 1
+                        continue
                     best = max(mass, key=mass.get)
                     # The name on the tile must belong to the bucket the tile
                     # was filed under. Mass decides the bucket, so a crop can
@@ -668,6 +846,9 @@ def main():
                         # read one of these and mistake it for a decision
                         'unverified': True,
                         'source': 'model_suggestion',
+                        # which guesser said it, so two can disagree about the
+                        # same crop and the page can filter by one of them
+                        'backend': BACKEND,
                         'model': model_id,
                         'ran_at': ran_at,                    }) + '\n')
                     wrote += 1

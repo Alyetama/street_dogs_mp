@@ -1869,6 +1869,17 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
 .trgbtn:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
 .trgbtn:disabled{opacity:.5;cursor:default}
 .trgerr{flex-basis:100%;font-size:11px;color:var(--red);margin-top:6px}
+#trgModel{flex:none;appearance:none;background:transparent;color:var(--mut);
+border:1px solid var(--bd);border-radius:999px;padding:4px 10px;
+font-size:11.5px;font-family:inherit;cursor:pointer}
+#trgModel:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+#trgModel[hidden]{display:none}
+/* The chosen guesser's caveat, on its own line under the strip: it is a
+   sentence about what this model is for, and it belongs where it is read
+   before the Run button rather than inside a title attribute. */
+.trgnote{margin:-4px 0 10px;font-size:11px;line-height:1.5;color:var(--dim);
+max-width:74ch}
+.trgnote[hidden]{display:none}
 </style></head><body><div class="wrap">
 
 <header>
@@ -1988,8 +1999,15 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
   <div class="trgtx"><b id="trgState">&mdash;</b><span class="trgsub" id="trgSub"></span></div>
   <div class="trgcol"><div class="trgbar"><i id="trgFill"></i></div></div>
   <span class="trgpct" id="trgPct"></span>
+  <!-- Which guesser. Two models with different failure modes, and the
+       accuracy of each sits in the option text: switching to the weaker one
+       without being told it is weaker is a trap, and the number is measured
+       against the crops already ruled on rather than asserted. Hidden unless
+       this checkout can run more than one. -->
+  <select id="trgModel" hidden title="which model's guesses the filter above shows, and which one Run starts"></select>
   <button type="button" class="trgbtn" id="trgRun">&mdash;</button>
 </div>
+<p class="trgnote" id="trgNote" hidden></p>
 
 <!-- The legend is a lesson, and a lesson stops being one after the first
      day. It kept two full lines of the viewport permanently to teach four
@@ -2025,6 +2043,10 @@ font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
     smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',leashf='all',find='',loading=false,
+    /* Which guesser the guess filter is reading. Page scope, not inside the
+       progress strip's closure: the queue request needs it too, and the two
+       must never disagree about whose opinions are on screen. */
+    BACKEND='siglip',
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 /* leash verdicts for what is on screen, and whether the store exists at all.
    LEASH_ON stays false on a checkout without the tool, and the two buttons
@@ -2265,6 +2287,7 @@ function load(){
     '&suggest='+encodeURIComponent(suggest)+
     '&leash='+encodeURIComponent(leashf)+
     '&find='+encodeURIComponent(find)+
+    '&backend='+encodeURIComponent(BACKEND)+
                '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
@@ -3237,6 +3260,7 @@ function restorePrefs(){
   if(o.suggest)suggest=o.suggest;
   if((v=restoreSel('leashf',o.leashf))!==null)leashf=v;
   if(typeof o.find==='string'){find=o.find;if($('find'))$('find').value=find;}
+  if(typeof o.backend==='string'&&o.backend)BACKEND=o.backend;
   if((v=restoreSel('mode',o.mode))!==null){
     mode=v;
     document.body.classList.toggle('auditing',mode==='audit');
@@ -3356,11 +3380,37 @@ load();loadBal();
 (function(){
   var el=document.getElementById('trg');
   if(!el)return;
+  function paintBackends(j){
+    var sel=$('trgModel'), note=$('trgNote'), list=(j&&j.backends)||[];
+    if(!sel)return;
+    /* one guesser is not a choice, so do not draw a control that offers one */
+    sel.hidden=list.length<2;
+    if(sel.hidden){if(note)note.hidden=true;return;}
+    var want=list.map(function(b){
+      return b.key+'|'+b.label+'|'+b.recall}).join(',');
+    /* rebuilt only when the offer itself changes: this repaints every 5s and
+       an unconditional innerHTML would close the dropdown under the pointer */
+    if(sel.dataset.sig!==want){
+      sel.dataset.sig=want;
+      sel.innerHTML=list.map(function(b){
+        var pct=b.recall==null?'':' · '+Math.round(b.recall*100)+
+                '% of known dogs';
+        return '<option value="'+esc(b.key)+'">'+esc(b.label)+pct+
+               '</option>'}).join('');
+    }
+    if(sel.value!==BACKEND)sel.value=BACKEND;
+    var cur=list.filter(function(b){return b.key===BACKEND})[0];
+    if(note){
+      note.hidden=!(cur&&cur.note);
+      note.textContent=cur&&cur.note?cur.note:'';
+    }
+  }
   function paint(j){
     /* shown once a run has happened OR once one could be started -- the
        button lives in here, so hiding it on an empty file left no way back */
     if(!j||(!j.ever&&!j.can_run)){el.hidden=true;return;}
     el.hidden=false;
+    paintBackends(j);
     var running=!!j.running, cov=Math.round((j.coverage||0)*100),
         gap=Math.max(0,(j.pool||0)-(j.guessed||0)), state, sub='';
     el.className='trg'+(running?' on':(j.stalled?' warn':''));
@@ -3429,12 +3479,29 @@ load();loadBal();
     if(document.hidden)return;
     var mine=gen;
     /* catch is for a dropped request only, never a bug in paint() */
-    fetch('/api/triage').then(function(r){return r.json()})
+    fetch('/api/triage?backend='+encodeURIComponent(BACKEND))
+      .then(function(r){return r.json()})
       .catch(function(){return null})
       .then(function(j){if(j&&mine===gen)paint(j)});
   }
   poll(); setInterval(poll,5000);
   document.addEventListener('visibilitychange',function(){if(!document.hidden)poll()});
+  /* Reachable from outside the closure. The strip is otherwise repainted only
+     by a 5s timer, which means nothing can ask it to catch up after an event
+     that changed what it should say -- and a harness with a stubbed
+     setInterval could never see it repaint at all. */
+  window.__trgPoll=poll;
+
+  var msel=$('trgModel');
+  if(msel) msel.addEventListener('change',function(){
+    BACKEND=this.value; savePref('backend',BACKEND);
+    /* Both halves move together. The strip's coverage and the queue's guess
+       filter are two views of the same guesser, and repainting one without
+       the other is how a page ends up reporting SigLIP's coverage over
+       RF-DETR's guesses. */
+    gen++; page=0; sel=-1;
+    poll(); load();
+  });
 
   var btn=$('trgRun');
   if(btn) btn.addEventListener('click',function(){
@@ -3447,7 +3514,7 @@ load();loadBal();
     btn.disabled=true; btn.textContent=stopping?'Pausing\u2026':'Starting\u2026';
     fetch('/api/triage',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action:stopping?'stop':'start'})})
+      body:JSON.stringify({action:stopping?'stop':'start',backend:BACKEND})})
       .then(function(r){return r.json()})
       .catch(function(){return {ok:false,msg:'the dashboard did not answer'}})
       .then(function(j){
@@ -6529,21 +6596,76 @@ TRIAGE_STATUS = os.path.join(OUT, 'triage_status.json')
 # writer touches the file every batch, which is seconds apart even on CPU.
 TRIAGE_STALE_S = 90
 TRIAGE_BUCKETS = ('dog', 'animal', 'object')
-_triage_cache = {'mtime': None, 'doc': {}}
+# The guessers, and what it takes to run each. A backend is only offered when
+# an interpreter for it is named in config -- they are different environments
+# on purpose: RF-DETR wants transformers>=5 and the SigLIP backend does not
+# run on that, so installing them together would break the one that works.
+TRIAGE_BACKENDS = ('siglip', 'rfdetr')
+RFDETR_PYTHON = cfg('rfdetr_python', '', env='RFDETR_PYTHON')
+RFDETR_MODEL = cfg('rfdetr_model', 'rfdetr', env='RFDETR_MODEL')
+# Recall on the 120 crops a human has confirmed are dogs, measured with
+# tools/detect/triage_crops.py against the same set. Shown beside the choice
+# because a toggle between an accurate guesser and a much less accurate one is
+# a trap unless the page says which is which.
+BACKEND_INFO = {
+    'siglip': {'label': 'SigLIP 2', 'recall': 0.98,
+               'note': 'reads the whole crop, always has an opinion, and '
+                       'leaves behind the vectors the search box needs'},
+    'rfdetr': {'label': 'RF-DETR', 'recall': 0.56,
+               'note': 'a COCO detector: names a concrete class or says '
+                       'nothing. Much weaker on these crops — most are under '
+                       '64px — but it rarely calls a non-dog a dog, so it is '
+                       'the better one for finding cows, horses and people. '
+                       'Writes no search vectors.'},
+}
+_triage_cache = {'mtime': None, 'by': {}}
 
 
-def triage_index():
-    """{crop name: {bucket, p, top}}, reloaded when the file changes.
+def backend_of(model_id):
+    """Which guesser wrote a record, from the model it names.
 
-    Same mtime discipline as country_index(): the hourly rebuild has to reach
-    a server that has been up for days, and a triage run appends to this file
-    while that server is running.
+    52,000 records predate the backend field and carry only `model`, so the
+    answer has to be derivable from that or they all vanish from a filter.
+    Kept in step with triage_crops.backend_of by adv_cross_module_signatures.
     """
+    m = str(model_id or '')
+    if m.startswith('rfdetr'):
+        return 'rfdetr'
+    if m == 'imagenet' or m.startswith('efficientnet'):
+        return 'imagenet'
+    return 'siglip'
+
+
+def backends_available():
+    """Backends this checkout can actually run, in offer order."""
+    out = []
+    if CONFIGURED_TRIAGE:
+        out.append('siglip')
+    if RFDETR_PYTHON:
+        out.append('rfdetr')
+    return out
+
+
+def triage_index(backend='siglip'):
+    """{crop name: {bucket, p, top}} for ONE guesser, reloaded on change.
+
+    Per backend, because the two disagree on purpose and a filter that mixed
+    them would answer with whichever ran last. Same mtime discipline as
+    country_index(): the hourly rebuild has to reach a server that has been up
+    for days, and a triage run appends to this file while that server is
+    running.
+    """
+    backend = backend if backend in TRIAGE_BACKENDS else 'siglip'
     try:
         mtime = os.path.getmtime(TRIAGE_FILE)
     except OSError:
-        return _triage_cache['doc'] if _triage_cache['mtime'] else {}
+        return _triage_cache['by'].get(backend, {})
+    # Kept per backend rather than one slot: two tabs on different guessers
+    # would otherwise evict each other on every poll and re-read 52,000 lines
+    # each time.
     if _triage_cache['mtime'] != mtime:
+        _triage_cache.update(mtime=mtime, by={})
+    if backend not in _triage_cache['by']:
         doc = {}
         try:
             with open(TRIAGE_FILE) as fh:
@@ -6553,7 +6675,20 @@ def triage_index():
                     except ValueError:
                         continue
                     nm = isinstance(r, dict) and r.get('name')
-                    if not nm or r.get('bucket') not in TRIAGE_BUCKETS:
+                    if not nm:
+                        continue
+                    if backend_of(r.get('backend') or r.get('model')) \
+                            != backend:
+                        continue
+                    if r.get('bucket') not in TRIAGE_BUCKETS:
+                        # A detector is allowed to find nothing, and it writes
+                        # that down. The record proves the crop was looked at,
+                        # which is why it is not simply absent -- but it is
+                        # not a guess, so it must not become one here. Dropping
+                        # any earlier guess for the crop is deliberate: last
+                        # line wins, and 'this backend saw nothing' is the
+                        # later word.
+                        doc.pop(nm, None)
                         continue
                     # last line wins, so a --refresh re-run supersedes
                     # prefer the in-bucket name; fall back to the overall
@@ -6566,8 +6701,8 @@ def triage_index():
                                or (r.get('top') or [[None]])[0][0]}
         except OSError:
             doc = {}
-        _triage_cache.update(mtime=mtime, doc=doc)
-    return _triage_cache['doc']
+        _triage_cache['by'][backend] = doc
+    return _triage_cache['by'][backend]
 
 
 # Failures worth repeating back to the reader, most specific first.
@@ -6609,13 +6744,16 @@ def _num_or(v, default):
         return default
 
 
-def triage_status():
+def triage_status(backend='siglip'):
     """Progress of the suggestion run, plus how much of the queue it covers.
 
     Coverage is the useful half: a finished run still leaves crops unguessed
     because the live pool keeps growing underneath it, and that is the number
-    that decides whether the filter is worth trusting right now.
+    that decides whether the filter is worth trusting right now. Coverage is
+    per backend for the same reason the index is: RF-DETR having guessed the
+    pool says nothing about whether SigLIP has.
     """
+    backend = backend if backend in TRIAGE_BACKENDS else 'siglip'
     doc = {}
     try:
         with open(TRIAGE_STATUS) as fh:
@@ -6647,15 +6785,24 @@ def triage_status():
     # through to the plain "not running" state instead of alarming with
     # "Run stopped, no progress for 114 min" when nothing is wrong.
     stalled = bool(doc.get('running')) and alive and age >= quiet_ok
-    tri = triage_index()
+    tri = triage_index(backend)
     pool = review_pool_names()
     have = sum(1 for n, _ in pool if n in tri)
     return {'ever': bool(doc) or bool(tri),
+            # Which guesser this coverage is about, what else could be asked,
+            # and how each did against the crops a human has already ruled on.
+            # The recall belongs on the page: switching to the weaker guesser
+            # without being told it is the weaker one is a trap.
+            'backend': backend, 'backends': [
+                dict(BACKEND_INFO.get(b, {}), key=b,
+                     running=(b == backend_of(doc.get('model'))
+                              and running))
+                for b in backends_available()],
             # Whether a run could be STARTED, which is not the same fact as
             # whether one ever has. The strip hides itself until something has
             # run, and it carries the Run button -- so clearing the guesses hid
             # the only control that could put them back.
-            'can_run': bool(CONFIGURED_TRIAGE),
+            'can_run': backend in backends_available(),
             # Why it is NOT running, when the run left a reason behind. A run
             # can die long after the start call returned -- a GPU filling up
             # takes as long as a model takes to load -- and the strip just went
@@ -6907,7 +7054,7 @@ def _leash_counts():
 
 
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
-                   suggest='', leash='', find=''):
+                   suggest='', leash='', find='', backend='siglip'):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
@@ -6985,7 +7132,9 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     # reviewable pool.
     cdoc = country_index()
     by_country = cdoc.get('by_image') or {}
-    _tri = triage_index()
+    want_backend = (backend if backend in backends_available()
+                    else (backends_available() or ['siglip'])[0])
+    _tri = triage_index(want_backend)
     want = (country or '').upper()
     want_sg = suggest if suggest in TRIAGE_BUCKETS or suggest == 'none' else ''
     want_leash = leash if leash in LEASH_FILTERS else 'all'
@@ -7179,6 +7328,8 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             # control at all -- an empty file means nobody has run the tool.
             'suggest': want_sg, 'suggest_counts': sg_offer,
             'suggest_ready': bool(_tri),
+            # which guesser's opinions the filter above is showing
+            'backend': want_backend,
             # crops only: the set's manifest sits in the same directory
             'harvested_available': sum(1 for n, d in pooled
                                        if d != CROPS and _CROP_RE.match(n)),
@@ -7292,7 +7443,7 @@ def triage_pids():
     return _script_pids('triage_crops.py')
 
 
-def triage_control(action):
+def triage_control(action, backend='siglip'):
     """stop = SIGTERM; start = relaunch detached in --watch mode.
 
     Stopping loses nothing: the guesser appends each batch to triage.jsonl as
@@ -7302,10 +7453,10 @@ def triage_control(action):
     single step, or two clicks race into two guessers.
     """
     with _SPAWN_LOCK:
-        return _triage_control(action)
+        return _triage_control(action, backend)
 
 
-def _triage_control(action):
+def _triage_control(action, backend='siglip'):
     _reap()
     pids = triage_pids()
     if action == 'stop':
@@ -7321,7 +7472,17 @@ def _triage_control(action):
     if action == 'start':
         if pids:
             return {'ok': True, 'running': True, 'msg': 'already running'}
-        py = TRIAGE_PYTHON
+        # Each backend has its own interpreter, because they cannot share one:
+        # RF-DETR needs transformers>=5 and SigLIP 2 is loaded by the 4.x the
+        # rest of this pipeline runs on. Refusing here beats launching a
+        # process that dies on an import.
+        if backend not in backends_available():
+            return {'ok': False, 'running': False,
+                    'msg': f'no interpreter configured for the {backend} '
+                           f'guesser (set {backend}_python in the dashboard '
+                           f'config)' if backend != 'siglip' else
+                           'no interpreter configured for the guesser'}
+        py = RFDETR_PYTHON if backend == 'rfdetr' else TRIAGE_PYTHON
         script = os.path.join(REPO, 'tools', 'detect', 'triage_crops.py')
         if not os.path.exists(script):
             return {'ok': False, 'running': False, 'msg': 'triage_crops.py is missing'}
@@ -7329,8 +7490,9 @@ def _triage_control(action):
         try:
             log = open(logp, 'a')
             argv = [py, script, '--watch', str(TRIAGE_WATCH)]
-            if TRIAGE_MODEL:
-                argv += ['--model', TRIAGE_MODEL]
+            model = RFDETR_MODEL if backend == 'rfdetr' else TRIAGE_MODEL
+            if model:
+                argv += ['--model', model]
             if TRIAGE_DEVICE:
                 argv += ['--device', TRIAGE_DEVICE]
             proc = subprocess.Popen(
@@ -7484,7 +7646,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                                           str(q.get('country', '')),
                                           str(q.get('suggest', '')),
                                           str(q.get('leash', '')),
-                                          str(q.get('find', ''))))
+                                          str(q.get('find', '')),
+                                          str(q.get('backend', 'siglip'))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
@@ -7633,7 +7796,11 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         if self.path.split('?', 1)[0] == '/api/triage':
             try:
-                self._json(triage_status())
+                bq = {}
+                if '?' in self.path:
+                    bq = {k: v[0] for k, v in
+                          parse_qs(self.path.split('?', 1)[1]).items()}
+                self._json(triage_status(str(bq.get('backend', 'siglip'))))
             except Exception as e:
                 self._json({'ever': False, 'error': str(e)})
             return
@@ -7750,7 +7917,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             try:
                 n = int(self.headers.get('Content-Length', 0) or 0)
                 data = json.loads(self.rfile.read(n) or b'{}')
-                self._json(triage_control(str(data.get('action') or '')))
+                self._json(triage_control(
+                    str(data.get('action') or ''),
+                    str(data.get('backend') or 'siglip')))
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)})
             return

@@ -252,7 +252,9 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   // findmsg is what says the search cannot work; leaving it
                   // out of the stub makes paintFind's guard skip the whole
                   // branch, so every state would 'pass' untested
-                  'leashf','find','findterms','findmsg']) {
+                  // the guesser toggle and its caveat line; without them
+                  // paintBackends' guard skips and t24 would pass untested
+                  'leashf','find','findterms','findmsg','trgModel','trgNote']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -271,6 +273,12 @@ try {
         + 'idx,mark,cols,hideToast,showUndo,'
         + 'markSeen,imgScale,saveBox,paintBox,fitBox,fitImage,zoomBy,'
         + 'flushSave,dirty,'
+        // the guesser strip repaints on a 5s timer, and setInterval is a
+        // no-op here; without a way to drive one poll by hand nothing in
+        // that closure is ever exercised
+        + 'trgPoll:()=>window.__trgPoll&&window.__trgPoll(),'
+        + 'setBackend:(b)=>{const s=document.getElementById("trgModel");'
+        + 's.value=b;(s._listeners.change||[]).forEach(f=>f.call(s));},'
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
         + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
@@ -994,8 +1002,56 @@ async function t23() {
      't23: entities shown literally: ' + byId['findmsg'].textContent);
 }
 
+// ── 24. the guesser toggle names the weaker guesser ─────────────────────
+// Two backends with very different accuracy on this data -- SigLIP calls 98%
+// of confirmed dogs 'dog', RF-DETR 56% -- so a bare "SigLIP / RF-DETR"
+// dropdown is a trap. The number the server measured has to reach the option
+// text, and the caveat has to be on screen, not in a title attribute. The
+// control also must not exist at all when there is only one guesser.
+async function t24() {
+  const TRG = {ever: true, can_run: true, running: false, pool: 100,
+               guessed: 100, coverage: 1};
+  const TWO = [{key: 'siglip', label: 'SigLIP 2', recall: 0.98,
+                note: 'leaves behind the vectors the search box needs'},
+               {key: 'rfdetr', label: 'RF-DETR', recall: 0.56,
+                note: 'writes no search vectors'}];
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
+           '/api/triage': () => Object.assign({}, TRG,
+                                              {backend: 'siglip',
+                                               backends: TWO}) };
+  await API.load(); API.trgPoll(); await flush(); await flush();
+  const sel = byId['trgModel'];
+  ck(!sel.hidden, 't24: two guessers offered but the control stayed hidden');
+  ck(/98%/.test(sel.innerHTML) && /56%/.test(sel.innerHTML),
+     't24: accuracy missing from the options: ' + sel.innerHTML);
+  ck(/SigLIP 2/.test(sel.innerHTML) && /RF-DETR/.test(sel.innerHTML),
+     't24: a guesser is missing from the options: ' + sel.innerHTML);
+  ck(!byId['trgNote'].hidden &&
+     /vectors/.test(byId['trgNote'].textContent),
+     't24: the caveat for the chosen guesser is not on screen: ' +
+     byId['trgNote'].textContent);
+
+  // one guesser is not a choice
+  RESP['/api/triage'] = () => Object.assign({}, TRG,
+        {backend: 'siglip', backends: [TWO[0]]});
+  API.trgPoll(); await flush(); await flush();
+  ck(byId['trgModel'].hidden,
+     't24: a dropdown with one option was still drawn');
+  ck(byId['trgNote'].hidden, 't24: a caveat with no choice to make');
+
+  // and the queue must be asked for the SELECTED guesser's guesses
+  RESP['/api/triage'] = () => Object.assign({}, TRG,
+        {backend: 'siglip', backends: TWO});
+  API.trgPoll(); await flush(); await flush();
+  API.setBackend('rfdetr'); await flush(); await flush();
+  const asked = CALLS.filter(c => /\/api\/review\?/.test(c.url)).pop();
+  ck(/backend=/.test(asked.url),
+     't24: the queue request does not say whose guesses it wants: ' +
+     asked.url);
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

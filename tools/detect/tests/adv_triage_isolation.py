@@ -50,10 +50,16 @@ DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
 # holds these two, so the exemption buys silence about the triage file and
 # nothing else.
 ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py',
-           'crop_search.py'}
+           'crop_search.py',
+           # It drives the review page, and the page polls /api/triage for the
+           # guesser strip, so the word is unavoidable there. What t1 is for --
+           # a module quietly growing a path from a guess to a ledger -- is
+           # covered for this file by NO_LEDGER below: a test may READ the
+           # guess API, and may not name a verdict store.
+           'adv_review_render.py'}
 # The allowlisted modules that have no business writing a verdict. dashboard.py
 # is not here: it owns the ledgers. triage_crops.py is covered by t2.
-NO_LEDGER = ('crop_search.py',)
+NO_LEDGER = ('crop_search.py', 'adv_review_render.py')
 LEDGER_WORDS = ('hard_negatives', 'hard_positives', 'labels.jsonl',
                 'label_flags', 'leash.db', 'flag_crop')
 LEDGERS = (os.path.join(REPO, 'data', 'hard_negatives', 'labels.jsonl'),
@@ -197,6 +203,55 @@ if src:
     check('t7b the writer verifies them before writing',
           'ImageNet class order is not what the buckets' in src,
           'no runtime check of the class order')
+
+# ── t8 both backend_of() implementations agree ─────────────────────────────
+# The tool stamps each record with the backend that wrote it; the dashboard
+# decides which backend a record belongs to when it reads one back. Those are
+# two copies of one rule in two files, and they cannot import each other -- the
+# dashboard needs duckdb, the tool needs torch. If they ever disagree, records
+# are filed under one guesser and looked for under another, and 62,979 of them
+# predate the field entirely and are attributed purely by this function.
+#
+# Compared by BEHAVIOUR, not by source text: the two are allowed to be written
+# differently as long as they answer the same. Each is lifted out by AST and
+# run on its own, so this stays import-free like the rest of the file.
+def _lift(path, name):
+    import ast as _ast
+    try:
+        tree = _ast.parse(read(path) or '')
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if isinstance(node, _ast.FunctionDef) and node.name == name:
+            ns = {}
+            exec(compile(_ast.Module(body=[node], type_ignores=[]),
+                         path, 'exec'), ns)
+            return ns[name]
+    return None
+
+
+DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
+_a, _b = _lift(TRIAGE, 'backend_of'), _lift(DASH, 'backend_of')
+if _a and _b:
+    probes = ['google/siglip2-so400m-patch14-384',
+              'google/siglip2-base-patch16-224', 'rfdetr', 'rfdetr-large',
+              'rfdetr-nano', 'imagenet', 'efficientnet_v2_s.imagenet1k_v1',
+              'siglip', 'rfdetr-small', '', None, 'something-new']
+    differ = [f'{p!r}: tool={_a(p)!r} dashboard={_b(p)!r}'
+              for p in probes if _a(p) != _b(p)]
+    check('t8 the tool and the dashboard agree which backend wrote a record',
+          not differ, '; '.join(differ))
+    # backend_of() recognises RF-DETR by prefix rather than by the size table,
+    # so that it needs no module constants and can be lifted out and compared.
+    # A size key that broke the prefix would be filed as SigLIP, silently.
+    sizes = re.findall(r"'([^']+)':\s*'RFDETR",
+                       (src or '').split('RFDETR_SIZES = {')[-1])
+    check('t8b every RF-DETR size key starts with the prefix backend_of reads',
+          bool(sizes) and all(s.startswith('rfdetr') for s in sizes),
+          f'keys: {sizes}')
+else:
+    check('t8 both backend_of() implementations were found',
+          False, f'tool={bool(_a)} dashboard={bool(_b)}')
 
 print()
 if fails:
