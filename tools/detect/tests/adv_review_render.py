@@ -317,7 +317,7 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   'gatef',
                   // the redesigned block: caption, applied-filter chips
                   // and the disclosure holding the controls
-                  'cap','chips','narrow','npanel']) {
+                  'cap','chips','narrow','npanel','ngrpLooks','ngrpWho']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -364,6 +364,17 @@ for (const id of (FIX.hidden || [])) if (byId[id]) byId[id].hidden = true;
 for (const [id, html] of Object.entries(FIX.options || {}))
   if (byId[id]) { byId[id].innerHTML = html; byId[id].value =
     (byId[id].options[0] || {}).value || ''; }
+// The panel's shape: which controls sit in which group, read off the
+// markup. trimGroups() walks that tree to decide whether a group still
+// offers anything, and a flat stub gave it nothing to walk -- so the
+// heading-over-nothing it exists to prevent could not be tested at all.
+for (const [gid, ids] of Object.entries(FIX.groups || {})) {
+  const g = byId[gid]; if (!g) continue;
+  g.className = ((g.className || '') + ' ngrp').trim();
+  const row = new El('div'); row.className = 'nrow'; g.appendChild(row);
+  for (const id of ids) if (byId[id]) row.appendChild(byId[id]);
+}
+for (const gid of (FIX.owned || [])) if (byId[gid]) byId[gid].dataset.own = '1';
 function payload(items, reserve, extra) {
   return Object.assign({ items, reserve: reserve || [], page: 0, pages: 2,
                          size: 50, sort: 'conf',
@@ -1388,8 +1399,81 @@ async function t29() {
   fire('mode', 'queue'); await flush(); await flush();
 }
 
+// ── 30. nothing narrows the queue without a way to see and undo it ──────
+// The whole point of the chip row. Hiding a control does not unset it: the
+// page hides the guess filter when the gate's own axis covers it, and the
+// value stayed in the request and kept being honoured — so choosing the gate
+// could empty the queue with no chip, no cross, no control on screen and no
+// "narrowed from". The server decides what it applied and echoes it; the page
+// has to adopt that rather than re-send the dropped value.
+async function t30() {
+  let asked = '';
+  RESP = { '/api/review': (url) => {
+    asked = url;
+    // the server drops a filter the page is not offering, and says so
+    const sg = /suggest=(\w*)/.exec(url);
+    const applied = (/backend=dogbin/.test(url)) ? '' : (sg ? sg[1] : '');
+    return payload(CROPS.normal.slice(0, 2), [], {
+      suggest: applied, suggest_ready: true, backend: 'siglip',
+      total_unflagged: applied ? 300 : 2206, pool_unfiltered: 2206});
+  }};
+  const fire = (id, v) => { const e = byId[id]; e.value = v;
+    if (e.onchange) e.onchange.call(e);
+    (e._listeners.change || []).forEach(f => f.call(e)); };
+
+  fire('suggest', 'animal'); await flush(); await flush();
+  ck(/suggest=animal/.test(asked) && /Other animal/.test(byId['chips'].innerHTML),
+     't30: a filter the server applied has no chip: ' + byId['chips'].innerHTML);
+
+  // now the server says it did NOT apply it. The page must stop sending it.
+  RESP['/api/review'] = (url) => { asked = url; return payload(
+      CROPS.normal.slice(0, 2), [], {suggest: '', suggest_ready: true,
+      backend: 'dogbin', gate_ready: true, total_unflagged: 2206,
+      pool_unfiltered: 2206}); };
+  await API.load(); await flush(); await flush();
+  await API.load(); await flush(); await flush();
+  ck(/suggest=(&|$)/.test(asked),
+     't30: the page kept sending a filter the server refused: ' + asked);
+  ck(byId['chips'].hidden || !/Other animal/.test(byId['chips'].innerHTML),
+     't30: a chip for a filter that was not applied: ' + byId['chips'].innerHTML);
+}
+
+// ── 31. the panel offers no control that does nothing ───────────────────
+// Two ways it did. A group whose every control is hidden rendered as an
+// uppercase heading over an empty row. And the Run button, which used to be
+// hidden by living inside the progress strip, moved into the panel and stayed
+// on screen on a checkout with no guesser at all — showing the markup's raw
+// placeholder, enabled, and clickable, since it reads its own label to decide
+// what to do.
+async function t31() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 2), [],
+             {suggest_ready: false, gate_ready: false}),
+           '/api/triage': () => ({ever: false, can_run: false}) };
+  await API.load(); API.trgPoll(); await flush(); await flush();
+  const looks = document.getElementById('ngrpLooks');
+  ck(looks && looks.hidden,
+     't31: a heading with nothing under it');
+  const who = document.getElementById('ngrpWho');
+  ck(who && who.hidden,
+     't31: the guesser controls are offered with no guesser to run');
+
+  // and they come back when there is one
+  RESP['/api/triage'] = () => ({ever: true, can_run: true, pool: 10,
+      guessed: 10, coverage: 1, running: false,
+      backends: [{key: 'siglip', label: 'SigLIP 2', recall: .977, clears: .943}]});
+  API.trgPoll(); await flush(); await flush();
+  ck(!who.hidden, 't31: the guesser group never came back');
+  ck(byId['trgRun'].textContent !== '—',
+     't31: the Run button is still showing its raw placeholder: ' +
+     byId['trgRun'].textContent);
+
+  // a reload must not undo that: two painters own this group
+  await API.load(); await flush(); await flush();
+  ck(!who.hidden, 't31: a queue reload hid the guesser group again');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
@@ -1462,9 +1546,32 @@ def main():
         opts = dict(re.findall(
             r'<select id="(\w+)"[^>]*>(.*?)</select>', html, re.S))
         opts = {k: v.strip() for k, v in opts.items() if '<option' in v}
+        # Which controls each panel group holds, so the stub has the tree
+        # trimGroups() walks.
+        # Split the panel at each group start rather than trying to match
+        # balanced divs: the nesting differs per group (one carries a
+        # <details>), and a regex that assumed otherwise silently dropped the
+        # Run button from its group and made a test fail for the wrong reason.
+        groups, owned = {}, []
+        panel = html.split('<div class="npanel"', 1)[-1]
+        parts = re.split(r'<div class="ngrp"', panel)[1:]
+        for part in parts:
+            # the id must be in the group's OWN opening tag. Searching the
+            # whole block found the first control's id instead for a group
+            # that has none, which wired that control as its own parent --
+            # a cycle the stub's descendant walk never returned from.
+            gid = re.match(r'[^>]*id="(\w+)"', part)
+            if not gid:
+                continue
+            groups[gid.group(1)] = re.findall(
+                r'<(?:select|button|input)[^>]*\bid="(\w+)"', part)
+            # a group that owns its own visibility, so trimGroups leaves it be
+            if re.match(r'[^>]*data-own=', part):
+                owned.append(gid.group(1))
         with open(fx, 'w') as f:
             json.dump({'crops': fixtures, 'hidden': sorted(set(hidden)),
-                       'options': opts}, f)
+                       'options': opts, 'groups': groups,
+                       'owned': owned}, f)
         with open(run, 'w') as f:
             f.write(HARNESS)
         p = subprocess.run(['node', run, js, fx],

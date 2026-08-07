@@ -1692,7 +1692,12 @@ flex-wrap:wrap;gap:6px 14px;align-items:center}
 font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
 .line[hidden]{display:none}
 .line b{color:var(--tx);font-weight:640;flex:none}
-.line .lsub{color:var(--dim);flex:none}
+/* shrinkable, and allowed to break: the longest sub this row produces is
+   the "<other guesser> is guessing now · they share the card · N crops have
+   no guess from this one" branch, and at flex:none its base size is its
+   max-content width -- 492px, which pushed the sticky header wider than the
+   viewport and gave the whole page a horizontal scrollbar below ~510px. */
+.line .lsub{color:var(--dim);flex:0 1 auto;min-width:0}
 .line .lend{flex:none;color:var(--mut)}
 .line .track{flex:1;min-width:60px;height:3px;border-radius:2px;
 background:rgba(130,140,150,.18);overflow:hidden;display:block}
@@ -1705,7 +1710,8 @@ transition:width .45s ease}
    rather than yours */
 .line.trg{color:var(--dim)}
 .line.trg b{color:var(--mut);font-weight:600}
-@media(max-width:700px){.line{flex-wrap:wrap}.line .track{order:9;flex-basis:100%}}
+@media(max-width:700px){.line{flex-wrap:wrap}.line .track{order:9;flex-basis:100%}
+.line .lsub{flex-basis:100%}}
 .pagebar{display:flex;align-items:center;justify-content:flex-end;gap:10px;
 padding:9px 0 12px}
 kbd{background:var(--panel2);border:1px solid var(--bd);border-bottom-width:2px;
@@ -2075,7 +2081,11 @@ color:var(--dim);transition:transform .15s}
         <button class="rbtn danger" id="unkeep" title="put every crop you already judged a dog back into the queue"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Restore kept</button>
       </div>
     </div>
-    <div class="ngrp">
+    <!-- data-own: the guesser strip decides whether this group is worth
+         showing, from whether there is a guesser at all. trimGroups()
+         must not also decide it from whether its controls are visible --
+         the Run button never hides, so the two answers differ. -->
+    <div class="ngrp" id="ngrpWho" data-own="1">
       <span class="nlab">Guesses by</span>
       <div class="nrow">
         <select id="trgModel" hidden title="which model's guesses the filter above shows, and which one Run starts"></select>
@@ -2300,7 +2310,7 @@ var FILTERS=[
   {id:'suggest', off:'',    where:'queue', strip:1},
   {id:'gatef',   off:'all', where:'queue', strip:1},
   {id:'country', off:'',    where:'queue', strip:1},
-  {id:'leashf',  off:'all', where:'both'},
+  {id:'leashf',  off:'all', where:'both', strip:1},
   /* shown and hidden by CSS on body.auditing rather than by the hidden
      attribute, so its availability is the view, not el.hidden */
   {id:'verdict', off:'all', where:'audit', css:1}
@@ -2512,6 +2522,7 @@ function load(){
     paintGate(j);
     paintChips();
     paintCap(j);
+    trimGroups();
     paintFind(j);
     score();
     /* "Page 3 of 47" described an offset that no longer moves. What the
@@ -3529,8 +3540,29 @@ var countryHealed=false;
    dropdown that silently filters nothing is worse than no dropdown. Counts
    come from the server, tallied on the post-collapse queue, so each option
    promises exactly what it delivers. */
+/* A group whose every control is hidden is a heading over nothing: an
+   uppercase label and 29px of panel naming a category that offers no choice.
+   The flat row it replaced left no trace when its selects were hidden. */
+function trimGroups(){
+  var gs=document.querySelectorAll('.ngrp');
+  for(var i=0;i<gs.length;i++){
+    var g=gs[i],row=g.querySelector('.nrow'),live=0;
+    if(!row)continue;
+    for(var k=0;k<row.children.length;k++)if(!row.children[k].hidden)live++;
+    /* a group with an owner decides for itself; see data-own in the markup */
+    if(!g.dataset.own)g.hidden=!live;
+  }
+}
 function paintSuggest(j){
   var el=$('suggest');if(!el)return;
+  /* The server is the authority on what it applied. It drops a guess filter
+     whose bucket the chosen guesser cannot produce, and the page has to adopt
+     that or it re-sends the dropped value forever -- which is how a hidden
+     control went on emptying the queue across reloads, the preference
+     outliving every surface that could show or clear it. */
+  if(typeof j.suggest==='string'&&j.suggest!==suggest){
+    suggest=j.suggest;savePref('suggest',suggest);
+  }
   /* The gate has its own control, so it must not also appear here: two
      dropdowns filtering by one model's verdict is a choice the reader has to
      work out is not a choice. Selecting it in the toggle still runs it and
@@ -3680,8 +3712,17 @@ load();loadBal();
   function paint(j){
     /* shown once a run has happened OR once one could be started -- the
        button lives in here, so hiding it on an empty file left no way back */
-    if(!j||(!j.ever&&!j.can_run)){el.hidden=true;return;}
-    el.hidden=false;
+    /* The controls moved out of this row into the panel, and the only thing
+       that ever hid them was being inside it. On a checkout with no guesser
+       at all the row correctly disappears and this returns -- leaving a Run
+       button on screen showing the markup's raw placeholder, enabled, and
+       clickable: it reads its own label to decide direction, so the dash was
+       treated as "start". The group goes with the row. */
+    var who=$('ngrpWho');
+    if(!j||(!j.ever&&!j.can_run)){
+      el.hidden=true;if(who)who.hidden=true;return;
+    }
+    el.hidden=false;if(who)who.hidden=false;
     paintBackends(j);
     var running=!!j.running, cov=Math.round((j.coverage||0)*100),
         gap=Math.max(0,(j.pool||0)-(j.guessed||0)), state, sub='';
@@ -3829,9 +3870,12 @@ load();loadBal();
           /* a start that fails does so for a reason the reader can act on --
              usually an interpreter without torch -- so say it rather than
              silently going back to "Not running" */
+          /* beside the button that failed, not in the progress row it used
+             to live in -- that row is hidden in exactly the cases a start is
+             refused */
           var e=document.createElement('div');
           e.className='trgerr'; e.textContent=j.msg;
-          el.appendChild(e);
+          ($('ngrpWho')||el).appendChild(e);
         }
         /* the status file is written by the run itself, so it lags the
            spawn; poll now for the button, and again once it has caught up */
@@ -6877,9 +6921,13 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
             'leash_totals': _leash_counts(),
             'leash_filter': want_leash, 'leash_counts': leash_offer,
             'pages': pages, 'total': total, 'sort': sort, 'label': label,
-            # what the list holds before the verdict and leash filters, so the
-            # caption can say what it was narrowed from here too
-            'pool_unfiltered': len(by_name),
+            # What the list holds before EITHER filter. len(by_name) was
+            # wrong: `want` decides which ledger files are read at all, so the
+            # verdict filter narrows upstream of the baseline and the baseline
+            # collapsed onto the total exactly when the one filter this view
+            # has was on. Counted from the live sets instead, which do not
+            # move with the request.
+            'pool_unfiltered': sum(len(live[lb]) for lb in FLAG_LABELS),
             'n_false_positive': sum(1 for i in by_name.values()
                                     if i['label'] == FLAG_LABEL
                                     and i['name'] in live[FLAG_LABEL]),
@@ -7513,6 +7561,18 @@ def _leash_counts():
 GATE_FILTERS = ('all', 'dog', 'not_dog', 'none')
 
 
+def _gate_covers(backend):
+    """Does the gate's own filter already answer this backend's question?
+
+    The dog-bin gate has a dedicated control, so the page does not also offer
+    it as a guess filter -- two dropdowns over one model's verdict is a choice
+    the reader has to work out is not a choice. Written once, here, because
+    the page's decision to hide a control and the server's decision to ignore
+    its value have to be the same decision.
+    """
+    return backend == 'dogbin' and bool(triage_index('dogbin'))
+
+
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
                    suggest='', leash='', find='', backend='siglip', gate=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
@@ -7601,6 +7661,18 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     # fresh one while filtered to 'Looks like a dog' emptied the queue and
     # took away the only thing that could put it back.
     if not _tri and want_sg:
+        want_sg = ''
+    # ...and neither is a bucket this guesser cannot produce. The page hides
+    # the guess filter whenever the dog-bin gate's own axis covers it, but
+    # hiding a control does not unset it: the value stayed in the request and
+    # the server kept honouring it, so choosing the gate could empty the queue
+    # with no chip, no cross to clear it, no control on screen and no
+    # "narrowed from" -- every surface the redesign added to make an empty
+    # queue explainable, silent at once. The server decides, and echoes what
+    # it decided so the page can follow.
+    _can_say = set(BACKEND_INFO.get(want_backend, {}).get('buckets')
+                   or OPEN_BUCKETS) | {'none'}
+    if want_sg and (want_sg not in _can_say or _gate_covers(want_backend)):
         want_sg = ''
     want_leash = leash if leash in LEASH_FILTERS else 'all'
     # Always the dog-bin gate, whatever the toggle above is set to: this axis
