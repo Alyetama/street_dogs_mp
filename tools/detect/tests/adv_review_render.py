@@ -1294,11 +1294,11 @@ async function t27() {
   // the disclosure holds the rest, and says so
   const nb = byId['narrow'];
   (nb._listeners.click || []).forEach(f => f.call(nb));
-  ck(!byId['npanel'].hidden, 't27: Narrow does not open the panel');
+  ck(!byId['npanel'].hidden, 't27: Filter does not open the panel');
   ck(nb.getAttribute && nb.getAttribute('aria-expanded') === 'true',
      't27: the disclosure does not report its state to a screen reader');
   (nb._listeners.click || []).forEach(f => f.call(nb));
-  ck(byId['npanel'].hidden, 't27: Narrow does not shut the panel again');
+  ck(byId['npanel'].hidden, 't27: Filter does not shut the panel again');
 }
 
 // ── 28. every state of the two lines is still a line ────────────────────

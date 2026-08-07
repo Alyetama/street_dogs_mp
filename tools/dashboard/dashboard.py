@@ -1998,7 +1998,7 @@ color:var(--dim);transition:transform .15s}
       <option value="audit">Check my annotations</option>
     </select>
     <!-- The audit view's own filter, and its ONLY one. It was folded into the
-         panel under "On a lead", which is not a question it answers, so the
+         panel under "On a leash", which is not a question it answers, so the
          one control that view has took a click to reach and sat under a
          heading about something else. CSS shows it only while auditing. -->
     <select id="verdict" title="which verdict to check">
@@ -2008,7 +2008,7 @@ color:var(--dim);transition:transform .15s}
     </select>
     <button type="button" class="nbtn" id="narrow" aria-expanded="false"
             aria-controls="npanel"
-            title="filters, sorting, and the guesser that fills them">Narrow<span class="ncar" aria-hidden="true">&#8250;</span></button>
+            title="filters, sorting, and the guesser that fills them">Filter<span class="ncar" aria-hidden="true">&#8250;</span></button>
   </div>
 
   <!-- Says out loud when the search cannot work. A search that quietly
@@ -2045,7 +2045,7 @@ color:var(--dim);transition:transform .15s}
       </div>
     </div>
     <div class="ngrp">
-      <span class="nlab">On a lead</span>
+      <span class="nlab">On a leash</span>
       <div class="nrow">
         <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
           <option value="all">Any leash state</option>
@@ -2346,7 +2346,7 @@ function paintCap(j){
     ? ' <i>&middot; narrowed from '+n(j.pool_unfiltered)+'</i>' : '';
   el.innerHTML=head+from;
   var btn=$('narrow');
-  if(btn)btn.innerHTML='Narrow'+(act.length?' <em>'+act.length+'</em>':'')+
+  if(btn)btn.innerHTML='Filter'+(act.length?' <em>'+act.length+'</em>':'')+
     '<span class="ncar" aria-hidden="true">›</span>';
 }
 /* Only what is applied, each one removable where it is read. A filter you
