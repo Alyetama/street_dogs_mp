@@ -29,6 +29,7 @@ ever multiplies.
 import argparse
 import contextlib
 import fcntl
+import json
 import os
 import sys
 
@@ -171,6 +172,14 @@ def search(term, k=24, path=None):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
     ap.add_argument('--add', nargs='+', metavar='TERM')
+    # How the dashboard passes what somebody typed. `--add` takes nargs='+',
+    # and argparse stops collecting at the first token beginning with '-', so
+    # a search for "-cat" made argparse reject the whole batch and every word
+    # queued alongside it went unencoded. One JSON token cannot be mistaken
+    # for a flag, whatever is inside it.
+    ap.add_argument('--add-json', metavar='JSON',
+                    help='a JSON array of terms; safe for terms starting '
+                         'with a dash')
     ap.add_argument('--seed', action='store_true',
                     help='encode the usual dog-confusables')
     ap.add_argument('--query', metavar='TERM')
@@ -181,8 +190,20 @@ def main(argv=None):
         n = add(SEED)
         print(f'{n} new term(s); {len(load_terms()[0])} searchable')
         return 0
-    if a.add:
-        n = add(a.add)
+    want = list(a.add or [])
+    if a.add_json:
+        try:
+            got = json.loads(a.add_json)
+        except ValueError as e:
+            print(f'--add-json is not JSON: {e}', file=sys.stderr)
+            return 2
+        if not isinstance(got, list) or not all(isinstance(t, str)
+                                                for t in got):
+            print('--add-json wants an array of strings', file=sys.stderr)
+            return 2
+        want += got
+    if want:
+        n = add(want)
         print(f'{n} new term(s); {len(load_terms()[0])} searchable')
         return 0
     if a.query:

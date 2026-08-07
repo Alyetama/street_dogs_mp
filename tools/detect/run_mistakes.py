@@ -90,12 +90,51 @@ def discover(root):
     return out
 
 
-def _val_images(yaml_path, split='val'):
-    """How many images the val split of this dataset yaml actually has."""
+def _spec(yaml_path):
+    """The few flat keys a dataset yaml carries: path, train, val, test.
+
+    Hand-read rather than parsed, because the DASHBOARD asks this question too
+    -- it calls _val_images() to decide whether a detector can be scored -- and
+    the dashboard's interpreter has no PyYAML. With the import inside a
+    try/except returning 0, a missing parser was indistinguishable from an
+    empty split: every detect run looked unscorable, forever and silently, in
+    the one environment where the answer mattered. training_tracker.read_args
+    reads ultralytics' args.yaml the same way and for the same reason.
+
+    Only top-level `key: value` lines are wanted. `names:` is a nested block
+    and is deliberately not understood; a line that is not a scalar assignment
+    at column zero is skipped.
+    """
+    out = {}
     try:
         import yaml as _yaml
         with open(yaml_path) as fh:
-            spec = _yaml.safe_load(fh) or {}
+            got = _yaml.safe_load(fh)
+        return got if isinstance(got, dict) else {}
+    except ImportError:
+        pass
+    except (OSError, ValueError):
+        return {}
+    try:
+        with open(yaml_path) as fh:
+            for ln in fh:
+                if not ln[:1].strip() or ln.lstrip().startswith('#'):
+                    continue          # indented (nested) or a comment
+                k, sep, v = ln.partition(':')
+                if not sep or not k.strip():
+                    continue
+                v = v.split('#')[0].strip().strip('"').strip("'")
+                if v:
+                    out[k.strip()] = v
+    except OSError:
+        return {}
+    return out
+
+
+def _val_images(yaml_path, split='val'):
+    """How many images the val split of this dataset yaml actually has."""
+    try:
+        spec = _spec(yaml_path)
         base = spec.get('path') or os.path.dirname(yaml_path)
         if not os.path.isabs(base):
             base = os.path.join(os.path.dirname(yaml_path), base)

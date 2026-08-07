@@ -590,7 +590,12 @@ def main():
         # every crop scored before the vectors existed permanently unsearchable
         # -- and since the same forward pass produces both, re-doing one is the
         # whole cost of getting the other.
-        owed = (set() if args.no_vectors
+        # Only a run that can actually produce a vector is allowed to re-do a
+        # crop for the sake of one. The ImageNet backend produces none, so it
+        # would have found the whole pool 'owing', re-predicted every crop,
+        # written no vectors, and found the same debt again on the next
+        # --watch pass -- forever.
+        owed = (set() if (args.no_vectors or imagenet)
                 else pool_names - vectored_names(model_id=model_id))
         skip -= owed
         if not args.include_judged:

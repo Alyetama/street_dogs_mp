@@ -943,7 +943,12 @@ async function t22() {
 // queue must put a sentence on screen.
 async function t23() {
   const FIND = {find: 'a cat', find_terms: ['a cat'], find_cover: [0, 3010]};
-  for (const [state, want] of [['cold', /embedded/], ['mismatch', /different models/],
+  for (const [state, want] of [['cold', /embedded/],
+                               // mismatch now clears itself: the words are
+                               // re-encoded under whichever model embedded the
+                               // crops, so the message must promise that and
+                               // not send the reader off to run a tool
+                               ['mismatch', /re-encoding the search words/],
                                ['learning', /moment/], ['unknown', /encoded/],
                                ['failed', /crop_search\.log/],
                                ['novectors', /guesser/]]) {
@@ -965,6 +970,28 @@ async function t23() {
   ck(byId['findmsg'].hidden, 't23: a working search still warned');
   ck(!/\bwarn\b/.test(byId['find'].className || ''),
      't23: a working search kept the warning border');
+
+  // 'cold' with most of the pool embedded is a FILTER problem, not a stopped
+  // guesser -- telling the reviewer to start one that is already running and
+  // has covered 4,014 of 5,018 crops sends them after the wrong thing.
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+             Object.assign({}, FIND, {find_state: 'cold',
+                                      find_cover: [4014, 5018]})) };
+  await API.load(); await flush();
+  ck(/4,014/.test(byId['findmsg'].textContent),
+     't23: cold ignored how much IS embedded: ' + byId['findmsg'].textContent);
+  ck(!/start the guesser/.test(byId['findmsg'].textContent),
+     't23: cold blamed the guesser with the pool mostly embedded');
+
+  // the term is written with textContent, so it must not arrive pre-escaped
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
+             {find: 'cats & dogs', find_terms: ['a cat'],
+              find_state: 'learning', find_cover: [0, 10]}) };
+  await API.load(); await flush();
+  ck(/cats & dogs/.test(byId['findmsg'].textContent),
+     't23: term double-escaped in the message: ' + byId['findmsg'].textContent);
+  ck(!/&amp;/.test(byId['findmsg'].textContent),
+     't23: entities shown literally: ' + byId['findmsg'].textContent);
 }
 
 (async () => {

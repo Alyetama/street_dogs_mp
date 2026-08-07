@@ -2117,20 +2117,30 @@ function paintFind(j){
   /* Every state that is not 'ordered the queue' gets a sentence, because the
      one thing they have in common on screen is that the queue does not move.
      Without this they are all the same event to a reader. */
+  /* textContent, so the raw term goes in -- esc() here would show a search
+     for "cats & dogs" as "cats &amp; dogs" */
   var say=st==='learning'
-    ? 'working out what “'+esc(j.find)+'” looks like — try again in a moment'
+    ? 'working out what “'+j.find+'” looks like — try again in a moment'
     : st==='unknown'
-    ? 'nothing has encoded “'+esc(j.find)+'” yet'
+    ? 'nothing has encoded “'+j.find+'” yet'
     : st==='failed'
-    ? 'could not encode “'+esc(j.find)+'” — see data/crop_search.log'
+    ? 'could not encode “'+j.find+'” — see data/crop_search.log'
     : st==='cold'
-    ? 'none of the '+n(cov[1])+' crops in the queue have been embedded yet — '+
-      'start the guesser above and it embeds as it works'
+    /* Both numbers. 'cold' means nothing in THIS view is searchable, which is
+       not the same as nothing being embedded at all -- a country or leash
+       filter can select a slice the guesser has not reached. Naming only the
+       pool size told a reviewer to start a guesser that was already running
+       and had covered most of the pool. */
+    ? (cov[0] ? n(cov[0])+' of '+n(cov[1])+' crops are embedded, but none in '+
+                'this view — clear a filter, or let the guesser catch up'
+              : 'none of the '+n(cov[1])+' crops in the queue have been '+
+                'embedded yet — start the guesser above and it embeds as it '+
+                'works')
     : st==='novectors'
     ? 'no crops have been embedded yet — start the guesser above'
     : st==='mismatch'
-    ? 'the crops and the search words come from different models — re-run the '+
-      'guesser, and the words re-encode to match'
+    ? 'the crops were embedded with a different model — re-encoding the search '+
+      'words to match, try again in a moment'
     : '';
   el.classList.toggle('warn',!!say);
   if(msg){msg.hidden=!say;msg.textContent=say;}
@@ -6812,13 +6822,24 @@ def search_learn(term):
             job['want'].add(term)
             return 'learning'
         if job['proc'] is not None:
-            # it has exited: judge the batch it was carrying before starting
-            # another, or a broken environment retries in silence forever
-            if job['proc'].returncode:
-                job['bad'] |= job['sent']
-            else:
-                job['bad'] -= job['sent']
+            # It has exited: judge the batch it was carrying before starting
+            # another, or a broken environment retries in silence forever.
+            # Judged PER TERM, by whether the word actually landed in the
+            # cache -- not by the exit code over the whole batch. One word
+            # argparse would not take (anything starting with '-') sinks the
+            # whole --add, and blaming the exit code told a reviewer that the
+            # perfectly good word they had typed 'could not be encoded'.
+            done = set(search_terms()[0])
+            for t in job['sent']:
+                if t in done:
+                    job['bad'].discard(t)
+                else:
+                    job['bad'].add(t)
             job.update(proc=None, sent=set())
+        # keyed by whatever anyone typed, so it needs a ceiling for the same
+        # reason _TERM_TRIED does
+        if len(job['bad']) > 512:
+            job['bad'] = set(sorted(job['bad'])[-256:])
         if now - _TERM_TRIED.get(term, 0) < SEARCH_RETRY_S:
             return 'failed' if term in job['bad'] else 'learning'
         job['want'].add(term)
@@ -6833,9 +6854,13 @@ def search_learn(term):
             _TERM_TRIED[t] = now
         try:
             log = open(os.path.join(REPO, 'data', 'crop_search.log'), 'a')
+            # --add-json, not --add: a word beginning with '-' is a word
+            # somebody can type, and as an --add value argparse reads it as a
+            # flag and rejects the batch it was in
             proc = subprocess.Popen(
-                [py, script, '--add'] + batch, cwd=REPO, stdout=log,
-                stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+                [py, script, '--add-json', json.dumps(batch)], cwd=REPO,
+                stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                start_new_session=True)
             _SPAWNED.append(proc)
             job.update(proc=proc, want=set(), sent=set(batch))
             return 'learning'
@@ -7109,7 +7134,20 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     if want_find:
         scores, why = search_scores(want_find)
         if scores is None:
-            find_state = search_learn(want_find) if why == 'unknown' else why
+            # A mismatch has to ask for an encode too, or it is terminal.
+            # crop_search.add() re-encodes the whole vocabulary under whichever
+            # model the CROP vectors carry, so this is exactly what clears it
+            # -- and search_learn() is the only thing in the dashboard that
+            # runs it. Gating the call on 'unknown' meant the one state that
+            # cannot fix itself was the one state that never asked for help,
+            # and free-text search stayed dead until somebody ran the tool by
+            # hand. Which is the state this box was left in earlier today.
+            if why in ('unknown', 'mismatch'):
+                asked = search_learn(want_find)
+                find_state = why if (why == 'mismatch' and asked == 'learning')\
+                    else asked
+            else:
+                find_state = why
         else:
             scored = [(scores.get(c['name']), c) for c in kept]
             have = [(v, c) for v, c in scored if v is not None]
