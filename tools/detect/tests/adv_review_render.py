@@ -271,6 +271,14 @@ function getComputedStyle() {
 }
 function requestAnimationFrame(f) { f(); }
 function setTimeout(f, ms) { timers.push({ f, ms }); return timers.length; }
+// IntersectionObserver: the header sheds its ambient rows once the page has
+// scrolled, and without a stub the guard skips that whole branch -- so the
+// compact behaviour would look tested while never running.
+let IO_CB = null;
+function IntersectionObserver(cb) {
+  IO_CB = cb;
+  return { observe() {}, disconnect() {} };
+}
 // setInterval stubbed to a no-op handle: a real one keeps node's event
 // loop alive forever, hanging this test the moment the page starts a poll
 function setInterval() { return 0; }
@@ -317,7 +325,9 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   'gatef',
                   // the redesigned block: caption, applied-filter chips
                   // and the disclosure holding the controls
-                  'cap','chips','narrow','npanel','ngrpLooks','ngrpWho']) {
+                  'cap','chips','narrow','npanel','ngrpLooks','ngrpWho',
+                  // the sentinel the header watches to know it has scrolled
+                  'scrollcue']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -331,7 +341,7 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 let API;
 try {
   API = new Function('document','window','CSS','fetch','getComputedStyle',
-    'requestAnimationFrame','setTimeout','clearTimeout','setInterval','clearInterval','docL','navigator','Blob',
+    'requestAnimationFrame','setTimeout','clearTimeout','setInterval','clearInterval','docL','navigator','Blob','IntersectionObserver',
     src + '\nreturn {load,render,flag,undo,openLb,closeLb,stepLb,tile,score,'
         + 'idx,mark,cols,hideToast,showUndo,'
         + 'markSeen,imgScale,saveBox,paintBox,fitBox,fitImage,zoomBy,'
@@ -345,7 +355,8 @@ try {
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
         + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
-    setTimeout, clearTimeout, setInterval, clearInterval, docL, navigator, Blob);
+    setTimeout, clearTimeout, setInterval, clearInterval, docL, navigator, Blob,
+    IntersectionObserver);
 } catch (e) {
   console.log('FAIL: could not evaluate the review script: ' + e);
   process.exit(1);
@@ -389,6 +400,12 @@ function ck(cond, msg) { if (!cond) failures.push(msg); }
 // queue deep enough that their fetch chains have settled
 async function flush(n) { for (let i = 0; i < (n || 12); i++) await Promise.resolve(); }
 function toastUp() { return root.children.some(c => c.id === 'tbox'); }
+
+// Cross the sentinel the way a scroll does. IO_CB is the page's own callback,
+// captured when it constructed the observer.
+function scrolled(down) {
+  if (IO_CB) IO_CB([{isIntersecting: !down}]);
+}
 
 // ── 1. load + render ────────────────────────────────────────────────────────
 async function t1() {
@@ -1472,8 +1489,25 @@ async function t31() {
   ck(!who.hidden, 't31: a queue reload hid the guesser group again');
 }
 
+// ── 32. the header stops taking a third of the screen once you scroll ───
+// Everything up there is setup, and setup is read once. Working through crops
+// with a running tally, two progress rows and an open panel pinned above them
+// is the complaint that started this.
+async function t32() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []) };
+  await API.load(); await flush();
+  ck(!document.body.classList.contains('compact'),
+     't32: the header starts compact, before anything has scrolled');
+  scrolled(true);
+  ck(document.body.classList.contains('compact'),
+     't32: scrolling past the top did not compact the header');
+  scrolled(false);
+  ck(!document.body.classList.contains('compact'),
+     't32: scrolling back to the top left the header compact');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

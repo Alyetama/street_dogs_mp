@@ -1547,7 +1547,23 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 /* ── header: identity left, the two numbers that matter right ── */
 header{margin:0 -24px 16px;padding:14px 24px 0;position:sticky;top:0;z-index:20;
 background:rgba(19,21,26,.93);backdrop-filter:saturate(140%) blur(12px);
-border-bottom:1px solid var(--bd)}
+border-bottom:1px solid var(--bd);transition:padding .16s ease}
+/* ── the header at work ───────────────────────────────────────────────────
+   Everything up here is setup, and setup is read once. Once the page has
+   scrolled, the header keeps only what a reviewer ACTS on -- the count, the
+   chips saying what is narrowing the queue, and the controls that change it
+   -- and sheds the running tally, the two progress rows and the open panel.
+   Those are ambient: worth a glance, not worth a third of the viewport on
+   every screen of crops. */
+.scrollcue{display:block;height:1px;margin-bottom:-1px}
+body.compact header{padding-top:7px}
+body.compact .tally,body.compact .lines,body.compact .npanel{display:none}
+body.compact h1{font-size:14px}
+body.compact .score>b{font-size:19px;letter-spacing:-.3px}
+body.compact .score>span{font-size:11px}
+body.compact .cap{padding-top:7px}
+body.compact .pagebar{padding:5px 0 8px}
+@media(prefers-reduced-motion:reduce){header{transition:none}}
 .hrow{display:flex;flex-wrap:wrap;align-items:center;gap:16px 20px}
 h1{font-size:17px;font-weight:640;letter-spacing:-.2px;display:flex;align-items:center;gap:9px}
 h1 .fl{color:var(--red)}
@@ -1937,6 +1953,12 @@ color:var(--dim);transition:transform .15s}
 .trgnote p{margin:7px 0 0 12px}
 .trgnote p[hidden]{display:none}
 </style></head><body><div class="wrap">
+
+<!-- Scrolled past this, you are working rather than setting up, and the
+     header sheds everything you are not acting on. A sentinel, not a scroll
+     handler: the browser reports the crossing once instead of the page
+     measuring itself on every frame. -->
+<i class="scrollcue" id="scrollcue" aria-hidden="true"></i>
 
 <header>
   <div class="hrow">
@@ -3615,6 +3637,16 @@ if($('find')){
     clearTimeout(ft);find=this.value;savePref('find',find);page=0;sel=-1;load();
   });
 }
+/* Compact once the top of the page has scrolled away. Guarded because the
+   test harness has no IntersectionObserver, and a page that threw here would
+   lose every handler bound after it. */
+(function(){
+  var cue=$('scrollcue');
+  if(!cue||typeof IntersectionObserver!=='function')return;
+  new IntersectionObserver(function(es){
+    document.body.classList.toggle('compact',!es[0].isIntersecting);
+  },{threshold:0}).observe(cue);
+})();
 if($('narrow'))$('narrow').addEventListener('click',function(){
   /* Inline, not a popover: this page is driven by F/D/L/N with the hands on
      the keyboard, and a floating layer that took focus would fight the work
