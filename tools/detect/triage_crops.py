@@ -771,7 +771,7 @@ def main():
               f'({len(skip):,} already judged or done'
               + (f'; {len(owed):,} owe a vector' if owed else '') + ')')
         if not todo:
-            write_status(args.status, running=bool(args.watch), model=model_id,
+            write_status(args.status, backend=BACKEND, running=bool(args.watch), model=model_id,
                          done=0, total=0, rate=0, started=started,
                          passes=passes[0], watch=args.watch, idle=True)
             return 0
@@ -854,7 +854,7 @@ def main():
                     wrote += 1
                 fh.flush()
                 el = time.time() - t0
-                write_status(args.status, running=True, model=model_id,
+                write_status(args.status, backend=BACKEND, running=True, model=model_id,
                              done=wrote, total=len(todo),
                              rate=round(wrote / el, 2) if el else 0,
                              started=started, unreadable=unreadable,
@@ -864,7 +864,7 @@ def main():
                           f'{wrote / el if el else 0:.1f}/s', end='\r',
                           flush=True)
         el = time.time() - t0
-        write_status(args.status, running=bool(args.watch), model=model_id,
+        write_status(args.status, backend=BACKEND, running=bool(args.watch), model=model_id,
                      done=wrote, total=len(todo),
                      rate=round(wrote / el, 2) if el else 0,
                      started=started, unreadable=unreadable, passes=passes[0],
@@ -897,7 +897,7 @@ def main():
             print('\nstopped')
     # ...unless a different live run owns the file; see _owner_alive
     if not _owner_alive(args.status):
-        write_status(args.status, running=False, model=model_id, done=0,
+        write_status(args.status, backend=BACKEND, running=False, model=model_id, done=0,
                      total=0, rate=0, started=started, passes=passes[0],
                      watch=args.watch, finished=True)
     print('These are suggestions for sorting the queue. Nothing reads this '

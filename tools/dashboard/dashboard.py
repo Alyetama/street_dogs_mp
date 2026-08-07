@@ -6666,13 +6666,43 @@ def backend_of(model_id):
 
 
 def backends_available():
-    """Backends this checkout can actually run, in offer order."""
+    """Backends this checkout can actually RUN, in offer order."""
     out = []
     if CONFIGURED_TRIAGE:
         out.append('siglip')
     if RFDETR_PYTHON:
         out.append('rfdetr')
     return out
+
+
+def backends_offered():
+    """Backends the page may select: runnable, plus any with guesses on file.
+
+    A backend whose interpreter is gone still has opinions worth reading, and
+    the legacy `--model imagenet` one has no interpreter of its own at all --
+    filtering the dropdown by runnability alone made its guesses invisible to
+    every index while the tool still documented how to write them.
+    """
+    out = list(backends_available())
+    for b in TRIAGE_BACKENDS:
+        if b not in out and triage_seen(b):
+            out.append(b)
+    return out
+
+
+def pick_backend(want):
+    """The backend a request actually gets. ONE rule, used by every caller.
+
+    The strip and the queue validated this differently -- one against the list
+    of names that exist, the other against the list that can run -- so a saved
+    preference for a backend this checkout cannot run had the strip describing
+    one guesser while the queue served another's opinions, with nothing on
+    screen admitting it.
+    """
+    offered = backends_offered()
+    if want in offered:
+        return want
+    return offered[0] if offered else 'siglip'
 
 
 def triage_index(backend='siglip'):
@@ -6684,18 +6714,36 @@ def triage_index(backend='siglip'):
     for days, and a triage run appends to this file while that server is
     running.
     """
+    return _triage_load(backend)[0]
+
+
+def triage_seen(backend='siglip'):
+    """Crops this guesser has LOOKED at, guess or no guess.
+
+    Not the same set as the index. RF-DETR is allowed to find nothing and
+    writes that down; 922 of its records on this box say exactly that. Those
+    crops are finished work -- it will not re-run them -- but they carry no
+    bucket, so counting coverage off the index alone left the strip reporting
+    a permanent shortfall and sitting in the warn state no amount of guessing
+    could clear.
+    """
+    return _triage_load(backend)[1]
+
+
+def _triage_load(backend):
+    """(guesses, looked-at) for one backend, reloaded when the file changes."""
     backend = backend if backend in TRIAGE_BACKENDS else 'siglip'
     try:
         mtime = os.path.getmtime(TRIAGE_FILE)
     except OSError:
-        return _triage_cache['by'].get(backend, {})
+        return _triage_cache['by'].get(backend, ({}, set()))
     # Kept per backend rather than one slot: two tabs on different guessers
     # would otherwise evict each other on every poll and re-read 52,000 lines
     # each time.
     if _triage_cache['mtime'] != mtime:
         _triage_cache.update(mtime=mtime, by={})
     if backend not in _triage_cache['by']:
-        doc = {}
+        doc, seen = {}, set()
         try:
             with open(TRIAGE_FILE) as fh:
                 for ln in fh:
@@ -6709,6 +6757,7 @@ def triage_index(backend='siglip'):
                     if backend_of(r.get('backend') or r.get('model')) \
                             != backend:
                         continue
+                    seen.add(nm)
                     if r.get('bucket') not in TRIAGE_BUCKETS:
                         # A detector is allowed to find nothing, and it writes
                         # that down. The record proves the crop was looked at,
@@ -6729,8 +6778,8 @@ def triage_index(backend='siglip'):
                                'top': r.get('guess') or r.get('label')
                                or (r.get('top') or [[None]])[0][0]}
         except OSError:
-            doc = {}
-        _triage_cache['by'][backend] = doc
+            doc, seen = {}, set()
+        _triage_cache['by'][backend] = (doc, seen)
     return _triage_cache['by'][backend]
 
 
@@ -6782,7 +6831,7 @@ def triage_status(backend='siglip'):
     per backend for the same reason the index is: RF-DETR having guessed the
     pool says nothing about whether SigLIP has.
     """
-    backend = backend if backend in TRIAGE_BACKENDS else 'siglip'
+    backend = pick_backend(backend)
     doc = {}
     try:
         with open(TRIAGE_STATUS) as fh:
@@ -6812,7 +6861,8 @@ def triage_status(backend='siglip'):
     # the strip reported an RF-DETR run as SigLIP's the moment the dropdown
     # moved -- same progress bar, same Pause button, and pressing it would
     # have stopped a run the reader was not looking at.
-    run_backend = backend_of(doc.get('model')) if doc else None
+    run_backend = (doc.get('backend') or backend_of(doc.get('model'))) \
+        if doc else None
     live = bool(doc.get('running')) and age < quiet_ok and alive
     running = live and run_backend == backend
     # STALLED means genuinely hung: the process is still alive but has stopped
@@ -6824,8 +6874,13 @@ def triage_status(backend='siglip'):
     stalled = (bool(doc.get('running')) and alive and age >= quiet_ok
                and run_backend == backend)
     tri = triage_index(backend)
+    # Coverage is "has this guesser dealt with the crop", which includes the
+    # ones it looked at and had nothing to say about. Counting only the crops
+    # with a bucket made RF-DETR's coverage permanently short by the 922 it
+    # had honestly declined, and the strip could never leave its warning.
+    done = triage_seen(backend)
     pool = review_pool_names()
-    have = sum(1 for n, _ in pool if n in tri)
+    have = sum(1 for n, _ in pool if n in done)
     return {'ever': bool(doc) or bool(tri),
             # Which guesser this coverage is about, what else could be asked,
             # and how each did against the crops a human has already ruled on.
@@ -6840,9 +6895,8 @@ def triage_status(backend='siglip'):
                          else None,
             'backend': backend, 'backends': [
                 dict(BACKEND_INFO.get(b, {}), key=b,
-                     running=(b == backend_of(doc.get('model'))
-                              and running))
-                for b in backends_available()],
+                     running=(b == run_backend and live))
+                for b in backends_offered()],
             # Whether a run could be STARTED, which is not the same fact as
             # whether one ever has. The strip hides itself until something has
             # run, and it carries the Run button -- so clearing the guesses hid
@@ -7177,11 +7231,16 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     # reviewable pool.
     cdoc = country_index()
     by_country = cdoc.get('by_image') or {}
-    want_backend = (backend if backend in backends_available()
-                    else (backends_available() or ['siglip'])[0])
+    want_backend = pick_backend(backend)
     _tri = triage_index(want_backend)
     want = (country or '').upper()
     want_sg = suggest if suggest in TRIAGE_BUCKETS or suggest == 'none' else ''
+    # A filter the chosen guesser cannot honour is dropped, not applied. The
+    # control hides itself when a backend has no guesses, so switching to a
+    # fresh one while filtered to 'Looks like a dog' emptied the queue and
+    # took away the only thing that could put it back.
+    if not _tri and want_sg:
+        want_sg = ''
     want_leash = leash if leash in LEASH_FILTERS else 'all'
     want_find = (find or '').strip()
     cands = []
@@ -7508,15 +7567,31 @@ def _running_backend():
             doc = json.load(fh) or {}
     except (OSError, ValueError):
         return None
-    return backend_of(doc.get('model')) if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        return None
+    # the run says so itself when it can; backend_of(model) is the fallback
+    # for a status file written before the field existed
+    return doc.get('backend') or backend_of(doc.get('model'))
 
 
 def _triage_control(action, backend='siglip'):
     _reap()
+    backend = pick_backend(backend)
     pids = triage_pids()
     if action == 'stop':
         if not pids:
             return {'ok': True, 'running': False, 'msg': 'already stopped'}
+        # Stop MY guesser, never the other one. SIGTERM went to every
+        # triage_crops.py alive whatever backend it was running, and the
+        # button reads Pause for a moment after the dropdown moves, before
+        # the next poll corrects it -- so a fast click could end the other
+        # guesser's run with nothing on screen saying it had.
+        other = _running_backend()
+        if other and other != backend:
+            return {'ok': False, 'running': False,
+                    'msg': f'that is the '
+                           f'{BACKEND_INFO.get(other, {}).get("label") or other}'
+                           f' run — switch to it to stop it'}
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -7585,7 +7660,14 @@ def _triage_control(action, backend='siglip'):
                 tmp = TRIAGE_STATUS + '.tmp'
                 now = time.time()
                 with open(tmp, 'w') as fh:
+                    # Whose run this is, said outright. Everything that asks
+                    # reads it, and a stamp that omitted it fell back to
+                    # backend_of(model) over an absent model -- which answers
+                    # 'siglip', so every freshly started RF-DETR run was
+                    # attributed to the other guesser for the tens of seconds
+                    # its model takes to load.
                     json.dump({'running': True, 'starting': True,
+                               'backend': backend, 'model': model,
                                'pid': proc.pid, 'started': now,
                                'updated': now, 'done': 0, 'total': 0,
                                'watch': TRIAGE_WATCH, 'schema': 1}, fh)
