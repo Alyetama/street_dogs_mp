@@ -256,7 +256,7 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   // paintBackends' guard skips and t24 would pass untested
                   'leashf','find','findterms','findmsg','trgModel','trgNote',
                   // the folded legend that explains the dropdown's percentage
-                  'trgNoteSum','trgNoteBasis','trgNoteWhich']) {
+                  'trgNoteSum','trgNoteBasis','trgNoteWhich','trgNoteCaveat']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -1015,9 +1015,11 @@ async function t24() {
                guessed: 100, coverage: 1};
   // the real measured values, so a stale fixture cannot make a stale claim
   // in the UI look correct
-  const TWO = [{key: 'siglip', label: 'SigLIP 2', recall: 0.75,
+  const TWO = [{key: 'siglip', label: 'SigLIP 2', recall: 0.977, clears: 0.943,
+                buckets: ['dog', 'animal', 'object'],
                 note: 'leaves behind the vectors the search box needs'},
-               {key: 'rfdetr', label: 'RF-DETR', recall: 0.56,
+               {key: 'rfdetr', label: 'RF-DETR', recall: 0.678, clears: 0.957,
+                buckets: ['dog', 'animal', 'object'],
                 note: 'writes no search vectors'}];
   const BASIS = '120 crops a reviewer confirmed are dogs, and the share ' +
                 'each guesser files under "dog".';
@@ -1030,7 +1032,8 @@ async function t24() {
   const sel = byId['trgModel'];
   const WANT_OPT = Math.round(TWO[0].recall * 100) + '%';
   ck(!sel.hidden, 't24: two guessers offered but the control stayed hidden');
-  ck(sel.innerHTML.includes(WANT_OPT) && /56%/.test(sel.innerHTML),
+  const WANT_OPT2 = Math.round(TWO[1].recall * 100) + '%';
+  ck(sel.innerHTML.includes(WANT_OPT) && sel.innerHTML.includes(WANT_OPT2),
      't24: accuracy missing from the options: ' + sel.innerHTML);
   ck(/SigLIP 2/.test(sel.innerHTML) && /RF-DETR/.test(sel.innerHTML),
      't24: a guesser is missing from the options: ' + sel.innerHTML);
@@ -1083,7 +1086,11 @@ async function t25() {
            // asked about SigLIP while RF-DETR holds the card
            '/api/triage': () => Object.assign({}, BASE, {backend: 'siglip',
                                 running: false, busy_with: 'RF-DETR'}) };
-  await API.load(); API.trgPoll(); await flush(); await flush();
+  // t24 leaves the page on another guesser and a repaint of its own still in
+  // flight; settle both before asserting, or this reads t24's last payload
+  API.setBackend('siglip');
+  await flush(); await flush(); await flush();
+  API.trgPoll(); await flush(); await flush();
   ck(/RF-DETR/.test(byId['trgState'].textContent + byId['trgSub'].textContent),
      't25: the strip does not say which guesser is busy: ' +
      byId['trgState'].textContent);

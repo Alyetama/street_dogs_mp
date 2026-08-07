@@ -209,6 +209,32 @@ def coco_bucket(name):
     return 'animal' if name in COCO_ANIMALS else 'object'
 
 
+# ── the dog-bin gate, as a third opinion ────────────────────────────────────
+# The binary classifier this project trained on its own reviewers' verdicts,
+# which is what makes it worth having here: SigLIP and RF-DETR are strangers
+# to this data, and this one has seen nothing else.
+#
+# It answers a NARROWER question than the other two -- dog or not a dog, with
+# no opinion on what a not-dog is -- so it gets its own two buckets rather
+# than being squeezed into theirs. Calling its 'not_dog' an 'object' would
+# file every cow under "not an animal".
+#
+# Measured on dogbin_v5's val split (342 dogs, 300 not-dogs, all human
+# labelled), the same crops as the other two:
+#
+#   SigLIP so400m   finds 97.7% of the dogs   clears 94.3% of the not-dogs
+#   dogbin_008      finds 93.6%               clears 94.3%
+#   RF-DETR         finds 67.8%               clears 95.7%
+#
+# The trained model does NOT win, which is worth saying plainly. Two caveats
+# cut the other way though, and both favour the leaders: dogbin picked its
+# best epoch against this split, and SigLIP's bucket rule (mean, not sum) was
+# chosen on it too. RF-DETR is the only one of the three with no exposure to
+# it at all.
+DOGBIN_MODEL = 'dogbin'
+DOGBIN_BUCKETS = {'dog': 'dog', 'not_dog': 'not_dog'}
+
+
 def backend_of(model_id):
     """Which backend produced a record, given the model it names.
 
@@ -224,6 +250,8 @@ def backend_of(model_id):
     m = str(model_id or '')
     if m.startswith('rfdetr'):
         return 'rfdetr'
+    if m.startswith('dogbin'):
+        return 'dogbin'
     if m == 'imagenet' or m.startswith('efficientnet'):
         return 'imagenet'
     return 'siglip'
@@ -494,6 +522,10 @@ def main():
                          'CPU). RF-DETR needs its own environment -- it wants '
                          'transformers>=5, which the SigLIP backend does not '
                          'run on.')
+    ap.add_argument('--weights', default='',
+                    help='checkpoint for --model dogbin. Required there and '
+                         'ignored elsewhere; kept out of this file because '
+                         'the path is this machine\'s, not the repo\'s')
     ap.add_argument('--topk', type=int, default=3)
     ap.add_argument('--include-judged', action='store_true',
                     help='also predict crops already ruled on (for measuring '
@@ -527,13 +559,42 @@ def main():
                   flush=True)
     imagenet = args.model == 'imagenet'
     rfdetr = args.model in RFDETR_SIZES
+    dogbin = args.model == DOGBIN_MODEL
     # Only SigLIP puts images and text in one space, so only SigLIP can leave
     # behind the vectors free-text search runs on. Naming the capability, not
     # the backend, so the next one added has to answer the question.
-    embeds = not imagenet and not rfdetr
+    embeds = not imagenet and not rfdetr and not dogbin
     BACKEND = backend_of(args.model)
 
-    if rfdetr:
+    if dogbin:
+        from ultralytics import YOLO
+        if not args.weights:
+            raise SystemExit(
+                'the dog-bin backend needs --weights pointing at a trained '
+                'classifier (the dashboard passes the promoted one from '
+                'data/best_models.json)')
+        if not os.path.exists(args.weights):
+            raise SystemExit(f'no weights at {args.weights}')
+        model = YOLO(args.weights)
+        cats = dict(model.names)
+        # The bucket rule is an assertion about this checkpoint's classes, so
+        # check it against the checkpoint rather than trusting the filename.
+        # A two-class model whose classes are something else entirely would
+        # otherwise be filed under 'dog' and 'not a dog' regardless.
+        got = sorted(str(v) for v in cats.values())
+        if got != sorted(DOGBIN_BUCKETS):
+            raise SystemExit(
+                f'{args.weights} classifies {got}, not '
+                f'{sorted(DOGBIN_BUCKETS)} -- this is not a dog-bin gate')
+        if args.verify_buckets:
+            print(f'dog-bin classes verified: {cats}')
+            return 0
+        # `model` is the run's identity for every reader, and a bare 'dogbin'
+        # cannot say WHICH gate. The run directory names it.
+        run = os.path.basename(os.path.dirname(
+            os.path.dirname(os.path.abspath(args.weights))))
+        model_id = f'dogbin:{run}' if run else DOGBIN_MODEL
+    elif rfdetr:
         import rfdetr as _rf
         from rfdetr.assets.coco_classes import COCO_CLASSES
         # The bucket rule is an assertion about the class list, so check it --
@@ -624,6 +685,10 @@ def main():
                 'the GPU is full and the RF-DETR backend cannot fall back to '
                 'the CPU -- stop whatever has the card, or run the SigLIP '
                 'backend instead')
+        if dogbin:
+            # ultralytics takes the device per predict() call, so this one
+            # steps aside simply by asking for the CPU next time
+            return
         model = model.to('cpu')
         if embeds:
             with torch.no_grad():
@@ -675,6 +740,24 @@ def main():
         return canvas
 
     def _score_on(ims):
+        if dogbin:
+            out = []
+            for r in model.predict(ims, verbose=False,
+                                   device=(0 if DEV['device'] == 'cuda'
+                                           else 'cpu')):
+                probs = r.probs.data.tolist()
+                mass = {'dog': 0.0, 'not_dog': 0.0}
+                per = []
+                for idx, p in enumerate(probs):
+                    nm = str(cats.get(idx, ''))
+                    bk = DOGBIN_BUCKETS.get(nm)
+                    if not bk:
+                        continue
+                    mass[bk] = max(mass[bk], float(p))
+                    per.append((bk, 'dog' if bk == 'dog' else 'not a dog',
+                                float(p)))
+                out.append((mass, per))
+            return out
         if rfdetr:
             out = []
             for im in ims:

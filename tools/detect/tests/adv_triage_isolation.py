@@ -237,10 +237,16 @@ def _lift(path, name):
 DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
 _a, _b = _lift(TRIAGE, 'backend_of'), _lift(DASH, 'backend_of')
 if _a and _b:
+    # Every model string either backend can stamp on a record. A backend the
+    # tool knows and the dashboard does not files its guesses under the wrong
+    # guesser silently -- which is what happened when the dog-bin gate was
+    # added to one side only: 241 of its verdicts turned up in SigLIP's
+    # filter, and SigLIP's own coverage absorbed them.
     probes = ['google/siglip2-so400m-patch14-384',
               'google/siglip2-base-patch16-224', 'rfdetr', 'rfdetr-large',
               'rfdetr-nano', 'imagenet', 'efficientnet_v2_s.imagenet1k_v1',
-              'siglip', 'rfdetr-small', '', None, 'something-new']
+              'siglip', 'rfdetr-small', 'dogbin', 'dogbin:dogbin_008',
+              'dogbin:anything', '', None, 'something-new']
     differ = [f'{p!r}: tool={_a(p)!r} dashboard={_b(p)!r}'
               for p in probes if _a(p) != _b(p)]
     check('t8 the tool and the dashboard agree which backend wrote a record',

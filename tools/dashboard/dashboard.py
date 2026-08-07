@@ -2025,6 +2025,7 @@ color:var(--dim);transition:transform .15s}
 <details class="trgnote" id="trgNote" hidden>
   <summary id="trgNoteSum"></summary>
   <p id="trgNoteBasis"></p>
+  <p id="trgNoteCaveat"></p>
   <p id="trgNoteWhich"></p>
 </details>
 
@@ -3340,9 +3341,16 @@ function paintSuggest(j){
   var el=$('suggest');if(!el)return;
   if(!j.suggest_ready){el.hidden=true;return;}
   el.hidden=false;
-  var c=j.suggest_counts||{},L=[['','Any guess',null],
-    ['dog','Looks like a dog','dog'],['animal','Other animal','animal'],
-    ['object','Not an animal','object'],['none','No guess yet','none']];
+  /* The options are the chosen guesser's own vocabulary, sent with the
+     payload. Hard-coding three buckets here offered the dog-bin gate an
+     "Other animal" filter it can never fill, and hid the "Not a dog" one it
+     answers with. */
+  var c=j.suggest_counts||{},L=[['','Any guess',null]];
+  var bk=j.buckets||[{key:'dog',label:'Looks like a dog'},
+                     {key:'animal',label:'Other animal'},
+                     {key:'object',label:'Not an animal'}];
+  for(var b=0;b<bk.length;b++)L.push([bk[b].key,bk[b].label,bk[b].key]);
+  L.push(['none','No guess yet','none']);
   var html='';
   for(var i=0;i<L.length;i++){
     var k=L[i][2],n2=(k===null)?null:(c[k]||0);
@@ -3399,6 +3407,10 @@ load();loadBal();
 (function(){
   var el=document.getElementById('trg');
   if(!el)return;
+  function setPara(id,text){
+    var el=$(id); if(!el)return;
+    el.textContent=text||''; el.hidden=!text;
+  }
   function paintBackends(j){
     var sel=$('trgModel'), note=$('trgNote'), list=(j&&j.backends)||[];
     if(!sel)return;
@@ -3412,11 +3424,11 @@ load();loadBal();
     if(sel.dataset.sig!==want){
       sel.dataset.sig=want;
       sel.innerHTML=list.map(function(b){
-        /* 'finds' says it is a hit rate, not an error rate. Which dogs, and
-           why they are hard, is the fold below — an <option> cannot hold a
-           sentence and should not try. */
+        /* BOTH numbers. One alone is not a claim: a guesser that called
+           everything a dog would read 100% here. The set they came from is
+           the fold below — an <option> cannot hold a sentence. */
         var pct=b.recall==null?'':' · finds '+Math.round(b.recall*100)+
-                '% of test dogs';
+                '%, clears '+Math.round((b.clears||0)*100)+'%';
         return '<option value="'+esc(b.key)+'">'+esc(b.label)+pct+
                '</option>'}).join('');
     }
@@ -3429,13 +3441,17 @@ load();loadBal();
            WHICH dogs — in one line. Everything else waits behind the fold. */
         var pct=cur.recall==null?'':Math.round(cur.recall*100)+'%';
         $('trgNoteSum').textContent=pct
-          ? cur.label+' finds '+pct+' of the dogs in a fixed test set — '+
+          ? cur.label+' finds '+pct+' of the dogs in a fixed test set, and '+
+            'clears '+Math.round((cur.clears||0)*100)+'% of the not-dogs — '+
             'what that means'
           : 'about '+cur.label;
-        $('trgNoteBasis').textContent=j.recall_basis||'';
-        $('trgNoteWhich').textContent=cur.note||'';
-        $('trgNoteBasis').hidden=!j.recall_basis;
-        $('trgNoteWhich').hidden=!cur.note;
+        /* Set through a helper that tolerates an absent node. paint() runs
+           inside a promise chain, so a throw here is swallowed and the strip
+           simply stops repainting -- the whole of it, not just the legend.
+           One missing paragraph is not worth the progress bar. */
+        setPara('trgNoteBasis',j.recall_basis);
+        setPara('trgNoteCaveat',j.recall_caveat);
+        setPara('trgNoteWhich',cur.note);
       }
     }
   }
@@ -6649,14 +6665,26 @@ TRIAGE_STATUS = os.path.join(OUT, 'triage_status.json')
 # so a status older than this is reported as stopped rather than running. The
 # writer touches the file every batch, which is seconds apart even on CPU.
 TRIAGE_STALE_S = 90
-TRIAGE_BUCKETS = ('dog', 'animal', 'object')
+TRIAGE_BUCKETS = ('dog', 'animal', 'object', 'not_dog')
+# What each guesser can actually SAY, in the order the filter offers it. Per
+# backend because they do not answer the same question: the dog-bin gate is
+# binary and has no opinion about what a not-dog is, and folding its 'not_dog'
+# into 'object' would file every cow under "not an animal".
+BUCKET_LABELS = {'dog': 'Looks like a dog', 'animal': 'Other animal',
+                 'object': 'Not an animal', 'not_dog': 'Not a dog'}
+OPEN_BUCKETS = ('dog', 'animal', 'object')
 # The guessers, and what it takes to run each. A backend is only offered when
 # an interpreter for it is named in config -- they are different environments
 # on purpose: RF-DETR wants transformers>=5 and the SigLIP backend does not
 # run on that, so installing them together would break the one that works.
-TRIAGE_BACKENDS = ('siglip', 'rfdetr')
+TRIAGE_BACKENDS = ('siglip', 'dogbin', 'rfdetr')
 RFDETR_PYTHON = cfg('rfdetr_python', '', env='RFDETR_PYTHON')
 RFDETR_MODEL = cfg('rfdetr_model', 'rfdetr', env='RFDETR_MODEL')
+# The dog-bin gate runs under ultralytics, a third environment again. Its
+# weights are NOT config: the promoted checkpoint is already recorded in
+# data/best_models.json, and a second place to write it down is a second place
+# for it to go stale.
+DOGBIN_PYTHON = cfg('dogbin_python', '', env='DOGBIN_PYTHON')
 # Share of the 120 crops in data/hard_positives -- ones the DETECTOR was
 # unsure about and a human then confirmed are dogs -- that each guesser files
 # under 'dog'. Both measured the same way on the same set, which is the only
@@ -6670,16 +6698,29 @@ RFDETR_MODEL = cfg('rfdetr_model', 'rfdetr', env='RFDETR_MODEL')
 # They are a like-for-like comparison between the two guessers, which is what
 # the dropdown is for.
 BACKEND_INFO = {
-    'siglip': {'label': 'SigLIP 2', 'recall': 0.75,
-               'note': 'reads the whole crop, always has an opinion, and '
-                       'leaves behind the vectors the search box needs'},
-    'rfdetr': {'label': 'RF-DETR', 'recall': 0.56,
+    'siglip': {'label': 'SigLIP 2', 'recall': 0.977, 'clears': 0.943,
+               'buckets': OPEN_BUCKETS,
+               'note': 'a general-purpose model asked our question in our own '
+                       'words. Reads the whole crop, always has an opinion, '
+                       'and is the only one that leaves behind the vectors '
+                       'the search box needs.'},
+    'dogbin': {'label': 'Dog-bin gate', 'recall': 0.936, 'clears': 0.943,
+               'buckets': ('dog', 'not_dog'),
+               'note': 'the classifier this project trained on its own '
+                       'reviewers\' verdicts — the only one of the three that '
+                       'has seen nothing but this data. It answers a narrower '
+                       'question, dog or not, with no opinion on what a '
+                       'not-dog is. It does not win: SigLIP finds more of the '
+                       'dogs and clears the same share of not-dogs. Writes no '
+                       'search vectors.'},
+    'rfdetr': {'label': 'RF-DETR', 'recall': 0.678, 'clears': 0.957,
+               'buckets': OPEN_BUCKETS,
                'note': 'a COCO detector: names a concrete class or says '
-                       'nothing. Weaker on these crops — most are under 64px '
-                       'and a detector needs pixels on target — but it rarely '
-                       'calls a non-dog a dog, so it is the better one for '
-                       'finding cows, horses and people. Writes no search '
-                       'vectors.'},
+                       'nothing. Weakest at finding dogs — most crops are '
+                       'under 64px and a detector needs pixels on target — '
+                       'but it is the least likely to call a non-dog a dog, '
+                       'so it is the one for finding cows, horses and people. '
+                       'Writes no search vectors.'},
 }
 # What the percentage beside each guesser IS. Sent to the page rather than
 # written into it, so the sentence and the numbers it explains come from one
@@ -6687,13 +6728,21 @@ BACKEND_INFO = {
 # which dogs, or what the guesser had to do to count -- and a number nobody
 # can interpret is not the safeguard it was put there to be.
 RECALL_BASIS = (
-    'The percentage is a fixed test, the same one for both: 120 crops a '
-    'reviewer confirmed are dogs, and the share each guesser files under '
-    '"dog" rather than "other animal" or "not an animal". Those 120 are '
-    'crops the DETECTOR was unsure about — 5 to 10% confidence — and a '
-    'person then confirmed, so they are the hard cases by construction. '
-    'Neither number is how often a guesser is right about an ordinary crop; '
-    'together they say which of the two to believe when they disagree.')
+    'One fixed test, the same crops for all three: the 342 dogs and 300 '
+    'not-dogs of the dog-bin validation split, every one of them labelled by '
+    'a reviewer. "Finds" is the share of the dogs a guesser files under '
+    '"dog"; "clears" is the share of the not-dogs it does not. A guesser that '
+    'called everything a dog would score 100% and 0%, so the pair is the '
+    'claim, never one number alone.')
+# The part that is easy to leave out and expensive to leave out. Two of the
+# three had a hand in choosing themselves against this split, which flatters
+# exactly the two that lead.
+RECALL_CAVEAT = (
+    'None of the three trained on these crops, but two of them were TUNED '
+    'against them: the dog-bin gate picked its best epoch here, and SigLIP\'s '
+    'bucket rule was chosen here too. RF-DETR is the only one that has never '
+    'seen this split in any form. Read the gap between the leaders as the '
+    'optimistic end of its range.')
 _triage_cache = {'mtime': None, 'by': {}}
 
 
@@ -6707,9 +6756,32 @@ def backend_of(model_id):
     m = str(model_id or '')
     if m.startswith('rfdetr'):
         return 'rfdetr'
+    if m.startswith('dogbin'):
+        return 'dogbin'
     if m == 'imagenet' or m.startswith('efficientnet'):
         return 'imagenet'
     return 'siglip'
+
+
+def dogbin_weights():
+    """The promoted dog-bin checkpoint, or '' if there is none on disk.
+
+    Read from data/best_models.json every time rather than cached: promoting a
+    new gate rewrites that file, and a guesser still running the old one
+    because the dashboard read the path at import is the kind of staleness
+    nobody notices.
+    """
+    try:
+        with open(BEST_MODELS) as fh:
+            best = (json.load(fh).get('projects') or {}) \
+                .get('dog-bin', {}).get('best') or {}
+    except (OSError, ValueError, AttributeError):
+        return ''
+    rel = str(best.get('weights') or '')
+    if not rel:
+        return ''
+    p = rel if os.path.isabs(rel) else os.path.join(training_root(), rel)
+    return p if os.path.exists(p) else ''
 
 
 def backends_available():
@@ -6717,6 +6789,10 @@ def backends_available():
     out = []
     if CONFIGURED_TRIAGE:
         out.append('siglip')
+    # weights as well as an interpreter: the gate is a checkpoint on this
+    # machine, and offering to run one that is not there wastes a click
+    if DOGBIN_PYTHON and dogbin_weights():
+        out.append('dogbin')
     if RFDETR_PYTHON:
         out.append('rfdetr')
     return out
@@ -6940,7 +7016,8 @@ def triage_status(backend='siglip'):
             'busy_with': (BACKEND_INFO.get(run_backend, {}).get('label')
                           or run_backend) if (live and run_backend != backend)
                          else None,
-            'backend': backend, 'recall_basis': RECALL_BASIS, 'backends': [
+            'backend': backend, 'recall_basis': RECALL_BASIS,
+            'recall_caveat': RECALL_CAVEAT, 'backends': [
                 dict(BACKEND_INFO.get(b, {}), key=b,
                      running=(b == run_backend and live))
                 for b in backends_offered()],
@@ -7479,8 +7556,14 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             # control at all -- an empty file means nobody has run the tool.
             'suggest': want_sg, 'suggest_counts': sg_offer,
             'suggest_ready': bool(_tri),
-            # which guesser's opinions the filter above is showing
+            # which guesser's opinions the filter above is showing, and what
+            # that guesser is able to say. The dog-bin gate answers dog or
+            # not-dog and nothing else, so offering it 'Other animal' would be
+            # offering an option that can only ever return nothing.
             'backend': want_backend,
+            'buckets': [{'key': b, 'label': BUCKET_LABELS.get(b, b)}
+                        for b in (BACKEND_INFO.get(want_backend, {})
+                                  .get('buckets') or OPEN_BUCKETS)],
             # crops only: the set's manifest sits in the same directory
             'harvested_available': sum(1 for n, d in pooled
                                        if d != CROPS and _CROP_RE.match(n)),
@@ -7667,7 +7750,8 @@ def _triage_control(action, backend='siglip'):
                            f'guesser (set {backend}_python in the dashboard '
                            f'config)' if backend != 'siglip' else
                            'no interpreter configured for the guesser'}
-        py = RFDETR_PYTHON if backend == 'rfdetr' else TRIAGE_PYTHON
+        py = {'rfdetr': RFDETR_PYTHON,
+              'dogbin': DOGBIN_PYTHON}.get(backend) or TRIAGE_PYTHON
         script = os.path.join(REPO, 'tools', 'detect', 'triage_crops.py')
         if not os.path.exists(script):
             return {'ok': False, 'running': False, 'msg': 'triage_crops.py is missing'}
@@ -7675,9 +7759,12 @@ def _triage_control(action, backend='siglip'):
         try:
             log = open(logp, 'a')
             argv = [py, script, '--watch', str(TRIAGE_WATCH)]
-            model = RFDETR_MODEL if backend == 'rfdetr' else TRIAGE_MODEL
+            model = {'rfdetr': RFDETR_MODEL,
+                     'dogbin': 'dogbin'}.get(backend) or TRIAGE_MODEL
             if model:
                 argv += ['--model', model]
+            if backend == 'dogbin':
+                argv += ['--weights', dogbin_weights()]
             if TRIAGE_DEVICE:
                 argv += ['--device', TRIAGE_DEVICE]
             proc = subprocess.Popen(
