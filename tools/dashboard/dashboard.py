@@ -5862,11 +5862,19 @@ def _smart_read(dev, bus):
     often need to be told how to talk to the disk behind them, so one retry
     with -d sat before giving up -- that is still a read.
     """
-    if not dev or not shutil.which('smartctl'):
+    sm = shutil.which('smartctl')
+    if not dev or not sm:
         return 'unreadable', 'smartctl is not installed'
-    tries = [['smartctl', '-H', '-j', dev]]
+    # Unprivileged first, and only then through sudo -n -- which fails
+    # immediately when no rule grants it rather than waiting on a password
+    # prompt no page build could answer. Without this second form the sudoers
+    # rule the section asks for would change nothing: the rule permits
+    # `sudo smartctl`, and nothing here was running sudo.
+    base = ['-H', '-j']
+    tries = [[sm] + base + [dev]]
     if bus == 'usb':
-        tries.append(['smartctl', '-H', '-j', '-d', 'sat', dev])
+        tries.append([sm] + base + ['-d', 'sat', dev])
+    tries += [['sudo', '-n', sm] + t[1:] for t in list(tries)]
     last = ''
     for argv in tries:
         try:
@@ -5887,8 +5895,10 @@ def _smart_read(dev, bus):
                         for m in (doc.get('smartctl') or {}).get('messages')
                         or [])
         last = msgs or (got.stderr or '').strip() or 'no verdict returned'
-        if 'permission' in last.lower():
-            # every device answers this way without root, so stop asking
+        if 'permission' in last.lower() and argv[0] == 'sudo':
+            # sudo refused too: the rule is absent, so stop asking
+            return 'unreadable', 'needs root'
+        if 'sudo:' in last.lower() or 'a password is required' in last.lower():
             return 'unreadable', 'needs root'
     return 'unreadable', last[:120]
 
@@ -6001,41 +6011,67 @@ def render_drives():
         if pct is not None:
             meter = ('<i class="dvmeter"><i style="width:'
                      + f'{min(100.0, pct * 100):.1f}' + '%"></i></i>')
-        room = (f'<b>{_gb(r["free"]):,.0f} GB</b><span> free of '
-                f'{_gb(r["total"]):,.0f} GB &middot; '
-                f'{pct * 100:.0f}% used</span>') if pct is not None else                ('<span>capacity unreadable while unmounted</span>'
-                if not r['mounted'] else '<span>capacity unreadable</span>')
-        # SMART's own words, never paraphrased into a verdict it did not give
-        sm = {'passed': 'SMART passed',
-              'failing': 'SMART FAILING',
-              'unreadable': 'SMART unavailable'}[r['smart']]
-        smcls = {'passed': 'ok', 'failing': 'bad',
-                 'unreadable': 'dim'}[r['smart']]
-        why = f' &middot; {esc_html(r["smart_detail"])}' \
-            if r['smart'] != 'passed' and r['smart_detail'] else ''
+        # the meter already carries the proportion; a percentage beside it is
+        # the third telling of one number
+        room = ((f'<b>{_gb(r["free"]):,.0f} GB</b><span> free of '
+                 f'{_gb(r["total"]):,.0f} GB</span>') if pct is not None
+                else ('<span>capacity unreadable while unmounted</span>'
+                      if not r['mounted']
+                      else '<span>capacity unreadable</span>'))
+        # Only when SMART has something to say. Six cards each reading "SMART
+        # passed" is six repetitions of the normal case; that it was read at
+        # all is one fact about the whole section, and it is stated once.
+        smrow = ''
+        if r['smart'] != 'passed':
+            sm = ('SMART FAILING' if r['smart'] == 'failing'
+                  else 'SMART unavailable')
+            smcls = 'bad' if r['smart'] == 'failing' else 'dim'
+            why = (f' &middot; {esc_html(r["smart_detail"])}'
+                   if r['smart_detail'] else '')
+            smrow = f'<div class="dvsm {smcls}">{sm}{why}</div>'
         cards.append(
             f'<div class="dv {kind}">'
             f'<div class="dvtop"><b class="dvname">{esc_html(r["label"])}</b>'
             f'<span class="dvverdict">{word}</span></div>'
             f'{meter}'
             f'<div class="dvroom">{room}</div>'
-            f'<div class="dvsm {smcls}">{sm}{why}</div>'
+            f'{smrow}'
             f'</div>')
+
+    # That SMART was consulted at all is worth one line, so a section with
+    # nothing to report cannot be mistaken for one that never checked.
+    npass = sum(1 for r in rows if r['smart'] == 'passed')
+    nfail = sum(1 for r in rows if r['smart'] == 'failing')
+    if nfail:
+        lead = (f'<p class="dvlead">SMART reports {nfail} of {len(rows)} '
+                f'drive{"" if nfail == 1 else "s"} FAILING</p>')
+    elif npass == len(rows):
+        lead = f'<p class="dvsum">SMART passed on all {len(rows)} drives</p>'
+    elif npass:
+        lead = (f'<p class="dvsum">SMART passed on {npass} of {len(rows)} '
+                f'&middot; the rest could not be read</p>')
+    else:
+        lead = '<p class="dvsum">SMART could not be read on any drive</p>'
 
     note = ''
     if any(r['smart'] == 'unreadable' and r['smart_detail'] == 'needs root'
            for r in rows):
         # The rule is narrow on purpose: one read-only subcommand, no wildcard
         # over smartctl's whole surface, and nothing that could start a test.
+        who = esc_html(os.environ.get('USER') or 'you')
+        smpath = esc_html(shutil.which('smartctl') or '/usr/sbin/smartctl')
         note = (
             '<p class="dvnote">SMART needs root to read. It is a read-only '
             'query &mdash; it does not unmount anything, interrupt I/O or '
-            'touch the filesystem &mdash; but the kernel still gates it. To '
-            'turn it on, add one line with <code>sudo visudo</code>:<br>'
-            '<code>' + esc_html(os.environ.get('USER') or 'you')
-            + ' ALL=(root) NOPASSWD: /usr/sbin/smartctl -H -j *</code><br>'
+            'touch the filesystem &mdash; but the kernel still gates it. '
+            'Grant just that one command in its own drop-in file, which '
+            '<code>visudo</code> syntax-checks before saving:<br>'
+            '<code>sudo visudo -f /etc/sudoers.d/smartctl-dashboard</code>'
+            '<br>and put one line in it:<br>'
+            '<code>' + who + ' ALL=(root) NOPASSWD: ' + smpath
+            + ' -H -j *</code><br>'
             'Until then the capacity and mount checks above still hold.</p>')
-    return '<div class="dvs">' + ''.join(cards) + '</div>' + note
+    return lead + '<div class="dvs">' + ''.join(cards) + '</div>' + note
 
 
 def render_store_path():
@@ -9649,6 +9685,8 @@ transition:width .4s ease}
 .dv.bad{border-color:rgba(216,116,58,.55);background:rgba(216,116,58,.07)}
 .dv.bad .dvmeter i{background:var(--red)}
 .dv.bad .dvverdict{color:var(--red);font-weight:650}
+.dvsum{margin:0 0 11px;font-size:11.5px;color:var(--dim)}
+.dvlead{margin:0 0 11px;font-size:12.5px;color:var(--red);font-weight:650}
 .dvnote{margin:12px 0 0;font-size:11.5px;line-height:1.6;color:var(--dim);
 max-width:78ch}
 .dvnote code{font-size:11px;background:var(--panel2);border:1px solid var(--bd);
