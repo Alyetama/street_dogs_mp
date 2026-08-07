@@ -5797,6 +5797,116 @@ def _db_facts(path):
         return (None, None)
 
 
+# ── drive health ────────────────────────────────────────────────────────────
+# The harvest is spread across six roots on separate disks, and the two ways
+# that goes wrong are silent. A drive that is not mounted does not error: the
+# catalog simply finds no cells under it and every region it held reads as
+# zero. A drive that is full does not error either until a write fails, by
+# which point a sweep has been dropping frames for hours.
+#
+# Both are visible in one number each -- is it there, and how much room is
+# left -- so this section is one row per drive and nothing else. Where each
+# region's data lives is a different question, and the section above answers
+# it.
+DRIVE_TIGHT_PCT = 0.90        # used share at which a disk needs attention
+DRIVE_TIGHT_GB = 50.0         # ...or an absolute floor, whichever bites first
+
+
+def _drive_free(path):
+    """(total, used, free) bytes for the filesystem holding `path`, or None."""
+    try:
+        u = shutil.disk_usage(path)
+        return u.total, u.used, u.free
+    except OSError:
+        return None
+
+
+def drive_health():
+    """One record per configured root: is it there, and how much room is left.
+
+    Never raises. This runs inside the page build, and a drive that has gone
+    away is the case it exists to report -- failing the whole dashboard
+    because one root is unplugged would hide the answer behind the symptom.
+    """
+    out = []
+    for label, root in sorted(_grid_roots().items()):
+        rec = {'label': label, 'root': root, 'mounted': os.path.isdir(root),
+               'cells': None, 'total': None, 'used': None, 'free': None}
+        if rec['mounted']:
+            try:
+                # cheap: one listdir of cell directories, no recursion
+                with os.scandir(root) as it:
+                    rec['cells'] = sum(1 for e in it if e.is_dir())
+            except OSError:
+                rec['cells'] = None
+            got = _drive_free(root)
+            if got:
+                rec['total'], rec['used'], rec['free'] = got
+        out.append(rec)
+    return out
+
+
+def _gb(n):
+    return n / (1024.0 ** 3)
+
+
+def render_drives():
+    """The drives, worst first: gone, then tight, then the rest by name."""
+    rows = drive_health()
+    if not rows:
+        return ('<div class="mnone">no data/catalog_dirs.txt &mdash; nothing '
+                'to check</div>')
+
+    def tight(r):
+        if not r['total']:
+            return False
+        return (r['used'] / r['total'] >= DRIVE_TIGHT_PCT
+                or _gb(r['free']) < DRIVE_TIGHT_GB)
+
+    def rank(r):
+        return (0 if not r['mounted'] else 1 if tight(r) else 2, r['label'])
+    rows.sort(key=rank)
+    gone = sum(1 for r in rows if not r['mounted'])
+    warn = sum(1 for r in rows if r['mounted'] and tight(r))
+
+    out = []
+    for r in rows:
+        cls = 'drv' + ('' if r['mounted'] else ' gone') \
+            + (' tight' if r['mounted'] and tight(r) else '')
+        if not r['mounted']:
+            # The path is the actionable half: it says which disk to plug in.
+            state = ('<span class="drvstate">not mounted</span>'
+                     '<span class="drvsub">every region on it reads as zero '
+                     'until it is back</span>')
+            bar = ''
+        elif not r['total']:
+            state = '<span class="drvstate">size unreadable</span>'
+            bar = ''
+        else:
+            pct = r['used'] / r['total']
+            state = ('<b>' + f'{_gb(r["free"]):,.0f}' + ' GB</b>'
+                     '<span class="drvsub">free of '
+                     + f'{_gb(r["total"]):,.0f}' + ' GB</span>')
+            bar = ('<i class="drvbar"><i style="width:'
+                   + f'{min(100.0, pct * 100):.1f}' + '%"></i></i>'
+                   '<span class="drvpct">' + f'{pct * 100:.0f}' + '%</span>')
+        cells = ('' if r['cells'] is None
+                 else f'<span class="drvcells">{r["cells"]:,} cells</span>')
+        out.append('<div class="' + cls + '">'
+                   '<span class="drvname">' + esc_html(r['label']) + '</span>'
+                   + state + bar + cells + '</div>')
+    lead = ''
+    if gone or warn:
+        bits = []
+        if gone:
+            bits.append(f'{gone} not mounted')
+        if warn:
+            bits.append(f'{warn} nearly full')
+        lead = ('<div class="drvlead">' + esc_html(' \u00b7 '.join(bits))
+                + '</div>')
+    return lead + '<div class="drvs">' + ''.join(out) + '</div>'
+
+
 def render_store_path():
     """The one path worth copying: what you paste into duckdb or a notebook.
 
@@ -8719,6 +8829,7 @@ def render(ov, per, tr, now, locs=()):
             .replace('__LB_JS__', LB_JS)
             .replace('__MODELS__', render_models())
             .replace('__TRAINING__', render_training())
+            .replace('__DRIVES__', render_drives())
             .replace('__STOREPATH__', render_store_path()))
     # A placeholder that survives is not cosmetic: __LB_JS__ left inside the
     # <script> is a syntax error that kills EVERY handler on the page (charts,
@@ -9373,6 +9484,31 @@ a.cand:hover .cname{color:var(--tx)}
 .mfoot{font-size:11px;color:var(--dim);margin-top:18px;padding-top:12px;
 border-top:1px solid var(--bd)}
 .mfoot code{background:var(--panel2);padding:1px 6px;border-radius:5px}
+/* ── drive health ─────────────────────────────────────────────────────────
+   One row per root, worst first. A missing drive gets the loudest treatment
+   on the page because it is the one failure that looks like an empty result
+   instead of an error. */
+.drvlead{font-size:12px;color:var(--red);margin:0 0 10px;font-weight:600}
+.drvs{display:grid;gap:1px;background:var(--bd);border:1px solid var(--bd);
+border-radius:9px;overflow:hidden}
+.drv{display:flex;align-items:center;gap:12px;padding:9px 13px;
+background:var(--panel);font-size:12.5px;color:var(--mut);
+font-variant-numeric:tabular-nums}
+.drvname{flex:none;min-width:84px;color:var(--tx);font-weight:640}
+.drv b{color:var(--tx);font-weight:640}
+.drvsub{color:var(--dim);font-size:11.5px}
+.drvbar{flex:1;min-width:70px;height:4px;border-radius:3px;
+background:rgba(130,140,150,.18);overflow:hidden;display:block}
+.drvbar i{display:block;height:100%;background:var(--green);border-radius:3px}
+.drvpct{flex:none;color:var(--dim);font-size:11.5px}
+.drvcells{flex:none;color:var(--dim);font-size:11.5px;margin-left:auto}
+.drv.tight .drvbar i{background:var(--acc)}
+.drv.tight b{color:var(--acc)}
+.drv.gone{background:rgba(216,116,58,.09)}
+.drv.gone .drvname{color:var(--red)}
+.drvstate{flex:none;color:var(--red);font-weight:600}
+.drv.gone .drvsub{flex:1}
+@media(max-width:640px){.drv{flex-wrap:wrap}.drvcells{margin-left:0}}
 .mnone{font-size:12px;color:var(--dim)}
 @media(max-width:760px){.pipe{padding-left:24px}.sproj{margin-left:0;width:100%}}
 @media(prefers-reduced-motion:reduce){.stg.live .dot{animation:none}}
@@ -10044,6 +10180,11 @@ __LB_HTML__
 <details class="fold sec" id="f-locs" open>
 <summary class="sect">Where everything lives <span>which drive holds each region's parquet data vs its jpgs — colour marks the role, drives ordered biggest first</span></summary>
 <div class="panel">__LOCS__</div>
+</details>
+
+<details class="fold sec" id="f-drives" open>
+<summary class="sect">Drive health <span>the two ways a root fails quietly — unmounted, or out of room</span></summary>
+<div class="panel">__DRIVES__</div>
 </details>
 
 <footer>Source: DuckDB catalog · downloaded jpgs ÷ ground-animal manifest rows<br>generated by tools/dashboard/dashboard.py</footer>
