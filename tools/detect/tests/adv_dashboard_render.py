@@ -1065,6 +1065,45 @@ def check_training_tracker():
           'are found')
 
 
+# Classes every section is entitled to wear: the section wrapper idiom, the
+# shared components, and the state modifiers. Everything else a section uses
+# should belong to it alone.
+SHARED_CLASSES = {
+    'panel', 'sect', 'fold', 'sec', 'phead', 'phint', 'chart', 'cards',
+    'ok', 'bad', 'warn', 'dim', 'mnone', 'cnt', 'hint', 'bar', 'fill',
+    'rbtn', 'quiet', 'danger', 'bico', 'sp', 'num', 'pill', 'tag',
+}
+# A section whose markup is expected to keep to its own prefix. The whole page
+# shares one stylesheet, so a section that invents a class already in use
+# silently restyles somebody else's markup: `.dv` was the sweep panel's
+# percentage span, and a drive-card rule of the same name put a border and a
+# panel background around every percentage on the dashboard. Nothing failed --
+# the page was valid, rendered, and wrong.
+#
+# Naming the prefix is the cheap half of the fix. Add a section, add a line.
+SECTION_PREFIX = {'f-drives': 'dh'}
+
+
+def css_collisions(index_path):
+    """[(class, section)] the section wears that are neither its own nor shared."""
+    import re as _re
+    h = open(index_path).read()
+    body = h[h.index('</style>'):]
+    out = []
+    for sid, prefix in SECTION_PREFIX.items():
+        i = body.find(f'id="{sid}"')
+        if i < 0:
+            continue
+        j = body.find('</details>', i)
+        seg = body[i:j if j > 0 else len(body)]
+        mine = {w for a in _re.findall(r'class="([^"]+)"', seg)
+                for w in a.split()}
+        for c in sorted(mine - SHARED_CLASSES):
+            if not c.startswith(prefix):
+                out.append((c, sid))
+    return out
+
+
 def main():
     if shutil.which('node') is None:
         print('SKIP: node not on PATH — client render test not run')
@@ -1076,6 +1115,15 @@ def main():
     # broken: that is exactly what happened when an apostrophe escaped as
     # \\' in the non-raw template emitted a bare quote, killed every handler
     # on the page, and this test -- run before the rebuild -- said ok.
+    stray = css_collisions(INDEX)
+    if stray:
+        for c, sid in stray[:8]:
+            print(f'FAIL {sid} wears class "{c}", which is neither its own '
+                  f'prefix nor a shared component — one stylesheet, so it is '
+                  f'styling or being styled by another section')
+        return 1
+    print('ok   every section keeps to its own class prefix')
+
     src = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
     if os.path.exists(src) and os.path.getmtime(src) > os.path.getmtime(INDEX):
         raise SystemExit(

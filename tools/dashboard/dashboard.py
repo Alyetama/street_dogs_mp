@@ -6095,7 +6095,7 @@ def render_drives():
         pct = (r['used'] / r['total']) if r.get('total') else None
         meter = ''
         if pct is not None:
-            meter = ('<i class="dvmeter"><i style="width:'
+            meter = ('<i class="dhmeter"><i style="width:'
                      + f'{min(100.0, pct * 100):.1f}' + '%"></i></i>')
         # the meter already carries the proportion; a percentage beside it is
         # the third telling of one number
@@ -6114,23 +6114,23 @@ def render_drives():
             smcls = 'bad' if r['smart'] == 'failing' else 'dim'
             why = (f' &middot; {esc_html(r["smart_detail"])}'
                    if r['smart_detail'] else '')
-            smrow = f'<div class="dvsm {smcls}">{sm}{why}</div>'
+            smrow = f'<div class="dhsm {smcls}">{sm}{why}</div>'
         # What the drive says about its own wear. A zero here is the good
         # news and worth stating -- "0 reallocated" is the reason to keep
         # using the disk -- so the values are shown whatever they are, and
         # only the ones that are not zero take a colour.
         facts = ''.join(
-            f'<span class="dvf {lvl}" title="{esc_html(why)}">'
+            f'<span class="dhf {lvl}" title="{esc_html(why)}">'
             f'{esc_html(val)}</span>'
             for val, why, lvl in (r.get('smart_facts') or []))
         if facts:
-            facts = f'<div class="dvfacts">{facts}</div>'
+            facts = f'<div class="dhfacts">{facts}</div>'
         cards.append(
-            f'<div class="dv {kind}">'
-            f'<div class="dvtop"><b class="dvname">{esc_html(r["label"])}</b>'
-            f'<span class="dvverdict">{word}</span></div>'
+            f'<div class="dh {kind}">'
+            f'<div class="dhtop"><b class="dhname">{esc_html(r["label"])}</b>'
+            f'<span class="dhverdict">{word}</span></div>'
             f'{meter}'
-            f'<div class="dvroom">{room}</div>'
+            f'<div class="dhroom">{room}</div>'
             f'{facts}'
             f'{smrow}'
             f'</div>')
@@ -6140,15 +6140,15 @@ def render_drives():
     npass = sum(1 for r in rows if r['smart'] == 'passed')
     nfail = sum(1 for r in rows if r['smart'] == 'failing')
     if nfail:
-        lead = (f'<p class="dvlead">SMART reports {nfail} of {len(rows)} '
+        lead = (f'<p class="dhlead">SMART reports {nfail} of {len(rows)} '
                 f'drive{"" if nfail == 1 else "s"} FAILING</p>')
     elif npass == len(rows):
-        lead = f'<p class="dvsum">SMART passed on all {len(rows)} drives</p>'
+        lead = f'<p class="dhsum">SMART passed on all {len(rows)} drives</p>'
     elif npass:
-        lead = (f'<p class="dvsum">SMART passed on {npass} of {len(rows)} '
+        lead = (f'<p class="dhsum">SMART passed on {npass} of {len(rows)} '
                 f'&middot; the rest could not be read</p>')
     else:
-        lead = '<p class="dvsum">SMART could not be read on any drive</p>'
+        lead = '<p class="dhsum">SMART could not be read on any drive</p>'
 
     note = ''
     if any(r['smart'] == 'unreadable' and r['smart_detail'] == 'needs root'
@@ -6158,7 +6158,7 @@ def render_drives():
         who = esc_html(os.environ.get('USER') or 'you')
         smpath = esc_html(shutil.which('smartctl') or '/usr/sbin/smartctl')
         note = (
-            '<p class="dvnote">SMART needs root to read. It is a read-only '
+            '<p class="dhnote">SMART needs root to read. It is a read-only '
             'query &mdash; it does not unmount anything, interrupt I/O or '
             'touch the filesystem &mdash; but the kernel still gates it. '
             'Grant just that one command in its own drop-in file, which '
@@ -6168,7 +6168,7 @@ def render_drives():
             '<code>' + who + ' ALL=(root) NOPASSWD: ' + smpath
             + ' -H -j *</code><br>'
             'Until then the capacity and mount checks above still hold.</p>')
-    return lead + '<div class="dvs">' + ''.join(cards) + '</div>' + note
+    return lead + '<div class="dhs">' + ''.join(cards) + '</div>' + note
 
 
 def render_store_path():
@@ -9758,45 +9758,45 @@ border-top:1px solid var(--bd)}
    The capacity meter is the only ink that carries state, and it carries it in
    the drive's own colour -- so a glance across the grid is the whole report.
    The cell count went: it answered a question nobody was asking. */
-.dvs{display:grid;gap:10px;
+.dhs{display:grid;gap:10px;
 grid-template-columns:repeat(auto-fill,minmax(232px,1fr))}
-.dv{border:1px solid var(--bd);border-radius:11px;padding:12px 13px 11px;
+.dh{border:1px solid var(--bd);border-radius:11px;padding:12px 13px 11px;
 background:var(--panel);display:grid;gap:8px;align-content:start}
-.dvtop{display:flex;align-items:baseline;gap:9px}
-.dvname{font-size:13.5px;font-weight:660;color:var(--tx);letter-spacing:-.1px}
-.dvverdict{margin-left:auto;font-size:10.5px;letter-spacing:.05em;
+.dhtop{display:flex;align-items:baseline;gap:9px}
+.dhname{font-size:13.5px;font-weight:660;color:var(--tx);letter-spacing:-.1px}
+.dhverdict{margin-left:auto;font-size:10.5px;letter-spacing:.05em;
 text-transform:uppercase;color:var(--dim)}
-.dvmeter{display:block;height:5px;border-radius:3px;
+.dhmeter{display:block;height:5px;border-radius:3px;
 background:rgba(130,140,150,.18);overflow:hidden}
-.dvmeter i{display:block;height:100%;border-radius:3px;background:var(--green);
+.dhmeter i{display:block;height:100%;border-radius:3px;background:var(--green);
 transition:width .4s ease}
-.dvroom{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
-.dvroom b{color:var(--tx);font-weight:650;font-size:13px}
+.dhroom{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+.dhroom b{color:var(--tx);font-weight:650;font-size:13px}
 /* The drive's own numbers, as chips: they are read by scanning for the one
    that is not grey, which a sentence of them would not allow. */
-.dvfacts{display:flex;flex-wrap:wrap;gap:4px}
-.dvf{font-size:10.5px;line-height:1.7;padding:0 6px;border-radius:4px;
+.dhfacts{display:flex;flex-wrap:wrap;gap:4px}
+.dhf{font-size:10.5px;line-height:1.7;padding:0 6px;border-radius:4px;
 background:rgba(130,140,150,.10);border:1px solid var(--bd);color:var(--dim);
 font-variant-numeric:tabular-nums;cursor:help}
-.dvf.warn{color:var(--acc);border-color:rgba(232,166,69,.42);
+.dhf.warn{color:var(--acc);border-color:rgba(232,166,69,.42);
 background:rgba(232,166,69,.10)}
-.dvf.bad{color:var(--red);border-color:rgba(216,116,58,.5);
+.dhf.bad{color:var(--red);border-color:rgba(216,116,58,.5);
 background:rgba(216,116,58,.12);font-weight:650}
-.dvsm{font-size:11px;color:var(--dim)}
-.dvsm.ok{color:var(--green)}
-.dvsm.bad{color:var(--red);font-weight:650}
+.dhsm{font-size:11px;color:var(--dim)}
+.dhsm.ok{color:var(--green)}
+.dhsm.bad{color:var(--red);font-weight:650}
 /* the two states worth interrupting a glance for */
-.dv.warn{border-color:rgba(232,166,69,.42)}
-.dv.warn .dvmeter i{background:var(--acc)}
-.dv.warn .dvverdict{color:var(--acc)}
-.dv.bad{border-color:rgba(216,116,58,.55);background:rgba(216,116,58,.07)}
-.dv.bad .dvmeter i{background:var(--red)}
-.dv.bad .dvverdict{color:var(--red);font-weight:650}
-.dvsum{margin:0 0 11px;font-size:11.5px;color:var(--dim)}
-.dvlead{margin:0 0 11px;font-size:12.5px;color:var(--red);font-weight:650}
-.dvnote{margin:12px 0 0;font-size:11.5px;line-height:1.6;color:var(--dim);
+.dh.warn{border-color:rgba(232,166,69,.42)}
+.dh.warn .dhmeter i{background:var(--acc)}
+.dh.warn .dhverdict{color:var(--acc)}
+.dh.bad{border-color:rgba(216,116,58,.55);background:rgba(216,116,58,.07)}
+.dh.bad .dhmeter i{background:var(--red)}
+.dh.bad .dhverdict{color:var(--red);font-weight:650}
+.dhsum{margin:0 0 11px;font-size:11.5px;color:var(--dim)}
+.dhlead{margin:0 0 11px;font-size:12.5px;color:var(--red);font-weight:650}
+.dhnote{margin:12px 0 0;font-size:11.5px;line-height:1.6;color:var(--dim);
 max-width:78ch}
-.dvnote code{font-size:11px;background:var(--panel2);border:1px solid var(--bd);
+.dhnote code{font-size:11px;background:var(--panel2);border:1px solid var(--bd);
 border-radius:4px;padding:1px 5px;color:var(--mut)}
 .mnone{font-size:12px;color:var(--dim)}
 @media(max-width:760px){.pipe{padding-left:24px}.sproj{margin-left:0;width:100%}}
