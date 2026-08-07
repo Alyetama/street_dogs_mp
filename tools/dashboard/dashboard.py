@@ -1573,7 +1573,56 @@ font-variant-numeric:tabular-nums}
 .tally b.dup,.tally b.lea{color:var(--dim)}
 
 /* ── toolbar ── */
-.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 0 13px}
+/* ── the caption ──────────────────────────────────────────────────────────
+   One line of running text, not a control strip. It states what the queue
+   currently is; the count sits in it at the same size as the words, marked
+   out by weight and colour rather than by being enormous. The GRID is this
+   page's hero, and a display-sized number here competed with it. */
+.cap{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 0 0}
+.capline{margin:0;font-size:12.5px;line-height:1.5;color:var(--mut);
+font-variant-numeric:tabular-nums}
+.capline b{color:var(--tx);font-weight:640}
+/* the narrowing readout: the one thing this block exists to do, and it
+   appears only when something has actually been narrowed */
+.capline i{font-style:normal;color:var(--dim)}
+.capsp{flex:1}
+.nbtn{display:inline-flex;align-items:center;gap:5px;background:transparent;
+border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:5px 11px;
+font-size:12px;font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
+.nbtn:hover{color:var(--tx);border-color:var(--dim)}
+.nbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.nbtn.on{color:var(--acc);border-color:rgba(232,166,69,.45)}
+.ncar{display:inline-block;transition:transform .16s}
+.nbtn.on .ncar{transform:rotate(90deg)}
+/* the count of what is applied, so the button says something when the panel
+   is shut */
+.nbtn em{font-style:normal;font-weight:650;color:var(--acc)}
+
+/* ── applied filters ──────────────────────────────────────────────────── */
+.chips{display:flex;gap:6px;flex-wrap:wrap;padding:9px 0 0}
+.chips[hidden]{display:none}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;
+line-height:1.7;padding:1px 4px 1px 9px;border-radius:999px;
+background:rgba(232,166,69,.11);border:1px solid rgba(232,166,69,.32);
+color:#e8b877;font-variant-numeric:tabular-nums}
+.chipx{background:transparent;border:0;color:inherit;opacity:.6;cursor:pointer;
+font-family:inherit;font-size:13px;line-height:1;padding:2px 5px;border-radius:999px}
+.chipx:hover{opacity:1;background:rgba(232,166,69,.2)}
+.chipx:focus-visible{outline:2px solid var(--acc);outline-offset:1px;opacity:1}
+
+/* ── the panel ────────────────────────────────────────────────────────────
+   Inline, not a popover. This page is driven by F/D/L/N with the hands on
+   the keyboard, and a floating layer that traps focus would fight the work
+   it is meant to serve. */
+.npanel{display:grid;gap:13px;padding:14px 0 4px;margin-top:11px;
+border-top:1px solid var(--bd)}
+.npanel[hidden]{display:none}
+.ngrp{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.nlab{flex:none;width:118px;font-size:10.5px;letter-spacing:.055em;
+text-transform:uppercase;color:var(--dim)}
+.nrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;min-width:220px}
+@media(max-width:640px){.ngrp{display:block}.nlab{width:auto;display:block;
+margin-bottom:6px}}
 .rbtn{display:inline-flex;align-items:center;gap:6px;
 background:rgba(232,166,69,.13);border:1px solid rgba(232,166,69,.34);
 color:var(--acc);border-radius:8px;padding:5px 12px;font-size:12.5px;font-weight:600;
@@ -1605,7 +1654,6 @@ color:#e8894f}
 .danger:focus-visible{outline-color:var(--red)}
 select{background:var(--panel2);border:1px solid var(--bd);color:var(--tx);
 border-radius:8px;padding:5px 9px;font-size:12.5px;font-family:inherit;cursor:pointer}
-.sp{flex:1}
 .cnt{color:var(--mut);font-size:12.5px;font-variant-numeric:tabular-nums}
 /* the folded legend */
 #find{background:var(--panel);color:var(--tx);border:1px solid var(--bd);
@@ -1633,29 +1681,33 @@ flex-wrap:wrap;gap:6px 14px;align-items:center;max-width:1180px}
 .hint{color:var(--dim);font-size:11.5px;padding-bottom:14px;display:flex;
 flex-wrap:wrap;gap:6px 14px;align-items:center}
 /* ── balance strip: one bar, two lines, no card chrome ── */
-.bal{display:flex;align-items:center;gap:18px;padding:11px 0 13px;
-border-top:1px solid var(--bd);cursor:default}
-.balnum{display:flex;flex-direction:column;line-height:1.02;flex:none}
-.balnum b{font-size:27px;font-weight:680;color:var(--tx);
-font-variant-numeric:tabular-nums;letter-spacing:-.01em}
-.balnum span{font-size:10.5px;color:var(--dim);margin-top:3px}
-.bal.ok .balnum b{color:var(--green)}
-.balcol{flex:1;min-width:150px}
-.balrow{display:flex;align-items:center;gap:10px}
-.balleft{flex:none;font-size:11.5px;color:var(--mut);font-variant-numeric:tabular-nums}
-.balleft b{color:var(--tx);font-weight:650}
-.bal.ok .balleft b{color:var(--green)}
-.balbar{position:relative;flex:1;height:9px;border-radius:5px;
-background:rgba(130,140,150,.16);overflow:hidden}
-/* ONE fill: how much of the not-dog side is standing, counting both what is
-   in the built dataset and what your flags have already earned */
-.balbar i{display:block;height:100%;width:0;background:var(--red);
-border-radius:5px;transition:width .45s ease}
-.baltx{font-size:11.5px;color:var(--dim);margin-top:6px;
-font-variant-numeric:tabular-nums}
-.baltx b{color:var(--mut);font-weight:650}
-.bal.ok .balbar i{background:var(--green)}
-@media(max-width:700px){.bal{flex-wrap:wrap}.baltx{white-space:normal}}
+/* ── the two progress lines ───────────────────────────────────────────────
+   Your progress, and the guesser's. They had a full-width strip each, with
+   their own bar, dot, legend and 27px number -- four times the volume for two
+   numbers, in a block that is supposed to recede behind the crops. Each is
+   now one line of the same caption type, with a hairline track sharing the
+   row rather than owning it. */
+.lines{display:grid;gap:2px;padding:10px 0 0}
+.line{display:flex;align-items:center;gap:10px;margin:0;padding:5px 0;
+font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
+.line[hidden]{display:none}
+.line b{color:var(--tx);font-weight:640;flex:none}
+.line .lsub{color:var(--dim);flex:none}
+.line .lend{flex:none;color:var(--mut)}
+.line .track{flex:1;min-width:60px;height:3px;border-radius:2px;
+background:rgba(130,140,150,.18);overflow:hidden;display:block}
+.line .track i{display:block;height:100%;width:0;background:var(--red);
+transition:width .45s ease}
+#bal.ok b{color:var(--green)}
+#bal.ok .track i{background:var(--green)}
+#trg .track i{background:var(--acc)}
+/* the guesser's own line: dimmer still, because it is a colleague's progress
+   rather than yours */
+.line.trg{color:var(--dim)}
+.line.trg b{color:var(--mut);font-weight:600}
+@media(max-width:700px){.line{flex-wrap:wrap}.line .track{order:9;flex-basis:100%}}
+.pagebar{display:flex;align-items:center;justify-content:flex-end;gap:10px;
+padding:9px 0 12px}
 kbd{background:var(--panel2);border:1px solid var(--bd);border-bottom-width:2px;
 border-radius:5px;padding:0 5px;font:600 10.5px/17px ui-monospace,SFMono-Regular,Menlo,monospace;
 color:var(--mut);display:inline-block;min-width:17px;text-align:center}
@@ -1840,28 +1892,11 @@ min-width:44px;text-align:center}
 /* crop-suggestion run progress: this filter lives on THIS page, so its
    progress does too. Was on the main dashboard, which is not where anyone
    sorting the queue is looking. */
-.trg{display:flex;align-items:center;gap:14px;padding:9px 0 11px;
-border-top:1px solid var(--bd)}
-.trg[hidden]{display:none}
 .trgdot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
 .trg.on .trgdot{background:var(--green);animation:trgpulse 1.6s ease-in-out infinite}
 .trg.warn .trgdot{background:var(--acc)}
 @keyframes trgpulse{0%,100%{opacity:1}50%{opacity:.35}}
 @media(prefers-reduced-motion:reduce){.trg.on .trgdot{animation:none}}
-.trgtx{display:flex;align-items:baseline;gap:8px;font-size:12px;flex:none;min-width:0}
-.trgtx b{color:var(--tx);font-weight:620;white-space:nowrap}
-.trgsub{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;
-text-overflow:ellipsis}
-/* deliberately slighter than the balance bar above it: that one is the
-   task, this one is the state of a tool that helps sort the task. Same
-   width and weight made the two read as one two-part widget. */
-.trgcol{flex:1;min-width:100px}
-.trgbar{height:4px;border-radius:3px;background:rgba(130,140,150,.14);overflow:hidden}
-.trgbar i{display:block;height:100%;width:0;border-radius:3px;
-background:var(--green);opacity:.75;transition:width .4s ease}
-.trg.warn .trgbar i{background:var(--acc)}
-.trgpct{font-size:11px;color:var(--dim);flex:none;
-font-variant-numeric:tabular-nums;white-space:nowrap}
 .trgbtn{flex:none;appearance:none;background:transparent;color:var(--mut);
 border:1px solid var(--bd);border-radius:999px;padding:4px 13px;font-size:11.5px;
 font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
@@ -1915,125 +1950,162 @@ color:var(--dim);transition:transform .15s}
       </div>
     </div>
   </div>
-  <div class="bar">
+  <!-- ── what you are looking at ──────────────────────────────────────────
+       Not a toolbar. Nine controls sat here in one row, styled identically,
+       holding four different KINDS of thing: a view switch, four filters, two
+       display options and two actions. Equal weight for unequal things is
+       what made it unreadable, not the count.
+
+       So: a caption states what the queue currently is, the filters you have
+       actually applied appear as chips under it, and everything set once and
+       forgotten moves behind one disclosure. Resting state is two quiet lines
+       instead of a wall of pills. -->
+  <!-- ── what you are looking at ──────────────────────────────────────────
+       Not a toolbar. Nine controls sat in one row, styled identically,
+       holding four different KINDS of thing: a view switch, four filters, two
+       display options and two actions. Equal weight for unequal things is
+       what made it unreadable — not the count.
+
+       So the block became a caption. One line says what the queue currently
+       is; the filters you have actually applied appear as chips beneath it;
+       everything set once and forgotten sits behind one disclosure. Resting
+       state is two quiet lines rather than a wall of pills. -->
+  <div class="cap">
+    <p class="capline" id="cap">&mdash;</p>
+    <span class="capsp"></span>
+    <!-- Free text over the queue. Not a filter: it ORDERS, so the near misses
+         stay reachable -- they are the crops most worth a human's eye. It
+         stays out here because typing is a different verb from picking, and
+         it is reached constantly. -->
+    <input id="find" type="search" list="findterms" hidden autocomplete="off"
+           placeholder="find crops of&hellip;"
+           title="type what you are looking for and the queue is reordered to bring it to the front — the same model that guesses the buckets, asked a different way">
+    <datalist id="findterms"></datalist>
+    <!-- A view switch, not a filter: it changes what the page IS. Set apart
+         from the narrowing controls for that reason. -->
     <select id="mode" title="review new crops, or check the ones you already judged">
       <option value="queue">Unreviewed queue</option>
       <option value="audit">Check my annotations</option>
     </select>
-    <!-- A MODEL'S GUESS, and labelled as one. It sorts the queue so a
-         reviewer can work through one kind of mistake at a time; it is never
-         written to a ledger and never becomes a label. Hidden until
-         tools/detect/triage_crops.py has actually produced something. -->
-    <select id="suggest" title="narrow the queue by what a general-purpose image model thinks each crop is — a guess to sort by, never a label" hidden>
-      <option value="">Any guess</option>
-      <option value="dog">Looks like a dog</option>
-      <option value="animal">Other animal</option>
-      <option value="object">Not an animal</option>
-      <option value="none">No guess yet</option>
-    </select>
-    <!-- The dog-bin gate, on its own axis rather than as a rival to the guess
-         filter above. It answers the question the REVIEWER is answering — is
-         this a dog — where the guess filter answers what kind of thing it is,
-         so the useful move is to narrow by one while reading the other.
-         Hidden until the gate has verdicts covering this queue. -->
-    <select id="gatef" title="narrow by the trained dog/not-dog gate's verdict — its own axis, and always this model whatever the guesser toggle below is set to" hidden></select>
-    <!-- The leash axis, filterable on its own. "Needs a leash call" is the
-         working view: crops you have already called a dog and not yet called
-         a lead on. Hidden until the leash store exists. -->
-    <!-- Free text over the queue. Not a filter: it ORDERS, so the near
-         misses stay reachable -- they are the crops most worth a human's
-         eye. Hidden until the crops have been embedded. -->
-    <input id="find" type="search" list="findterms" hidden autocomplete="off"
-           placeholder="find crops of&hellip;  e.g. a cat"
-           title="type what you are looking for and the queue is reordered to bring it to the front — the same model that guesses the buckets, asked a different way">
-    <datalist id="findterms"></datalist>
-    <!-- Says out loud when the search cannot work. A search that quietly
-         ordered nothing was read as the model returning nonsense, which is
-         the right conclusion from the evidence the page was giving. -->
-    <b id="findmsg" hidden></b>
-    <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
-      <option value="all">Any leash state</option>
-      <option value="none">Needs a leash call</option>
-      <option value="leashed">Leashed</option>
-      <option value="unleashed">Unleashed</option>
-    </select>
-    <select id="verdict" title="which verdict to check">
-      <option value="all">Both verdicts</option>
-      <option value="false_positive">Only &ldquo;not a dog&rdquo;</option>
-      <option value="true_positive">Only &ldquo;is a dog&rdquo;</option>
-    </select>
-    <select id="sort" title="which crops to surface first">
-      <option value="low" selected>Least confident first</option>
-      <option value="conf">Most confident first</option>
-      <option value="new">Newest first</option>
-    </select>
-    <!-- Populated from /api/review, which lists only countries the sweep has
-         actually produced crops for, with counts. Rebuilt hourly alongside the
-         dashboard refresh, so newly swept ground appears on its own. -->
-    <select id="country" title="only review crops from one country">
-      <option value="">All countries</option>
-    </select>
-    <select id="size"><option value="50">50 per page</option>
-      <option value="100">100 per page</option></select>
-    <button class="rbtn quiet" id="reload" title="pull in detections found since this page loaded"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh pool</button>
-    <!-- destructive, and deliberately NOT beside Prev/Next: a mis-click there
-         would throw away every keep decision made so far -->
-    <button class="rbtn danger" id="unkeep" title="put every crop you already judged a dog back into the queue"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Restore kept</button>
-    <span class="sp"></span>
+    <button type="button" class="nbtn" id="narrow" aria-expanded="false"
+            aria-controls="npanel"
+            title="filters, sorting, and the guesser that fills them">Narrow<span class="ncar" aria-hidden="true">&#8250;</span></button>
+  </div>
+
+  <!-- Says out loud when the search cannot work. A search that quietly
+       ordered nothing was read as the model returning nonsense, which is the
+       right conclusion from the evidence the page was giving. -->
+  <b id="findmsg" hidden></b>
+
+  <!-- Only what has actually been applied. No filters, no row: an empty
+       filter bar spends a line telling you nothing is set. -->
+  <div class="chips" id="chips" hidden></div>
+
+  <!-- The controls, grouped by the QUESTION each answers rather than by what
+       kind of widget it is. That grouping is the fix: "Any guess" and "50 per
+       page" sat adjacent and identical, and one narrows the work while the
+       other is a preference nobody sets twice. -->
+  <div class="npanel" id="npanel" hidden>
+    <div class="ngrp">
+      <span class="nlab">What it looks like</span>
+      <div class="nrow">
+        <!-- A MODEL'S GUESS, and labelled as one. It sorts the queue so a
+             reviewer can work through one kind of mistake at a time; it is
+             never written to a ledger and never becomes a label. -->
+        <select id="suggest" title="narrow by what the selected guesser thinks each crop is — a guess to sort by, never a label" hidden>
+          <option value="">Any guess</option>
+          <option value="dog">Looks like a dog</option>
+          <option value="animal">Other animal</option>
+          <option value="object">Not an animal</option>
+          <option value="none">No guess yet</option>
+        </select>
+        <!-- The dog-bin gate on its own axis: it answers the question the
+             REVIEWER is answering, where the guess filter answers what kind
+             of thing it is. -->
+        <select id="gatef" title="narrow by the trained dog/not-dog gate's verdict — its own axis, and always this model whatever the guesser below is set to" hidden></select>
+      </div>
+    </div>
+    <div class="ngrp">
+      <span class="nlab">On a lead</span>
+      <div class="nrow">
+        <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
+          <option value="all">Any leash state</option>
+          <option value="none">Needs a leash call</option>
+          <option value="leashed">Leashed</option>
+          <option value="unleashed">Unleashed</option>
+        </select>
+        <select id="verdict" title="which verdict to check" hidden>
+          <option value="all">Both verdicts</option>
+          <option value="false_positive">Only &ldquo;not a dog&rdquo;</option>
+          <option value="true_positive">Only &ldquo;is a dog&rdquo;</option>
+        </select>
+      </div>
+    </div>
+    <div class="ngrp">
+      <span class="nlab">Where</span>
+      <div class="nrow">
+        <!-- Populated from /api/review, which lists only countries the sweep
+             has actually produced crops for, with counts. -->
+        <select id="country" title="only review crops from one country">
+          <option value="">All countries</option>
+        </select>
+      </div>
+    </div>
+    <div class="ngrp">
+      <span class="nlab">Show</span>
+      <div class="nrow">
+        <select id="sort" title="which crops to surface first">
+          <option value="low" selected>Least confident first</option>
+          <option value="conf">Most confident first</option>
+          <option value="new">Newest first</option>
+        </select>
+        <select id="size"><option value="50">50 per page</option>
+          <option value="100">100 per page</option></select>
+        <button class="rbtn quiet" id="reload" title="pull in detections found since this page loaded"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh pool</button>
+        <!-- destructive, and deliberately NOT beside Prev/Next: a mis-click
+             there would throw away every keep decision made so far -->
+        <button class="rbtn danger" id="unkeep" title="put every crop you already judged a dog back into the queue"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Restore kept</button>
+      </div>
+    </div>
+    <div class="ngrp">
+      <span class="nlab">Guesses by</span>
+      <div class="nrow">
+        <select id="trgModel" hidden title="which model's guesses the filter above shows, and which one Run starts"></select>
+        <button type="button" class="trgbtn" id="trgRun">&mdash;</button>
+      </div>
+      <details class="trgnote" id="trgNote" hidden>
+        <summary id="trgNoteSum"></summary>
+        <p id="trgNoteBasis"></p>
+        <p id="trgNoteCaveat"></p>
+        <p id="trgNoteWhich"></p>
+      </details>
+    </div>
+  </div>
+
+  <!-- The page's own progress, and the guesser's, on one quiet line each.
+       Two full-width strips with their own bars, dots and legends said the
+       same two numbers at four times the volume. -->
+  <div class="lines">
+    <p class="line" id="bal" hidden>
+      <b id="balNum">&mdash;</b><span id="balNumU">crops left to judge</span>
+      <i class="track"><i id="balFill"></i></i>
+      <span class="lend" id="balLeft"></span>
+      <span class="lsub" id="balMain"></span>
+    </p>
+    <p class="line trg" id="trg" hidden>
+      <span class="trgdot" id="trgDot"></span>
+      <b id="trgState">&mdash;</b><span class="lsub" id="trgSub"></span>
+      <i class="track"><i id="trgFill"></i></i>
+      <span class="lend" id="trgPct"></span>
+    </p>
+  </div>
+
+  <div class="pagebar">
     <span class="cnt" id="pg">&mdash;</span>
     <button class="rbtn quiet" id="next" title="bank this screen and bring up the next unjudged crops">Next &rsaquo;</button>
   </div>
 </header>
 
-<!-- Training-set balance. The queue tells you what is left to look at; this
-     tells you what the looking is FOR, and when to stop. -->
-<!-- The count leads, because it is the only thing here anyone acts on. The
-     bar behind it is ONE fill: it used to be cut into segments with a
-     four-entry legend, which spent the whole panel explaining its own
-     bookkeeping instead of answering "how much longer". The breakdown still
-     exists, on hover. -->
-<div class="bal" id="bal" hidden>
-  <div class="balnum"><b id="balNum">&mdash;</b><span id="balNumU">crops left to judge</span></div>
-  <div class="balcol">
-    <!-- the remainder sits at the end of the track it belongs to, in the
-         track's own unit -- the big number on the left counts JUDGEMENTS,
-         this counts the not-dog CROPS the bar is still short -->
-    <div class="balrow">
-      <div class="balbar"><i id="balFill"></i></div>
-      <span class="balleft" id="balLeft"></span>
-    </div>
-    <div class="baltx"><span id="balMain">&mdash;</span></div>
-  </div>
-</div>
-
-<!-- Crop-suggestion run. Hidden until a run has produced anything, so the page
-     is unchanged for anyone who never runs tools/detect/triage_crops.py. The
-     dot pulses while a pass is live; the bar is COVERAGE of the queue, not
-     progress through one pass -- the pool grows under a finished run, and
-     coverage is what says whether the filter can be trusted right now. -->
-<div class="trg" id="trg" hidden title="progress of tools/detect/triage_crops.py, which fills the guess filter above">
-  <span class="trgdot" id="trgDot"></span>
-  <div class="trgtx"><b id="trgState">&mdash;</b><span class="trgsub" id="trgSub"></span></div>
-  <div class="trgcol"><div class="trgbar"><i id="trgFill"></i></div></div>
-  <span class="trgpct" id="trgPct"></span>
-  <!-- Which guesser. Two models with different failure modes, and the
-       accuracy of each sits in the option text: switching to the weaker one
-       without being told it is weaker is a trap, and the number is measured
-       against the crops already ruled on rather than asserted. Hidden unless
-       this checkout can run more than one. -->
-  <select id="trgModel" hidden title="which model's guesses the filter above shows, and which one Run starts"></select>
-  <button type="button" class="trgbtn" id="trgRun">&mdash;</button>
-</div>
-<!-- What the percentage in the dropdown means, and what this guesser is for.
-     Folded, because it is a thing you read once: the summary carries the one
-     sentence that makes the number legible, and the rest waits to be asked
-     for. -->
-<details class="trgnote" id="trgNote" hidden>
-  <summary id="trgNoteSum"></summary>
-  <p id="trgNoteBasis"></p>
-  <p id="trgNoteCaveat"></p>
-  <p id="trgNoteWhich"></p>
-</details>
 
 <!-- The legend is a lesson, and a lesson stops being one after the first
      day. It kept two full lines of the viewport permanently to teach four
@@ -2198,6 +2270,69 @@ function paintFind(j){
     : say||('type what you are looking for and the queue is reordered to '+
             'bring it to the front');
 }
+/* ── the caption, and the filters you have applied ────────────────────────
+   FILTERS is the single description of what can narrow the queue: the control
+   that sets it, how to read its current value, and what resets it. Every part
+   of the block below is derived from this one list, so a filter cannot appear
+   in the chips and be missing from the panel, or be removable and not
+   resettable. Adding one means adding one entry. */
+var FILTERS=[
+  {id:'suggest', off:'',    say:function(el){return el.options[el.selectedIndex]
+     ?el.options[el.selectedIndex].text.replace(/\s*\(.*\)$/,''):''}},
+  {id:'gatef',   off:'all', say:function(el){return el.options[el.selectedIndex]
+     ?el.options[el.selectedIndex].text.replace(/\s*\(.*\)$/,''):''}},
+  {id:'leashf',  off:'all', say:function(el){return el.options[el.selectedIndex]
+     ?el.options[el.selectedIndex].text:''}},
+  {id:'country', off:'',    say:function(el){return el.options[el.selectedIndex]
+     ?el.options[el.selectedIndex].text.replace(/\s*\(.*\)$/,''):''}},
+  {id:'verdict', off:'all', say:function(el){return el.options[el.selectedIndex]
+     ?el.options[el.selectedIndex].text:''}}
+];
+function activeFilters(){
+  var out=[];
+  for(var i=0;i<FILTERS.length;i++){
+    var f=FILTERS[i],el=$(f.id);
+    if(!el||el.hidden||el.value===f.off)continue;
+    var t=f.say(el);
+    if(t)out.push({id:f.id,off:f.off,text:t});
+  }
+  return out;
+}
+/* The sentence. It says what the queue IS, and -- only when something has
+   actually been narrowed -- what it was narrowed from. That readout is the
+   one thing this block exists to do, so it is the only thing in it set in the
+   page's own voice rather than as a control. */
+function paintCap(j){
+  var el=$('cap');if(!el)return;
+  /* the two payloads name their count differently; the caption is one
+     sentence and must not read an undefined field in either mode */
+  var act=activeFilters();
+  var showing=(mode==='audit')?(j.total||0):(j.total_unflagged||0);
+  var word=mode==='audit'?'annotation':'crop';
+  var head=mode==='audit'
+    ? 'Checking <b>'+n(showing)+'</b> '+word+(showing===1?'':'s')
+    : 'Reviewing <b>'+n(showing)+'</b> unjudged '+word+(showing===1?'':'s');
+  var from=(act.length&&j.pool_unfiltered&&j.pool_unfiltered>showing)
+    ? ' <i>&middot; narrowed from '+n(j.pool_unfiltered)+'</i>' : '';
+  el.innerHTML=head+from;
+  var btn=$('narrow');
+  if(btn)btn.innerHTML='Narrow'+(act.length?' <em>'+act.length+'</em>':'')+
+    '<span class="ncar" aria-hidden="true">›</span>';
+}
+/* Only what is applied, each one removable where it is read. A filter you
+   cannot see is a filter you will not think to clear, which is how an empty
+   queue becomes a bug report. */
+function paintChips(){
+  var box=$('chips');if(!box)return;
+  var act=activeFilters();
+  box.hidden=!act.length;
+  if(!act.length){box.innerHTML='';return;}
+  box.innerHTML=act.map(function(a){
+    return '<span class="chip">'+esc(a.text)+
+      '<button type="button" class="chipx" data-f="'+att(a.id)+
+      '" title="'+att('clear '+a.text)+'" aria-label="'+
+      att('clear '+a.text)+'">×</button></span>'}).join('');
+}
 function paintGate(j){
   var el=$('gatef');if(!el)return;
   /* only once the gate has verdicts over this queue: a dropdown that filters
@@ -2309,6 +2444,7 @@ function loadAudit(){
     $('pg').textContent=lab;$('pg2').textContent=lab;
     $('next').disabled=$('next2').disabled=page>=pages-1;
     $('foot').hidden=pages<=1;
+    paintChips();paintCap(j);
     if(sel>=items.length)sel=items.length-1;
     render();toTop();
   }).catch(function(){
@@ -2354,6 +2490,8 @@ function load(){
     paintCountries(j.countries,j.country);
     paintSuggest(j);
     paintGate(j);
+    paintChips();
+    paintCap(j);
     paintFind(j);
     score();
     /* "Page 3 of 47" described an offset that no longer moves. What the
@@ -2430,7 +2568,7 @@ function paintBal(){
   var b=BAL;if(!b)return;
   var el=$('bal');el.hidden=false;
   if(b.ok===false){
-    el.className='bal';
+    el.className='line';
     $('balFill').style.width='0%';
     $('balNum').textContent='—';$('balNumU').textContent='dataset not found';
     $('balLeft').textContent='';
@@ -2465,7 +2603,7 @@ function paintBal(){
   var share=(jd>=(b.mix_min_sample||50))?np/jd:0;
   var net=y*(1-2*share);
   var need=short?(net>0?Math.ceil(short/net):null):0;
-  el.className='bal'+(short?'':' ok');
+  el.className='line'+(short?'':' ok');
   var ds=b.dataset||'the dataset';
   if(!short){
     $('balNum').textContent='0';
@@ -3310,6 +3448,9 @@ function restorePrefs(){
   if(typeof o.find==='string'){find=o.find;if($('find'))$('find').value=find;}
   if(typeof o.backend==='string'&&o.backend)BACKEND=o.backend;
   if(typeof o.gatef==='string'&&o.gatef)gatef=o.gatef;
+  if(o.npanel&&$('npanel')){$('npanel').hidden=false;
+    if($('narrow')){$('narrow').classList.add('on');
+      $('narrow').setAttribute('aria-expanded','true');}}
   if((v=restoreSel('mode',o.mode))!==null){
     mode=v;
     document.body.classList.toggle('auditing',mode==='audit');
@@ -3420,6 +3561,28 @@ if($('find')){
     clearTimeout(ft);find=this.value;savePref('find',find);page=0;sel=-1;load();
   });
 }
+if($('narrow'))$('narrow').addEventListener('click',function(){
+  /* Inline, not a popover: this page is driven by F/D/L/N with the hands on
+     the keyboard, and a floating layer that took focus would fight the work
+     it exists to serve. */
+  var pan=$('npanel'),open=pan.hidden;
+  pan.hidden=!open;
+  this.classList.toggle('on',open);
+  this.setAttribute('aria-expanded',open?'true':'false');
+  savePref('npanel',open?'1':'');
+});
+/* Delegated, because the chips are rebuilt on every load and listeners bound
+   to the old nodes would die with them. */
+if($('chips'))$('chips').addEventListener('click',function(e){
+  var b=e.target&&e.target.closest&&e.target.closest('.chipx');
+  if(!b)return;
+  var id=b.getAttribute('data-f'),el=$(id);
+  if(!el)return;
+  for(var i=0;i<FILTERS.length;i++)if(FILTERS[i].id===id)el.value=FILTERS[i].off;
+  /* go through the control's own handler so one filter has one code path */
+  if(el.onchange)el.onchange.call(el);
+  else{page=0;sel=-1;load();}
+});
 if($('gatef'))$('gatef').onchange=function(){
   gatef=this.value;savePref('gatef',gatef);page=0;sel=-1;load();
 };
@@ -3500,7 +3663,10 @@ load();loadBal();
     paintBackends(j);
     var running=!!j.running, cov=Math.round((j.coverage||0)*100),
         gap=Math.max(0,(j.pool||0)-(j.guessed||0)), state, sub='';
-    el.className='trg'+(running?' on':(j.stalled?' warn':''));
+    /* 'line trg' is the base: the strip became one of the two caption lines,
+       and rewriting className wholesale used to drop the class that gives it
+       its type and layout */
+    el.className='line trg'+(running?' on':(j.stalled?' warn':''));
     if(j.starting){
       /* spawned, but the model is still loading and it has not written a
          count yet; "0 of 0" would read as nothing to do */
@@ -7538,6 +7704,12 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     for c in kept:
         k = c.get('sg') or 'none'
         sg_offer[k] = sg_offer.get(k, 0) + 1
+    # What the queue would hold with nothing narrowed, for the caption's
+    # "narrowed from" readout. Taken here, after the dedup and the sequence
+    # collapse, because those are not filters -- they are what the queue IS.
+    # Comparing against the raw pool would advertise a reduction the reviewer
+    # never chose and could not undo.
+    pool_unfiltered = len(kept)
     if want:
         kept = [c for c in kept if c['country'] == want]
     if want_sg:
@@ -7617,6 +7789,9 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             # control at all -- an empty file means nobody has run the tool.
             'suggest': want_sg, 'suggest_counts': sg_offer,
             'suggest_ready': bool(_tri),
+            # what the queue holds before any filter, so the caption can
+            # say what it was narrowed from
+            'pool_unfiltered': pool_unfiltered,
             # which guesser's opinions the filter above is showing, and what
             # that guesser is able to say. The dog-bin gate answers dog or
             # not-dog and nothing else, so offering it 'Other animal' would be

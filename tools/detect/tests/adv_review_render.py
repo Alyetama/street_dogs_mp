@@ -28,6 +28,7 @@ Requires node on PATH; skips (exit 0, loud message) if absent.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,12 @@ function parseKids(html) {
     if (cm) el.className = cm[1];
     if (im) { el.id = im[1]; byId[im[1]] = el; }
     if (sm) el.src = sm[1];
+    // every data-* attribute, not one hardcoded name: delegated handlers use
+    // them to work out which control a click came from
+    let dm; const dre = /data-([\w-]+)="([^"]*)"/g;
+    while ((dm = dre.exec(attrs))) el.dataset[dm[1]] = dm[2];
+    const am = /aria-expanded="([^"]*)"/.exec(attrs);
+    if (am) el._attrs['aria-expanded'] = am[1];
     out.push(el);
   }
   return out;
@@ -97,6 +104,7 @@ class El {
     this.children = []; this.parentNode = null; this._text = '';
     this.hidden = false; this.disabled = false; this.src = '';
     this._html = ''; this.onclick = null; this.onchange = null;
+    this._attrs = {};
     this.onmousedown = null; this.value = ''; this._listeners = {};
     this.onload = null; this.naturalWidth = 0; this.naturalHeight = 0;
     this.clientWidth = 0; this.clientHeight = 0;
@@ -117,10 +125,41 @@ class El {
     for (const c of this.children) c.parentNode = this;
   }
   get innerHTML() { return this._html; }
+  // A <select> is not just a box with a value: four painters on this page
+  // BUILD its options and a fifth reads the chosen one's text back out to
+  // label a chip. Without options/selectedIndex the read threw, load()'s
+  // promise swallowed it, and every later assertion failed for the wrong
+  // reason.
+  get options() {
+    const out = [];
+    const re = /<option([^>]*)>([\s\S]*?)<\/option>/g;
+    let m;
+    while ((m = re.exec(this._html))) {
+      const v = /value="([^"]*)"/.exec(m[1]);
+      out.push({ value: v ? v[1].replace(/&quot;/g, '"') : m[2],
+                 text: m[2].replace(/&middot;/g, '·')
+                           .replace(/&mdash;/g, '—')
+                           .replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+                           .replace(/&gt;/g, '>') });
+    }
+    return out;
+  }
+  get selectedIndex() {
+    const o = this.options;
+    for (let i = 0; i < o.length; i++) if (o[i].value === this.value) return i;
+    return o.length ? 0 : -1;
+  }
   // esc() in the page is `d.textContent = t; return d.innerHTML` -- model it
   set textContent(v) { this._text = String(v); this._html = escHtml(v);
                        this.children = []; }
-  get textContent() { return this._text; }
+  get textContent() {
+    if (this._text) return this._text;
+    // set via innerHTML: a browser still reports the text inside it
+    return this._html.replace(/<[^>]*>/g, '')
+      .replace(/&middot;/g, '·').replace(/&mdash;/g, '—')
+      .replace(/&times;/g, '×').replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  }
   get classList() {
     const self = this;
     return {
@@ -154,9 +193,22 @@ class El {
   getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth,
                                      height: this.clientHeight }; }
   matches(sel) { return matchSel(this, sel); }
+  // delegated handlers walk up from the event target; the chip row and
+  // the grid both rely on it
+  closest(sel) {
+    for (let n = this; n; n = n.parentNode) if (matchSel(n, sel)) return n;
+    return null;
+  }
   querySelector(sel) { return descendants(this).find(e => matchSel(e, sel)) || null; }
   querySelectorAll(sel) { return descendants(this).filter(e => matchSel(e, sel)); }
-  getAttribute(k) { return k === 'data-name' ? this.dataset.name : null; }
+  getAttribute(k) {
+    if (k.startsWith('data-')) {
+      const v = this.dataset[k.slice(5)];
+      return v === undefined ? null : v;
+    }
+    return this._attrs[k] === undefined ? null : this._attrs[k];
+  }
+  setAttribute(k, v) { this._attrs[k] = String(v); }
 }
 
 function descendants(root) {
@@ -258,7 +310,10 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   // the folded legend that explains the dropdown's percentage
                   'trgNoteSum','trgNoteBasis','trgNoteWhich','trgNoteCaveat',
                   // the gate's own filter axis
-                  'gatef']) {
+                  'gatef',
+                  // the redesigned block: caption, applied-filter chips
+                  // and the disclosure holding the controls
+                  'cap','chips','narrow','npanel']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
   e.id = id; e.__page = true; root.appendChild(e);
 }
@@ -292,7 +347,12 @@ try {
   process.exit(1);
 }
 
-const CROPS = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const FIX = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const CROPS = FIX.crops;
+// Which page elements the real markup ships hidden. Taken from the
+// markup rather than assumed, because a stub that starts everything
+// visible lets a panel 'pass' a test for being shut.
+for (const id of (FIX.hidden || [])) if (byId[id]) byId[id].hidden = true;
 function payload(items, reserve, extra) {
   return Object.assign({ items, reserve: reserve || [], page: 0, pages: 2,
                          size: 50, sort: 'conf',
@@ -1154,8 +1214,73 @@ async function t26() {
      't26: an empty gate filter was still offered');
 }
 
+// ── 27. the caption, the chips, and the one disclosure ──────────────────
+// Nine controls sat in one row holding four different kinds of thing. The
+// block is now a caption over a fold: it says what the queue is, shows only
+// the filters actually applied, and keeps the rest behind one button. Each of
+// those three claims is checked, because each replaced something visible.
+async function t27() {
+  const FULL = {total_unflagged: 2157, pool_unfiltered: 2157,
+                suggest_ready: true, gate_ready: true,
+                gate_label: 'Dog-bin gate', gate: 'all',
+                gate_counts: {all: 2157, dog: 887, not_dog: 796, none: 474},
+                countries: [{iso: 'JPN', name: 'Japan', n: 838}], country: ''};
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [], FULL) };
+  await API.load(); await flush();
+  ck(/2,157/.test(byId['cap'].textContent),
+     't27: the caption does not say what the queue holds: ' +
+     byId['cap'].textContent);
+  ck(!/narrowed from/.test(byId['cap'].textContent),
+     't27: claimed a narrowing with no filter applied: ' +
+     byId['cap'].textContent);
+  ck(byId['chips'].hidden, 't27: an empty chip row still took a line');
+  ck(byId['npanel'].hidden, 't27: the panel is open before it is asked for');
+
+  // apply one: the chip appears, and the caption says what it narrowed from
+  RESP['/api/review'] = () => Object.assign({}, FULL,
+        {total_unflagged: 887, gate: 'dog', pool_unfiltered: 2157});
+  byId['gatef'].value = 'dog';
+  await API.load(); await flush();
+  ck(!byId['chips'].hidden && /Gate says dog/.test(byId['chips'].innerHTML),
+     't27: the applied filter is not shown as a chip: ' +
+     byId['chips'].innerHTML);
+  ck(/narrowed from/.test(byId['cap'].textContent) &&
+     /2,157/.test(byId['cap'].textContent) &&
+     /887/.test(byId['cap'].textContent),
+     't27: the caption does not report the narrowing: ' +
+     byId['cap'].textContent);
+  ck(/1/.test(byId['narrow'].textContent),
+     't27: the shut panel does not say how many filters are on: ' +
+     byId['narrow'].textContent);
+
+  // clearing from the chip resets the control it came from
+  RESP['/api/review'] = () => Object.assign({}, FULL, {gate: 'all'});
+  const x = byId['chips'].querySelector('.chipx');
+  ck(!!x, 't27: the chip cannot be cleared where it is read');
+  (byId['chips']._listeners.click || []).forEach(f => f.call(byId['chips'],
+      {target: x}));
+  await flush(); await flush();
+  // Asserted on the REQUEST, not on the control's value afterwards: the next
+  // payload echoes `gate` back and paintGate writes it into the select, so a
+  // chip that cleared nothing would still look cleared a moment later. The
+  // URL is the only observable the echo cannot fake.
+  const after = CALLS.filter(c => /\/api\/review\?/.test(c.url)).pop();
+  ck(/gate=all/.test(after.url),
+     't27: clearing the chip did not clear the filter it names: ' + after.url);
+  ck(byId['chips'].hidden, 't27: the chip outlived the filter');
+
+  // the disclosure holds the rest, and says so
+  const nb = byId['narrow'];
+  (nb._listeners.click || []).forEach(f => f.call(nb));
+  ck(!byId['npanel'].hidden, 't27: Narrow does not open the panel');
+  ck(nb.getAttribute && nb.getAttribute('aria-expanded') === 'true',
+     't27: the disclosure does not report its state to a screen reader');
+  (nb._listeners.click || []).forEach(f => f.call(nb));
+  ck(byId['npanel'].hidden, 't27: Narrow does not shut the panel again');
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
@@ -1216,8 +1341,15 @@ def main():
         run = os.path.join(tmp, 'run.js')
         with open(js, 'w') as f:
             f.write(script)
+        # Which ids the real markup ships hidden, read off the markup so the
+        # stub starts where the page does. Asserting a panel is shut against a
+        # stub that starts everything visible proves nothing.
+        hidden = re.findall(r'<[a-z]+[^>]*\bid="(\w+)"[^>]*\bhidden\b',
+                            html)
+        hidden += re.findall(r'<[a-z]+[^>]*\bhidden\b[^>]*\bid="(\w+)"',
+                             html)
         with open(fx, 'w') as f:
-            json.dump(fixtures, f)
+            json.dump({'crops': fixtures, 'hidden': sorted(set(hidden))}, f)
         with open(run, 'w') as f:
             f.write(HARNESS)
         p = subprocess.run(['node', run, js, fx],
