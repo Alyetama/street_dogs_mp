@@ -154,14 +154,44 @@ def check(rel, tree, defs):
     return out
 
 
+def shadowed(trees):
+    """[(module, name, lines)] defined twice at module level.
+
+    The second definition wins silently, and in a ten-thousand-line file the
+    two can be a hundred lines apart: a helper added near its caller was
+    shadowed by an unrelated one further down that took different arguments,
+    and nothing said so until it was called. Same-name, same-module, one
+    survives -- that is never intentional.
+    """
+    import ast as _ast
+    out = []
+    for rel, tree in trees.items():
+        seen = {}
+        for n in tree.body:
+            if not isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                  _ast.ClassDef)):
+                continue
+            if n.name in seen:
+                out.append((rel, n.name, (seen[n.name], n.lineno)))
+            seen[n.name] = n.lineno
+    return out
+
+
 def main():
     files = tracked_py()
     defs, trees = collect(files)
+    dupes = shadowed(trees)
+    if dupes:
+        for rel, name, (a, b) in sorted(dupes):
+            print(f'FAIL {rel}:{b} redefines {name}(), already defined at '
+                  f'line {a} — the first one is dead and every call to it '
+                  f'silently reaches the second')
+        return 1
     problems = [p for rel, tree in trees.items() for p in check(rel, tree, defs)]
     if not problems:
         n = sum(len(v) for v in defs.values())
         print(f'{len(trees)} modules, {n} resolvable symbols: '
-              'no cross-module signature mismatches')
+              'no shadowed definitions, no cross-module signature mismatches')
         return 0
     print(f'{len(problems)} call site(s) disagree with their callee:\n')
     for where, callee, why in sorted(problems):

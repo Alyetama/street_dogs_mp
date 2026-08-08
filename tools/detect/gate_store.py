@@ -51,6 +51,13 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT_DIR = os.path.join(REPO, 'data', 'gate')
 PLAN_FILE = os.path.join(OUT_DIR, 'plan.json')
+# What the run is doing RIGHT NOW. Progress was read off the written shards
+# alone, and a shard is 20,000 frames -- so for the first several minutes of a
+# twelve-hour run the dashboard showed 0%, 0 judged, no rate and no share, an
+# idle-looking panel above a machine at full tilt. The shards remain the
+# record; this is the only thing that can speak before the first one lands.
+BEAT_FILE = os.path.join(OUT_DIR, 'progress.json')
+BEAT_EVERY_S = 3.0
 SHARD_ROWS = 20000
 # The margin the gate was trained with. tools/detect/build_review_set.py and
 # the live preview writer both use it; inference has to match or every verdict
@@ -106,6 +113,25 @@ def gate_weights():
                          '  set TRAINING_ROOT to where the runs live')
     return p, best.get('run') or os.path.basename(os.path.dirname(
         os.path.dirname(p)))
+
+
+def _beat(**kw):
+    """Publish the in-flight figures. Never fatal: a run must not die because
+    a status file could not be written."""
+    try:
+        tmp = BEAT_FILE + '.tmp'
+        with open(tmp, 'w') as fh:
+            json.dump(kw, fh)
+        os.replace(tmp, BEAT_FILE)
+    except OSError:
+        pass
+
+
+def _beat_clear():
+    try:
+        os.remove(BEAT_FILE)
+    except OSError:
+        pass
 
 
 def _interleave(rows):
@@ -346,6 +372,26 @@ def run(args):
 
     roots = _roots()
     t0, seen, bad = time.time(), 0, 0
+    # frames the shards on disk already account for -- `seen` counts only what
+    # THIS process walked, and a resumed run starts it at zero
+    base = sum(len(shards[i]) for i in skip if i < len(shards))
+    boxes_run = dogs_run = 0
+    last_beat = 0.0
+
+    def beat(si, flight):
+        el = max(1e-9, time.time() - t0)
+        _beat(pid=os.getpid(), started=t0, updated=time.time(),
+              shard=si, shards_total=len(shards),
+              images=base + seen, images_total=len(jobs),
+              rows_flight=flight, boxes=boxes_run, bad=bad,
+              img_s=round(seen / el, 2), box_s=round(boxes_run / el, 2),
+              dog_share=(dogs_run / boxes_run) if boxes_run else None)
+
+    # The first one goes out BEFORE any frame is read: the model is already
+    # loaded by here, so this is the moment the panel can stop saying nothing
+    # is happening. Everything in it is zero, which is true and is not the
+    # same as unknown.
+    beat(next((i for i in range(len(shards)) if i not in skip), 0), 0)
     with mp.get_context('spawn').Pool(args.workers, _init, (roots,)) as pool:
         for si, shard in enumerate(shards):
             if stop is not None and si >= stop:
@@ -356,6 +402,7 @@ def run(args):
             batch, meta = [], []
 
             def flush():
+                nonlocal boxes_run, dogs_run
                 if not batch:
                     return
                 for res, (iid, di) in zip(
@@ -366,6 +413,8 @@ def run(args):
                     rows['det_idx'].append(int(di))
                     rows['label'].append('dog' if p >= 0.5 else 'not_dog')
                     rows['p_dog'].append(round(p, 5))
+                    boxes_run += 1
+                    dogs_run += p >= 0.5
                 batch.clear()
                 meta.clear()
 
@@ -379,6 +428,9 @@ def run(args):
                     meta.append((iid, di))
                     if len(batch) >= args.batch:
                         flush()
+                if time.time() - last_beat >= BEAT_EVERY_S:
+                    beat(si, len(rows['label']))
+                    last_beat = time.time()
             flush()
             tmp = os.path.join(OUT_DIR, f'.gate-{si:05d}.tmp')
             pq.write_table(pa.table({
@@ -397,6 +449,14 @@ def run(args):
                   f'{seen / el:.0f} img/s  '
                   f'eta {(len(jobs) - seen) / max(1e-9, seen / el) / 3600:.1f} h',
                   flush=True)
+            # the shard is on disk now, so its rows are no longer in flight --
+            # counting them in both places would double them for one tick
+            beat(si, 0)
+            last_beat = time.time()
+    # The record is the shards; a heartbeat outliving the process would be a
+    # claim about a run that is over. A kill leaves it behind, which is why
+    # the reader also ages it out.
+    _beat_clear()
     print(f'done: {seen:,} images, {bad:,} unreadable, '
           f'{time.time() - t0:.0f}s')
     return 0

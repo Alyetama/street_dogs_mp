@@ -5935,12 +5935,13 @@ _GATE = {'at': 0, 'doc': None}
 GATE_TTL_S = 20
 
 
-def gate_progress():
-    """How far the gate has got, read off the shards it has written."""
+def _gate_shards():
+    """The written record: 165 parquet footers, so it is cached. Everything
+    here changes once every few minutes at most."""
     now = time.time()
     if _GATE['doc'] is not None and now - _GATE['at'] < GATE_TTL_S:
         return _GATE['doc']
-    doc = {'ever': False}
+    doc = None
     try:
         with open(os.path.join(GATE_DIR, 'plan.json')) as fh:
             plan = json.load(fh)
@@ -5983,19 +5984,75 @@ def gate_progress():
         sus = per * (len(times) - 1) / max(1e-9, times[-1] - times[0])
         k = min(len(times) - 1, 5)
         rate = per * k / max(1e-9, times[-1] - times[-1 - k])
-    running = bool(times) and (now - times[-1]) < 900
-    left = max(0, total - rows)
-    doc = {'ever': bool(fs) or total > 0, 'running': running,
-           'rows': rows, 'total': total, 'shards': len(fs),
-           'pct': (rows / total) if total else 0,
-           'dog_share': (dogs / seen) if seen else None,
-           'rate': round(rate, 1), 'sustained': round(sus, 1),
-           'eta_s': (left / sus) if sus > 0 else None,
+    doc = {'rows': rows, 'total': total, 'shards': len(fs),
+           'dogs': dogs, 'seen': seen, 'last': times[-1] if times else 0.0,
+           'rate': rate, 'sustained': sus,
            'model': plan.get('model') or 'dog-bin gate',
            'images': int(plan.get('images') or 0),
            'created': plan.get('created') or ''}
     _GATE.update(at=now, doc=doc)
     return doc
+
+
+def _gate_beat():
+    """What the run is doing BETWEEN shards.
+
+    A shard is 20,000 frames, so on a cold start the footers say nothing for
+    several minutes: the panel read 0%, 0 judged, no rate and no share while
+    sixteen decoders were flat out, and pressing Run looked like it had done
+    nothing. The shards stay the record; this fills the gap between them, and
+    only while it is fresh enough to be about a process that still exists (a
+    killed run cannot clean up after itself). Read every call, never cached --
+    it is the one part of this panel that changes by the second.
+    """
+    try:
+        with open(os.path.join(GATE_DIR, 'progress.json')) as fh:
+            b = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(b, dict):
+        return None
+    try:
+        fresh = time.time() - float(b.get('updated') or 0) <= 30.0
+    except (TypeError, ValueError):
+        return None
+    return b if fresh else None
+
+
+def gate_progress():
+    """How far the gate has got: the shards it has written, plus the shard it
+    is in the middle of."""
+    shards = _gate_shards()
+    if shards is None:
+        return {'ever': False}
+    beat = _gate_beat() or {}
+    rows = shards['rows'] + int(_num_or(beat.get('rows_flight'), 0))
+    total, dogs, seen = shards['total'], shards['dogs'], shards['seen']
+    rate, sus = shards['rate'], shards['sustained']
+    if beat:
+        # measured by the run itself, not inferred from file timestamps
+        rate = _num_or(beat.get('box_s'), 0.0)
+        if not sus:
+            sus = rate
+        share = _num_or(beat.get('dog_share'), None)
+        if seen <= 0 and share is not None:
+            dogs, seen = share, 1.0
+    left = max(0, total - rows)
+    warm = bool(shards['last']) and (time.time() - shards['last']) < 900
+    return {'ever': bool(shards['shards']) or total > 0,
+            'running': bool(beat) or warm,
+            'rows': rows, 'total': total, 'shards': shards['shards'],
+            'pct': (rows / total) if total else 0,
+            'dog_share': (dogs / seen) if seen else None,
+            'rate': round(rate, 1), 'sustained': round(sus, 1),
+            'eta_s': (left / sus) if sus > 0 else None,
+            'model': shards['model'], 'images': shards['images'],
+            # frames opened, which moves every second -- the judged count only
+            # moves when a shard lands, and a run whose first shard is still
+            # minutes away needs something true to show
+            'images_done': int(_num_or(beat.get('images'), 0)) if beat else None,
+            'img_s': _num_or(beat.get('img_s'), 0.0) if beat else None,
+            'created': shards['created']}
 
 
 # ── drive health ────────────────────────────────────────────────────────────
@@ -7828,10 +7885,18 @@ def _triage_last_error():
 
 
 def _num_or(v, default):
+    """A number out of a status file, or the default.
+
+    Every caller reads a file some other process is writing, so a truncated
+    write, a changed schema or a JSON NaN has to degrade to "unknown" rather
+    than reach arithmetic. NaN is the one that hides: it is a float, it
+    passes this cast, and it poisons everything downstream silently.
+    """
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return default
+    return default if f != f else f
 
 
 def triage_status(backend='siglip'):
@@ -12236,10 +12301,23 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     document.getElementById('gCount').textContent=
       fmt(j.rows)+' of '+fmt(j.total)+' detections judged'+
       (j.shards?' · '+fmt(j.shards)+' shards written':'');
+    /* while it runs, the honest headline is frames OPENED: a shard is 20,000
+       of them, so the judged count above sits still for minutes at a time and
+       a run that had just started read as a run that had done nothing */
     document.getElementById('gRun').textContent=
-      j.images?fmt(j.images)+' frames to open · '+(j.model||'')+
-        (j.created?' · planned '+j.created:''):'—';
-    document.getElementById('gMeta').textContent=j.error||'';
+      j.images_done!=null
+        ? fmt(j.images_done)+' of '+fmt(j.images)+' frames opened'+
+          (j.img_s?' · '+j.img_s.toFixed(0)+' frames/s':'')+
+          ' · '+(j.model||'')
+        : (j.images?fmt(j.images)+' frames to open · '+(j.model||'')+
+            (j.created?' · planned '+j.created:''):'—');
+    /* a run started by an older build publishes nothing until its first
+       shard; say which it is rather than showing a still panel */
+    document.getElementById('gMeta').textContent=j.error||
+      (j.running&&j.images_done==null&&!j.rows
+        ? 'running \\u2014 nothing is written until the first shard closes at '
+          +'20,000 frames'
+        : '');
     var pill=document.getElementById('gateState'),
         btn=document.getElementById('gateBtn');
     if(pill){
