@@ -6302,6 +6302,138 @@ def _drive_free(path):
         return None
 
 
+# ── the machine itself ──────────────────────────────────────────────────────
+# Every long job on this box is one of three things: waiting on a disk,
+# waiting on the CPU, or waiting on the GPU. Which one decides whether a knob
+# is worth turning, and the answer is not guessable -- the gate runs at 75
+# boxes/s with the GPU at 0%, because decoding an 8000x4000 panorama is 98% of
+# the work and the card is idle waiting for pixels. So the four figures here
+# are chosen to answer that question rather than to fill a row of gauges.
+_CPU = {'t': 0.0, 'idle': 0.0, 'total': 0.0, 'pct': None}
+_GPU = {'at': 0.0, 'doc': None}
+GPU_TTL_S = 2.0          # nvidia-smi forks a process; do not do it per client
+
+
+def _cpu_pct():
+    """Busy share since the last SAMPLE. /proc/stat is a set of counters since
+    boot, so a single read says what the machine has averaged over days --
+    only the delta between two reads is about now.
+
+    The window is held at a second minimum whatever the request rate. The
+    delta is consumed by whoever reads it, so two open tabs polling every two
+    seconds would have measured alternating one-second windows, and ten of
+    them windows short enough to be mostly scheduling noise. The sampling
+    cadence has to be the server's, not the audience's.
+    """
+    # On time, not on "have we got a number yet": gating on the latter let the
+    # call right after the baseline through, and it measured a window of
+    # microseconds -- one scheduler tick either way reads as 0% or 100%.
+    if _CPU['t'] and time.time() - _CPU['t'] < 1.0:
+        return _CPU['pct']
+    try:
+        with open('/proc/stat') as fh:
+            parts = fh.readline().split()
+    except OSError:
+        return None
+    if len(parts) < 5 or parts[0] != 'cpu':
+        return None
+    try:
+        v = [float(x) for x in parts[1:]]
+    except ValueError:
+        return None
+    total = sum(v)
+    idle = v[3] + (v[4] if len(v) > 4 else 0.0)     # idle + iowait
+    first = _CPU['total'] <= 0
+    dt, di = total - _CPU['total'], idle - _CPU['idle']
+    _CPU.update(t=time.time(), idle=idle, total=total)
+    # The first call has nothing to subtract from, and the delta against zero
+    # is the counter itself -- the machine's average since BOOT, which on a
+    # box that has been up for days is a small number that looks like an
+    # answer. One tick of "unknown" beats a plausible wrong number.
+    if first or dt <= 0:
+        return None if first else _CPU['pct']
+    _CPU['pct'] = max(0.0, min(100.0, 100.0 * (1.0 - di / dt)))
+    return _CPU['pct']
+
+
+def _meminfo():
+    """Bytes: (total, available, swap_total, swap_free). MemAvailable, not
+    MemFree -- the page cache is free memory that happens to be useful, and
+    counting it as used reports 60 GB in use on an idle box."""
+    want = {'MemTotal': 0, 'MemAvailable': 0, 'SwapTotal': 0, 'SwapFree': 0}
+    try:
+        with open('/proc/meminfo') as fh:
+            for line in fh:
+                k, _, rest = line.partition(':')
+                if k in want:
+                    want[k] = float(rest.split()[0]) * 1024.0
+    except (OSError, IndexError, ValueError):
+        return None
+    return want
+
+
+def _pressure(kind):
+    """PSI: the share of the last 10 s in which EVERY task was stalled on this
+    resource. `full` is the honest one -- `some` counts a single blocked
+    thread on a box with fifteen others working."""
+    try:
+        with open(f'/proc/pressure/{kind}') as fh:
+            for line in fh:
+                if line.startswith('full'):
+                    for tok in line.split():
+                        if tok.startswith('avg10='):
+                            return float(tok[6:])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _gpu():
+    """The card, via nvidia-smi. None when there is no card or no driver --
+    a machine without one is not a broken dashboard."""
+    now = time.time()
+    if _GPU['doc'] is not None and now - _GPU['at'] < GPU_TTL_S:
+        return _GPU['doc']
+    doc = None
+    try:
+        out = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,'
+             'memory.total,temperature.gpu,power.draw,power.limit',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=4.0)
+        if out.returncode == 0 and out.stdout.strip():
+            f = [x.strip() for x in out.stdout.strip().split('\n')[0].split(',')]
+            doc = {'name': f[0],
+                   'util': _num_or(f[1], None),
+                   'mem_used': _num_or(f[2], None),
+                   'mem_total': _num_or(f[3], None),
+                   'temp': _num_or(f[4], None),
+                   'power': _num_or(f[5], None),
+                   'power_max': _num_or(f[6], None)}
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        doc = None
+    _GPU.update(at=now, doc=doc)
+    return doc
+
+
+def sys_stats():
+    """CPU, memory, GPU and what the machine is stalled on. Never raises: a
+    missing card or an older kernel means one figure is unknown, not that the
+    panel is."""
+    m = _meminfo() or {}
+    tot, avail = m.get('MemTotal') or 0, m.get('MemAvailable') or 0
+    sw_t, sw_f = m.get('SwapTotal') or 0, m.get('SwapFree') or 0
+    try:
+        load1 = os.getloadavg()[0]
+    except OSError:
+        load1 = None
+    return {'cpu': _cpu_pct(), 'cores': os.cpu_count() or 0, 'load': load1,
+            'mem_used': tot - avail, 'mem_total': tot,
+            'swap_used': sw_t - sw_f, 'swap_total': sw_t,
+            'io_stall': _pressure('io'), 'cpu_stall': _pressure('cpu'),
+            'gpu': _gpu(), 'ts': time.time()}
+
+
 def drive_health():
     """One record per configured root: is it there, is it sound, is there room.
 
@@ -9128,6 +9260,12 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if self.path.split('?', 1)[0] == '/api/sweep':
             self._json({'running': bool(sweep_pids())})
             return
+        if self.path.split('?', 1)[0] == '/api/sys':
+            try:
+                self._json(sys_stats())
+            except Exception as e:
+                self._json({'error': str(e)})
+            return
         if self.path.split('?', 1)[0] == '/api/gate':
             try:
                 doc = gate_progress()
@@ -10279,6 +10417,28 @@ cursor:pointer;transition:color .12s,background .12s}
    sparkline draws as the subtle BACKGROUND of the img/s (now) chip */
 .kpi.spk{position:relative;overflow:hidden}
 .kpi.spk .kpi-label,.kpi.spk .kpi-val{position:relative;z-index:1}
+/* ── the machine ──
+   Four cards, one row, same shape as every other KPI on the page: this is a
+   readout, not a feature, and a section that invented its own look would
+   claim more attention than it earns. What it adds is the second line -- the
+   figure under each headline that says what the headline is against (16
+   cores, 63 GB, a 16 GB card), because a bare "48%" is not actionable. */
+.sykpis .kpi{padding:12px 15px}
+.sykpis .kpi-val{font-size:20px;margin-top:3px;position:relative;z-index:1}
+.sysub{font-size:10.5px;color:var(--dim);margin-top:3px;position:relative;
+  z-index:1;font-variant-numeric:tabular-nums;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.sysub.warn{color:var(--acc)}
+.sysub.bad{color:var(--red)}
+.symeta{font-size:11px;color:var(--dim);margin-top:11px}
+.symeta:empty{display:none}
+/* one word in the header: what the box is waiting on right now */
+.syverdict{margin-left:auto;align-self:center;font-size:11px;font-weight:600;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--dim);
+  border:1px solid var(--bd);border-radius:999px;padding:3px 10px}
+.syverdict:empty{display:none}
+.syverdict.io{color:var(--acc);border-color:rgba(232,166,69,.35)}
+.syverdict.gpu{color:var(--green);border-color:rgba(67,181,129,.3)}
 .dspark{position:absolute;inset:0;z-index:0;opacity:.5;pointer-events:none}
 .dmain{height:10px}
 .dcount{font-size:12.5px;color:var(--mut);font-variant-numeric:tabular-nums;margin:7px 0 0}
@@ -10747,6 +10907,36 @@ outline-offset:2px}
   <div class="kpis">__KPIS__</div>
 </div>
 
+<details class="fold sec" id="f-sys" open>
+<summary class="sect">The machine <span id="syHint">cpu, memory and the card &mdash; every 2 s</span>
+  <span class="syverdict" id="syVerdict"></span></summary>
+<div class="panel">
+  <div class="kpis sykpis">
+    <div class="kpi spk"><div id="sySparkCpu" class="dspark"></div>
+      <div class="kpi-label" title="busy share of all cores since the last reading, iowait counted as idle">cpu</div>
+      <div class="kpi-val" id="syCpu">&mdash;</div>
+      <div class="sysub" id="syLoad">&mdash;</div></div>
+    <div class="kpi spk"><div id="sySparkMem" class="dspark"></div>
+      <div class="kpi-label" title="MemTotal minus MemAvailable — the page cache is not counted as used">memory</div>
+      <div class="kpi-val" id="syMem">&mdash;</div>
+      <div class="sysub" id="sySwap">&mdash;</div></div>
+    <div class="kpi spk"><div id="sySparkGpu" class="dspark"></div>
+      <div class="kpi-label" title="how much of the time the card had work in flight">gpu</div>
+      <div class="kpi-val" id="syGpu">&mdash;</div>
+      <div class="sysub" id="syVram">&mdash;</div></div>
+    <div class="kpi spk"><div id="sySparkIo" class="dspark"></div>
+      <!-- PSI `full`: the share of the last ten seconds in which EVERY task
+           was stalled waiting on a disk. On this box it is the number that
+           explains the others -- the gate runs with the GPU near zero
+           because decoding 8000x4000 panoramas is what it is waiting for. -->
+      <div class="kpi-label" title="share of the last 10 s in which every task on the box was stalled waiting on storage">io stall</div>
+      <div class="kpi-val" id="syIo">&mdash;</div>
+      <div class="sysub" id="syCpuStall">&mdash;</div></div>
+  </div>
+  <div class="symeta" id="syMeta"></div>
+</div>
+</details>
+
 <details class="fold sec" id="f-detect" open>
 <summary class="sect">Models over the store <span id="stgHint">yolo26x @1280 — live, updates every 5 s while open</span>
   <!-- Two stages of one pipeline, so one section with a switch rather than
@@ -10810,7 +11000,7 @@ outline-offset:2px}
       <div class="kpi"><div class="kpi-label" title="detections the gate has judged">Judged</div><div class="kpi-val" id="gDone" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label">ETA</div><div class="kpi-val" id="gEta" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label" title="share the gate calls a dog, over the shards most recently written">Called dog</div><div class="kpi-val" id="gDog" style="font-size:19px">—</div></div>
-      <div class="kpi"><div class="kpi-label" title="boxes per second over the last few shards">boxes/s (now)</div><div class="kpi-val" id="gNow" style="font-size:19px">—</div></div>
+      <div class="kpi ok spk"><div id="gateSpark" class="dspark"></div><div class="kpi-label" title="boxes per second, measured by the run itself">boxes/s (now)</div><div class="kpi-val" id="gNow" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label" title="boxes per second over the whole run — the ETA is computed from this">boxes/s (sustained)</div><div class="kpi-val" id="gSus" style="font-size:19px">—</div></div>
     </div>
     <div class="bar dmain"><div class="fill" id="gFill" style="background:var(--acc)"></div></div>
@@ -10930,6 +11120,39 @@ function fmt(v){v=+v;if(v>=1e9)return (v/1e9).toFixed(2)+'B';if(v>=1e6)return (v
 var STAGE_COLOR={pending:'#7d8893',extract:'#8b7fd6',coverage:'#5b8fd6',backfill:'#4fb6c4',complete:'#b083d6',downloading:'#e8a645',downloaded:'#43b581'};
 /* cards past this many stay in the column's scroll area (see .colbody max-height) */
 function pctColor(p){return p>=99?'#43b581':p>=70?'#e8a645':'#d8743a'}
+/* One sparkline, several cards. The detection panel grew its own and every
+   later card that wanted the same thing would have copied the four details
+   that make it read as a trend rather than a rendering fault: hold it back
+   until there are enough points, resize on every draw because the KPI card
+   is a grid track with no final width on first paint, run the line edge to
+   edge, and pin the floor at zero so a flat series does not look like a
+   cliff. Written once, they stay true everywhere.
+   `cap` is the y-axis ceiling for a value with a known range: a percentage
+   drawn against its own maximum shows noise at full scale, so 3% CPU would
+   fill the card. Omit it and the axis follows the data, which is what a
+   throughput wants. */
+function mkSpark(el,color,cap){
+  var ch=null;
+  return function(vals){
+    if(typeof echarts==='undefined'||!el)return;
+    if(!vals||vals.length<4){el.style.display='none';return}
+    el.style.display='';
+    if(!ch)ch=echarts.init(el,null,{renderer:'canvas'});
+    ch.resize();
+    ch.setOption({backgroundColor:'transparent',animation:false,
+      grid:{left:0,right:0,top:2,bottom:0},
+      xAxis:{type:'category',show:false,boundaryGap:false,
+             data:vals.map(function(_,i){return i})},
+      yAxis:{type:'value',show:false,min:0,max:cap||null},
+      tooltip:{show:false},
+      series:[{type:'line',data:vals,symbol:'none',
+        lineStyle:{width:1,color:color+'.55)'},
+        areaStyle:{color:color+'.10)'}}]});
+    return ch;
+  };
+}
+var SPARK_ACC='rgba(232,166,69,',SPARK_OK='rgba(67,181,129,',
+    SPARK_COOL='rgba(91,143,214,',SPARK_HOT='rgba(216,116,58,';
 var COPY_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 function execCopy(t){var ta=document.createElement('textarea');ta.value=t;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';ta.style.opacity='0';document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,t.length);var ok=false;try{ok=document.execCommand('copy')}catch(e){}document.body.removeChild(ta);return ok;}
 function copyText(t){var done=function(){toast('copied '+t)},fail=function(){toast('copy failed')};if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,function(){execCopy(t)?done():fail()});}else{execCopy(t)?done():fail();}}
@@ -12244,6 +12467,92 @@ echarts.init(bEl,null,{renderer:'canvas'}).setOption({
   series:[{type:'bar',data:D.dogs,barWidth:'66%',itemStyle:{borderRadius:[0,4,4,0],color:new echarts.graphic.LinearGradient(0,0,1,0,[{offset:0,color:'#d8923a'},{offset:1,color:'#f0b85f'}])},label:{show:true,position:'right',color:'#828d98',fontSize:10,formatter:function(p){return fmt(p.value)}}}]});
 }
 window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);if(c)c.resize()});
+/* ── the machine: cpu, memory, the card, and what it is all waiting on ───── */
+(function(){
+  var el={}, ids=['syCpu','syLoad','syMem','sySwap','syGpu','syVram','syIo',
+                  'syCpuStall','syMeta','syVerdict'];
+  for(var i=0;i<ids.length;i++)el[ids[i]]=document.getElementById(ids[i]);
+  if(!el.syCpu)return;
+  var N=90,hist={cpu:[],mem:[],gpu:[],io:[]},DASH='\\u2014';
+  /* percentages are drawn against 100, not against their own maximum: a card
+     whose axis follows the data turns 3% jitter into a mountain range */
+  var draw={
+    cpu:mkSpark(document.getElementById('sySparkCpu'),SPARK_ACC,100),
+    mem:mkSpark(document.getElementById('sySparkMem'),SPARK_COOL,100),
+    gpu:mkSpark(document.getElementById('sySparkGpu'),SPARK_OK,100),
+    io:mkSpark(document.getElementById('sySparkIo'),SPARK_HOT,100)};
+  function gb(b){return (b/1073741824)}
+  function push(k,v){
+    if(v==null||v!==v)return;
+    hist[k].push(+v.toFixed(1));
+    if(hist[k].length>N)hist[k].shift();
+    draw[k](hist[k]);
+  }
+  function pc(v,d){return v==null?DASH:v.toFixed(d==null?0:d)+'%'}
+  function paint(j){
+    if(!j)return;
+    el.syCpu.textContent=pc(j.cpu);
+    el.syLoad.textContent=(j.load==null?DASH:j.load.toFixed(2)+' load')+
+      ' \\u00b7 '+j.cores+' cores';
+    /* load is per-core: 18 on a 16-core box is a queue, not a busy machine,
+       and the two readings disagreeing is the interesting case */
+    el.syLoad.className='sysub'+(j.load!=null&&j.cores&&j.load>j.cores*1.25
+      ?' warn':'');
+    var mu=gb(j.mem_used||0),mt=gb(j.mem_total||0);
+    el.syMem.textContent=mt?mu.toFixed(1)+' / '+mt.toFixed(0)+' GB':DASH;
+    /* Swap in use is the line that matters on this box: the target is to sit
+       just under the RAM ceiling, and the first sign of overshooting is not
+       a memory figure but pages going to disk. */
+    var su=gb(j.swap_used||0);
+    el.sySwap.textContent=j.swap_total
+      ?(su<0.05?'no swap in use':su.toFixed(1)+' GB swapped')
+      :'no swap configured';
+    el.sySwap.className='sysub'+(su>=8?' bad':su>=0.5?' warn':'');
+    var g=j.gpu;
+    el.syGpu.textContent=g?pc(g.util):'no card';
+    el.syVram.textContent=g&&g.mem_total
+      ?(g.mem_used/1024).toFixed(1)+' / '+(g.mem_total/1024).toFixed(0)+
+       ' GB'+(g.temp!=null?' \\u00b7 '+g.temp.toFixed(0)+'\\u00b0C':'')+
+       (g.power!=null?' \\u00b7 '+g.power.toFixed(0)+' W':'')
+      :(g?DASH:'nvidia-smi not answering');
+    el.syIo.textContent=j.io_stall==null?DASH:pc(j.io_stall,1);
+    el.syCpuStall.textContent=j.cpu_stall==null
+      ?'kernel reports no pressure'
+      :'cpu stall '+j.cpu_stall.toFixed(1)+'%';
+    el.syIo.parentNode.className='kpi spk'+(j.io_stall>=40?' hot':'');
+    /* The one sentence worth putting in the header: on a box that spends its
+       life on long batch jobs, WHICH resource is the ceiling decides whether
+       any knob is worth turning. Storage wins here more often than not --
+       decoding a 8000x4000 panorama is 98% of the gate's cost, so the card
+       sits near zero while six disks are read flat out. */
+    var v='';
+    if(j.io_stall!=null&&j.io_stall>=40)v='waiting on disk';
+    else if(g&&g.util!=null&&g.util>=70)v='gpu bound';
+    else if(j.cpu!=null&&j.cpu>=85)v='cpu bound';
+    el.syVerdict.textContent=v;
+    el.syVerdict.className='syverdict'+(v==='waiting on disk'?' io':
+      v==='gpu bound'?' gpu':'');
+    el.syMeta.textContent=g&&g.name?g.name:'';
+    push('cpu',j.cpu);
+    push('mem',mt?100*mu/mt:null);
+    push('gpu',g?g.util:null);
+    push('io',j.io_stall);
+  }
+  function poll(){
+    if(document.hidden)return;
+    fetch('/api/sys').then(function(r){return r.json()})
+      .catch(function(){return null}).then(paint);
+  }
+  poll();setInterval(poll,2000);
+  var rz=null;
+  window.addEventListener('resize',function(){
+    if(rz)clearTimeout(rz);
+    rz=setTimeout(function(){
+      for(var k in hist)draw[k](hist[k]);
+    },150);
+  });
+})();
+
 /* ── which stage the section is showing ─────────────────────────────────────
    The detector and the gate are two passes over one store, so they share a
    section and a set of card shapes. Only one polls at a time: the other's
@@ -12299,9 +12608,22 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     var h=Math.floor(s/3600), m=Math.round((s%3600)/60);
     return h?h+'h '+m+'m':m+'m';
   }
+  /* Same trend line the detector's img/s card carries. It is worth more here
+     than there: this rate is what the ETA is built from, and a run whose
+     throughput is sagging as it moves onto a slower drive says so in the
+     shape long before it says so in the number. */
+  var gSpark=mkSpark(document.getElementById('gateSpark'),SPARK_OK),
+      gHist=[],GN=90;
   function paint(j){
     if(!j)return;
     pace(j.running?2000:5000);
+    /* only while it runs: a stopped run's last rate repeated ninety times
+       would draw a flat line that looks like a measurement */
+    if(j.running&&j.rate!=null&&j.rate===j.rate){
+      gHist.push(+(+j.rate).toFixed(1));
+      if(gHist.length>GN)gHist.shift();
+    }
+    gSpark(gHist);
     var pct=(j.pct||0)*100;
     document.getElementById('gPct').textContent=j.total?pct.toFixed(1)+'%':'—';
     document.getElementById('gDone').textContent=fmt(j.rows);

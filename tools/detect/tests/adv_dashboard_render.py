@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -165,6 +166,18 @@ def check_markup(html):
     """
     bad = []
     for frag, why in (
+            # ── the machine ──
+            ('id="f-sys"', 'machine section'),
+            ('id="syCpu"', 'cpu readout'),
+            ('id="syMem"', 'memory readout'),
+            ('id="syGpu"', 'gpu readout'),
+            ('id="syIo"', 'io-stall readout — the figure that explains the '
+             'other three on a box that is storage bound'),
+            ('id="sySwap"', 'swap line — the target is to sit just under the '
+             'RAM ceiling, and swap is the first sign of overshooting it'),
+            ('/api/sys', 'machine endpoint call'),
+            ('id="gateSpark"', 'gate throughput sparkline'),
+            ('function mkSpark(', 'shared sparkline helper'),
             ('id="dhDone"', 'Processed KPI value slot'),
             ('>Processed<', 'Processed KPI label'),
             ('id="dcropGrid"', 'live detection grid container'),
@@ -1123,6 +1136,9 @@ SHARED_CLASSES = {
     'panel', 'sect', 'fold', 'sec', 'phead', 'phint', 'chart', 'cards',
     'ok', 'bad', 'warn', 'dim', 'mnone', 'cnt', 'hint', 'bar', 'fill',
     'rbtn', 'quiet', 'danger', 'bico', 'sp', 'num', 'pill', 'tag',
+    # the KPI card and its sparkline underlay: every panel that reports a
+    # number uses them, which is the point -- one readout shape, page-wide
+    'kpis', 'kpi', 'kpi-label', 'kpi-val', 'spk', 'dspark', 'hot',
 }
 # A section whose markup is expected to keep to its own prefix. The whole page
 # shares one stylesheet, so a section that invents a class already in use
@@ -1132,7 +1148,7 @@ SHARED_CLASSES = {
 # the page was valid, rendered, and wrong.
 #
 # Naming the prefix is the cheap half of the fix. Add a section, add a line.
-SECTION_PREFIX = {'f-drives': 'dh'}
+SECTION_PREFIX = {'f-drives': 'dh', 'f-sys': 'sy'}
 
 
 def css_collisions(index_path):
@@ -1153,6 +1169,110 @@ def css_collisions(index_path):
             if not c.startswith(prefix):
                 out.append((c, sid))
     return out
+
+
+def check_machine_stats():
+    """The machine panel reports live figures, so every one of them is a way
+    to be confidently wrong."""
+    import subprocess as _sp
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+    try:
+        import dashboard as d
+    except ImportError as e:
+        print(f'SKIP: cannot import the dashboard ({e})')
+        return 0
+    bad = []
+
+    # /proc/stat holds counters since BOOT. The first read has nothing to
+    # subtract from, and the delta against zero is the machine's lifetime
+    # average -- a small, plausible number that is not about now.
+    d._CPU.update(t=0.0, idle=0.0, total=0.0, pct=None)
+    if d._cpu_pct() is not None:
+        bad.append('the first cpu reading is the since-boot average, not a '
+                   'measurement of now — it must report unknown')
+    if any(d._cpu_pct() is not None for _ in range(3)):
+        bad.append('cpu re-sampled within the second — the window would be '
+                   'microseconds wide and one scheduler tick reads as 100%')
+    time.sleep(1.1)
+    v = d._cpu_pct()
+    if v is None or not 0.0 <= v <= 100.0:
+        bad.append(f'cpu reading {v} is not a percentage')
+    # and the cadence is the server's, not the audience's: two tabs polling
+    # must not each consume the delta
+    held = [d._cpu_pct() for _ in range(4)]
+    if len(set(held)) != 1:
+        bad.append(f'four reads inside one second gave {held} — each client '
+                   f'is consuming the delta')
+
+    m = d._meminfo()
+    if not m or not m.get('MemTotal'):
+        bad.append('meminfo unreadable')
+    elif not 0 < m['MemAvailable'] <= m['MemTotal']:
+        bad.append(f'available {m["MemAvailable"]} vs total {m["MemTotal"]}')
+
+    # No card, no driver, or an nvidia-smi that hangs: one unknown figure,
+    # not a broken panel.
+    real = _sp.run
+    for boom in (FileNotFoundError('nvidia-smi'),
+                 _sp.TimeoutExpired('nvidia-smi', 4.0),
+                 OSError('no such device')):
+        d._GPU.update(at=0.0, doc=None)
+        d.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(boom)
+        try:
+            if d._gpu() is not None:
+                bad.append(f'{type(boom).__name__} still produced a card')
+            got = d.sys_stats()
+            if got['gpu'] is not None or got['mem_total'] <= 0:
+                bad.append(f'{type(boom).__name__} broke the rest of the panel')
+        except Exception as e:                 # noqa: BLE001 - that is the test
+            bad.append(f'{type(boom).__name__} propagated: {e}')
+        finally:
+            d.subprocess.run = real
+    # garbage on stdout is not a card either
+    d._GPU.update(at=0.0, doc=None)
+    d.subprocess.run = lambda *a, **k: _sp.CompletedProcess(
+        a, 0, stdout='n/a, [N/A], , not supported\n', stderr='')
+    try:
+        g = d._gpu()
+        if g and (g['util'] is not None or g['mem_total'] is not None):
+            bad.append(f'"[N/A]" read as a measurement: {g}')
+    except Exception as e:                     # noqa: BLE001
+        bad.append(f'unparsable nvidia-smi output propagated: {e}')
+    finally:
+        d.subprocess.run = real
+    # One field nvidia-smi will not answer for (power on a laptop card, temp
+    # in a container) must cost that field, not the whole readout. A single
+    # float() over the row loses the utilisation to a missing wattage.
+    d._GPU.update(at=0.0, doc=None)
+    d.subprocess.run = lambda *a, **k: _sp.CompletedProcess(
+        a, 0, stdout='Card X, 74, 4103, 16303, 51, [N/A], [N/A]\n', stderr='')
+    try:
+        g = d._gpu() or {}
+        if g.get('util') != 74 or g.get('mem_total') != 16303:
+            bad.append(f'an unsupported power reading took the whole card '
+                       f'down with it: {g}')
+        if g.get('power') is not None:
+            bad.append(f'"[N/A]" power read as a number: {g.get("power")}')
+    except Exception as e:                     # noqa: BLE001
+        bad.append(f'a partly-unsupported card propagated: {e}')
+    finally:
+        d.subprocess.run = real
+        d._GPU.update(at=0.0, doc=None)
+
+    s = d.sys_stats()
+    for k in ('cpu', 'cores', 'mem_used', 'mem_total', 'swap_used',
+              'io_stall', 'gpu'):
+        if k not in s:
+            bad.append(f'sys_stats() has no {k}')
+    if s.get('mem_used', 0) > s.get('mem_total', 0):
+        bad.append('memory used exceeds total — MemFree read as MemAvailable?')
+    if bad:
+        for b in bad:
+            print(f'FAIL {b}')
+        return 1
+    print('ok   machine stats: measured windows, and a missing card is one '
+          'unknown figure')
+    return 0
 
 
 def hidden_that_still_shows(html):
@@ -1237,6 +1357,8 @@ def main():
                   f'{tag}\n     add {sel}[hidden]{{display:none}}')
         return 1
     print('ok   every hidden element is actually hidden')
+    if check_machine_stats():
+        return 1
     check_whole_script(html)
     check_markup(html)
     check_key_metrics()
