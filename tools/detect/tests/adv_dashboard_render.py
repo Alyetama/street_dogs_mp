@@ -1249,6 +1249,19 @@ def check_gate_panel(html, snips):
             'created': '2026-08-08 06:00:00',
             'upstream': {'stage': 'gate', 'title': 'dog-bin gate',
                          'rows': 4688510, 'total': 4688510, 'ready': True}},
+        # upstream done, but no work list yet: this is a DIFFERENT button
+        # doing a different thing, and saying Run while quietly planning
+        # would misdescribe the click
+        'leash_needs_plan': {
+            'ever': False, 'stage': 'leash', 'planned': False,
+            'running': False, 'planning': False, 'can_run': True,
+            'upstream': {'stage': 'gate', 'title': 'dog-bin gate',
+                         'rows': 4688510, 'total': 4688510, 'ready': True}},
+        'leash_planning': {
+            'ever': False, 'stage': 'leash', 'planned': False,
+            'running': False, 'planning': True, 'can_run': True,
+            'upstream': {'stage': 'gate', 'title': 'dog-bin gate',
+                         'rows': 4688510, 'total': 4688510, 'ready': True}},
         'gate_running': {
             'ever': True, 'stage': 'gate', 'planned': True, 'running': True,
             'can_run': True, 'rows': 1530446, 'total': 4688510, 'shards': 52,
@@ -1258,6 +1271,9 @@ def check_gate_panel(html, snips):
             'images_done': 1045505, 'img_s': 45.6,
             'created': '2026-08-07 22:28:52', 'upstream': None},
         'null_response': None,
+        # what the route returns when gate_progress throws: not a progress
+        # document, so nothing on the cards may be read as a measurement
+        'server_error': {'ever': False, 'error': 'disk went away'},
         'empty': {},
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -1316,6 +1332,31 @@ paint(P.leash_ready);
 if (els.gateBtn.disabled || !/Run leash/.test(String(els.gateBtn.textContent)))
   bad.push('a planned leash stage is not offered a Run: '
     + JSON.stringify(els.gateBtn.textContent));
+for (var k in els) { els[k].textContent = ''; els[k].title = '' }
+paint(P.server_error);
+if (/\b0 of 0\b/.test(String(els.gCount.textContent))
+    || String(els.gDone.textContent) !== '\u2014')
+  bad.push('an error response renders as a measured zero: '
+    + JSON.stringify(els.gCount.textContent) + ' / '
+    + JSON.stringify(els.gDone.textContent));
+if (!/disk went away/.test(String(els.gMeta.textContent)))
+  bad.push('the error itself is not shown: '
+    + JSON.stringify(els.gMeta.textContent));
+for (var k in els) { els[k].textContent = ''; els[k].title = '' }
+paint(P.leash_needs_plan);
+if (els.gateBtn.disabled || !/Plan leash/.test(String(els.gateBtn.textContent)))
+  bad.push('an unplanned stage whose upstream IS done offers '
+    + JSON.stringify(els.gateBtn.textContent) + ' — it needs a work list '
+    + 'built before it can run, and the button has to say which it is doing');
+for (var k in els) { els[k].textContent = ''; els[k].title = '' }
+paint(P.leash_planning);
+if (!els.gateBtn.disabled
+    || !/Planning/.test(String(els.gateBtn.textContent)))
+  bad.push('a planner already running is still offered a button: '
+    + JSON.stringify(els.gateBtn.textContent));
+if (String(els.gateState.textContent) !== 'planning')
+  bad.push('pill during planning reads '
+    + JSON.stringify(els.gateState.textContent));
 if (bad.length) { bad.forEach(function(b){ console.log('FAIL ' + b) });
   process.exit(1) }
 console.log('ok   gate panel: two stages, and an unplanned one says so');

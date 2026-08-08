@@ -5937,14 +5937,14 @@ GATE_DIR = os.path.join(REPO, 'data', 'gate')
 # is called, and which stage has to finish before this one can start. The two
 # lists are checked against each other by a guard rather than kept in step by
 # hand -- they are read by different interpreters and cannot import each other.
+# `card` and `hint` were here too, and nothing read them: the page is static
+# HTML, so its labels live in the markup, and a second copy on the server was
+# a source of truth that no code consulted and no guard could keep honest.
 GATE_STAGES = {
     'gate': {'dir': 'gate', 'title': 'dog-bin gate', 'positive': 'dog',
-             'card': 'Called dog', 'project': 'dog-bin', 'feeds_on': None,
-             'hint': 'over every detection the sweep committed'},
+             'project': 'dog-bin', 'feeds_on': None},
     'leash': {'dir': 'leash', 'title': 'leash model', 'positive': 'leashed',
-              'card': 'On a leash', 'project': 'leash-models',
-              'feeds_on': 'gate',
-              'hint': 'over every box the gate called a dog'},
+              'project': 'leash-models', 'feeds_on': 'gate'},
 }
 _GATE = {}                     # per stage: {'at': .., 'doc': ..}
 # A shard is immutable once written -- the runner builds it under a dot-name
@@ -9122,6 +9122,56 @@ def gate_pids(stage='gate'):
     return out
 
 
+def _gate_plan(stage, sp):
+    """Spawn the planner for a stage that has none, and say so."""
+    script = os.path.join(REPO, 'tools', 'detect', 'gate_store.py')
+    if _script_pids('gate_store.py', 'plan'):
+        return {'ok': True, 'running': False,
+                'msg': f'planning the {sp["title"]} — a few minutes over the '
+                       f'whole store; the Run button appears when it lands'}
+    try:
+        import duckdb                                       # noqa: F401
+    except ImportError:
+        return {'ok': False, 'running': False,
+                'msg': f'no plan yet, and this interpreter has no duckdb to '
+                       f'build one — run `gate_store.py plan --stage {stage}`'}
+    try:
+        log = open(os.path.join(REPO, 'data', f'{sp["dir"]}_run.log'), 'a')
+        env = dict(os.environ)
+        env['TRAINING_ROOT'] = training_root()
+        proc = subprocess.Popen(
+            [sys.executable, script, 'plan', '--stage', stage],
+            cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+            start_new_session=True, env=env)
+        _SPAWNED.append(proc)
+    except Exception as e:
+        return {'ok': False, 'running': False, 'msg': str(e)}
+    try:
+        # the planner refuses an unfinished upstream, and it does so instantly
+        code = proc.wait(timeout=2.5)
+        if proc in _SPAWNED:
+            _SPAWNED.remove(proc)
+        tail = ''
+        try:
+            with open(os.path.join(REPO, 'data', f'{sp["dir"]}_run.log')) as fh:
+                lines = [x.strip() for x in fh if x.strip()]
+            tail = lines[-1] if lines else ''
+        except OSError:
+            pass
+        return {'ok': False, 'running': False,
+                'msg': f'planning failed (code {code}). ' + tail[:200]}
+    except subprocess.TimeoutExpired:
+        pass
+    return {'ok': True, 'running': False,
+            'msg': f'planning the {sp["title"]} — a few minutes over the '
+                   f'whole store; the Run button appears when it lands'}
+
+
+def gate_planning():
+    """True while a planner is building a work list."""
+    return bool(_script_pids('gate_store.py', 'plan'))
+
+
 def gate_control(action, stage='gate'):
     """stop = SIGTERM (the shard in flight is lost, the written ones are not);
     start = relaunch detached, which resumes at the first unwritten shard."""
@@ -9164,10 +9214,13 @@ def gate_control(action, stage='gate'):
                            f'{sp["title"]} reads its verdicts and cannot be '
                            f'planned until it finishes'}
         if not os.path.exists(os.path.join(gate_dir(stage), 'work.parquet')):
-            return {'ok': False, 'running': False,
-                    'msg': f'no plan yet — run `gate_store.py plan --stage '
-                           f'{stage}` once, on the interpreter that has '
-                           f'duckdb'}
+            # Plan it here rather than sending someone to a terminal. The
+            # planner needs duckdb, and THIS interpreter has it -- it is the
+            # only one that can both parse this file and open the catalog, so
+            # the "run it where duckdb lives" instruction was pointing at the
+            # process reading it. Detached, because a 4.8M-row join is minutes
+            # and a request handler is not the place to spend them.
+            return _gate_plan(stage, sp)
         try:
             log = open(os.path.join(REPO, 'data',
                                     f'{sp["dir"]}_run.log'), 'a')
@@ -9424,6 +9477,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 # liveness from the process table, not from the file dates:
                 # a run killed mid-shard leaves recent mtimes behind
                 doc['running'] = bool(gate_pids(stage))
+                doc['planning'] = gate_planning()
                 doc['can_run'] = bool(DOGBIN_PYTHON) and (
                     not doc.get('upstream')
                     or doc['upstream']['ready'])
@@ -12705,11 +12759,22 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     push('gpu',g?g.util:null);
     push('io',j.io_stall);
   }
+  /* A collapsed fold is not being read, and this one costs a live nvidia-smi
+     to answer. The detection panel already stops when its fold shuts; this
+     one polled on regardless, twice a second, at whatever the section was
+     hiding. */
+  var fold=document.getElementById('f-sys');
   function poll(){
-    if(document.hidden)return;
+    if(document.hidden||(fold&&!fold.open))return;
     fetch('/api/sys').then(function(r){return r.json()})
       .catch(function(){return null}).then(paint);
   }
+  if(fold)fold.addEventListener('toggle',function(){
+    if(fold.open){poll();for(var k in hist)draw[k](hist[k])}
+  });
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden)poll();
+  });
   poll();setInterval(poll,2000);
   var rz=null;
   window.addEventListener('resize',function(){
@@ -12809,7 +12874,12 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
        the string "NaN" -- six of them across the cards, which reads as a
        broken panel rather than one that has not been asked to do anything.
        Absent is a dash. */
-    var DASH='\u2014',known=j.planned!==false;
+    /* `planned` is set on every payload this server builds, so a missing one
+       means the response is not a progress document at all -- the error path
+       returns {ever:false,error:...}, and treating that as "planned" put
+       "0 of 0 detections judged" under the error message. Absent is unknown,
+       and unknown is a dash. */
+    var DASH='\u2014',known=j.planned===true;
     function K(v,f){return (!known||v==null||v!==v)?DASH:f(v)}
     var pct=(j.pct||0)*100;
     document.getElementById('gPct').textContent=
@@ -12855,8 +12925,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
           fmt(up.total)+' boxes judged. This stage reads its verdicts, so it '+
           'cannot be planned until that finishes.'
         : !j.planned
-          ? 'not planned yet \u2014 run `gate_store.py plan --stage '+
-            (j.stage||'gate')+'` on the interpreter that has duckdb'
+          ? (j.planning
+              ? 'building the work list for this stage \u2014 a join over '+
+                'the whole store, a few minutes'
+              : 'no work list for this stage yet \u2014 Plan builds one')
           : j.running&&j.images_done==null&&!j.rows
             ? 'running \u2014 nothing is written until the first shard '+
               'closes at 20,000 frames'
@@ -12865,27 +12937,43 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         btn=document.getElementById('gateBtn');
     if(pill){
       pill.textContent=j.running?'running'
+        :j.planning?'planning'
         :waiting?'waiting':(j.rows?'paused':'not started');
       pill.className='swpill'+(j.running?' on':'');
     }
     if(btn&&btn.dataset.busy!=='1'){
       var what=j.stage==='leash'?'leash':'gate';
-      btn.disabled=!j.can_run;
-      btn.textContent=j.running?'Stop':(j.rows?'Resume':'Run '+what);
+      /* A stage with no work list needs one built before it can run, and
+         that is a different button doing a different thing -- saying Run and
+         quietly planning instead would be a lie about what the click does. */
+      var needsPlan=known===false&&!waiting;
+      btn.disabled=!j.can_run||j.planning;
+      btn.textContent=j.planning?'Planning\u2026'
+        :j.running?'Stop'
+        :needsPlan?'Plan '+what
+        :(j.rows?'Resume':'Run '+what);
       btn.title=waiting
         ? 'the '+up.title+' has to finish first \u2014 this stage judges its dogs'
-        : j.can_run
-          ? (j.running?'stop after the shard in flight \u2014 finished shards are kept'
-                      :(what==='leash'
-                        ?'judge every box the gate called a dog; resumes where it left off'
-                        :'judge every detection the sweep committed; resumes where it left off'))
-          : 'no interpreter configured for the '+what;
+        : j.planning
+          ? 'building the work list \u2014 a few minutes over the whole store'
+          : needsPlan
+            ? 'build the work list for this stage, then run it'
+            : j.can_run
+              ? (j.running?'stop after the shard in flight \u2014 finished shards are kept'
+                          :(what==='leash'
+                            ?'judge every box the gate called a dog; resumes where it left off'
+                            :'judge every detection the sweep committed; resumes where it left off'))
+              : 'no interpreter configured for the '+what;
     }
   }
   var gen=0;
+  var gfold=document.getElementById('f-detect');
   function poll(){
     var st=window.__stage;
     if((st!=='gate'&&st!=='leash')||document.hidden)return;
+    /* same rule as the detector's: a shut fold is not being looked at, and
+       this one now asks every two seconds */
+    if(gfold&&!gfold.open)return;
     var mine=++gen;
     fetch('/api/gate?stage='+encodeURIComponent(st))
       .then(function(r){return r.json()})
