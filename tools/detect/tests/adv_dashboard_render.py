@@ -107,16 +107,20 @@ def extract_snippets(html):
     """Pull the helper fns + the detect and crops IIFEs out of the built page."""
     script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
     helpers = []
+    # Brace-matched, not line-matched. These were taken with `.*$`, which
+    # carries a helper only while it happens to fit on one line: adding a
+    # second line to pctColor() left a dangling half-function in the harness
+    # and every panel check died on a SyntaxError, reporting nothing about
+    # the page it was meant to be grading.
     for name in ('fmt', 'pctColor', 'esc'):
-        m = re.search(r'^function %s\(.*$' % name, script, re.M)
+        m = re.search(r'^function %s\(' % name, script, re.M)
         if not m:
             raise SystemExit(f'helper {name}() not found at top level '
                              f'of the built script — detect IIFE would '
                              f'throw ReferenceError')
-        helpers.append(m.group(0))
+        helpers.append(_take_fn(script, m.start()))
     # makeLightbox() is a multi-line top-level helper (LB_JS) that the crops
-    # IIFE calls at construction time. Single-line extraction cannot carry it,
-    # so take the whole function body by brace-matching from its declaration.
+    # IIFE calls at construction time, taken the same way.
     # mkSpark() is the shared sparkline the detect and gate panels both call,
     # and the SPARK_* colours go with it. Without them the gate IIFE throws
     # ReferenceError before the first card is painted -- which is exactly what
@@ -198,6 +202,12 @@ def check_markup(html):
              'the stage'),
             ("'/api/gate?stage='", 'stage-scoped gate endpoint'),
             ('function mkSpark(', 'shared sparkline helper'),
+            # one number per panel leads; six at one weight is six headlines
+            ('class="kpi lead"', 'lead KPI card'),
+            ('.kpi.lead{grid-column:span 2}', 'lead card spans two tracks'),
+            ('--red:#ef5350', 'a failure colour distinguishable from the '
+             'amber accent — rust was 12.5 OKLab units from it, under the 15 '
+             'an average reader needs'),
             ('id="dhDone"', 'Processed KPI value slot'),
             ('>Processed<', 'Processed KPI label'),
             ('id="dcropGrid"', 'live detection grid container'),
@@ -1158,7 +1168,7 @@ SHARED_CLASSES = {
     'rbtn', 'quiet', 'danger', 'bico', 'sp', 'num', 'pill', 'tag',
     # the KPI card and its sparkline underlay: every panel that reports a
     # number uses them, which is the point -- one readout shape, page-wide
-    'kpis', 'kpi', 'kpi-label', 'kpi-val', 'spk', 'dspark', 'hot',
+    'kpis', 'kpi', 'kpi-label', 'kpi-val', 'spk', 'dspark', 'hot', 'lead',
 }
 # A section whose markup is expected to keep to its own prefix. The whole page
 # shares one stylesheet, so a section that invents a class already in use
@@ -1366,6 +1376,62 @@ console.log('ok   gate panel: two stages, and an unplanned one says so');
         sys.stdout.write(r.stdout)
         sys.stderr.write(r.stderr)
         return r.returncode
+
+
+def check_progress_ramp():
+    """One quantity, one ramp -- in both languages that draw it.
+
+    A completion bar is rendered twice: once into the static page by
+    bar_color() in Python, and once live by pctColor() in the page script.
+    They had already drifted -- same thresholds, but one finished in #3fb27f
+    and the other in #43b581 -- which is invisible until the two appear on
+    one screen, and then reads as two different kinds of "done".
+
+    The ramp itself has one property that has to hold: lightness climbing
+    monotonically. That is what makes a magnitude readable at all, and it is
+    the channel every kind of colour blindness keeps, which is why this ramp
+    replaced seven scattered hues.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+    try:
+        import dashboard as d
+    except ImportError as e:
+        print(f'SKIP: cannot import the dashboard ({e})')
+        return 0
+    bad = []
+    src = inspect.getsource(d)
+    m = re.search(r"function pctColor\(p\)\{(.*?)\n(?=[a-zA-Z/])", src, re.S)
+    js = re.findall(r"#[0-9a-fA-F]{6}", m.group(1)) if m else []
+    if not js:
+        bad.append('pctColor() not found in the page script')
+    else:
+        # js is [done, ...ramp descending by threshold]; compare as sets of
+        # the ramp steps plus the terminal colour
+        py = list(d.PROGRESS_RAMP) + [d.bar_color(100)]
+        if sorted(set(x.lower() for x in js)) != sorted(set(x.lower() for x in py)):
+            bad.append(f'the two ramps disagree: page script uses {js}, '
+                       f'bar_color() uses {py} — one bar, two scales')
+    # every 5% step must be non-decreasing in lightness, and 100 must differ
+    def lum(h):
+        def c(v):
+            v = int(h[v:v + 2], 16) / 255
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+        r, g, b = c(1), c(3), c(5)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    steps = [lum(d.bar_color(p)) for p in range(0, 100, 5)]
+    if any(b < a - 1e-9 for a, b in zip(steps, steps[1:])):
+        bad.append(f'the ramp is not monotonic in lightness: '
+                   f'{[round(x, 3) for x in steps]} — a magnitude that gets '
+                   f'darker as it grows cannot be read')
+    if d.bar_color(100) == d.bar_color(99):
+        bad.append('finished is painted the same as nearly-finished')
+    if bad:
+        for b in bad:
+            print(f'FAIL {b}')
+        return 1
+    print('ok   progress ramp: one scale in both languages, rising in '
+          'lightness')
+    return 0
 
 
 def check_machine_stats():
@@ -1586,6 +1652,8 @@ def main():
         return 1
     print('ok   every hidden element is actually hidden')
     if check_machine_stats():
+        return 1
+    if check_progress_ramp():
         return 1
     if check_gate_panel(html, extract_snippets(html)):
         return 1

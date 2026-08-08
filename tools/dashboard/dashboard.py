@@ -409,13 +409,19 @@ def trend():
     } for r in rows]
 
 
+# The server-side twin of pctColor() in the page script: the same bar, drawn
+# once at build time and once live, so the two must step the same ramp. They
+# had already drifted -- same thresholds, but this one finished in #3fb27f
+# and the other in #43b581, two greens nobody chose to be different.
+# adv_dashboard_render.py checks them against each other.
+PROGRESS_RAMP = ('#8a6529', '#a97c2e', '#c79536', '#e0ae45')
+
+
 def bar_color(pct):
-    """Pick a progress-bar color by completion percentage."""
-    if pct >= 99:
-        return '#3fb27f'
-    if pct >= 70:
-        return '#e8a645'
-    return '#d8743a'
+    """A completion bar's fill: one hue, dark to light, by how much is done."""
+    if pct >= 100:
+        return '#43b581'          # finished is a state, not a quantity
+    return PROGRESS_RAMP[min(3, max(0, int(pct // 25)))]
 
 
 # ── pipeline status board ───────────────────────────────────────────────────
@@ -9787,7 +9793,7 @@ def render(ov, per, tr, now, locs=()):
 
     cards = ''.join(f'''<div class="rcard">
   <div class="rtop"><span class="rname">{p['region']}</span>
-    <span class="rpct" style="color:{bar_color(p['pct'])}">{p['pct']:.0f}%</span></div>
+    <span class="rpct">{p['pct']:.0f}%</span></div>
   <div class="bar"><div class="fill" style="width:{min(p['pct'],100):.1f}%;background:{bar_color(p['pct'])}"></div></div>
   <div class="rmeta"><span>{human(p['downloaded'])} / {human(p['dogs'])} ground animals</span>
     <span class="b">{human(p['all_data'])} imgs</span></div>
@@ -10136,8 +10142,17 @@ TEMPLATE = """<!doctype html>
    interrupted run never actually rendered rust. It only became visible when
    color-mix() got hold of it: an undefined custom property makes the whole
    declaration invalid, so every error cell in the confusion matrix came out
-   fully transparent. */
---red:#d8743a;
+   fully transparent.
+   It was rust, #d8743a, which is 12.5 OKLab units from the amber accent --
+   under the 15 an average reader needs to tell two colours apart, so a
+   failure was rendered in very nearly the page's ambient colour and did not
+   read as one. The review page had already hit this and kept its own red for
+   the "no" button; this is the same fix, made once. */
+--red:#ef5350;
+/* The progress ramp is NOT declared here. Every bar that uses it is filled
+   from script, inline, so a custom property would be five names no rule ever
+   reads -- and the page already carried two of those. It lives in
+   PROGRESS_RAMP and pctColor(), which a guard holds to each other. */
 --gap:22px}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:radial-gradient(1100px 560px at 72% -12%,#1d222b 0%,#13151a 56%) fixed,#13151a;
@@ -10318,7 +10333,8 @@ color:var(--dim);flex-wrap:wrap}
 .rcard:hover{border-color:rgba(232,166,69,.4);transform:translateY(-2px)}
 .rtop{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px;gap:8px}
 .rname{font-size:14.5px;font-weight:620}
-.rpct{font-size:14px;font-weight:680;font-variant-numeric:tabular-nums}
+.rpct{font-size:14px;font-weight:680;font-variant-numeric:tabular-nums;
+  color:var(--tx)}
 .bar{height:8px;border-radius:6px;background:rgba(130,140,150,.16);overflow:hidden}
 .fill{height:100%;border-radius:6px;transition:width .5s ease}
 .rmeta{display:flex;justify-content:space-between;margin-top:10px;font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums;gap:8px}
@@ -10561,6 +10577,11 @@ border-radius:4px;padding:1px 5px;color:var(--mut)}
 .cp:hover{color:var(--acc);background:rgba(232,166,69,.12)}
 .cp:active{transform:scale(.9)}
 .rc .rs{display:flex;justify-content:space-between;align-items:center;margin-top:5px;font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
+/* The percentage wore the bar's colour, which put 11px text at 3.4:1 on the
+   dim end of the ramp -- unreadable exactly where a region is furthest
+   behind and you most want to read it. The bar beside it already carries the
+   magnitude; the number only has to be legible. */
+.rc .rpc{color:var(--tx);font-weight:600}
 .rc .mini{height:4px;border-radius:3px;background:rgba(130,140,150,.18);margin-top:6px;overflow:hidden}
 .rc .mini i{display:block;height:100%;border-radius:3px}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:#21262d;border:1px solid var(--bd);color:var(--tx);padding:9px 16px;border-radius:10px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:9}
@@ -10624,6 +10645,15 @@ cursor:pointer;transition:color .12s,background .12s}
 .dsub{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin:16px 0 8px}
 /* headline: compact KPI chips (the page's existing .kpi look); the img/s
    sparkline draws as the subtle BACKGROUND of the img/s (now) chip */
+/* One number leads. Six cards at one weight is six headlines, so the panel
+   had no answer to the question it exists to answer -- how far along is it --
+   and "boxes/s (sustained)" shouted as loudly as "complete". Size carries the
+   rank, not colour: the accent is already the progress bar directly below,
+   and a hero in the same amber would just be the loudest thing twice. */
+.kpi.lead{grid-column:span 2}
+.kpi.lead .kpi-val{font-size:34px;line-height:1.12;letter-spacing:-1.2px}
+@media(max-width:620px){.kpi.lead{grid-column:span 1}
+  .kpi.lead .kpi-val{font-size:26px}}
 .kpi.spk{position:relative;overflow:hidden}
 .kpi.spk .kpi-label,.kpi.spk .kpi-val{position:relative;z-index:1}
 /* ── the machine ──
@@ -10662,13 +10692,13 @@ cursor:pointer;transition:color .12s,background .12s}
 .drow .bar{flex:1}
 .drow .dv{flex:none;text-align:right;white-space:nowrap}
 .drow.dmut{opacity:.55}
-.dbadge{background:rgba(216,116,58,.13);border:1px solid rgba(216,116,58,.45);color:#d8743a;border-radius:7px;padding:0 7px;font-size:10.5px;font-weight:620;flex:none}
+.dbadge{background:rgba(239,83,80,.13);border:1px solid rgba(239,83,80,.45);color:var(--red);border-radius:7px;padding:0 7px;font-size:10.5px;font-weight:620;flex:none}
 /* not_a_dog gauge: the 7–16% labelled prior renders as a shaded healthy zone
    (Addendum A.5) so in/out of band is legible without reading numbers */
 .dband{position:relative;height:10px;border-radius:6px;background:rgba(130,140,150,.16);flex:1}
 .dband .zone{position:absolute;top:0;bottom:0;background:rgba(67,181,129,.3);border-radius:2px}
 .dband .cur{position:absolute;top:-3px;bottom:-3px;width:3px;border-radius:2px;background:var(--acc)}
-.dband .cur.bad{background:#d8743a}
+.dband .cur.bad{background:var(--red)}
 .dchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 /* live detection crops: a random sample of the last minute's positives.
    Fixed square tiles so a row of wildly different crop aspect ratios still
@@ -11173,7 +11203,7 @@ outline-offset:2px}
   <div id="detOff" class="dnone dstat">sweep idle</div>
   <div id="detOn">
     <div class="kpis" style="margin-bottom:12px">
-      <div class="kpi"><div class="kpi-label">Complete</div><div class="kpi-val" id="dhPct" style="font-size:19px">—</div></div>
+      <div class="kpi lead"><div class="kpi-label">Complete</div><div class="kpi-val" id="dhPct">—</div></div>
       <div class="kpi"><div class="kpi-label" title="images the detector has covered all-time, across every restart">Processed</div><div class="kpi-val" id="dhDone" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label">ETA</div><div class="kpi-val" id="dhEta" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label" title="images with at least one detection, all-time across every restart">Positives</div><div class="kpi-val" id="dhPos" style="font-size:19px">—</div></div>
@@ -11210,7 +11240,7 @@ outline-offset:2px}
        one for symmetry would be worse than leaving it out. -->
   <div id="gateOn" hidden>
     <div class="kpis" style="margin-bottom:12px">
-      <div class="kpi"><div class="kpi-label">Complete</div><div class="kpi-val" id="gPct" style="font-size:19px">—</div></div>
+      <div class="kpi lead"><div class="kpi-label">Complete</div><div class="kpi-val" id="gPct">—</div></div>
       <div class="kpi"><div class="kpi-label" title="detections the gate has judged">Judged</div><div class="kpi-val" id="gDone" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label">ETA</div><div class="kpi-val" id="gEta" style="font-size:19px">—</div></div>
       <!-- the counts behind the share go in the card's own title, filled in
@@ -11334,9 +11364,27 @@ var D=__DATA__;
 /* mirrors human() in dashboard.py exactly -- see the note there */
 function fmt(v){v=+v;if(v>=1e9)return (v/1e9).toFixed(2)+'B';if(v>=1e6)return (v/1e6).toFixed(2)+'M';if(v>=1e3)return (v/1e3).toFixed(2)+'K';return ''+v}
 /* ── pipeline tracker board ── */
-var STAGE_COLOR={pending:'#7d8893',extract:'#8b7fd6',coverage:'#5b8fd6',backfill:'#4fb6c4',complete:'#b083d6',downloading:'#e8a645',downloaded:'#43b581'};
+/* The stages are a SEQUENCE -- pending, extract, coverage, backfill,
+   complete, downloading, downloaded -- so the colour says how far along a
+   region is, not which of seven unrelated things it is. It used to be seven
+   scattered hues, and two of them (#5b8fd6 coverage, #8b7fd6 extract) were
+   6.9 OKLab units apart for an average reader and 0.2 apart for a red-green
+   colourblind one: on the board that decides where every region stands, two
+   columns were painted the same colour. Seven hues cannot be separated on a
+   dark ground; a ramp does not have to be, because it climbs in lightness,
+   which every kind of colour vision keeps.
+   Grey is the absence of the ramp, which is what "not started" is. Green is
+   kept for the end, because finished is a state and not a quantity. */
+var STAGE_COLOR={pending:'#7d8893',extract:'#8a6529',coverage:'#a97c2e',
+  backfill:'#c79536',complete:'#e0ae45',downloading:'#f5c570',
+  downloaded:'#43b581'};
 /* cards past this many stay in the column's scroll area (see .colbody max-height) */
-function pctColor(p){return p>=99?'#43b581':p>=70?'#e8a645':'#d8743a'}
+/* Same ramp, same reason: how much of a thing is done is a magnitude. The
+   old three-colour version reported 69% in the same red as 3% and 71% in the
+   same amber as 98%, which is a claim about kind rather than degree. Full
+   stays green -- done IS a state. */
+function pctColor(p){return p>=100?'#43b581'
+  :p>=75?'#e0ae45':p>=50?'#c79536':p>=25?'#a97c2e':'#8a6529'}
 /* One sparkline, several cards. The detection panel grew its own and every
    later card that wanted the same thing would have copied the four details
    that make it read as a trend rather than a rendering fault: hold it back
@@ -11377,7 +11425,7 @@ var boardEl=document.getElementById('board'),toastEl=document.getElementById('to
 function toast(t){toastEl.textContent=t;toastEl.classList.add('show');clearTimeout(toastT);toastT=setTimeout(function(){toastEl.classList.remove('show')},1700)}
 function bcard(r){
   var d=document.createElement('div');d.className='rc';d.draggable=true;d.dataset.key=r.key;
-  d.innerHTML='<div class="rn"><span class="nm">'+r.name+'</span><button type="button" class="cp" title="Copy &quot;'+r.key+'&quot;" aria-label="Copy region name">'+COPY_SVG+'</button></div><div class="rs"><span>'+fmt(r.downloaded)+' / '+fmt(r.dogs)+'</span><span style="color:'+pctColor(r.pct)+'">'+r.pct+'%</span></div><div class="mini"><i style="width:'+Math.min(r.pct,100)+'%;background:'+pctColor(r.pct)+'"></i></div>';
+  d.innerHTML='<div class="rn"><span class="nm">'+r.name+'</span><button type="button" class="cp" title="Copy &quot;'+r.key+'&quot;" aria-label="Copy region name">'+COPY_SVG+'</button></div><div class="rs"><span>'+fmt(r.downloaded)+' / '+fmt(r.dogs)+'</span><span class="rpc">'+r.pct+'%</span></div><div class="mini"><i style="width:'+Math.min(r.pct,100)+'%;background:'+pctColor(r.pct)+'"></i></div>';
   var cp=d.querySelector('.cp');cp.draggable=false;
   cp.addEventListener('mousedown',function(e){e.stopPropagation()});
   cp.addEventListener('click',function(e){e.stopPropagation();e.preventDefault();copyText(r.key)});
@@ -11850,13 +11898,13 @@ function genCommands(){
   var region=(cmdRegion.value||'').trim();
   if(!region){cmdOut.innerHTML='';return;}
   fetch('/api/commands?region='+encodeURIComponent(region)).then(function(r){return r.json()}).then(function(j){
-    if(j.error){cmdOut.innerHTML='<div style="color:#d8743a;padding:8px 2px">unknown region: '+esc(region)+'</div>';return;}
+    if(j.error){cmdOut.innerHTML='<div style="color:var(--red);padding:8px 2px">unknown region: '+esc(region)+'</div>';return;}
     var labels=['① Extract','② Coverage audit','③ Backfill metadata (no download)','④ Download images','⑤ Consolidate data → one drive (dry-run; add --execute)'];
     cmdOut.innerHTML=j.commands.map(function(c,i){
       return '<div class="cmdblock"><div class="cmdhead"><span>'+labels[i]+'</span><button type="button" class="cp" data-i="'+i+'" title="Copy command">'+COPY_SVG+'</button></div><pre>'+esc(c)+'</pre></div>';
     }).join('');
     cmdOut.querySelectorAll('.cp').forEach(function(b){b.addEventListener('click',function(e){e.preventDefault();copyText(j.commands[+b.dataset.i])})});
-  }).catch(function(){cmdOut.innerHTML='<div style="color:#d8743a;padding:8px 2px">failed to generate</div>'});
+  }).catch(function(){cmdOut.innerHTML='<div style="color:var(--red);padding:8px 2px">failed to generate</div>'});
 }
 if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListener('keydown',function(e){if(e.key==='Enter')genCommands()});}
 /* ── atlas (Equal Earth, three layers, zoom-adaptive raster) ── */
