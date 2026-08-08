@@ -1132,9 +1132,17 @@ def detect_payload():
                     done = float(body.get('imgs_done') or 0)
                     total = float(body.get('imgs_total') or 0)
                     body['finished'] = bool(total and done >= total)
-                    for k in ('eta_s', 'imgs_per_s', 'imgs_per_s_15m',
-                              'drives', 'regions_live'):
-                        body.pop(k, None)
+                    # An ETA is a claim about a process, so it goes.
+                    body.pop('eta_s', None)
+                    # Per drive, done/total is work that HAPPENED and stays --
+                    # dropping the whole block took the bars with it. The rate,
+                    # the queue depth and the stall flag all describe a reader
+                    # that is not reading, so only those three go.
+                    body['drives'] = {
+                        d: {'done': v.get('done'), 'total': v.get('total')}
+                        for d, v in (body.get('drives') or {}).items()
+                        if isinstance(v, dict)
+                    }
             except Exception:
                 body = {'running': False}
         _detect_memo.update(t=now, body=body)
@@ -12369,7 +12377,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
        GLOBAL (all-time, across restarts) — the %, the bar and the ETA are all
        against imgs_total, never against the per-process run_imgs_done. */
     var ips=j.img_per_sec||{},rNow=+ips.w60||0,rSus=+ips.w900||0;
-    var tot=+j.imgs_total||0,pct=(live&&tot)?100*(+j.imgs_done||0)/tot:0;
+    /* NOT gated on live: how much of the store has been swept is a fact about
+       work done. Gating it printed 0.00% and an empty bar under a finished
+       sweep, which reads as "nothing happened" -- the exact opposite. */
+    var tot=+j.imgs_total||0,pct=tot?100*(+j.imgs_done||0)/tot:0;
     /* always 2 decimals: at ~50 img/s the third digit is the only one that
        visibly moves, and a field that switches precision at 10% jitters */
     hPct.textContent=tot?(pct.toFixed(2)+'%'):DASH;
@@ -12399,7 +12410,9 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     var dr=j.drives||{},dk=Object.keys(dr).sort();
     keep('drives',dk);
     dEl.innerHTML=(dk.length?dk:roster.drives).map(function(nm){
-      var d=dr[nm]||{},known=live&&d.total!=null,p=known&&d.total?100*d.done/d.total:0;
+      /* the bar is progress (permanent); only the img/s beside it needs a
+         running reader to mean anything */
+      var d=dr[nm]||{},known=d.total!=null,p=known&&d.total?100*d.done/d.total:0;
       return '<div class="drow'+(known?'':' dmut')+'"><span class="dn">'+esc(nm)+'</span>'+
         bar(known?p:0,pctColor(known?p:0))+
         '<span class="dv">'+(known&&d.total?p.toFixed(0)+'% \\u00b7 ':'')+
@@ -12427,7 +12440,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
       return 2;                                  /* not started */
     }
     var all=(rk.length?rk:roster.regions).map(function(nm){
-        return {n:nm,p:(live&&rg[nm]!=null)?+rg[nm]||0:null}})
+        return {n:nm,p:(rg[nm]!=null)?+rg[nm]||0:null}})
       .sort(function(a,b){
         var ra=rank(a),rb=rank(b);
         if(ra!==rb) return ra-rb;

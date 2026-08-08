@@ -524,6 +524,57 @@ for (const [name, p] of Object.entries(payloads)) {
             && !els['detRegions']._innerHTML.includes('dmut'))
           failures.push(name + ': untouched region not muted');
       }
+    } else if (p && p.imgs_total) {
+      // IDLE, BUT THE WORK HAPPENED. The panel used to treat "no process" as
+      // "no data" and dashed a finished 32.5M-image sweep into six em-dashes,
+      // reporting 0.00% complete under a full store. What was DONE survives
+      // the process; only rates and an ETA describe one.
+      if (off.style.display !== '')
+        failures.push(name + ': idle status line not shown');
+      const want = (100 * p.imgs_done / p.imgs_total).toFixed(2) + '%';
+      if (String(els['dhPct'].textContent) !== want)
+        failures.push(name + ': % complete is '
+          + JSON.stringify(els['dhPct'].textContent) + ' with ' + p.imgs_done
+          + ' of ' + p.imgs_total + ' images done — expected ' + want);
+      if (els['dhFill'].style.width !== want)
+        failures.push(name + ': progress bar is ' + els['dhFill'].style.width
+          + ', expected ' + want + ' — the work does not un-happen');
+      if (String(els['dhDone'].textContent) === DASH)
+        failures.push(name + ': Processed dashed away a real image count');
+      // an ETA is a claim about a process; a finished run says so instead
+      if (String(els['dhEta'].textContent) !== (p.finished ? 'complete' : DASH))
+        failures.push(name + ': ETA is '
+          + JSON.stringify(els['dhEta'].textContent) + ', expected '
+          + (p.finished ? 'complete' : 'a dash'));
+      for (const id of ['dhNow', 'dhSus'])
+        if (String(els[id].textContent) !== DASH)
+          failures.push(name + ': ' + id + ' is a throughput — it must dash '
+            + 'when nothing is reading, got '
+            + JSON.stringify(els[id].textContent));
+      const reg = els['detRegions']._innerHTML;
+      const rows = (reg.match(/class="drow/g) || []).length;
+      if (rows !== Object.keys(p.regions || {}).length)
+        failures.push(name + ': region list not complete (' + rows + ' of '
+          + Object.keys(p.regions || {}).length + ' rendered)');
+      for (const [rn, rv] of Object.entries(p.regions || {}))
+        if (!reg.includes('>' + rv.toFixed(1) + '%<'))
+          failures.push(name + ': region ' + rn + ' lost its ' + rv
+            + '% — completion is work done, not work happening');
+      const doneN = Object.values(p.regions || {}).filter(v => v >= 100).length;
+      if (Object.keys(p.regions || {}).length
+          && !String(els['detRegHead'].textContent).includes(
+              doneN + ' of ' + Object.keys(p.regions).length + ' complete'))
+        failures.push(name + ': region heading does not count the finished '
+          + 'ones: ' + JSON.stringify(els['detRegHead'].textContent));
+      const drv = els['detDrives']._innerHTML;
+      for (const [dn, d] of Object.entries(p.drives || {})) {
+        const dp = d.total ? (100 * d.done / d.total).toFixed(0) + '%' : null;
+        if (dp && !drv.includes(dp))
+          failures.push(name + ': drive ' + dn + ' lost its ' + dp
+            + ' of work done');
+      }
+      if (Object.keys(p.drives || {}).length && !drv.includes(DASH + ' img/s'))
+        failures.push(name + ': per-drive img/s must dash when idle: ' + drv);
     } else {
       if (off.style.display !== '')
         failures.push(name + ': idle status line not shown');
@@ -1146,6 +1197,39 @@ def main():
             'stale': {'running': False, 'stale': True, 'age_s': 500,
                       'state': 'running', 'run_id': 'r', 'pid': 1},
             'terminal': {'running': False, 'state': 'done'},
+            # The sweep that FINISHED. Not running, so no rate and no ETA --
+            # but 32.5M images were swept and every region is done, and the
+            # panel showed six em-dashes for it.
+            'finished_idle': {
+                'running': False, 'finished': True, 'state': 'stopped',
+                'age_s': 4269, 'run_id': 56381, 'gen': 1,
+                'imgs_done': 32_542_334, 'imgs_total': 32_542_334,
+                'run_imgs_done': 28_022_101,
+                # the writer keeps publishing its last window; the client must
+                # not believe it once the process is gone
+                'img_per_sec': {'w60': 71.8, 'w900': 69.0},
+                'drives': {'bobcat': {'done': 4043431, 'total': 4043431},
+                           'lynx': {'done': 3654093, 'total': 3654093}},
+                'regions': {'Africa': 100.0, 'Europe': 100.0,
+                            'South_Asia': 100.0},
+                'positives': 3_368_223, 'positive_rate': 10.4,
+                'boxes_total': 4_785_890, 'crops_classified': 0,
+                'class_split': {}, 'errors': {},
+                'started_at': '2026-08-02 20:09:33'},
+            # Stopped PART WAY. Same rule, different number: show what was
+            # done, and no ETA because nothing is running to have one.
+            'paused_idle': {
+                'running': False, 'finished': False, 'state': 'stopped',
+                'age_s': 900, 'run_id': 7, 'gen': 1,
+                'imgs_done': 13_016_933, 'imgs_total': 32_542_334,
+                'run_imgs_done': 1_000_000,
+                'drives': {'lynx': {'done': 1827046, 'total': 3654093}},
+                'regions': {'Africa': 100.0, 'Europe': 40.0,
+                            'South_Asia': 0.0},
+                'positives': 1_200_000, 'positive_rate': 9.2,
+                'boxes_total': 1_500_000, 'crops_classified': 0,
+                'class_split': {}, 'errors': {},
+                'started_at': '2026-08-05 11:00:00'},
             'degenerate_min': {'running': True, 'state': 'running'},
             # imgs_done is GLOBAL (all-time); run_imgs_done is this process
             # only. The %, the bar and the ETA must come from the former.
