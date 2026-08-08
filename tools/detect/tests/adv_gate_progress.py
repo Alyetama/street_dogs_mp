@@ -47,7 +47,9 @@ def _beat_doc(**kw):
 def reader_checks(bad):
     import dashboard as d
     tmp = tempfile.mkdtemp()
-    d.GATE_DIR = tmp
+    # the panel resolves a stage to a directory; point that one function at
+    # the fixture rather than at data/gate, which is a live twelve-hour run
+    d.gate_dir = lambda stage='gate': tmp
     beat_p = os.path.join(tmp, 'progress.json')
     with open(os.path.join(tmp, 'plan.json'), 'w') as fh:
         json.dump(PLAN, fh)
@@ -64,7 +66,7 @@ def reader_checks(bad):
         else:
             with open(beat_p, 'w') as fh:
                 json.dump(beat, fh)
-        d._GATE.update(at=0, doc=None)         # the shard scan is cached
+        d._GATE.pop('gate', None)              # the shard scan is cached
         return d.gate_progress()
 
     # ── a live run with no shard written yet ────────────────────────────────
@@ -162,14 +164,14 @@ def reader_checks(bad):
 
     pq.read_table = counted
     try:
-        d._GATE.update(at=0, doc=None)
+        d._GATE.pop('gate', None)
         d.gate_progress()                      # everything already known
         if reads:
             bad.append(f'{len(reads)} shard(s) re-read on a scan that had '
                        f'nothing new: {[os.path.basename(r) for r in reads]}')
         pq.write_table(pa.table({'label': pa.array(['dog'] * 40)}),
                        os.path.join(tmp, 'gate-00001.parquet'))
-        d._GATE.update(at=0, doc=None)
+        d._GATE.pop('gate', None)
         g = d.gate_progress()
         if len(reads) != 1:
             bad.append(f'a new shard cost {len(reads)} reads, expected 1')
@@ -180,7 +182,7 @@ def reader_checks(bad):
             bad.append(f"share called dog is {g['dog_share']}, expected the "
                        f"whole record's 340/1040")
         os.remove(os.path.join(tmp, 'gate-00001.parquet'))
-        d._GATE.update(at=0, doc=None)
+        d._GATE.pop('gate', None)
         g = d.gate_progress()
         if g['shards'] != 1 or g['rows'] != 1250:
             bad.append(f'a deleted shard is still counted: {g["shards"]} '
@@ -243,8 +245,60 @@ def runner_checks(bad):
     gs._beat(updated=1.0)                       # unwritable: must not raise
 
 
+def stage_table_checks(bad):
+    """The runner and the dashboard each carry a stage table, and they cannot
+    import each other -- one needs ultralytics, the other needs an interpreter
+    that can parse a 3.12 f-string. So they are checked against each other
+    here instead of kept in step by hand, which is the thing that never
+    happens twice.
+
+    What has to agree is small and load-bearing: the directory the shards go
+    in, the class whose share the panel reports, and which stage feeds which.
+    A drift in any of the three is silent -- the panel would read the wrong
+    directory, or count the wrong label and report 0%.
+    """
+    import gate_store as gs
+    try:
+        import dashboard as d
+    except ImportError:
+        return
+    for name, run in sorted(gs.STAGES.items()):
+        dash = d.GATE_STAGES.get(name)
+        if not dash:
+            bad.append(f'the runner has a {name!r} stage the dashboard has '
+                       f'never heard of -- its panel would read nothing')
+            continue
+        for key in ('dir', 'positive', 'feeds_on'):
+            if run[key] != dash[key]:
+                bad.append(f'stage {name!r} disagrees on {key}: runner says '
+                           f'{run[key]!r}, dashboard says {dash[key]!r}')
+    for name in sorted(set(d.GATE_STAGES) - set(gs.STAGES)):
+        bad.append(f'the dashboard offers a {name!r} stage the runner cannot '
+                   f'run -- its button would fail')
+    # every stage's directory is its own, or two of them would overwrite each
+    # other's shards
+    dirs = [v['dir'] for v in gs.STAGES.values()]
+    if len(set(dirs)) != len(dirs):
+        bad.append(f'two stages share an output directory: {dirs}')
+    # feeds_on must name a real stage and never cycle
+    for name, run in gs.STAGES.items():
+        seen, cur = {name}, run['feeds_on']
+        while cur:
+            if cur not in gs.STAGES:
+                bad.append(f'stage {name!r} feeds on {cur!r}, which does not '
+                           f'exist')
+                break
+            if cur in seen:
+                bad.append(f'stage {name!r} feeds on itself through {cur!r} '
+                           f'-- nothing could ever start')
+                break
+            seen.add(cur)
+            cur = gs.STAGES[cur]['feeds_on']
+
+
 def main():
     bad = []
+    stage_table_checks(bad)
     runner_checks(bad)
     try:
         reader_checks(bad)

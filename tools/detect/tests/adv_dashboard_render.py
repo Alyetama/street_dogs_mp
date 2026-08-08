@@ -117,6 +117,20 @@ def extract_snippets(html):
     # makeLightbox() is a multi-line top-level helper (LB_JS) that the crops
     # IIFE calls at construction time. Single-line extraction cannot carry it,
     # so take the whole function body by brace-matching from its declaration.
+    # mkSpark() is the shared sparkline the detect and gate panels both call,
+    # and the SPARK_* colours go with it. Without them the gate IIFE throws
+    # ReferenceError before the first card is painted -- which is exactly what
+    # would happen in a browser if the helper were ever moved into an IIFE.
+    m = re.search(r'^function mkSpark\(', script, re.M)
+    if not m:
+        raise SystemExit('helper mkSpark() not found at top level of the '
+                         'built script — both KPI panels call it')
+    helpers.append(_take_fn(script, m.start()))
+    m = re.search(r'^var SPARK_ACC=', script, re.M)
+    if not m:
+        raise SystemExit('the SPARK_* palette is not at top level')
+    helpers.append(script[m.start():script.index(';', m.start()) + 1])
+
     m = re.search(r'^function makeLightbox\(', script, re.M)
     if not m:
         raise SystemExit('helper makeLightbox() not found at top level of the '
@@ -129,7 +143,8 @@ def extract_snippets(html):
         return script[s:script.index('})();', s) + 5]
 
     return ('\n'.join(helpers), iife('/* ── detection sweep panel'),
-            iife('/* ── live detection crops'))
+            iife('/* ── live detection crops'),
+            iife("/* ── the gate's progress"))
 
 
 def check_whole_script(html):
@@ -177,6 +192,11 @@ def check_markup(html):
              'RAM ceiling, and swap is the first sign of overshooting it'),
             ('/api/sys', 'machine endpoint call'),
             ('id="gateSpark"', 'gate throughput sparkline'),
+            ('data-stage="leash"', 'leash stage tab'),
+            ('id="gDogLbl"', 'positive-class label — it is the one label that '
+             'is about the model rather than the run, so it has to follow '
+             'the stage'),
+            ("'/api/gate?stage='", 'stage-scoped gate endpoint'),
             ('function mkSpark(', 'shared sparkline helper'),
             ('id="dhDone"', 'Processed KPI value slot'),
             ('>Processed<', 'Processed KPI label'),
@@ -1171,6 +1191,142 @@ def css_collisions(index_path):
     return out
 
 
+GATE_STUB = r'''
+var els = {};
+function E(id){
+  return els[id] || (els[id] = {
+    id: id, textContent: '', title: '', className: '', disabled: false,
+    dataset: {}, style: {}, hidden: false,
+    addEventListener: function(){}, closest: function(){ return null },
+  });
+}
+global.document = {
+  getElementById: E, hidden: false,
+  addEventListener: function(){},
+  createElement: function(){ return {style:{}, setAttribute:function(){},
+    appendChild:function(){}, select:function(){},
+    setSelectionRange:function(){}} },
+};
+global.window = { addEventListener: function(){}, __stage: 'gate' };
+global.setInterval = function(){ return 1 };
+global.clearInterval = function(){};
+global.setTimeout = function(){ return 1 };
+global.clearTimeout = function(){};
+global.fetch = function(){ return {then:function(){return {catch:function(){
+  return {then:function(){}} }} }} };
+global.confirm = function(){ return true };
+'''
+
+
+def check_gate_panel(html, snips):
+    """Drive the classifier panel over every state it can be handed.
+
+    It serves two stages now -- the gate and the leash model -- and the second
+    spends its whole life before it is planned in a state the first never had:
+    no plan, no totals, no shards. fmt(undefined) is the string "NaN", so that
+    state rendered six NaNs across the cards, which reads as a broken panel
+    rather than one with nothing to do yet.
+    """
+    helpers, _, _, gate = snips
+    if 'gateSpark' not in gate or 'api/gate' not in gate:
+        print('FAIL the gate IIFE was not extracted — this check ran on '
+              'nothing')
+        return 1
+    payloads = {
+        # the leash stage before the gate has finished: no plan at all
+        'leash_waiting': {
+            'ever': False, 'stage': 'leash', 'planned': False,
+            'running': False, 'can_run': False,
+            'upstream': {'stage': 'gate', 'title': 'dog-bin gate',
+                         'rows': 1515214, 'total': 4688510, 'ready': False}},
+        # planned, never started
+        'leash_ready': {
+            'ever': True, 'stage': 'leash', 'planned': True, 'running': False,
+            'can_run': True, 'rows': 0, 'total': 863000, 'shards': 0,
+            'pct': 0, 'dog_share': None, 'dogs': None, 'dogs_of': None,
+            'rate': 0, 'sustained': 0, 'eta_s': None, 'model': 'leash model',
+            'images': 700000, 'images_done': None, 'img_s': None,
+            'created': '2026-08-08 06:00:00',
+            'upstream': {'stage': 'gate', 'title': 'dog-bin gate',
+                         'rows': 4688510, 'total': 4688510, 'ready': True}},
+        'gate_running': {
+            'ever': True, 'stage': 'gate', 'planned': True, 'running': True,
+            'can_run': True, 'rows': 1530446, 'total': 4688510, 'shards': 52,
+            'pct': 0.3264, 'dog_share': 0.184, 'dogs': 278874,
+            'dogs_of': 1515214, 'rate': 66.4, 'sustained': 66.2,
+            'eta_s': 47798.5, 'model': 'dog-bin gate', 'images': 3292062,
+            'images_done': 1045505, 'img_s': 45.6,
+            'created': '2026-08-07 22:28:52', 'upstream': None},
+        'null_response': None,
+        'empty': {},
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'gate.js')
+        with open(js, 'w', encoding='utf-8') as f:
+            # the IIFE keeps paint() private, so its body is re-evaluated
+            # with paint returned -- the same trick the detect panel's check
+            # uses, and the reason both are checked as bodies rather than
+            # reimplemented
+            body = re.sub(r'\(function\(\)\{', '', gate, count=1)
+            body = re.sub(r'\}\)\(\);?\s*$', '', body)
+            f.write(GATE_STUB + helpers + '\n'
+                    + 'var paint = (function(){' + body
+                    + '\nreturn paint})();\n' + r'''
+var P = JSON.parse(process.argv[2]), bad = [];
+for (var name in P) {
+  for (var k in els) { els[k].textContent = ''; els[k].title = '' }
+  window.__stage = (P[name] && P[name].stage) || 'gate';
+  try { paint(P[name]) }
+  catch (e) { bad.push(name + ': THREW ' + e.message); continue }
+  var seen = [];
+  for (var k in els)
+    seen.push(String(els[k].textContent) + ' ' + String(els[k].title));
+  var all = seen.join(' | ');
+  if (/NaN|undefined|\[object/.test(all))
+    bad.push(name + ': junk on the cards -> ' + all.slice(0, 300));
+}
+// the states that carry no numbers must SAY so, not sit blank
+var w = {}; for (var k in els) w[k] = 0;
+for (var k in els) { els[k].textContent = ''; els[k].title = '' }
+window.__stage = 'leash'; paint(P.leash_waiting);
+// The panel's own fmt() maps an absent number to 0, not to NaN -- so a
+// stage that has never been planned rendered "0 judged, 0 of 0, 0%", which
+// is indistinguishable from a planned stage that has done nothing yet. It
+// has to read as UNKNOWN, which is a dash.
+['gDone', 'gPct', 'gNow', 'gSus', 'gDog'].forEach(function (id) {
+  if (String(els[id].textContent) !== '\u2014')
+    bad.push('unplanned stage shows ' + id + ' = '
+      + JSON.stringify(els[id].textContent) + ', expected a dash — a zero '
+      + 'here is a claim that the stage has judged nothing, not that it has '
+      + 'not been asked to');
+});
+if (/\b0 of 0\b/.test(String(els.gCount.textContent)))
+  bad.push('unplanned stage counts against a total it does not have: '
+    + JSON.stringify(els.gCount.textContent));
+if (!/waiting on the dog-bin gate/.test(String(els.gMeta.textContent)))
+  bad.push('a stage waiting on another does not say so: '
+    + JSON.stringify(els.gMeta.textContent));
+if (String(els.gateState.textContent) !== 'waiting')
+  bad.push('pill reads ' + JSON.stringify(els.gateState.textContent)
+    + ', expected "waiting"');
+if (!els.gateBtn.disabled)
+  bad.push('Run is offered for a stage that cannot be planned yet');
+for (var k in els) { els[k].textContent = ''; els[k].title = '' }
+paint(P.leash_ready);
+if (els.gateBtn.disabled || !/Run leash/.test(String(els.gateBtn.textContent)))
+  bad.push('a planned leash stage is not offered a Run: '
+    + JSON.stringify(els.gateBtn.textContent));
+if (bad.length) { bad.forEach(function(b){ console.log('FAIL ' + b) });
+  process.exit(1) }
+console.log('ok   gate panel: two stages, and an unplanned one says so');
+''')
+        r = subprocess.run(['node', js, json.dumps(payloads)],
+                           capture_output=True, text=True)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        return r.returncode
+
+
 def check_machine_stats():
     """The machine panel reports live figures, so every one of them is a way
     to be confidently wrong."""
@@ -1390,12 +1546,14 @@ def main():
     print('ok   every hidden element is actually hidden')
     if check_machine_stats():
         return 1
+    if check_gate_panel(html, extract_snippets(html)):
+        return 1
     check_whole_script(html)
     check_markup(html)
     check_key_metrics()
     check_training_tracker()
     check_flag_api()
-    helpers, iife, crops_iife = extract_snippets(html)
+    helpers, iife, crops_iife, gate_iife = extract_snippets(html)
 
     with tempfile.TemporaryDirectory() as tmp:
         payloads = {

@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
-"""Run the dog-bin gate over every detection the sweep committed.
+"""Run a promoted classifier over the store, one stage at a time.
 
     python tools/detect/gate_store.py plan            # what there is to do
     python tools/detect/gate_store.py run             # do it, resumably
     python tools/detect/gate_store.py run --limit 5000
     python tools/detect/gate_store.py status
+    python tools/detect/gate_store.py plan  --stage leash
+    python tools/detect/gate_store.py run   --stage leash
+
+TWO STAGES, ONE MACHINE. The pipeline narrows: the detector finds ground
+animals, the gate decides which of them are dogs, and the leash model decides
+which of those dogs are on a lead. Each stage reads the one before it, so the
+leash stage judges the gate's dogs and nothing else -- 4.7M boxes become
+~870K, which is most of why it is a separate pass rather than a second head.
+
+Everything around the model is identical between them: the same locality
+ordering, the same shards, the same resume, the same heartbeat. So it is the
+same code with a stage table, not two files that drift.
 
 WHAT THIS IS. The detector is single-class and deliberately loose: it finds
 ground animals and calls them all "target". About one in five of its boxes is
@@ -49,6 +61,26 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# One row per stage. `feeds_on` is the whole difference between them: the gate
+# judges every detection, the leash model judges only what the gate called a
+# dog. `positive` names the class whose share the dashboard reports, and
+# `p_col` the probability column written beside every verdict -- kept at five
+# decimals so a threshold can be moved over the finished store without
+# re-running anything.
+STAGES = {
+    'gate': {
+        'dir': 'gate', 'project': 'dog-bin', 'title': 'dog-bin gate',
+        'classes': ['dog', 'not_dog'], 'positive': 'dog', 'p_col': 'p_dog',
+        'feeds_on': None,
+    },
+    'leash': {
+        'dir': 'leash', 'project': 'leash-models', 'title': 'leash model',
+        'classes': ['leashed', 'unleashed'], 'positive': 'leashed',
+        'p_col': 'p_leashed', 'feeds_on': 'gate',
+    },
+}
+STAGE = 'gate'
 OUT_DIR = os.path.join(REPO, 'data', 'gate')
 PLAN_FILE = os.path.join(OUT_DIR, 'plan.json')
 # What the run is doing RIGHT NOW. Progress was read off the written shards
@@ -58,6 +90,7 @@ PLAN_FILE = os.path.join(OUT_DIR, 'plan.json')
 # record; this is the only thing that can speak before the first one lands.
 BEAT_FILE = os.path.join(OUT_DIR, 'progress.json')
 BEAT_EVERY_S = 1.0        # one small atomic write; the panel polls at 2 s
+
 SHARD_ROWS = 20000
 # The margin the gate was trained with. tools/detect/build_review_set.py and
 # the live preview writer both use it; inference has to match or every verdict
@@ -67,6 +100,29 @@ MIN_SIDE = 8
 # images one drive contributes before the plan moves to the next. Sized
 # so a worker's chunk falls inside one block and stays on one disk.
 INTERLEAVE_BLOCK = 256
+
+
+def spec(stage=None):
+    return STAGES[stage or STAGE]
+
+
+def use(stage):
+    """Point the module at one stage's directory.
+
+    Module state rather than an argument threaded through nine functions: the
+    process runs exactly one stage from `main` to exit, and the alternative
+    was a parameter on every path helper that could only ever hold one value
+    per process. `data/gate/` keeps its name so a job already part-written
+    stays resumable.
+    """
+    global STAGE, OUT_DIR, PLAN_FILE, BEAT_FILE
+    if stage not in STAGES:
+        raise SystemExit(f'unknown stage {stage!r} -- '
+                         f'one of {", ".join(sorted(STAGES))}')
+    STAGE = stage
+    OUT_DIR = os.path.join(REPO, 'data', STAGES[stage]['dir'])
+    PLAN_FILE = os.path.join(OUT_DIR, 'plan.json')
+    BEAT_FILE = os.path.join(OUT_DIR, 'progress.json')
 
 
 def _roots():
@@ -97,19 +153,22 @@ def _resolve_roots():
 
 
 def gate_weights():
-    """The promoted gate, from data/best_models.json. Never hardcoded: a new
-    gate is promoted by editing that file, and this must follow it."""
+    """The promoted model for this stage, from data/best_models.json. Never
+    hardcoded: a new one is promoted by editing that file, and this follows
+    it."""
+    project = spec()['project']
     with open(os.path.join(REPO, 'data', 'best_models.json')) as fh:
         best = (json.load(fh).get('projects') or {}) \
-            .get('dog-bin', {}).get('best') or {}
+            .get(project, {}).get('best') or {}
     rel = str(best.get('weights') or '')
     if not rel:
-        raise SystemExit('no dog-bin model promoted in data/best_models.json')
+        raise SystemExit(f'no {project} model promoted in '
+                         f'data/best_models.json')
     root = os.environ.get('TRAINING_ROOT') or os.path.dirname(
         os.path.dirname(REPO))
     p = rel if os.path.isabs(rel) else os.path.join(root, rel)
     if not os.path.exists(p):
-        raise SystemExit(f'promoted gate not on disk: {p}\n'
+        raise SystemExit(f'promoted {project} model not on disk: {p}\n'
                          '  set TRAINING_ROOT to where the runs live')
     return p, best.get('run') or os.path.basename(os.path.dirname(
         os.path.dirname(p)))
@@ -184,11 +243,64 @@ def _interleave(rows):
     return out
 
 
+def upstream_state(stage=None):
+    """(judged, planned, dir) for the stage this one feeds on, or None.
+
+    A stage that reads another's output can only be planned once that output
+    is complete: planning the leash model against a half-written gate would
+    build a work list missing every dog the gate has not reached yet, and the
+    shard numbering is fixed at plan time, so there is no adding to it later.
+    """
+    up = spec(stage)['feeds_on']
+    if not up:
+        return None
+    d = os.path.join(REPO, 'data', STAGES[up]['dir'])
+    planned = 0
+    try:
+        with open(os.path.join(d, 'plan.json')) as fh:
+            planned = int(json.load(fh).get('rows') or 0)
+    except (OSError, ValueError, TypeError):
+        pass
+    judged = 0
+    try:
+        import glob
+        import pyarrow.parquet as pq
+        judged = sum(pq.ParquetFile(f).metadata.num_rows for f in
+                     glob.glob(os.path.join(d, f'{STAGES[up]["dir"]}-*.parquet')))
+    except Exception:
+        pass
+    return judged, planned, d
+
+
 def plan(args):
     """Every detection to judge, ordered for locality, split into shards."""
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import duckdb
     import store
+    sp = spec()
+    up = upstream_state()
+    if up and not args.partial:
+        judged, planned, updir = up
+        if not planned or judged < planned:
+            raise SystemExit(
+                f'the {STAGES[sp["feeds_on"]]["title"]} has judged '
+                f'{judged:,} of {planned:,} boxes -- the {sp["title"]} reads '
+                f'its output, and a plan built now would permanently omit '
+                f'every dog it has not reached yet (shard numbering is fixed '
+                f'at plan time). Wait for it to finish, or pass --partial to '
+                f'plan over what exists so far and accept that.')
+    # Every box the upstream stage marked with its positive class, and only
+    # those. The gate's verdicts live in their own store, joined back to the
+    # detection rows for the coordinates -- the shards carry a verdict and a
+    # probability, never a box.
+    narrow, params = '', [f'{args.gen:04d}']
+    if up:
+        pre = STAGES[sp['feeds_on']]['dir']
+        glob_sql = os.path.join(up[2], f'{pre}-*.parquet').replace("'", "''")
+        narrow = (f"JOIN read_parquet('{glob_sql}') u "
+                  f"ON u.image_id = CAST(d.image_id AS VARCHAR) "
+                  f"AND u.det_idx = d.det_idx "
+                  f"AND u.label = '{STAGES[sp['feeds_on']]['positive']}'")
     root = store.get_detect_root()
     img = store._sql_src(store._store_globs(root, 'img'))
     det = store._sql_src(store._store_globs(root, 'det'))
@@ -200,6 +312,7 @@ def plan(args):
         FROM {det} d
         JOIN {img} i ON i.image_id = d.image_id AND i.gen = d.gen
                     AND i.cell = d.cell
+        {narrow}
         WHERE d.gen = ?
         -- ONE row per box. A frame that was harvested into two cells on two
         -- drives has a detection row under each, same image_id and same
@@ -214,12 +327,13 @@ def plan(args):
         -- within a drive, one directory at a time: a worker walks a cell
         -- rather than seeking around it
         ORDER BY i.drive, i.cell, d.image_id, d.det_idx
-    """, [f'{args.gen:04d}']).fetchall()
+    """, params).fetchall()
     con.close()
     rows = _interleave(rows)
     os.makedirs(OUT_DIR, exist_ok=True)
     doc = {'gen': args.gen, 'rows': len(rows),
            'images': len({r[0] for r in rows}),
+           'stage': STAGE, 'model': sp['title'],
            # the runner cannot look these up for itself; see _roots()
            'roots': _resolve_roots(),
            'shard_rows': SHARD_ROWS, 'created': time.strftime('%F %T')}
@@ -265,16 +379,21 @@ def _shard_size(want):
             f'this job was sharded at {pinned} and {len(done_shards())} '
             f'shards are already written; --shard {want} would renumber them '
             f'and skip work that was never done. Use --shard {pinned}, or '
-            f'delete data/gate/ to start over.')
+            f"delete data/{spec()['dir']}/ to start over.")
     return pinned
 
 
+def shard_name(i):
+    return f"{spec()['dir']}-{i:05d}.parquet"
+
+
 def done_shards():
+    pre = spec()['dir'] + '-'
     try:
-        return {int(f.split('-')[1].split('.')[0])
+        return {int(f[len(pre):].split('.')[0])
                 for f in os.listdir(OUT_DIR)
-                if f.startswith('gate-') and f.endswith('.parquet')}
-    except OSError:
+                if f.startswith(pre) and f.endswith('.parquet')}
+    except (OSError, ValueError):
         return set()
 
 
@@ -332,13 +451,18 @@ def run(args):
     if args.limit:
         n = min(n, args.limit)
 
+    sp = spec()
     weights, run_name = gate_weights()
     model = YOLO(weights)
     names = dict(model.names)
     got = sorted(str(v) for v in names.values())
-    if got != ['dog', 'not_dog']:
-        raise SystemExit(f'{weights} classifies {got} -- not a dog-bin gate')
-    dog_idx = [k for k, v in names.items() if v == 'dog'][0]
+    if got != sorted(sp['classes']):
+        raise SystemExit(f"{weights} classifies {got} -- not a {sp['title']} "
+                         f"(expected {sorted(sp['classes'])})")
+    # index of the class whose probability is written beside every verdict
+    pos = sp['positive']
+    dog_idx = [k for k, v in names.items() if v == pos][0]
+    other = next(c for c in sp['classes'] if c != pos)
 
     # group into images, keeping the plan's order
     jobs, cur, cur_key = [], [], None
@@ -399,7 +523,7 @@ def run(args):
                 break
             if si in skip:
                 continue
-            rows = {'image_id': [], 'det_idx': [], 'label': [], 'p_dog': []}
+            rows = {'image_id': [], 'det_idx': [], 'label': [], 'p': []}
             batch, meta = [], []
 
             def flush():
@@ -412,8 +536,8 @@ def run(args):
                     p = float(res.probs.data[dog_idx])
                     rows['image_id'].append(iid)
                     rows['det_idx'].append(int(di))
-                    rows['label'].append('dog' if p >= 0.5 else 'not_dog')
-                    rows['p_dog'].append(round(p, 5))
+                    rows['label'].append(pos if p >= 0.5 else other)
+                    rows['p'].append(round(p, 5))
                     boxes_run += 1
                     dogs_run += p >= 0.5
                 batch.clear()
@@ -433,18 +557,18 @@ def run(args):
                     beat(si, len(rows['label']))
                     last_beat = time.time()
             flush()
-            tmp = os.path.join(OUT_DIR, f'.gate-{si:05d}.tmp')
+            tmp = os.path.join(OUT_DIR, f'.{shard_name(si)}.tmp')
             pq.write_table(pa.table({
                 'image_id': pa.array(rows['image_id'], pa.string()),
                 'det_idx': pa.array(rows['det_idx'], pa.int32()),
                 'label': pa.array(rows['label'], pa.string()),
-                'p_dog': pa.array(rows['p_dog'], pa.float32()),
+                sp['p_col']: pa.array(rows['p'], pa.float32()),
                 # stamped on every row: this is a model's opinion, and nothing
                 # that builds a training set may read it as a verdict
                 'unverified': pa.array([True] * len(rows['label']), pa.bool_()),
                 'model': pa.array([run_name] * len(rows['label']), pa.string()),
             }), tmp)
-            os.replace(tmp, os.path.join(OUT_DIR, f'gate-{si:05d}.parquet'))
+            os.replace(tmp, os.path.join(OUT_DIR, shard_name(si)))
             el = time.time() - t0
             print(f'  shard {si + 1}/{len(shards)}  {seen:,} images  '
                   f'{seen / el:.0f} img/s  '
@@ -469,15 +593,15 @@ def status(args):
         return 0
     doc = json.load(open(PLAN_FILE))
     import glob
-    fs = sorted(glob.glob(os.path.join(OUT_DIR, 'gate-*.parquet')))
+    fs = sorted(glob.glob(os.path.join(OUT_DIR, f"{spec()['dir']}-*.parquet")))
     rows = 0
     try:
         import pyarrow.parquet as pq
         rows = sum(pq.ParquetFile(f).metadata.num_rows for f in fs)
     except Exception:
         pass
-    print(f"plan: {doc['rows']:,} boxes / {doc['images']:,} images "
-          f"(gen {doc['gen']}, {doc['created']})")
+    print(f"{spec()['title']} plan: {doc['rows']:,} boxes / "
+          f"{doc['images']:,} images (gen {doc['gen']}, {doc['created']})")
     print(f'judged: {rows:,} boxes in {len(fs)} shards '
           f'({rows / max(1, doc["rows"]):.1%})')
     return 0
@@ -489,6 +613,10 @@ def main(argv=None):
     p = sub.add_parser('plan'); p.set_defaults(fn=plan)
     p.add_argument('--gen', type=int, default=1)
     p.add_argument('--memory', default='8GB')
+    p.add_argument('--partial', action='store_true',
+                   help='plan a downstream stage over an unfinished upstream '
+                        'one, permanently omitting whatever it has not '
+                        'reached')
     r = sub.add_parser('run'); r.set_defaults(fn=run)
     r.add_argument('--workers', type=int, default=max(2, (os.cpu_count() or 4)))
     r.add_argument('--batch', type=int, default=128)
@@ -497,7 +625,13 @@ def main(argv=None):
     r.add_argument('--limit', type=int, default=0,
                    help='stop after this many BOXES (for a trial run)')
     s = sub.add_parser('status'); s.set_defaults(fn=status)
+    # every subcommand takes it, and it has to be applied before any of them
+    # touches a path
+    for sp_ in (p, r, s):
+        sp_.add_argument('--stage', default='gate', choices=sorted(STAGES),
+                         help='which pass over the store to work on')
     a = ap.parse_args(argv)
+    use(a.stage)
     return a.fn(a)
 
 
