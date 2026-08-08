@@ -1155,6 +1155,53 @@ def css_collisions(index_path):
     return out
 
 
+def hidden_that_still_shows(html):
+    """[(selector, element)] the page hides in markup but styles into view.
+
+    The UA's ``[hidden]{display:none}`` is the weakest rule there is: any
+    author rule that names a display wins, so ``.swctl{display:flex}`` made
+    ``<span class="swctl" hidden>`` fully visible. That put four buttons in
+    the section header -- Resume sweep AND Run gate -- when only one stage was
+    on screen. This file already carries a dozen hand-written
+    ``.x[hidden]{display:none}`` rules for exactly that, which is the tell: it
+    is a rule everyone must remember, so nobody does. Checked, not remembered.
+    """
+    import re as _re
+    css = '\n'.join(_re.findall(r'<style[^>]*>(.*?)</style>', html, _re.S))
+    css = _re.sub(r'/\*.*?\*/', ' ', css, flags=_re.S)
+    shows, hides = set(), set()
+    for sel, decls in _re.findall(r'([^{}]+)\{([^{}]*)\}', css):
+        disp = _re.search(r'(?:^|;)\s*display\s*:\s*([a-z-]+)', decls)
+        for one in sel.split(','):
+            one = one.strip()
+            if not one:
+                continue
+            # the last simple-selector sequence is what the element itself
+            # must match; ".a .b" styles .b, not .a
+            leaf = _re.split(r'[\s>+~]+', one)[-1]
+            for tok in _re.findall(r'[.#][A-Za-z0-9_-]+', leaf):
+                if '[hidden]' in leaf and (disp and disp.group(1) == 'none'):
+                    hides.add(tok)
+                elif disp and disp.group(1) != 'none':
+                    shows.add(tok)
+    if _re.search(r'(?:^|[,}])\s*\[hidden\]\s*\{[^{}]*display\s*:\s*none',
+                  css):
+        return []                       # a global rule covers everything
+    body = html[html.index('</style>'):]
+    out = []
+    for tag in _re.findall(r'<[a-z][^>]*\shidden(?:=[^>]*)?>', body):
+        toks = ['#' + m for m in _re.findall(r'\bid="([^"]+)"', tag)]
+        toks += ['.' + c for a in _re.findall(r'\bclass="([^"]+)"', tag)
+                 for c in a.split()]
+        if any(t in hides for t in toks):
+            continue
+        for t in toks:
+            if t in shows:
+                out.append((t, tag[:70]))
+                break
+    return out
+
+
 def main():
     if shutil.which('node') is None:
         print('SKIP: node not on PATH — client render test not run')
@@ -1183,6 +1230,13 @@ def main():
             'so this run would grade the previous build. Rebuild first:\n'
             '  python tools/dashboard/dashboard.py build --no-refresh')
     html = open(INDEX, encoding='utf-8').read()
+    showing = hidden_that_still_shows(html)
+    if showing:
+        for sel, tag in showing[:8]:
+            print(f'FAIL {sel} names a display, so [hidden] does not hide it: '
+                  f'{tag}\n     add {sel}[hidden]{{display:none}}')
+        return 1
+    print('ok   every hidden element is actually hidden')
     check_whole_script(html)
     check_markup(html)
     check_key_metrics()

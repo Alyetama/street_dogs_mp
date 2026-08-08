@@ -9773,6 +9773,11 @@ box-shadow:none}
    on, not in the page-meta line. State is spelled out in the pill so the
    button label is never the only thing carrying it. ── */
 .swctl{margin-left:auto;align-self:center;display:flex;align-items:center;gap:9px}
+/* A bare display:flex outranks the UA's [hidden]{display:none}, so the stage
+   switch hid neither control and the header carried four buttons: Resume
+   sweep and Run gate side by side, only one of which the visible stage was
+   about. The section shows ONE stage, so it offers ONE run to start. */
+.swctl[hidden]{display:none}
 .swpill{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;
   letter-spacing:.04em;text-transform:uppercase;color:var(--dim);
   border:1px solid var(--bd);border-radius:999px;padding:3px 10px}
@@ -10677,7 +10682,7 @@ outline-offset:2px}
     <button type="button" class="stagebtn" data-stage="gate" role="tab" aria-selected="false">Dog-bin gate</button>
   </span>
   <!-- one control slot, and the stage decides which run it drives -->
-  <span class="swctl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span>
+  <span class="swctl" id="sweepCtl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span>
   <span class="swctl" id="gateCtl" hidden><span class="swpill" id="gateState">checking</span><button id="gateBtn" class="rbtn sw" disabled>Checking&hellip;</button></span></summary>
 <div class="panel">
   <!-- status line ABOVE the cards, never instead of them: the layout below is
@@ -12178,7 +12183,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     if(a)a.hidden=!det;
     if(off)off.hidden=!det;
     if(b)b.hidden=det;
-    var sc=document.querySelector('.swctl'), gc=document.getElementById('gateCtl');
+    /* by id, not by class: querySelector('.swctl') meant "whichever control
+       comes first in the document", which is only the detector's by accident
+       of source order */
+    var sc=document.getElementById('sweepCtl'), gc=document.getElementById('gateCtl');
     if(sc)sc.hidden=!det;
     if(gc)gc.hidden=det;
     var h=document.getElementById('stgHint');
