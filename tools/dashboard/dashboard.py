@@ -5932,12 +5932,19 @@ def _db_facts(path):
 # needs no change to a job already twelve hours into a run.
 GATE_DIR = os.path.join(REPO, 'data', 'gate')
 _GATE = {'at': 0, 'doc': None}
-GATE_TTL_S = 20
+# A shard is immutable once written -- the runner builds it under a dot-name
+# and os.replace()s it into place, and a resumed run skips the indices it
+# already has. So a file only ever needs reading ONCE, and the scan costs one
+# glob plus a footer per file that is new since the last call. That is what
+# makes a 2-second window affordable: with a 20-second cache a shard landing
+# could sit invisible for twenty seconds after the fact, which on a panel that
+# only moves when a shard lands is most of the time between moves.
+_GATE_FILES = {}
+GATE_TTL_S = 2
 
 
 def _gate_shards():
-    """The written record: 165 parquet footers, so it is cached. Everything
-    here changes once every few minutes at most."""
+    """The written record, read incrementally."""
     now = time.time()
     if _GATE['doc'] is not None and now - _GATE['at'] < GATE_TTL_S:
         return _GATE['doc']
@@ -5955,36 +5962,41 @@ def _gate_shards():
         _GATE.update(at=now, doc=doc)
         return doc
     fs = sorted(glob.glob(os.path.join(GATE_DIR, 'gate-*.parquet')))
-    rows = dogs = 0
-    times = []
     for f in fs:
         try:
-            md = pq.ParquetFile(f).metadata
-            rows += md.num_rows
-            times.append(os.path.getmtime(f))
-        except Exception:
+            mt = os.path.getmtime(f)
+        except OSError:
             continue
-    # Counting dogs means reading a column, not a footer, so only the newest
-    # few -- the share is stable and the whole set is 165 files.
-    for f in fs[-3:]:
+        if _GATE_FILES.get(f, (None,))[0] == mt:
+            continue
         try:
+            # Both numbers in one pass, once per shard for the life of the
+            # process. Counting dogs used to mean re-reading a label column
+            # every 20 seconds, which is why it was limited to the newest
+            # three shards and why the share was a sample rather than the
+            # whole record -- read once, it can be all of it.
             t = pq.read_table(f, columns=['label'])
             col = t.column('label').to_pylist()
-            dogs += sum(1 for v in col if v == 'dog')
+            _GATE_FILES[f] = (mt, len(col), sum(1 for v in col if v == 'dog'))
         except Exception:
-            pass
-    seen = sum(pq.ParquetFile(f).metadata.num_rows for f in fs[-3:]) if fs else 0
+            continue
+    for f in list(_GATE_FILES):          # a shard that went away is not a fact
+        if f not in fs:
+            _GATE_FILES.pop(f, None)
+    rows = sum(v[1] for v in _GATE_FILES.values())
+    dogs = sum(v[2] for v in _GATE_FILES.values())
+    seen = rows
+    times = sorted(v[0] for v in _GATE_FILES.values())
     total = int(plan.get('rows') or 0)
-    times.sort()
     # rate from the shard timestamps: the run writes one every few minutes,
     # so the last handful is a real recent throughput and not a lifetime mean
     rate = sus = 0.0
-    per = (rows / len(fs)) if fs else 0
+    per = (rows / len(_GATE_FILES)) if _GATE_FILES else 0
     if len(times) >= 2:
         sus = per * (len(times) - 1) / max(1e-9, times[-1] - times[0])
         k = min(len(times) - 1, 5)
         rate = per * k / max(1e-9, times[-1] - times[-1 - k])
-    doc = {'rows': rows, 'total': total, 'shards': len(fs),
+    doc = {'rows': rows, 'total': total, 'shards': len(_GATE_FILES),
            'dogs': dogs, 'seen': seen, 'last': times[-1] if times else 0.0,
            'rate': rate, 'sustained': sus,
            'model': plan.get('model') or 'dog-bin gate',
@@ -12289,6 +12301,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
   }
   function paint(j){
     if(!j)return;
+    pace(j.running?2000:5000);
     var pct=(j.pct||0)*100;
     document.getElementById('gPct').textContent=j.total?pct.toFixed(1)+'%':'—';
     document.getElementById('gDone').textContent=fmt(j.rows);
@@ -12342,7 +12355,17 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
       .then(function(j){if(mine===gen)paint(j)});
   }
   window.__gatePoll=poll;
-  setInterval(poll,5000);
+  /* A running gate publishes every second, so ask at a rate you can see it
+     at. Idle, nothing changes between shards or at all, and 5 s of a poll
+     that returns the same document is 5 s of nothing. */
+  var tick=null,every=0;
+  function pace(ms){
+    if(every===ms)return;
+    every=ms;
+    if(tick)clearInterval(tick);
+    tick=setInterval(poll,ms);
+  }
+  pace(5000);
   var btn=document.getElementById('gateBtn');
   if(btn)btn.addEventListener('click',function(){
     var stopping=this.textContent.indexOf('Stop')===0;

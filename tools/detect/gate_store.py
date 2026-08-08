@@ -57,7 +57,7 @@ PLAN_FILE = os.path.join(OUT_DIR, 'plan.json')
 # idle-looking panel above a machine at full tilt. The shards remain the
 # record; this is the only thing that can speak before the first one lands.
 BEAT_FILE = os.path.join(OUT_DIR, 'progress.json')
-BEAT_EVERY_S = 3.0
+BEAT_EVERY_S = 1.0        # one small atomic write; the panel polls at 2 s
 SHARD_ROWS = 20000
 # The margin the gate was trained with. tools/detect/build_review_set.py and
 # the live preview writer both use it; inference has to match or every verdict

@@ -129,6 +129,45 @@ def reader_checks(bad):
         bad.append(f"share called dog is {g['dog_share']}, expected 0.30 from "
                    f"the written shard -- the record outranks the heartbeat")
 
+    # ── the scan has to be incremental, or a 2 s window is unaffordable ─────
+    # A shard is immutable once os.replace()d into place, so reading one twice
+    # is pure waste -- and at 165 of them, every two seconds, it is the kind
+    # of waste that shows up as a dashboard that stalls the box it runs on.
+    reads = []
+    real = pq.read_table
+
+    def counted(path, **kw):
+        reads.append(path)
+        return real(path, **kw)
+
+    pq.read_table = counted
+    try:
+        d._GATE.update(at=0, doc=None)
+        d.gate_progress()                      # everything already known
+        if reads:
+            bad.append(f'{len(reads)} shard(s) re-read on a scan that had '
+                       f'nothing new: {[os.path.basename(r) for r in reads]}')
+        pq.write_table(pa.table({'label': pa.array(['dog'] * 40)}),
+                       os.path.join(tmp, 'gate-00001.parquet'))
+        d._GATE.update(at=0, doc=None)
+        g = d.gate_progress()
+        if len(reads) != 1:
+            bad.append(f'a new shard cost {len(reads)} reads, expected 1')
+        if g['rows'] != 1290 or g['shards'] != 2:
+            bad.append(f"new shard not picked up: rows={g['rows']} "
+                       f"shards={g['shards']}")
+        if abs((g['dog_share'] or 0) - 340 / 1040) > 1e-9:
+            bad.append(f"share called dog is {g['dog_share']}, expected the "
+                       f"whole record's 340/1040")
+        os.remove(os.path.join(tmp, 'gate-00001.parquet'))
+        d._GATE.update(at=0, doc=None)
+        g = d.gate_progress()
+        if g['shards'] != 1 or g['rows'] != 1250:
+            bad.append(f'a deleted shard is still counted: {g["shards"]} '
+                       f'shards, {g["rows"]} rows')
+    finally:
+        pq.read_table = real
+
 
 def runner_checks(bad):
     """The runner has to publish, and publish EARLY.
