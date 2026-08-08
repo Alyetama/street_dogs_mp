@@ -1117,7 +1117,24 @@ def detect_payload():
             body = {'running': False}
         else:
             try:
-                body = _read_detect_status(stale_after=120.0)
+                # Read the doc WHOLE, then decide what is still true. The
+                # staleness rule used to throw the whole payload away, so a
+                # finished sweep -- 32.5M images, 3.3M positives, a hundred
+                # per cent complete -- rendered as six em-dashes. Those totals
+                # are permanent facts: the run ended, it did not un-happen.
+                # Only the instantaneous fields go, because those would be
+                # lies about a process that is not running.
+                body = dict(_read_detect_status(stale_after=1e12) or {})
+                fresh = float(body.get('age_s') or 0) <= 120.0
+                live = fresh and str(body.get('state')) == 'running'
+                body['running'] = live
+                if not live:
+                    done = float(body.get('imgs_done') or 0)
+                    total = float(body.get('imgs_total') or 0)
+                    body['finished'] = bool(total and done >= total)
+                    for k in ('eta_s', 'imgs_per_s', 'imgs_per_s_15m',
+                              'drives', 'regions_live'):
+                        body.pop(k, None)
             except Exception:
                 body = {'running': False}
         _detect_memo.update(t=now, body=body)
@@ -12285,6 +12302,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
      identical before and after the sweep starts and nothing jumps. */
   var DASH='\\u2014',live=false;
   function n(v,f){return (!live||v==null||v!==v)?DASH:f(v)}
+  /* What stays true after the run stops. A finished sweep's totals are facts
+     about work that happened; only rates and an ETA describe a process, and
+     only those go to a dash when there is no process. */
+  function p(v,f){return (v==null||v!==v)?DASH:f(v)}
   /* An idle payload carries no drives/regions at all, so the row rosters would
      vanish with it. Remember the last one we saw (and across reloads) and draw
      it dashed instead. */
@@ -12351,22 +12372,25 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     var tot=+j.imgs_total||0,pct=(live&&tot)?100*(+j.imgs_done||0)/tot:0;
     /* always 2 decimals: at ~50 img/s the third digit is the only one that
        visibly moves, and a field that switches precision at 10% jitters */
-    hPct.textContent=(live&&tot)?(pct.toFixed(2)+'%'):DASH;
-    hDone.textContent=n(j.imgs_done,hnum);
-    hEta.textContent=live?etaTxt(j.eta_s):DASH;
+    hPct.textContent=tot?(pct.toFixed(2)+'%'):DASH;
+    hDone.textContent=p(j.imgs_done,hnum);
+    /* a finished run has no ETA and does not need one -- it says so */
+    hEta.textContent=live?etaTxt(j.eta_s):(j.finished?'complete':DASH);
     hNow.textContent=n(ips.w60,function(v){return (+v).toFixed(1)});
     hSus.textContent=n(ips.w900,function(v){return (+v).toFixed(1)});
-    hFill.style.width=(live?Math.min(pct,100):0).toFixed(2)+'%';
-    if(hPos)hPos.textContent=n(j.positives,hnum);
+    hFill.style.width=Math.min(pct||0,100).toFixed(2)+'%';
+    if(hPos)hPos.textContent=p(j.positives,hnum);
     /* every figure on this line is ALL-TIME, so say so -- the same line used
        to mix a global image count with a per-process positives count and
        reported a 0.1% hit rate against a true ~2.8% */
-    hCount.textContent='all-time: '+n(j.imgs_done,hnum)+' of '+
-      (tot?hnum(tot):DASH)+' images \\u00b7 '+n(j.positives,hnum)+' positives'+
-      (j.positive_rate!=null?' ('+j.positive_rate+'%)':'');
-    if(hRun)hRun.textContent='this run: '+n(j.run_imgs_done,hnum)+' images'+
-      (j.run_positives!=null?' \\u00b7 '+n(j.run_positives,hnum)+' positives':'')+
-      (live&&j.started_at?' \\u00b7 since '+j.started_at:'');
+    hCount.textContent='all-time: '+p(j.imgs_done,hnum)+' of '+
+      (tot?hnum(tot):DASH)+' images \\u00b7 '+p(j.positives,hnum)+' positives'+
+      (j.positive_rate!=null?' ('+j.positive_rate+'%)':'')+
+      (j.boxes_total!=null?' \\u00b7 '+hnum(j.boxes_total)+' boxes':'');
+    if(hRun)hRun.textContent=(live?'this run: ':'last run: ')+
+      p(j.run_imgs_done,hnum)+' images'+
+      (j.run_positives!=null?' \\u00b7 '+p(j.run_positives,hnum)+' positives':'')+
+      (j.started_at?' \\u00b7 since '+j.started_at:'');
     if(live){samples.push(+rNow.toFixed(1));if(samples.length>SPARK_N)samples.shift();}
     drawSpark();
     /* per drive: name · bar · rate; queue only when nonzero, badge only when
@@ -12411,12 +12435,16 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         return a.n.localeCompare(b.n);
       });
     var prog=all.filter(function(r){return r.p>0&&r.p<100});
-    rHead.textContent=all.length?'Per region \\u2014 '+(live?prog.length:DASH)+
-      ' of '+all.length+' in progress':'Per region';
+    var doneN=all.filter(function(r){return r.p!=null&&r.p>=100}).length;
+    rHead.textContent=!all.length?'Per region'
+      : live?('Per region \\u2014 '+prog.length+' of '+all.length+' in progress')
+      : ('Per region \\u2014 '+doneN+' of '+all.length+' complete');
     rEl.innerHTML=all.map(function(r){
       return '<div class="drow'+(r.p>0?'':' dmut')+'"><span class="dn">'+esc(r.n.replace(/_/g,' '))+'</span>'+
         bar(r.p||0,pctColor(r.p||0))+
-        '<span class="dv">'+n(r.p,function(v){return v.toFixed(1)+'%'})+'</span></div>';
+        /* a region's completion is what was DONE, not what is happening:
+           it survives the sweep stopping, so it is not gated on live */
+        '<span class="dv">'+p(r.p,function(v){return v.toFixed(1)+'%'})+'</span></div>';
     }).join('')||'<div class="dnone">no per-region data</div>';
     /* classifier: gauge only once crops actually flow (A.5) */
     if(!live){
