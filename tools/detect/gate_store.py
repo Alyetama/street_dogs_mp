@@ -174,6 +174,16 @@ def plan(args):
         JOIN {img} i ON i.image_id = d.image_id AND i.gen = d.gen
                     AND i.cell = d.cell
         WHERE d.gen = ?
+        -- ONE row per box. A frame that was harvested into two cells on two
+        -- drives has a detection row under each, same image_id and same
+        -- det_idx: 47,320 boxes on this store, 97,380 rows. Left in, the
+        -- output would carry duplicate keys and every join downstream would
+        -- double-count them -- and the frame would be decoded twice for the
+        -- same answer. Which copy is kept does not matter, only that it is
+        -- always the same one.
+        QUALIFY row_number() OVER (
+            PARTITION BY d.image_id, d.det_idx
+            ORDER BY i.drive, i.cell) = 1
         -- within a drive, one directory at a time: a worker walks a cell
         -- rather than seeking around it
         ORDER BY i.drive, i.cell, d.image_id, d.det_idx
