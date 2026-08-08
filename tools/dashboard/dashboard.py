@@ -6047,9 +6047,19 @@ def gate_progress():
         rate = _num_or(beat.get('box_s'), 0.0)
         if not sus:
             sus = rate
-        share = _num_or(beat.get('dog_share'), None)
-        if seen <= 0 and share is not None:
-            dogs, seen = share, 1.0
+        # Real counts, not a share and a 1.0 -- the panel shows both the
+        # percentage and the two numbers under it, and a synthesised
+        # denominator would put "0.213 of 1 boxes" in the tooltip.
+        boxes = _num_or(beat.get('boxes'), 0)
+        if seen <= 0 and boxes > 0:
+            # `dogs` is newer than `dog_share`. A run started before it
+            # existed keeps publishing the share, and reading the absent
+            # count as zero would report a gate that calls nothing a dog --
+            # so the count is derived from the share when it has to be.
+            n = beat.get('dogs')
+            dogs = (_num_or(n, 0) if n is not None
+                    else round(_num_or(beat.get('dog_share'), 0) * boxes))
+            seen = boxes
     left = max(0, total - rows)
     warm = bool(shards['last']) and (time.time() - shards['last']) < 900
     return {'ever': bool(shards['shards']) or total > 0,
@@ -6057,6 +6067,10 @@ def gate_progress():
             'rows': rows, 'total': total, 'shards': shards['shards'],
             'pct': (rows / total) if total else 0,
             'dog_share': (dogs / seen) if seen else None,
+            # the two numbers the share is made of: a percentage alone cannot
+            # say whether it is drawn from a thousand boxes or four million
+            'dogs': int(dogs) if seen else None,
+            'dogs_of': int(seen) if seen else None,
             'rate': round(rate, 1), 'sustained': round(sus, 1),
             'eta_s': (left / sus) if sus > 0 else None,
             'model': shards['model'], 'images': shards['images'],
@@ -11045,7 +11059,10 @@ outline-offset:2px}
       <div class="kpi"><div class="kpi-label">Complete</div><div class="kpi-val" id="gPct" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label" title="detections the gate has judged">Judged</div><div class="kpi-val" id="gDone" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label">ETA</div><div class="kpi-val" id="gEta" style="font-size:19px">—</div></div>
-      <div class="kpi"><div class="kpi-label" title="share the gate calls a dog, over the shards most recently written">Called dog</div><div class="kpi-val" id="gDog" style="font-size:19px">—</div></div>
+      <!-- the counts behind the share go in the card's own title, filled in
+           as the numbers arrive; a percentage cannot say whether it is drawn
+           from a thousand boxes or four million -->
+      <div class="kpi" id="gDogCard"><div class="kpi-label">Called dog</div><div class="kpi-val" id="gDog" style="font-size:19px">—</div></div>
       <div class="kpi ok spk"><div id="gateSpark" class="dspark"></div><div class="kpi-label" title="boxes per second, measured by the run itself">boxes/s (now)</div><div class="kpi-val" id="gNow" style="font-size:19px">—</div></div>
       <div class="kpi"><div class="kpi-label" title="boxes per second over the whole run — the ETA is computed from this">boxes/s (sustained)</div><div class="kpi-val" id="gSus" style="font-size:19px">—</div></div>
     </div>
@@ -12680,6 +12697,16 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     document.getElementById('gEta').textContent=j.running?dur(j.eta_s):'—';
     document.getElementById('gDog').textContent=
       j.dog_share==null?'—':(j.dog_share*100).toFixed(1)+'%';
+    /* Hover gives the counts in full. fmt() abbreviates past a thousand
+       everywhere on this page, which is right for a headline and wrong for
+       the one place you went looking for the exact number -- so these are
+       written out in full, with separators. */
+    var dcard=document.getElementById('gDogCard');
+    if(dcard)dcard.title=j.dogs==null
+      ?'no verdicts yet'
+      :j.dogs.toLocaleString('en-US')+' of '+j.dogs_of.toLocaleString('en-US')+
+       ' boxes judged so far were called a dog \\u2014 '+
+       (j.dogs_of-j.dogs).toLocaleString('en-US')+' were not';
     document.getElementById('gNow').textContent=j.running?fmt(j.rate):'—';
     document.getElementById('gSus').textContent=fmt(j.sustained);
     document.getElementById('gFill').style.width=Math.min(100,pct)+'%';

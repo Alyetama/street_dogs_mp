@@ -385,6 +385,7 @@ def run(args):
               images=base + seen, images_total=len(jobs),
               rows_flight=flight, boxes=boxes_run, bad=bad,
               img_s=round(seen / el, 2), box_s=round(boxes_run / el, 2),
+              dogs=dogs_run,
               dog_share=(dogs_run / boxes_run) if boxes_run else None)
 
     # The first one goes out BEFORE any frame is read: the model is already

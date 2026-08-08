@@ -38,7 +38,8 @@ def _beat_doc(**kw):
     doc = {'pid': 1, 'started': time.time() - 60, 'updated': time.time(),
            'shard': 0, 'shards_total': 165, 'images': 8123,
            'images_total': 3292062, 'rows_flight': 11500, 'boxes': 11500,
-           'bad': 3, 'img_s': 135.4, 'box_s': 196.2, 'dog_share': 0.213}
+           'bad': 3, 'img_s': 135.4, 'box_s': 196.2, 'dogs': 2450,
+           'dog_share': 0.213}
     doc.update(kw)
     return doc
 
@@ -75,9 +76,28 @@ def reader_checks(bad):
     if abs(g['pct'] - 11500 / PLAN['rows']) > 1e-9:
         bad.append(f"percentage {g['pct']} is not the in-flight rows over the "
                    f"plan total")
-    if g['dog_share'] != 0.213:
+    if abs((g['dog_share'] or 0) - 2450 / 11500) > 1e-9:
         bad.append(f"share called dog is {g['dog_share']} with no shard to "
-                   f"read it from -- the run measured 0.213")
+                   f"read it from -- the run counted 2,450 of 11,500")
+    # the card's tooltip is the two counts, so they have to BE counts: a
+    # share and a synthesised denominator of 1 renders as "0.213 of 1 boxes"
+    if (g['dogs'], g['dogs_of']) != (2450, 11500):
+        bad.append(f"counts behind the share are {g['dogs']}/{g['dogs_of']}, "
+                   f"expected 2,450/11,500")
+
+    # `dogs` postdates `dog_share`. A run started by an older build publishes
+    # only the share, and reading the absent count as zero would report a
+    # gate that has called nothing a dog at all.
+    old = _beat_doc()
+    del old['dogs']
+    g = prog(old)
+    # tolerance is one whole box out of 11,500: the count is derived by
+    # rounding, and the panel shows one decimal place
+    if abs((g['dog_share'] or 0) - 0.213) > 1e-4:
+        bad.append(f"a heartbeat without the newer `dogs` field reports "
+                   f"{g['dog_share']} rather than the 0.213 it does publish")
+    if g['dogs'] != round(0.213 * 11500):
+        bad.append(f"count derived from an older heartbeat is {g['dogs']}")
     if (g['rate'], g['sustained']) != (196.2, 196.2):
         bad.append(f"rate {g['rate']}/{g['sustained']} is not the measured "
                    f"196.2 boxes/s")
