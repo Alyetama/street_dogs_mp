@@ -1210,54 +1210,85 @@ def check_machine_stats():
     elif not 0 < m['MemAvailable'] <= m['MemTotal']:
         bad.append(f'available {m["MemAvailable"]} vs total {m["MemTotal"]}')
 
-    # No card, no driver, or an nvidia-smi that hangs: one unknown figure,
-    # not a broken panel.
-    real = _sp.run
-    for boom in (FileNotFoundError('nvidia-smi'),
-                 _sp.TimeoutExpired('nvidia-smi', 4.0),
-                 OSError('no such device')):
-        d._GPU.update(at=0.0, doc=None)
-        d.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(boom)
+    # ── the card ────────────────────────────────────────────────────────────
+    real = _sp.Popen
+
+    def reset():
+        d._GPU.update(proc=None, samples=None, meta={}, retry_at=0.0)
+
+    class FakeSmi:
+        """One nvidia-smi -l 1, as a finite stream of rows."""
+
+        def __init__(self, rows):
+            self.stdout = iter(rows)
+
+    def feed(rows):
+        reset()
+        d.subprocess.Popen = lambda *a, **k: FakeSmi(rows)
+        try:
+            d._gpu()                            # spawns and drains the reader
+            for _ in range(100):                # the reader is a thread
+                if d._GPU['samples'] and len(d._GPU['samples']) >= len(rows):
+                    break
+                time.sleep(0.01)
+            return d._gpu()
+        finally:
+            d.subprocess.Popen = real
+
+    # A single reading is not a measurement of a bursty workload. Measured on
+    # a real run: forty zeroes and four bursts in twenty-two seconds, so a
+    # glance taken when a browser asks lands on zero nine times in ten and the
+    # card reads 0% forever. The headline has to be the window.
+    burst = ['NVIDIA X, 0, 4103, 16303, 33, 40, 360'] * 9 + \
+            ['NVIDIA X, 63, 4103, 16303, 35, 190, 360']
+    g = feed(burst) or {}
+    if g.get('util') is None or abs(g['util'] - 6.3) > 0.01:
+        bad.append(f'gpu utilisation is {g.get("util")}, expected the 6.3% '
+                   f'mean of the window — a point sample of this workload is '
+                   f'0% nine times in ten')
+    if g.get('util_peak') != 63:
+        bad.append(f'peak is {g.get("util_peak")}, expected 63 — a mean of 6% '
+                   f'from bursts of 63% is a different machine from a flat 6%')
+
+    # No card, no driver, a binary that is not there: one unknown figure.
+    for boom in (FileNotFoundError('nvidia-smi'), OSError('no such device'),
+                 ValueError('bad argv')):
+        reset()
+        d.subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(boom)
         try:
             if d._gpu() is not None:
                 bad.append(f'{type(boom).__name__} still produced a card')
             got = d.sys_stats()
             if got['gpu'] is not None or got['mem_total'] <= 0:
                 bad.append(f'{type(boom).__name__} broke the rest of the panel')
+            # and it must not respawn on every request for the rest of time
+            if d._GPU['retry_at'] <= time.time():
+                bad.append(f'{type(boom).__name__} left no backoff — a box '
+                           f'with no card would fork nvidia-smi every 2 s')
         except Exception as e:                 # noqa: BLE001 - that is the test
             bad.append(f'{type(boom).__name__} propagated: {e}')
         finally:
-            d.subprocess.run = real
-    # garbage on stdout is not a card either
-    d._GPU.update(at=0.0, doc=None)
-    d.subprocess.run = lambda *a, **k: _sp.CompletedProcess(
-        a, 0, stdout='n/a, [N/A], , not supported\n', stderr='')
-    try:
-        g = d._gpu()
-        if g and (g['util'] is not None or g['mem_total'] is not None):
-            bad.append(f'"[N/A]" read as a measurement: {g}')
-    except Exception as e:                     # noqa: BLE001
-        bad.append(f'unparsable nvidia-smi output propagated: {e}')
-    finally:
-        d.subprocess.run = real
-    # One field nvidia-smi will not answer for (power on a laptop card, temp
-    # in a container) must cost that field, not the whole readout. A single
-    # float() over the row loses the utilisation to a missing wattage.
-    d._GPU.update(at=0.0, doc=None)
-    d.subprocess.run = lambda *a, **k: _sp.CompletedProcess(
-        a, 0, stdout='Card X, 74, 4103, 16303, 51, [N/A], [N/A]\n', stderr='')
-    try:
-        g = d._gpu() or {}
-        if g.get('util') != 74 or g.get('mem_total') != 16303:
-            bad.append(f'an unsupported power reading took the whole card '
-                       f'down with it: {g}')
-        if g.get('power') is not None:
-            bad.append(f'"[N/A]" power read as a number: {g.get("power")}')
-    except Exception as e:                     # noqa: BLE001
-        bad.append(f'a partly-unsupported card propagated: {e}')
-    finally:
-        d.subprocess.run = real
-        d._GPU.update(at=0.0, doc=None)
+            d.subprocess.Popen = real
+    reset()
+
+    # Rows that are not measurements: short, empty, or "[N/A]" throughout.
+    g = feed(['n/a, [N/A], , not supported', 'garbage', '', 'a,b'])
+    if g and g.get('util') is not None:
+        bad.append(f'"[N/A]" read as a measurement: {g}')
+    # One field the driver will not answer for (power on a laptop card, temp
+    # in a container) must cost that field, not the whole readout.
+    g = feed(['Card X, 74, 4103, 16303, 51, [N/A], [N/A]']) or {}
+    if g.get('util') != 74 or g.get('mem_total') != 16303:
+        bad.append(f'an unsupported power reading took the whole card down '
+                   f'with it: {g}')
+    if g.get('power') is not None:
+        bad.append(f'"[N/A]" power read as a number: {g.get("power")}')
+    # A card that goes away mid-run (driver reset, eGPU unplugged) closes the
+    # pipe; the panel must notice rather than serve the last frame forever.
+    reset()
+    if d._GPU['proc'] is not None:
+        bad.append('a closed nvidia-smi stream left a live process behind')
+    d.subprocess.Popen = real
 
     s = d.sys_stats()
     for k in ('cpu', 'cores', 'mem_used', 'mem_total', 'swap_used',

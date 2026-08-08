@@ -27,6 +27,7 @@ tools/detect/tests/adv_no_hardcoded_paths.py fails the build if that changes.
 """
 
 import argparse
+import collections
 import functools
 import glob
 import json
@@ -6310,8 +6311,63 @@ def _drive_free(path):
 # the work and the card is idle waiting for pixels. So the four figures here
 # are chosen to answer that question rather than to fill a row of gauges.
 _CPU = {'t': 0.0, 'idle': 0.0, 'total': 0.0, 'pct': None}
-_GPU = {'at': 0.0, 'doc': None}
-GPU_TTL_S = 2.0          # nvidia-smi forks a process; do not do it per client
+# The card is sampled CONTINUOUSLY, not once per request, and this is the
+# whole reason the panel is worth having. Measured on this box while the gate
+# ran: 44 readings over 22 s came back 0, 0, 0, ... 63, 0, 0, 29 -- forty
+# zeroes and four bursts. The work is real (mean 4.2%) but it arrives in
+# fractions of a second between long decode stalls, so a reading taken at the
+# moment a browser happens to ask lands on a zero nine times in ten. The card
+# read "0%" forever and looked broken. A window, not a glance.
+_GPU = {'proc': None, 'samples': None, 'meta': {}, 'retry_at': 0.0,
+        'lock': threading.Lock()}
+GPU_WINDOW = 30          # readings kept; nvidia-smi -l 1 gives one a second
+GPU_RETRY_S = 60.0       # a box with no card must not respawn nvidia-smi hourly
+
+
+def _gpu_reader(proc):
+    """Drain one nvidia-smi -l 1 into the ring. Runs until the pipe closes."""
+    try:
+        for line in proc.stdout:
+            f = [x.strip() for x in line.split(',')]
+            if len(f) < 7:
+                continue
+            _GPU['meta'] = {'name': f[0],
+                            'mem_used': _num_or(f[2], None),
+                            'mem_total': _num_or(f[3], None),
+                            'temp': _num_or(f[4], None),
+                            'power': _num_or(f[5], None),
+                            'power_max': _num_or(f[6], None)}
+            u = _num_or(f[1], None)
+            if u is not None and _GPU['samples'] is not None:
+                _GPU['samples'].append(u)
+    except Exception:
+        pass
+    finally:
+        with _GPU['lock']:
+            if _GPU['proc'] is proc:
+                _GPU['proc'] = None
+                _GPU['retry_at'] = time.time() + GPU_RETRY_S
+
+
+def _gpu_start():
+    """One long-lived nvidia-smi for the life of the server. Forking one per
+    request cost 30 ms of a 2 s poll and still only bought a single glance."""
+    with _GPU['lock']:
+        if _GPU['proc'] is not None or time.time() < _GPU['retry_at']:
+            return
+        try:
+            proc = subprocess.Popen(
+                ['nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,'
+                 'memory.total,temperature.gpu,power.draw,power.limit',
+                 '--format=csv,noheader,nounits', '-l', '1'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1)
+        except (OSError, ValueError):
+            _GPU['retry_at'] = time.time() + GPU_RETRY_S
+            return
+        _GPU['proc'] = proc
+        _GPU['samples'] = collections.deque(maxlen=GPU_WINDOW)
+        threading.Thread(target=_gpu_reader, args=(proc,), daemon=True).start()
 
 
 def _cpu_pct():
@@ -6389,30 +6445,20 @@ def _pressure(kind):
 
 
 def _gpu():
-    """The card, via nvidia-smi. None when there is no card or no driver --
-    a machine without one is not a broken dashboard."""
-    now = time.time()
-    if _GPU['doc'] is not None and now - _GPU['at'] < GPU_TTL_S:
-        return _GPU['doc']
-    doc = None
-    try:
-        out = subprocess.run(
-            ['nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,'
-             'memory.total,temperature.gpu,power.draw,power.limit',
-             '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=4.0)
-        if out.returncode == 0 and out.stdout.strip():
-            f = [x.strip() for x in out.stdout.strip().split('\n')[0].split(',')]
-            doc = {'name': f[0],
-                   'util': _num_or(f[1], None),
-                   'mem_used': _num_or(f[2], None),
-                   'mem_total': _num_or(f[3], None),
-                   'temp': _num_or(f[4], None),
-                   'power': _num_or(f[5], None),
-                   'power_max': _num_or(f[6], None)}
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        doc = None
-    _GPU.update(at=now, doc=doc)
+    """The card over the last half minute. None when there is no card or no
+    driver -- a machine without one is not a broken dashboard."""
+    _gpu_start()
+    s = list(_GPU['samples'] or ())
+    if not _GPU['meta'] or not s:
+        return None
+    doc = dict(_GPU['meta'])
+    # The MEAN is the headline: it is what share of the window the card had
+    # work, which is the question. The peak goes beside it, because a mean of
+    # 4% built from bursts of 63% is a different machine from one sitting at a
+    # flat 4%, and only the two together say which this is.
+    doc['util'] = sum(s) / len(s)
+    doc['util_peak'] = max(s)
+    doc['window'] = len(s)
     return doc
 
 
@@ -10921,7 +10967,7 @@ outline-offset:2px}
       <div class="kpi-val" id="syMem">&mdash;</div>
       <div class="sysub" id="sySwap">&mdash;</div></div>
     <div class="kpi spk"><div id="sySparkGpu" class="dspark"></div>
-      <div class="kpi-label" title="how much of the time the card had work in flight">gpu</div>
+      <div class="kpi-label" title="share of the last 30 seconds the card had work in flight — sampled every second, because this workload runs in bursts a single reading lands between">gpu</div>
       <div class="kpi-val" id="syGpu">&mdash;</div>
       <div class="sysub" id="syVram">&mdash;</div></div>
     <div class="kpi spk"><div id="sySparkIo" class="dspark"></div>
@@ -12509,10 +12555,14 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
       :'no swap configured';
     el.sySwap.className='sysub'+(su>=8?' bad':su>=0.5?' warn':'');
     var g=j.gpu;
-    el.syGpu.textContent=g?pc(g.util):'no card';
+    /* one decimal: this workload's honest figure is single-digit, and a whole
+       number would round the difference between an idle card and a working
+       one away to nothing */
+    el.syGpu.textContent=g?pc(g.util,1):'no card';
     el.syVram.textContent=g&&g.mem_total
-      ?(g.mem_used/1024).toFixed(1)+' / '+(g.mem_total/1024).toFixed(0)+
-       ' GB'+(g.temp!=null?' \\u00b7 '+g.temp.toFixed(0)+'\\u00b0C':'')+
+      ?(g.util_peak?'peak '+g.util_peak.toFixed(0)+'% \\u00b7 ':'')+
+       (g.mem_used/1024).toFixed(1)+' GB'+
+       (g.temp!=null?' \\u00b7 '+g.temp.toFixed(0)+'\\u00b0C':'')+
        (g.power!=null?' \\u00b7 '+g.power.toFixed(0)+' W':'')
       :(g?DASH:'nvidia-smi not answering');
     el.syIo.textContent=j.io_stall==null?DASH:pc(j.io_stall,1);
