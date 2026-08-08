@@ -14,10 +14,11 @@ animal" boxes into 4.8M dog / not-a-dog verdicts with a probability each.
 
 WHAT THIS IS NOT. A verdict here is a MODEL'S opinion and never a label. It is
 written to its own store under data/gate/, every row stamped unverified, and
-nothing that builds a training set reads it -- the ledgers under
-data/hard_negatives and data/hard_positives are still written only by a human
-clicking a verdict. Keeping model output in its own file, in its own shape, is
-the same rule tools/detect/triage_crops.py follows and for the same reason.
+nothing that builds a training set reads it. The reviewer ledgers are written
+only by a human clicking a verdict, and this file neither opens nor names
+them -- the guard in tools/detect/tests/ that enforces that separation reads
+source, not intentions, which is why the rule is stated here without spelling
+their paths.
 
 WHY IT IS SHAPED LIKE THIS. Measured before it was written:
 

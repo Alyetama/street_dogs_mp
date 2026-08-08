@@ -5899,6 +5899,80 @@ def _db_facts(path):
         return (None, None)
 
 
+# ── the dog-bin gate over the whole store ───────────────────────────────────
+# tools/detect/gate_store.py judges every detection the sweep committed. It
+# publishes no status of its own, and does not need to: it writes one parquet
+# shard per 20,000 images, so what has actually been done is on disk. Reading
+# that is ground truth, where a self-reported counter is a claim -- and it
+# needs no change to a job already twelve hours into a run.
+GATE_DIR = os.path.join(REPO, 'data', 'gate')
+_GATE = {'at': 0, 'doc': None}
+GATE_TTL_S = 20
+
+
+def gate_progress():
+    """How far the gate has got, read off the shards it has written."""
+    now = time.time()
+    if _GATE['doc'] is not None and now - _GATE['at'] < GATE_TTL_S:
+        return _GATE['doc']
+    doc = {'ever': False}
+    try:
+        with open(os.path.join(GATE_DIR, 'plan.json')) as fh:
+            plan = json.load(fh)
+    except (OSError, ValueError):
+        _GATE.update(at=now, doc=doc)
+        return doc
+    try:
+        import glob
+        import pyarrow.parquet as pq
+    except Exception:
+        _GATE.update(at=now, doc=doc)
+        return doc
+    fs = sorted(glob.glob(os.path.join(GATE_DIR, 'gate-*.parquet')))
+    rows = dogs = 0
+    times = []
+    for f in fs:
+        try:
+            md = pq.ParquetFile(f).metadata
+            rows += md.num_rows
+            times.append(os.path.getmtime(f))
+        except Exception:
+            continue
+    # Counting dogs means reading a column, not a footer, so only the newest
+    # few -- the share is stable and the whole set is 165 files.
+    for f in fs[-3:]:
+        try:
+            t = pq.read_table(f, columns=['label'])
+            col = t.column('label').to_pylist()
+            dogs += sum(1 for v in col if v == 'dog')
+        except Exception:
+            pass
+    seen = sum(pq.ParquetFile(f).metadata.num_rows for f in fs[-3:]) if fs else 0
+    total = int(plan.get('rows') or 0)
+    times.sort()
+    # rate from the shard timestamps: the run writes one every few minutes,
+    # so the last handful is a real recent throughput and not a lifetime mean
+    rate = sus = 0.0
+    per = (rows / len(fs)) if fs else 0
+    if len(times) >= 2:
+        sus = per * (len(times) - 1) / max(1e-9, times[-1] - times[0])
+        k = min(len(times) - 1, 5)
+        rate = per * k / max(1e-9, times[-1] - times[-1 - k])
+    running = bool(times) and (now - times[-1]) < 900
+    left = max(0, total - rows)
+    doc = {'ever': bool(fs) or total > 0, 'running': running,
+           'rows': rows, 'total': total, 'shards': len(fs),
+           'pct': (rows / total) if total else 0,
+           'dog_share': (dogs / seen) if seen else None,
+           'rate': round(rate, 1), 'sustained': round(sus, 1),
+           'eta_s': (left / sus) if sus > 0 else None,
+           'model': plan.get('model') or 'dog-bin gate',
+           'images': int(plan.get('images') or 0),
+           'created': plan.get('created') or ''}
+    _GATE.update(at=now, doc=doc)
+    return doc
+
+
 # ── drive health ────────────────────────────────────────────────────────────
 # The harvest is spread across six roots on separate disks, and the two ways
 # that goes wrong are silent. A drive that is not mounted does not error: the
@@ -8679,6 +8753,76 @@ def _triage_control(action, backend='siglip'):
     return {'ok': False, 'msg': 'unknown action'}
 
 
+def gate_pids():
+    """PIDs actually running gate_store.py run, matched on argv structure."""
+    return _script_pids('gate_store.py', 'run')
+
+
+def gate_control(action):
+    """stop = SIGTERM (the shard in flight is lost, the written ones are not);
+    start = relaunch detached, which resumes at the first unwritten shard."""
+    with _SPAWN_LOCK:
+        _reap()
+        pids = gate_pids()
+        if action == 'stop':
+            if not pids:
+                return {'ok': True, 'running': False, 'msg': 'already stopped'}
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            return {'ok': True, 'running': False,
+                    'msg': 'stopping — finished shards are kept'}
+        if action != 'start':
+            return {'ok': False, 'msg': 'unknown action'}
+        if pids:
+            return {'ok': True, 'running': True, 'msg': 'already running'}
+        py = DOGBIN_PYTHON
+        script = os.path.join(REPO, 'tools', 'detect', 'gate_store.py')
+        if not py:
+            return {'ok': False, 'running': False,
+                    'msg': 'no interpreter for the gate (set dogbin_python '
+                           'in the dashboard config)'}
+        if not os.path.exists(script):
+            return {'ok': False, 'running': False,
+                    'msg': 'tools/detect/gate_store.py is missing'}
+        if not os.path.exists(os.path.join(GATE_DIR, 'work.parquet')):
+            return {'ok': False, 'running': False,
+                    'msg': 'no plan yet — run `gate_store.py plan` once, on '
+                           'the interpreter that has duckdb'}
+        try:
+            log = open(os.path.join(REPO, 'data', 'gate_run.log'), 'a')
+            env = dict(os.environ)
+            # the runner resolves the promoted weights against this
+            env['TRAINING_ROOT'] = training_root()
+            proc = subprocess.Popen(
+                [py, script, 'run'], cwd=REPO, stdout=log, stderr=log,
+                stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+            _SPAWNED.append(proc)
+        except Exception as e:
+            return {'ok': False, 'running': False, 'msg': str(e)}
+        # the usual failure is an interpreter without ultralytics, which dies
+        # on the import in under a second and after this call has returned
+        try:
+            code = proc.wait(timeout=2.5)
+            if proc in _SPAWNED:
+                _SPAWNED.remove(proc)
+            tail = ''
+            try:
+                with open(os.path.join(REPO, 'data', 'gate_run.log')) as fh:
+                    lines = [x.strip() for x in fh if x.strip()]
+                tail = lines[-1] if lines else ''
+            except OSError:
+                pass
+            return {'ok': False, 'running': False,
+                    'msg': f'the gate exited immediately (code {code}). '
+                           + tail[:160]}
+        except subprocess.TimeoutExpired:
+            pass
+        return {'ok': True, 'running': True, 'msg': 'gate started'}
+
+
 def sweep_control(action):
     """stop = SIGTERM (graceful: commits its contiguous prefix, loses nothing);
     resume = relaunch detached. Resume is safe because the store's tiling
@@ -8882,6 +9026,17 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if self.path.split('?', 1)[0] == '/api/sweep':
             self._json({'running': bool(sweep_pids())})
             return
+        if self.path.split('?', 1)[0] == '/api/gate':
+            try:
+                doc = gate_progress()
+                # liveness from the process table, not from the file dates:
+                # a run killed mid-shard leaves recent mtimes behind
+                doc['running'] = bool(gate_pids())
+                doc['can_run'] = bool(DOGBIN_PYTHON)
+                self._json(doc)
+            except Exception as e:
+                self._json({'ever': False, 'error': str(e)})
+            return
         if self.path.split('?', 1)[0] == '/api/review/box':
             q = parse_qs(urlparse(self.path).query)
             info = box_for((q.get('name', [''])[0]))
@@ -9042,6 +9197,16 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 n = int(self.headers.get('Content-Length', 0) or 0)
                 data = json.loads(self.rfile.read(n) or b'{}')
                 self._json(sweep_control(str(data.get('action') or '')))
+            except Exception as e:
+                self._json({'ok': False, 'msg': str(e)})
+            return
+        if self.path.split('?', 1)[0] == '/api/gate':
+            # The argv is built here, from config. The client chooses one of
+            # two words and nothing else reaches a command line.
+            try:
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                data = json.loads(self.rfile.read(n) or b'{}')
+                self._json(gate_control(str(data.get('action') or '')))
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)})
             return
@@ -9988,6 +10153,18 @@ border-radius:4px;padding:1px 5px;color:var(--mut)}
 @media(max-width:760px){.loc{grid-template-columns:1fr;gap:6px;padding:12px 4px}
   .loc.lh{display:none}}
 footer{margin-top:32px;color:var(--dim);font-size:11.5px;text-align:center;line-height:1.7}
+/* ── the stage switch ─────────────────────────────────────────────────────
+   Two passes over one store, one section. The switch is a pair of tabs and
+   not a dropdown: there are two, they are peers, and which one is showing
+   should be readable without opening anything. */
+.stagesw{display:inline-flex;gap:2px;margin-left:14px;padding:2px;
+border:1px solid var(--bd);border-radius:999px;vertical-align:middle}
+.stagebtn{appearance:none;background:transparent;border:0;color:var(--dim);
+font-family:inherit;font-size:11.5px;padding:3px 11px;border-radius:999px;
+cursor:pointer;transition:color .12s,background .12s}
+.stagebtn:hover{color:var(--tx)}
+.stagebtn.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
+.stagebtn:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
 /* ── detection sweep panel (§7.4) ── */
 .dnone{color:var(--dim);font-size:12.5px;padding:2px}
 .dsub{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin:16px 0 8px}
@@ -10464,8 +10641,19 @@ outline-offset:2px}
 </div>
 
 <details class="fold sec" id="f-detect" open>
-<summary class="sect">Detection sweep <span>yolo26x @1280 — live, updates every 5 s while open</span>
-  <span class="swctl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span></summary>
+<summary class="sect">Models over the store <span id="stgHint">yolo26x @1280 — live, updates every 5 s while open</span>
+  <!-- Two stages of one pipeline, so one section with a switch rather than
+       two sections saying the same six things. The detector finds ground
+       animals; the gate decides which of them are dogs. They run at different
+       times over the same store, and the question "how far along is it" has
+       the same shape for both. -->
+  <span class="stagesw" id="stagesw" role="tablist">
+    <button type="button" class="stagebtn on" data-stage="detect" role="tab" aria-selected="true">Detector</button>
+    <button type="button" class="stagebtn" data-stage="gate" role="tab" aria-selected="false">Dog-bin gate</button>
+  </span>
+  <!-- one control slot, and the stage decides which run it drives -->
+  <span class="swctl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span>
+  <span class="swctl" id="gateCtl" hidden><span class="swpill" id="gateState">checking</span><button id="gateBtn" class="rbtn sw" disabled>Checking&hellip;</button></span></summary>
 <div class="panel">
   <!-- status line ABOVE the cards, never instead of them: the layout below is
        always present and goes to em-dashes when idle, so nothing jumps when
@@ -10504,6 +10692,24 @@ outline-offset:2px}
     </div>
     <div class="dcrops" id="dcropGrid"></div>
     <div class="dflag" id="dcropFlagged"></div>
+  </div>
+
+  <!-- The gate, in the same shapes. Not every card carries over: the gate has
+       no per-drive lanes of its own and no live crops, and inventing an empty
+       one for symmetry would be worse than leaving it out. -->
+  <div id="gateOn" hidden>
+    <div class="kpis" style="margin-bottom:12px">
+      <div class="kpi"><div class="kpi-label">Complete</div><div class="kpi-val" id="gPct" style="font-size:19px">—</div></div>
+      <div class="kpi"><div class="kpi-label" title="detections the gate has judged">Judged</div><div class="kpi-val" id="gDone" style="font-size:19px">—</div></div>
+      <div class="kpi"><div class="kpi-label">ETA</div><div class="kpi-val" id="gEta" style="font-size:19px">—</div></div>
+      <div class="kpi"><div class="kpi-label" title="share the gate calls a dog, over the shards most recently written">Called dog</div><div class="kpi-val" id="gDog" style="font-size:19px">—</div></div>
+      <div class="kpi"><div class="kpi-label" title="boxes per second over the last few shards">boxes/s (now)</div><div class="kpi-val" id="gNow" style="font-size:19px">—</div></div>
+      <div class="kpi"><div class="kpi-label" title="boxes per second over the whole run — the ETA is computed from this">boxes/s (sustained)</div><div class="kpi-val" id="gSus" style="font-size:19px">—</div></div>
+    </div>
+    <div class="bar dmain"><div class="fill" id="gFill" style="background:var(--acc)"></div></div>
+    <div class="dcount" id="gCount">—</div>
+    <div class="drun" id="gRun">—</div>
+    <div class="dmeta" id="gMeta"></div>
   </div>
 </div>
 </details>
@@ -11931,6 +12137,124 @@ echarts.init(bEl,null,{renderer:'canvas'}).setOption({
   series:[{type:'bar',data:D.dogs,barWidth:'66%',itemStyle:{borderRadius:[0,4,4,0],color:new echarts.graphic.LinearGradient(0,0,1,0,[{offset:0,color:'#d8923a'},{offset:1,color:'#f0b85f'}])},label:{show:true,position:'right',color:'#828d98',fontSize:10,formatter:function(p){return fmt(p.value)}}}]});
 }
 window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);if(c)c.resize()});
+/* ── which stage the section is showing ─────────────────────────────────────
+   The detector and the gate are two passes over one store, so they share a
+   section and a set of card shapes. Only one polls at a time: the other's
+   numbers do not change while it is not running, and two 5s pollers for one
+   open fold is a cost with nothing behind it. */
+(function(){
+  var sw=document.getElementById('stagesw');
+  if(!sw)return;
+  var stage=localStorage.getItem('sdStage')==='gate'?'gate':'detect';
+  function paintStage(){
+    var det=stage==='detect';
+    var a=document.getElementById('detOn'), b=document.getElementById('gateOn'),
+        off=document.getElementById('detOff');
+    if(a)a.hidden=!det;
+    if(off)off.hidden=!det;
+    if(b)b.hidden=det;
+    var sc=document.querySelector('.swctl'), gc=document.getElementById('gateCtl');
+    if(sc)sc.hidden=!det;
+    if(gc)gc.hidden=det;
+    var h=document.getElementById('stgHint');
+    if(h)h.textContent=det
+      ? 'yolo26x @1280 — live, updates every 5 s while open'
+      : 'dogbin_008 over every detection the sweep committed';
+    var bs=sw.querySelectorAll('.stagebtn');
+    for(var i=0;i<bs.length;i++){
+      var on=bs[i].getAttribute('data-stage')===stage;
+      bs[i].classList.toggle('on',on);
+      bs[i].setAttribute('aria-selected',on?'true':'false');
+    }
+    window.__stage=stage;
+    if(!det&&window.__gatePoll)window.__gatePoll();
+  }
+  sw.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest&&e.target.closest('.stagebtn');
+    if(!b)return;
+    stage=b.getAttribute('data-stage');
+    localStorage.setItem('sdStage',stage);
+    paintStage();
+  });
+  paintStage();
+})();
+
+/* ── the gate's progress, read from the shards it has written ────────────── */
+(function(){
+  var box=document.getElementById('gateOn');
+  if(!box)return;
+  function fmt(n){return (n||0).toLocaleString()}
+  function dur(s){
+    if(s==null||!isFinite(s))return '—';
+    var h=Math.floor(s/3600), m=Math.round((s%3600)/60);
+    return h?h+'h '+m+'m':m+'m';
+  }
+  function paint(j){
+    if(!j)return;
+    var pct=(j.pct||0)*100;
+    document.getElementById('gPct').textContent=j.total?pct.toFixed(1)+'%':'—';
+    document.getElementById('gDone').textContent=fmt(j.rows);
+    document.getElementById('gEta').textContent=j.running?dur(j.eta_s):'—';
+    document.getElementById('gDog').textContent=
+      j.dog_share==null?'—':(j.dog_share*100).toFixed(1)+'%';
+    document.getElementById('gNow').textContent=j.running?fmt(j.rate):'—';
+    document.getElementById('gSus').textContent=fmt(j.sustained);
+    document.getElementById('gFill').style.width=Math.min(100,pct)+'%';
+    document.getElementById('gCount').textContent=
+      fmt(j.rows)+' of '+fmt(j.total)+' detections judged'+
+      (j.shards?' · '+fmt(j.shards)+' shards written':'');
+    document.getElementById('gRun').textContent=
+      j.images?fmt(j.images)+' frames to open · '+(j.model||'')+
+        (j.created?' · planned '+j.created:''):'—';
+    document.getElementById('gMeta').textContent=j.error||'';
+    var pill=document.getElementById('gateState'),
+        btn=document.getElementById('gateBtn');
+    if(pill){
+      pill.textContent=j.running?'running':(j.rows?'paused':'not started');
+      pill.className='swpill'+(j.running?' on':'');
+    }
+    if(btn&&btn.dataset.busy!=='1'){
+      btn.disabled=!j.can_run;
+      btn.textContent=j.running?'Stop':(j.rows?'Resume':'Run gate');
+      btn.title=j.can_run
+        ? (j.running?'stop after the shard in flight — finished shards are kept'
+                    :'judge every detection the sweep committed; resumes where it left off')
+        : 'no interpreter configured for the gate';
+    }
+  }
+  var gen=0;
+  function poll(){
+    if(window.__stage!=='gate'||document.hidden)return;
+    var mine=++gen;
+    fetch('/api/gate').then(function(r){return r.json()})
+      .catch(function(){return null})
+      .then(function(j){if(mine===gen)paint(j)});
+  }
+  window.__gatePoll=poll;
+  setInterval(poll,5000);
+  var btn=document.getElementById('gateBtn');
+  if(btn)btn.addEventListener('click',function(){
+    var stopping=this.textContent.indexOf('Stop')===0;
+    /* one line: the page template is a NON-raw Python string, so a \n
+       written here arrives as a real newline and takes the whole script
+       with it -- the same trap an escaped apostrophe sprang once already */
+    if(stopping&&!confirm('Stop the gate? The shard in flight is lost; every '+
+      'finished shard is kept, and Resume picks up from there.'))return;
+    btn.dataset.busy='1';btn.disabled=true;
+    btn.textContent=stopping?'Stopping…':'Starting…';
+    fetch('/api/gate',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:stopping?'stop':'start'})})
+      .then(function(r){return r.json()})
+      .catch(function(){return {ok:false,msg:'the dashboard did not answer'}})
+      .then(function(j){
+        btn.dataset.busy='';btn.disabled=false;
+        if(j&&!j.ok&&j.msg)document.getElementById('gMeta').textContent=j.msg;
+        poll();setTimeout(poll,1500);
+      });
+  });
+})();
+
 /* ── detection sweep panel (§7.4 / A.5) ── polls /api/detect every 5 s, but
    ONLY while its fold is open and the tab is visible — every fetch consumes a
    ThreadingHTTPServer thread. The img/s sparkline (last ~15 min at 5 s
