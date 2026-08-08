@@ -1598,9 +1598,23 @@ border-bottom:1px solid var(--bd);transition:padding .16s ease}
    -- and sheds the running tally, the two progress rows and the open panel.
    Those are ambient: worth a glance, not worth a third of the viewport on
    every screen of crops. */
-.scrollcue{display:block;height:1px;margin-bottom:-1px}
+/* 96px, not 1px. A one-pixel sentinel flipped the header the instant the
+   page moved at all, so a small scroll near the top snapped ~60px of chrome
+   in and out repeatedly. The threshold now sits below anything a reader
+   nudges past by accident. */
+.scrollcue{display:block;height:96px;margin-bottom:-96px;pointer-events:none}
 body.compact header{padding-top:7px}
-body.compact .tally,body.compact .lines,body.compact .npanel{display:none}
+/* Collapsed, not deleted. display:none took the height in one frame and the
+   grid jumped; a height transition makes the same change read as the header
+   folding rather than the page lurching. */
+.tally,.lines{overflow:hidden;
+transition:max-height .18s ease,opacity .18s ease,padding .18s ease}
+.tally{max-height:40px}
+.lines{max-height:64px}
+body.compact .tally,body.compact .lines{max-height:0;opacity:0;padding-top:0;
+padding-bottom:0}
+body.compact .npanel{display:none}
+@media(prefers-reduced-motion:reduce){.tally,.lines{transition:none}}
 body.compact h1{font-size:14px}
 body.compact .score>b{font-size:19px;letter-spacing:-.3px}
 body.compact .score>span{font-size:11px}
@@ -1747,7 +1761,12 @@ flex-wrap:wrap;gap:6px 14px;align-items:center}
    now one line of the same caption type, with a hairline track sharing the
    row rather than owning it. */
 .lines{display:grid;gap:2px;padding:10px 0 0}
+/* A FIXED height. The guesser's sub-line grows and shrinks every five
+   seconds while a pass runs -- "Not running" one poll, "176 of 2,864 this
+   pass · 39.2/s" the next -- and with a row free to wrap, the header changed
+   height under the reader and shoved the grid down the page on a timer. */
 .line{display:flex;align-items:center;gap:10px;margin:0;padding:5px 0;
+min-height:22px;
 font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
 .line[hidden]{display:none}
 .line b{color:var(--tx);font-weight:640;flex:none}
@@ -1756,7 +1775,8 @@ font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
    no guess from this one" branch, and at flex:none its base size is its
    max-content width -- 492px, which pushed the sticky header wider than the
    viewport and gave the whole page a horizontal scrollbar below ~510px. */
-.line .lsub{color:var(--dim);flex:0 1 auto;min-width:0}
+.line .lsub{color:var(--dim);flex:0 1 auto;min-width:0;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .line .lend{flex:none;color:var(--mut)}
 .line .track{flex:1;min-width:60px;height:3px;border-radius:2px;
 background:rgba(130,140,150,.18);overflow:hidden;display:block}
@@ -1769,8 +1789,10 @@ transition:width .45s ease}
    rather than yours */
 .line.trg{color:var(--dim)}
 .line.trg b{color:var(--mut);font-weight:600}
-@media(max-width:700px){.line{flex-wrap:wrap}.line .track{order:9;flex-basis:100%}
-.line .lsub{flex-basis:100%}}
+/* the track drops to its own row on a phone; the text still elides
+   rather than wrapping, so the row keeps one height everywhere */
+@media(max-width:700px){.line{flex-wrap:wrap}
+.line .track{order:9;flex-basis:100%}}
 .pagebar{display:flex;align-items:center;justify-content:flex-end;gap:10px;
 padding:9px 0 12px}
 kbd{background:var(--panel2);border:1px solid var(--bd);border-bottom-width:2px;
@@ -3707,8 +3729,20 @@ if($('find')){
 (function(){
   var cue=$('scrollcue');
   if(!cue||typeof IntersectionObserver!=='function')return;
+  var at=null,hold=0;
   new IntersectionObserver(function(es){
-    document.body.classList.toggle('compact',!es[0].isIntersecting);
+    var want=!es[0].isIntersecting;
+    if(want===at)return;
+    /* Hysteresis. Compacting removes height from a sticky header, which moves
+       everything below it — and that settling can cross the sentinel again
+       and ask for the opposite. Refusing a reversal for a moment turns a
+       flutter into one change. */
+    /* the observer's own timestamp, not the wall clock: it is what the
+       browser measured the crossing at, and it can be driven in a test */
+    var now=(typeof es[0].time==='number')?es[0].time:Date.now();
+    if(at!==null&&now-hold<260)return;
+    at=want;hold=now;
+    document.body.classList.toggle('compact',want);
   },{threshold:0}).observe(cue);
 })();
 if($('narrow'))$('narrow').addEventListener('click',function(){

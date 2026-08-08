@@ -421,8 +421,13 @@ function toastUp() { return root.children.some(c => c.id === 'tbox'); }
 
 // Cross the sentinel the way a scroll does. IO_CB is the page's own callback,
 // captured when it constructed the observer.
-function scrolled(down) {
-  if (IO_CB) IO_CB([{isIntersecting: !down}]);
+let IO_T = 0;
+// `ms` advances the crossing timestamp the page reads, so the hysteresis that
+// stops a sticky header fluttering can be exercised from both sides without
+// the test sleeping.
+function scrolled(down, ms) {
+  IO_T += (ms === undefined ? 1000 : ms);
+  if (IO_CB) IO_CB([{isIntersecting: !down, time: IO_T}]);
 }
 
 // ── 1. load + render ────────────────────────────────────────────────────────
@@ -1522,6 +1527,18 @@ async function t32() {
   scrolled(false);
   ck(!document.body.classList.contains('compact'),
      't32: scrolling back to the top left the header compact');
+
+  // A sticky header that sheds height moves everything under it, and that
+  // settling can cross the sentinel again and ask for the opposite. Two
+  // crossings inside the hold window are one change, not a flutter.
+  scrolled(true);
+  ck(document.body.classList.contains('compact'), 't32: did not compact');
+  scrolled(false, 40);
+  ck(document.body.classList.contains('compact'),
+     't32: a reversal 40ms later undid it — that is the flutter');
+  scrolled(false, 900);
+  ck(!document.body.classList.contains('compact'),
+     't32: a real scroll back to the top was refused too');
 }
 
 // ── 33. the id can be copied, but only from the enlarged view ───────────
