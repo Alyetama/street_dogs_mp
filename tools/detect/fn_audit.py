@@ -378,13 +378,23 @@ def export(args):
                 'sequence': v.get('seq'),
                 'verdict': verdict_of(v.get('verdict')),
                 'p_dog': v.get('p_dog'), 'band': v.get('band'),
+                # the row's reason for existing: a dog the gate said no to.
+                # Everything downstream wants to weight or filter on this.
+                'false_negative': bool(
+                    cls == 'dog' and v.get('p_dog') is not None
+                    and float(v['p_dog']) < THRESHOLD),
                 'judged_at': v.get('ts'), 'judged_model': args.model}) + '\n')
     with open(os.path.join(DATASET, 'README.md'), 'w') as fh:
         fh.write(README.format(model=args.model))
     n_dog = sum(1 for name, (c, _) in keep.items() if c == 'dog'
                 and os.path.exists(os.path.join(DATASET, 'dog', name)))
+    fn = sum(1 for c, v in keep.values()
+             if c == 'dog' and v.get('p_dog') is not None
+             and float(v['p_dog']) < THRESHOLD)
     print(f'{placed:,} crops in {os.path.relpath(DATASET, REPO)} '
           f'({n_dog:,} dog, {placed - n_dog:,} not_dog)')
+    print(f'  {fn:,} of the dogs are FALSE NEGATIVES -- the gate scored them '
+          f'below {THRESHOLD} and a person said dog')
     if removed:
         print(f'  {removed:,} removed -- the ledger no longer says they '
               f'belong there')

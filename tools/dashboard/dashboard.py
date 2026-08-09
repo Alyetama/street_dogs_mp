@@ -9418,10 +9418,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 i = int((q.get('i', ['-1'])[0]))
             except ValueError:
                 i = -1
-            b = q.get('band', [''])[0]
             self._json(a.api_page(
                 i, n=a.page_size(q.get('n', [None])[0]),
-                band=int(b) if b.isdigit() else None))
+                band=a.band_arg(q.get('band', [None])[0])))
             return True
         if path == '/api/audit/stats':
             self._json(a.stats() if a else {'judged': 0, 'bands': []})
@@ -9723,10 +9722,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     self._json({'error': 'the audit pool is not built — run '
                                          'tools/detect/fn_audit.py build'})
                 elif self.path.startswith('/api/audit/draw'):
-                    b = data.get('band')
                     self._json(a.api_draw(
                         n=a.page_size(data.get('n')),
-                        band=None if b is None else int(b)))
+                        band=a.band_arg(data.get('band'))))
                 else:
                     self._json(a.record(
                         data.get('key'), str(data.get('verdict') or ''),

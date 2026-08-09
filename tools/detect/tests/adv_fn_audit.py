@@ -481,19 +481,58 @@ listeners.doc.keydown({key:'1', target:{tagName:'SELECT'},
   preventDefault:function(){}});
 chk(FETCHES.length === before,
   'a keypress inside a dropdown recorded a verdict');
+// With nothing selected, a verdict key must do NOTHING -- there is no crop
+// under a cursor that does not exist.
+page.items.forEach(function (it) { delete it.verdict });
+render(); cur = -1; FETCHES.length = 0;
+listeners.doc.keydown({key:'f', target:{tagName:'DIV'},
+  preventDefault:function(){}});
+chk(!FETCHES.some(function(u){return /verdict/.test(u)}),
+  'a verdict key recorded something with no crop selected');
+// an arrow selects; then the key acts on what you chose
+listeners.doc.keydown({key:'ArrowRight', target:{tagName:'DIV'},
+  preventDefault:function(){}});
+chk(cur === 0, 'the first arrow press did not select the first crop');
 listeners.doc.keydown({key:'f', target:{tagName:'DIV'},
   preventDefault:function(){}});
 chk(FETCHES.some(function(u){return /verdict/.test(u)}),
-  'F did not flag the crop under the cursor');
+  'F did not flag the selected crop');
 // the cursor must NOT walk on by itself -- the page choosing the next crop
 // for you is what made it feel like it was selecting things
+page.items.forEach(function (it) { delete it.verdict });
+render(); cur = 1;
 var was = cur;
 judge(cur, 'dog');
 chk(cur === was, 'the cursor advanced on its own after a verdict');
-// "not a dog" clears the crop off the grid and offers a way back
-judge(0, 'not_dog');
-chk(grid.children.length === 0 || els.undotoast.hidden === false,
-  'dismissing a crop offered no undo');
+// EVERY verdict clears the crop off the grid -- the grid is the work left,
+// not a record of what was answered -- and every one offers a way back.
+['dog', 'not_dog', 'unsure'].forEach(function (v, n) {
+  page.items.forEach(function (it) { delete it.verdict });
+  render();
+  var before = grid.children.filter(function (c) {
+    return c.style.display !== 'none' }).length;
+  judge(0, v);
+  var after = grid.children.filter(function (c) {
+    return c.style.display !== 'none' }).length;
+  chk(before > 0, 'the grid rendered no cards to judge');
+  chk(after === before - 1,
+    'after answering "' + v + '" the crop is still on the grid (' +
+    before + ' -> ' + after + ')');
+  chk(els.undotoast.hidden === false, '"' + v + '" offered no undo');
+  undoLast();
+  var back = grid.children.filter(function (c) {
+    return c.style.display !== 'none' }).length;
+  chk(back === before, 'undo did not put the crop back (' + back +
+    ' of ' + before + ')');
+});
+// nothing is selected when a page arrives -- show() is the real path a page
+// takes, and it is where the ring used to land on the first crop
+PAGE.items.forEach(function (it) { delete it.verdict });
+show(PAGE, 0, 1);
+chk(cur < 0, 'a crop is selected before the reader has touched anything');
+chk(grid.children.filter(function (c) {
+  return c.style.display !== 'none' }).length === PAGE.items.length,
+  'a fresh page does not show all of its crops');
 // changing the selection must draw rather than replay a page cut under the
 // old one. Each click lands a stubbed response that resets total, so the
 // state under test is set immediately before each one.

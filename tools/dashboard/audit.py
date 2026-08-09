@@ -113,6 +113,22 @@ def _drawn_keys():
     return keys, seqs
 
 
+def band_list(band):
+    """Whatever the caller asked for, as a list of band indices."""
+    n = len(fa.BANDS)
+    if band is None or band == 'all':
+        return list(range(n))
+    if band == 'rejected':
+        return [i for i in range(n) if fa.BANDS[i][0] < fa.THRESHOLD]
+    if band == 'kept':
+        return [i for i in range(n) if fa.BANDS[i][0] >= fa.THRESHOLD]
+    try:
+        i = int(band)
+    except (TypeError, ValueError):
+        return list(range(n))
+    return [i] if 0 <= i < n else list(range(n))
+
+
 def sample(n=25, band=None, seed=None):
     """A page of candidates: stratified by band, one box per sequence, none
     ever drawn before.
@@ -130,7 +146,11 @@ def sample(n=25, band=None, seed=None):
     if seqs:
         con.executemany("INSERT INTO seen_seq VALUES (?)",
                         [(s,) for s in seqs])
-    bands = [band] if band is not None else list(range(len(fa.BANDS)))
+    # A band can be one band, or a side of the threshold. False negatives --
+    # the whole reason to run this -- only exist where the gate said no, so
+    # "rejected" is a first-class choice and the page's default rather than
+    # something to be assembled by picking five bands one at a time.
+    bands = band_list(band)
     # Evenly over the bands asked for, with the remainder going to the ones
     # NEAREST the threshold -- that is where a wrong answer is most likely to
     # be found, and flooring instead quietly dropped four crops off every
@@ -573,8 +593,12 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
       <option value="25">25</option><option value="50">50</option>
       <option value="75">75</option><option value="100">100</option>
     </select></label>
-  <label class="pick">score
-    <select id="bandsel"><option value="">every band</option></select></label>
+  <label class="pick">draw from
+    <select id="bandsel">
+      <option value="rejected">below 0.5 &mdash; what it rejected</option>
+      <option value="kept">0.5 and up &mdash; what it kept</option>
+      <option value="all">every band</option>
+    </select></label>
   <button class="btn" id="fresh">&#8635; draw a new page</button>
 </div>
 
@@ -602,12 +626,24 @@ var BANDS=__BANDS__;
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
     lbimg=document.getElementById('lbimg'),lbtxt=document.getElementById('lbtxt');
-var page=null,idx=0,cur=0,total=0,band=null,busy=false,size=25,dirty=false;
+/* -1 is NOT a crop. The page used to open with the first one ringed, which
+   reads as a choice already made on your behalf before you have looked. */
+/* A false negative is a dog the gate said no to, so it can only be found
+   below the threshold. That is what this page is for, so that is where it
+   draws from unless told otherwise. */
+var page=null,idx=0,cur=-1,total=0,band='rejected',busy=false,size=25,
+    dirty=false;
 
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
   e.hidden=false;clearTimeout(e._t);e._t=setTimeout(function(){e.hidden=true},1600)}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function pctTxt(v){return (v*100).toFixed(1)+'%'}
+function bandName(b){
+  if(typeof b==='number'&&BANDS[b])
+    return BANDS[b][0].toFixed(1)+'–'+BANDS[b][1].toFixed(1);
+  return b==='kept'?'what it kept'
+    : b==='all'?'every band' : 'what it rejected';
+}
 function fmtn(n){return (n||0).toLocaleString('en-US')}
 
 /* The verdict is sent the moment it is given and the card is marked from the
@@ -615,22 +651,21 @@ function fmtn(n){return (n||0).toLocaleString('en-US')}
    must never wait on a round trip, and the ledger is append-only so a lost
    response costs one line, not the page. */
 var lastUndo=null,toastT=null;
+var VERDICT_TEXT={dog:'Flagged as a dog',not_dog:'Not a dog',
+                  unsure:'Left as unsure'};
 function judge(i,verdict){
+  if(i<0)return;
   var it=page.items[i]; if(!it)return;
   it.verdict=verdict;
-  /* The cursor stays where it was put. It used to step to the next crop after
-     every answer, which reads as the page choosing for you -- and on a grid,
-     where the eye is already on the crop it means to judge, moving the ring
-     somewhere else is just wrong. Arrows move it; nothing else does. */
-  if(verdict==='not_dog'){
-    /* Not a dog is a DISMISSAL: it is the answer for almost every crop here,
-       and leaving three hundred of them on screen greyed out buries the few
-       that matter. It leaves the grid, and the toast is the way back. */
-    hide(i);
-    offerUndo(it,i);
-  }else{
-    paintCard(i);
-  }
+  /* EVERY answer takes the crop off the grid. The grid is the work left, not
+     a record of what was answered -- a page of a hundred where the judged ones
+     linger greyed out is a page you have to keep re-reading to find the ones
+     you have not done. What was flagged is in the count above and in the
+     dataset; what is on screen is what is still to do.
+     The cursor does not walk on by itself either: it stays where it was put,
+     because the page moving your selection for you is the page choosing. */
+  hide(i);
+  offerUndo(it,i,verdict);
   send(it.key,verdict,it);
 }
 function send(key,verdict,it){
@@ -645,17 +680,39 @@ function send(key,verdict,it){
 function hide(i){
   var el=grid.children[i];
   if(el){el.style.display='none';el.setAttribute('data-gone','1')}
+  left();
 }
 function unhide(i){
   var el=grid.children[i];
   if(el){el.style.display='';el.removeAttribute('data-gone')}
+  left();
 }
-function offerUndo(it,i){
+/* Pure: how many crops on this page are still unanswered. Kept separate from
+   the redraw because setPos() wants the number too, and the two calling each
+   other is a stack overflow rather than a layout. */
+function remaining(){
+  if(!page||!page.items)return 0;
+  var n=0;
+  for(var i=0;i<page.items.length;i++)if(!page.items[i].verdict)n++;
+  return n;
+}
+function left(){
+  var n=remaining(),e=document.getElementById('empty');
+  if(page&&page.items&&page.items.length){
+    if(n===0){e.hidden=false;
+      e.textContent='Every crop on this page is done \u2014 next page \u2192'}
+    else e.hidden=true;
+  }
+  setPos();
+  return n;
+}
+function offerUndo(it,i,verdict){
   lastUndo={key:it.key,i:i};
   var t=document.getElementById('undotoast');
   t.innerHTML='<img src="/audit/crop/'+esc(it.key.replace("#","_"))+
     '.jpg" alt="">'+
-    '<span class="tt"><b>Not a dog</b>'+it.image_id+'</span>'+
+    '<span class="tt"><b>'+(VERDICT_TEXT[verdict]||'Recorded')+'</b>'+
+    esc(it.image_id)+'</span>'+
     '<button class="btn" id="undoB">Undo</button>';
   t.hidden=false;
   document.getElementById('undoB').onclick=undoLast;
@@ -718,25 +775,31 @@ function render(){
 }
 function move(d){
   if(!page||!page.items.length)return;
-  cur=Math.max(0,Math.min(page.items.length-1,cur+d));
+  /* the first arrow press selects rather than moving from an assumed first */
+  if(cur<0){cur=d>0?0:page.items.length-1}
+  else cur=Math.max(0,Math.min(page.items.length-1,cur+d));
   for(var i=0;i<page.items.length;i++)paintCard(i);
   var el=grid.children[cur];
   if(el&&el.scrollIntoView)el.scrollIntoView({block:'nearest'});
 }
 function setPos(){
+  /* `band` is a band index OR a side of the threshold, so it cannot be
+     indexed into BANDS without asking which it is -- doing that threw and
+     took the whole page down. */
   posEl.textContent=total?('page '+(idx+1)+' of '+total+
-    (page&&page.dropped?' · '+page.dropped+' unreadable':'')+
-    (band!=null?' · band '+BANDS[band][0].toFixed(1)+'-'+BANDS[band][1].toFixed(1):'')):'—';
+    (page&&page.dropped?' \u00b7 '+page.dropped+' unreadable':'')+
+    ' \u00b7 '+bandName(band)+
+    (page&&page.items&&page.items.length?' \u00b7 '+remaining()+' left':'')):'—';
   document.getElementById('prev').disabled=busy||idx<=0;
   document.getElementById('next').disabled=busy;
 }
 function show(doc,at,tot){
-  page=doc;idx=at;total=tot;cur=0;render();setPos();
+  page=doc;idx=at;total=tot;cur=-1;render();setPos();left();
 }
 function load(at){
   busy=true;setPos();
   fetch('/api/audit/page?i='+at+'&n='+size+
-        (band==null?'':'&band='+band)).then(function(r){return r.json()})
+        (band==null?'':'&band='+encodeURIComponent(band))).then(function(r){return r.json()})
     .then(function(j){busy=false;if(!j||j.error){toast(j&&j.error||'failed');setPos();return}
       show(j.page,j.index,j.total)})
     .catch(function(){busy=false;toast('failed');setPos()});
@@ -835,7 +898,8 @@ grid.addEventListener('click',function(e){
 var sizeSel=document.getElementById('size'),bandSel=document.getElementById('bandsel');
 for(var bi=0;bi<BANDS.length;bi++){
   var o=document.createElement('option');
-  o.value=bi;o.textContent=BANDS[bi][0].toFixed(1)+' – '+BANDS[bi][1].toFixed(1);
+  o.value=bi;o.textContent='only '+BANDS[bi][0].toFixed(1)+' – '+
+    BANDS[bi][1].toFixed(1);
   bandSel.appendChild(o);
 }
 /* Both choices are remembered. Working through an audit is a long sitting and
@@ -845,7 +909,8 @@ try{
   var sv=localStorage.getItem('sdAuditSize');
   if(sv&&/^(25|50|75|100)$/.test(sv))sizeSel.value=sv;
   var bv=localStorage.getItem('sdAuditBand');
-  if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length){band=+bv;bandSel.value=bv}
+  if(bv==='rejected'||bv==='kept'||bv==='all'){band=bv;bandSel.value=bv}
+  else if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length){band=+bv;bandSel.value=bv}
 }catch(_){}
 size=+sizeSel.value||25;
 sizeSel.addEventListener('change',function(){
@@ -854,10 +919,13 @@ sizeSel.addEventListener('change',function(){
   toast(size+' crops on the next page');
 });
 bandSel.addEventListener('change',function(){
-  band=bandSel.value===''?null:+bandSel.value;dirty=true;
+  band=/^\d+$/.test(bandSel.value)?+bandSel.value:bandSel.value;dirty=true;
   try{localStorage.setItem('sdAuditBand',bandSel.value)}catch(_){}
-  toast(band==null?'drawing from every band'
-    :'drawing from '+BANDS[band][0].toFixed(1)+'–'+BANDS[band][1].toFixed(1)+' only');
+  toast(band==='all'?'drawing from every band'
+    :typeof band==='number'
+      ?'drawing from '+BANDS[band][0].toFixed(1)+'–'+BANDS[band][1].toFixed(1)+' only'
+      :band==='rejected'?'drawing from what the gate rejected'
+      :'drawing from what the gate kept');
 });
 /* Changing the score band or the page size is an instruction about what to
    show NEXT. Paging on regardless would hand back a page drawn under the old
@@ -910,13 +978,13 @@ document.addEventListener('keydown',function(e){
   else if(e.key==='u'||e.key==='U'){undoLast();e.preventDefault()}
   else if(e.key==='ArrowRight'){move(1);e.preventDefault()}
   else if(e.key==='ArrowLeft'){move(-1);e.preventDefault()}
-  else if(e.key==='Enter'){zoom(cur);e.preventDefault()}
+  else if(e.key==='Enter'){if(cur>=0)zoom(cur);e.preventDefault()}
   else if(e.key==='n'||e.key==='N'){
     if(idx+1<total)load(idx+1);else draw();e.preventDefault()}
 });
 /* boot: the last page if there is one, otherwise an invitation */
 fetch('/api/audit/page?i=-1&n='+size+
-      (band==null?'':'&band='+band)).then(function(r){return r.json()})
+      (band==null?'':'&band='+encodeURIComponent(band))).then(function(r){return r.json()})
   .then(function(j){
     if(j&&j.page)show(j.page,j.index,j.total);
     else{total=0;setPos();render()}
@@ -972,6 +1040,20 @@ def with_verdicts(doc):
 # down by typing. Each divides by the band count, so every band gets the same
 # quota and the strata stay even.
 PAGE_SIZES = (25, 50, 75, 100)
+
+
+BAND_GROUPS = ('rejected', 'kept', 'all')
+
+
+def band_arg(v):
+    """A band selection off the wire: a group name, an index, or nothing."""
+    if v in BAND_GROUPS:
+        return v
+    try:
+        i = int(v)
+    except (TypeError, ValueError):
+        return None
+    return i if 0 <= i < len(fa.BANDS) else None
 
 
 def page_size(v, default=25):

@@ -3,19 +3,44 @@
 // is not becomes a TypeError, which is the point.
 var els = {}, listeners = {};
 function mk(id){
-  return {id:id, textContent:'', innerHTML:'', className:'', title:'',
+  var el = {id:id, textContent:'', className:'', title:'',
     hidden:false, disabled:false, style:{}, children:[], value:'', src:'',
     dataset:{}, options:[],
     // a <select> the page fills at boot: without these the option list is
     // never built and every assertion below runs against a control that does
     // not exist, which is a test passing on code it never executed
     appendChild:function(c){ this.children.push(c); this.options.push(c) },
-    setAttribute:function(){}, getAttribute:function(){return null},
+    setAttribute:function(k,v){ this.dataset[k] = v },
+    removeAttribute:function(k){ delete this.dataset[k] },
+    getAttribute:function(){ return null },
     addEventListener:function(t,f){(listeners[id]=listeners[id]||{})[t]=f},
-    querySelectorAll:function(){return []}, scrollIntoView:function(){},
+    // a card really does contain its three action buttons; returning []
+    // made paintCard() read b[0].classList off undefined
+    querySelectorAll:function(sel){
+      if (/\.act/.test(sel || '')) {
+        this._acts = this._acts ||
+          [mk(this.id + ':flag'), mk(this.id + ':no'), mk(this.id + ':unsure')];
+        return this._acts;
+      }
+      return [];
+    }, scrollIntoView:function(){},
     classList:{toggle:function(){}, add:function(){}, remove:function(){}},
     closest:function(){return null}, select:function(){},
     setSelectionRange:function(){}};
+  // innerHTML must MAKE CHILDREN. Without this, grid.children stayed [] for
+  // ever, so every check about a card being hidden, restored or counted
+  // passed against a grid that had none -- a test of nothing at all.
+  var _html = '';
+  Object.defineProperty(el, 'innerHTML', {
+    get: function(){ return _html },
+    set: function(v){
+      _html = String(v);
+      var n = (_html.match(/<div class="card/g) || []).length;
+      el.children = [];
+      for (var i = 0; i < n; i++) el.children.push(mk(el.id + ':card' + i));
+    }
+  });
+  return el;
 }
 function E(id){ return els[id] || (els[id] = mk(id)) }
 // Elements the MARKUP starts hidden. Defaulting every node to visible made
