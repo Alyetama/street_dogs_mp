@@ -492,8 +492,11 @@ def _page_once(bad, audit, probe, stage):
     # its placeholders in and would throw ReferenceError on the first line
     html = audit.page_html(stage)
     script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    css = html[html.index('<style>') + 7:html.index('</style>')]
     with _tf.NamedTemporaryFile('w', suffix='.js', delete=False) as f:
-        f.write(open(probe).read() + '\n' + script + '\n' + TAIL)
+        f.write(open(probe).read()
+                + '\nvar PAGE_CSS = ' + json.dumps(css) + ';\n'
+                + script + '\n' + TAIL)
         p = f.name
     r = subprocess.run(['node', p], capture_output=True, text=True)
     if r.returncode != 0:
@@ -539,6 +542,21 @@ chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
 // reads "leashed 0.048" would mean the two came from different places
 chk(/class="ptag/.test(els.grid.innerHTML),
   'no tile says what the model predicted');
+// The sheet is ordered by score and the model's own line is drawn where it
+// crosses -- once, and only when the page actually spans it.
+var rules = (els.grid.innerHTML.match(/class="thr"/g) || []).length;
+var spans = page.items.some(function (i) { return +i.p_dog >= THRESH }) &&
+            page.items.some(function (i) { return +i.p_dog < THRESH });
+chk(rules === (spans ? 1 : 0),
+  'the threshold rule appears ' + rules + ' time(s) on a page that ' +
+  (spans ? 'does' : 'does not') + ' cross it');
+// at rest a tile is a photograph: the buttons ride over it, they are not
+// permanent furniture below it
+chk(/\.acts\{[^}]*position:absolute/.test(PAGE_CSS),
+  'the action row is still stacked under every tile rather than riding over '
+  + 'it — seventy-five buttons where the photographs should be');
+chk(/\.card:hover \.acts/.test(PAGE_CSS),
+  'the actions never appear on hover, so the mouse cannot reach them');
 page.items.forEach(function (it) {
   var want = (+it.p_dog >= THRESH) ? POS : NEG;
   chk(predOf(it) === want,

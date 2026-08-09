@@ -463,7 +463,12 @@ AUDIT_HTML = r"""<!doctype html>
 <title>Audit &mdash; __H1__</title><style>
 :root{--bg:#13151a;--panel:#1b2027;--panel2:#21262d;--bd:rgba(130,140,150,.13);
 --tx:#eef1f4;--mut:#98a2ad;--dim:#69727d;--acc:#e8a645;--green:#43b581;
---red:#ef5350;--gap:20px}
+--red:#ef5350;--gap:20px;
+/* Numbers get their own face. Every score, count and interval on this page is
+   read by comparison -- 0.048 against 0.462, 6/7 against 4/4 -- and in a
+   proportional face the digits move under the eye between rows. This is the
+   one typographic choice here and it is a functional one. */
+--num:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -485,11 +490,31 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   border:1px solid var(--bd);border-radius:8px;padding:6px 11px}
 .back:hover{color:var(--tx);border-color:rgba(130,140,150,.3)}
 /* ── the measurement ── */
+/* THE WORK COMES FIRST. The measurement block, the pool notice and a
+   ten-row band table sat above the photographs -- around five hundred pixels
+   of statistics before the first crop, on a page whose entire job is showing
+   crops and taking answers. The numbers move by a tenth of a percent per
+   verdict; they are worth reading once a session, not once a click. So they
+   fold into one line that is always true and open when asked. */
+.figures{margin-bottom:14px}
+.figsum{list-style:none;cursor:pointer;display:flex;gap:12px;
+  align-items:baseline;padding:9px 14px;background:var(--panel);
+  border:1px solid var(--bd);border-radius:12px;font-size:12.5px;
+  color:var(--mut)}
+.figsum::-webkit-details-marker{display:none}
+.figsum:hover{border-color:rgba(130,140,150,.3)}
+.figline b{color:var(--tx);font-weight:640;font-variant-numeric:tabular-nums;
+  font-family:var(--num)}
+.figmore{margin-left:auto;color:var(--dim);font-size:11.5px}
+.figmore::after{content:' \25b8'}
+.figures[open] .figmore::after{content:' \25be'}
+.figures[open] .figsum{border-radius:12px 12px 0 0;border-bottom:0}
+.figures[open] .meas{border-radius:0}
 .meas{display:flex;gap:26px;align-items:flex-end;flex-wrap:wrap;
-  background:var(--panel);border:1px solid var(--bd);border-radius:14px;
-  padding:16px 20px;margin-bottom:14px}
+  background:var(--panel);border:1px solid var(--bd);border-top:0;
+  padding:16px 20px}
 .mbig{font-size:34px;font-weight:680;letter-spacing:-1.2px;line-height:1.1;
-  font-variant-numeric:tabular-nums}
+  font-variant-numeric:tabular-nums;font-family:var(--num)}
 .mlab{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;
   color:var(--dim)}
 .mci{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
@@ -554,7 +579,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .btn:disabled{opacity:.4;cursor:default}
 .btn.go{color:var(--acc);border-color:rgba(232,166,69,.4)}
 .pos{font-size:12px;color:var(--dim);margin-left:2px;
-  font-variant-numeric:tabular-nums}
+  font-variant-numeric:tabular-nums;font-family:var(--num)}
 .spacer{margin-left:auto}
 .pick{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;
   color:var(--dim)}
@@ -562,42 +587,61 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   color:var(--mut);border-radius:9px;padding:7px 9px;font-size:12.5px;
   font-family:inherit;cursor:pointer}
 .pick select:hover{color:var(--tx)}
-/* ── the grid ── */
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(212px,1fr));
-  gap:14px}
-.card{background:var(--panel);border:1px solid var(--bd);border-radius:13px;
-  overflow:hidden;display:flex;flex-direction:column}
+/* ── the sheet ──
+   A CONTACT SHEET, the same conclusion the review page reached and this page
+   did not inherit: at rest a tile is a photograph and the model's own verdict,
+   nothing else. Three buttons under every crop is seventy-five buttons on a
+   page of twenty-five, all saying the same three things, while the pictures
+   they are about get what is left. They ride over the foot of the frame now,
+   and only when the tile is under the cursor, focused, or the selected one.
+   The keyboard never needed them. */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));
+  gap:12px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:12px;
+  overflow:hidden;position:relative}
 .card.done{opacity:.5}
 /* a flag is the FINDING -- it stays lit rather than greying out like an
    answered question, because the whole point of the page is the pile of them */
 .card.miss{border-color:var(--acc);opacity:1;
   box-shadow:0 0 0 1px rgba(232,166,69,.35)}
 .card.ok{border-color:rgba(67,181,129,.4)}
+.card.cur{box-shadow:0 0 0 2px var(--acc)}
 .shot{position:relative;background:#0e1014;aspect-ratio:1;display:flex;
   align-items:center;justify-content:center;cursor:zoom-in}
 .shot img{max-width:100%;max-height:100%;display:block}
-/* The model's own verdict, top-left, opposite the score. Told apart by
-   WEIGHT rather than hue -- filled for the class the score predicts, outlined
-   for the other -- because these are two categories and not a good and a bad,
-   and colouring one green would put a judgement on the tile before the reader
-   has made one. The word is always there, so it is never colour alone. */
 .ptag{position:absolute;left:6px;top:6px;font-size:10.5px;border-radius:6px;
   padding:2px 7px;letter-spacing:.02em;border:1px solid var(--bd);
   background:rgba(10,12,16,.82);color:var(--mut)}
 .ptag.yes{background:rgba(232,166,69,.16);border-color:rgba(232,166,69,.42);
   color:var(--acc);font-weight:620}
 .pchip{position:absolute;right:6px;bottom:6px;font-size:10.5px;
+  font-family:var(--num);
   background:rgba(10,12,16,.82);border:1px solid var(--bd);border-radius:6px;
-  padding:2px 6px;color:var(--mut);font-variant-numeric:tabular-nums}
-.acts{display:grid;grid-template-columns:1fr 1fr auto;gap:1px;
-  background:var(--bd)}
-.act{background:var(--panel2);border:0;color:var(--mut);font-family:inherit;
-  font-size:11.5px;padding:9px 4px;cursor:pointer}
+  padding:2px 6px;color:var(--mut);font-variant-numeric:tabular-nums;
+  opacity:0;transition:opacity .12s ease}
+.card:hover .pchip,.card:focus-within .pchip,.card.cur .pchip{opacity:1}
+.acts{position:absolute;left:0;right:0;bottom:0;display:grid;
+  grid-template-columns:1fr 1fr auto;gap:1px;background:rgba(130,140,150,.14);
+  opacity:0;transform:translateY(4px);pointer-events:none;
+  transition:opacity .13s ease,transform .13s ease}
+.card:hover .acts,.card:focus-within .acts,.card.cur .acts{opacity:1;
+  transform:none;pointer-events:auto}
+.act{background:rgba(16,19,24,.94);border:0;color:var(--mut);
+  font-family:inherit;font-size:11.5px;padding:9px 4px;cursor:pointer}
 .act:hover{color:var(--tx)}
-.act.m:hover,.act.m.on{background:rgba(239,83,80,.16);color:var(--red)}
-.act.c:hover,.act.c.on{background:rgba(67,181,129,.14);color:var(--green)}
+.act.m:hover,.act.m.on{background:rgba(232,166,69,.2);color:var(--acc)}
+.act.c:hover,.act.c.on{background:rgba(67,181,129,.18);color:var(--green)}
 .act.u{padding:9px 10px}
 .act.u:hover,.act.u.on{color:var(--acc)}
+/* THE MODEL'S LINE. The sheet is ordered by score, so reading it is a walk
+   from "certainly not" to "certainly yes" -- and this is drawn where the
+   model stops saying one and starts saying the other. Everything above it was
+   thrown away; everything below it was kept. It is the whole question of the
+   page, made a place on the page. */
+.thr{grid-column:1/-1;display:flex;align-items:center;gap:12px;
+  color:var(--dim);font-size:11px;text-transform:uppercase;
+  letter-spacing:.08em;margin:4px 0 2px}
+.thr::before,.thr::after{content:'';height:1px;background:var(--bd);flex:1}
 .empty{color:var(--dim);font-size:13px;padding:40px 0;text-align:center}
 /* ── lightbox ── */
 .lb{position:fixed;inset:0;background:rgba(0,0,0,.9);display:flex;
@@ -639,20 +683,25 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   <a class="back" href="/">&larr; dashboard</a>
 </header>
 
-<div class="meas">
-  <div><div class="mlab">__MISSLAB__</div>
-    <div class="mbig" id="rate">&mdash;</div>
-    <div class="mci" id="ci">nothing flagged yet</div></div>
-  <div><div class="mlab">you have flagged</div>
-    <div class="mbig" id="judged">0</div>
-    <div class="mci" id="found">&nbsp;</div></div>
-  <div class="mnote" id="note">Bands are drawn from evenly, so this is not a
-    proportion of what you have seen &mdash; it weights each band by how many
-    boxes the gate really put in it.</div>
-</div>
-
+<details class="figures" id="figures">
+  <summary class="figsum">
+    <span class="figline" id="figline">nothing judged yet</span>
+    <span class="figmore">the numbers</span>
+  </summary>
+  <div class="meas">
+    <div><div class="mlab">__MISSLAB__</div>
+      <div class="mbig" id="rate">&mdash;</div>
+      <div class="mci" id="ci">nothing judged yet</div></div>
+    <div><div class="mlab">you have judged</div>
+      <div class="mbig" id="judged">0</div>
+      <div class="mci" id="found">&nbsp;</div></div>
+    <div class="mnote">Bands are drawn from evenly, so this is not a
+      proportion of what you have seen &mdash; it weights each band by how
+      many boxes the model really put in it.</div>
+  </div>
 <div class="poolwarn" id="poolwarn" hidden></div>
 <div class="bands" id="bands"></div>
+</details>
 
 <div class="bar">
   <button class="btn" id="prev">&larr; back</button>
@@ -841,9 +890,17 @@ function render(){
   var dr=page.dropped||0;
   posEl.title=dr?dr+' of this page\u2019s frames could not be opened '+
     '(usually a jpg pruned off a drive after the sweep read it)':'';
+  /* the sheet runs low score to high, so the crossing happens at most once */
+  var crossed=false;
   grid.innerHTML=page.items.map(function(it,i){
+    var rule='';
+    if(!crossed&&+it.p_dog>=THRESH){
+      crossed=true;
+      rule='<div class="thr">the model\u2019s line \u2014 '+THRESH+
+        ' \u00b7 above this it said '+NO+', below it said '+YES+'</div>';
+    }
     var lo=BANDS[it.band][0],hi=BANDS[it.band][1];
-    return '<div class="card" data-i="'+i+'">'+
+    return rule+'<div class="card" data-i="'+i+'">'+
       '<div class="shot" data-zoom="'+i+'">'+
         '<img loading="lazy" src="'+cropSrc(it)+
         '" alt="box '+esc(it.key)+'">'+
@@ -917,6 +974,12 @@ function paintStats(s){
   var r=document.getElementById('rate'),ci=document.getElementById('ci'),
       rej=s.rejected||{},kept=s.kept||{};
   document.getElementById('judged').textContent=fmtn(s.judged||0);
+  var fl=document.getElementById('figline');
+  if(fl)fl.innerHTML=s.judged
+    ? '<b>'+fmtn(s.judged)+'</b> judged \u00b7 <b>'+fmtn(s.wrong||0)+
+      '</b> the model got wrong \u00b7 <b>'+pctTxt(rej.rate||0)+
+      '</b> of what it '+(STAGE==='gate'?'rejected':'called '+NO)
+    : 'nothing judged yet \u2014 the numbers fill in as you go';
   document.getElementById('found').textContent=
     (rej.wrong||0)+' the model got wrong below 0.5';
   /* The headline is the one number the page exists to produce: how many dogs
