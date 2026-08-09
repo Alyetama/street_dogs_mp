@@ -9486,9 +9486,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             if a is None or not a.pool_ready(stage):
                 self._json({'items': [], 'total': 0, 'pages': 1, 'page': 0})
                 return True
-            which = q.get('which', ['flagged'])[0]
-            if which not in a.JUDGED_VIEWS:
-                which = 'flagged'
+            which = q.get('which', ['all'])[0]
+            if which not in a.judged_views(stage):
+                which = 'all'
             try:
                 pg = int(q.get('page', ['0'])[0])
             except ValueError:

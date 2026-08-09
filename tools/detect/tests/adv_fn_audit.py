@@ -400,11 +400,20 @@ def correction_checks(bad):
             bad.append('a redrawn box overwrote full/ — the picture the '
                        'model was judged on changed after the fact')
         if open(thumb, 'rb').read() != wasthumb:
-            bad.append('a redrawn box overwrote the thumbnail — the sheet '
-                       'would show a crop the model never saw')
+            bad.append('a redrawn box overwrote the model\'s thumbnail — '
+                       'nothing is destroyed by a redraw, the new cut goes '
+                       'beside the old one')
         if not os.path.exists(os.path.join(tmp, 'edited', '9_0.jpg')):
             bad.append('a redrawn box was not cut into edited/, so nothing '
                        'downstream can use it')
+        # ...and the tile shows what you drew
+        rt = os.path.join(tmp, 'edited_thumbs', '9_0.jpg')
+        if not os.path.exists(rt):
+            bad.append('a redraw wrote no thumbnail, so the tile would keep '
+                       'showing the framing you just replaced')
+        elif audit.crop_path('9_0', 'gate') != rt:
+            bad.append(f'the served crop is {audit.crop_path("9_0", "gate")}, '
+                       f'not the redrawn one')
     except Exception as e:                     # noqa: BLE001
         bad.append(f'cutting a corrected box threw {type(e).__name__}: {e}')
     finally:
@@ -691,6 +700,15 @@ chk(/id="next2"/.test(PAGE_HTML) && /id="prev2"/.test(PAGE_HTML),
   'there is no way to page on from the foot of the sheet');
 chk(/id="views"/.test(PAGE_HTML),
   'there is no way to look at what has already been answered');
+// one button for the annotations, with a filter beside it that speaks this
+// stage's vocabulary
+chk((PAGE_HTML.match(/class="viewbtn"|class="viewbtn on"/g) || []).length === 2,
+  'the annotations should be one button, not a row of them');
+chk(/id="anno"/.test(PAGE_HTML), 'no filter over the annotations');
+[POS, NEG, 'unsure', 'all', 'wrong'].forEach(function (v) {
+  chk(new RegExp('value="' + v + '"').test(PAGE_HTML),
+    'the annotation filter cannot select ' + v);
+});
 // Which side of the model's line to walk is THE question of this page, so it
 // is a visible control, not the third option in a list of thirteen.
 ['rejected', 'kept', 'all'].forEach(function (sd) {
@@ -711,6 +729,32 @@ chk(sideOf(7) === 'kept' && sideOf(2) === 'rejected',
 // reads "leashed 0.048" would mean the two came from different places
 chk(/class="ptag/.test(els.grid.innerHTML),
   'no tile says what the model predicted');
+// Dragging an edge past its opposite must SWAP them, the way every editor
+// does. Forcing a minimum width instead dragged the far edge along with the
+// near one, so the box crept across the picture instead of flipping.
+EDIT.meta = {view_w:1000, view_h:800, model_box:[0,0,1,1],
+             off_x:0, off_y:0, scale:1};
+els.lbimg.clientWidth = 1000;
+EDIT.on = true;
+EDIT.box = [100,100,200,200];
+EDIT.drag = {h:'se', x:0, y:0, box:[100,100,200,200]};
+listeners.doc.mousemove({clientX:-150, clientY:-150});   // past the far corner
+chk(EDIT.box[0] < EDIT.box[2] && EDIT.box[1] < EDIT.box[3],
+  'dragging past the opposite corner left an inverted box: ' +
+  JSON.stringify(EDIT.box));
+chk(EDIT.box[2] <= 100.01,
+  'dragging the corner past its opposite pushed the far edge along instead ' +
+  'of flipping: ' + JSON.stringify(EDIT.box));
+// moving keeps the box's size when it meets the frame edge
+EDIT.box = [900,700,1000,800];
+EDIT.drag = {h:'move', x:0, y:0, box:[900,700,1000,800]};
+listeners.doc.mousemove({clientX:500, clientY:500});
+chk(Math.abs((EDIT.box[2]-EDIT.box[0]) - 100) < 0.01 &&
+    Math.abs((EDIT.box[3]-EDIT.box[1]) - 100) < 0.01,
+  'moving the box into the frame edge squashed it: ' +
+  JSON.stringify(EDIT.box));
+EDIT.drag = null; EDIT.on = false;
+
 // The editing box is drawn in VIEW pixels, but the picture is fitted to the
 // window by CSS -- so on any screen that shrinks it, a box placed at its view
 // coordinates lands down and right of the detection by exactly the ratio.

@@ -214,9 +214,16 @@ def _cut_one(cand, roots, stage=DEFAULT_STAGE, into=None, force=False):
     """
     from PIL import Image
     pp = P(stage)
+    name = cand['key'].replace('#', '_') + '.jpg'
     if into == 'edited':
         os.makedirs(os.path.join(pp['out'], 'edited'), exist_ok=True)
-    dst = os.path.join(pp['crops'], cand['key'].replace('#', '_') + '.jpg')
+        os.makedirs(os.path.join(pp['out'], 'edited_thumbs'), exist_ok=True)
+    # A redraw writes its own thumbnail rather than over the model's. The
+    # tile shows the redrawn one -- you drew it, you should see it -- and
+    # crops/ still holds the picture the model was given, which is what makes
+    # the measurement re-checkable afterwards.
+    dst = (os.path.join(pp['out'], 'edited_thumbs', name) if into == 'edited'
+           else os.path.join(pp['crops'], name))
     if os.path.exists(dst) and not force:
         return True
     root = roots.get(cand['drive'])
@@ -246,14 +253,12 @@ def _cut_one(cand, roots, stage=DEFAULT_STAGE, into=None, force=False):
         base = os.path.join(pp['out'], 'edited') if into == 'edited' \
             else pp['full']
         os.makedirs(base, exist_ok=True)
-        fdst = os.path.join(base, cand['key'].replace('#', '_') + '.jpg')
+        fdst = os.path.join(base, name)
         ftmp = fdst + '.tmp'
         crop.save(ftmp, 'JPEG', quality=95)
         os.replace(ftmp, fdst)
-        if into == 'edited':
-            return True          # full/ and the thumbnail stay as the model saw
         crop.thumbnail((CROP_PX, CROP_PX), Image.LANCZOS)
-        os.makedirs(pp['crops'], exist_ok=True)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
         tmp = dst + '.tmp'
         crop.save(tmp, 'JPEG', quality=88)
         os.replace(tmp, dst)
@@ -455,7 +460,11 @@ def crop_path(key, stage=DEFAULT_STAGE):
     import re
     if not re.fullmatch(r'[0-9]{1,32}_[0-9]{1,6}', str(key or '')):
         return None
-    p = os.path.join(P(stage)['crops'], f'{key}.jpg')
+    pp = P(stage)
+    redrawn = os.path.join(pp['out'], 'edited_thumbs', f'{key}.jpg')
+    if os.path.exists(redrawn):
+        return redrawn
+    p = os.path.join(pp['crops'], f'{key}.jpg')
     if os.path.exists(p):
         return p
     cand = _pool_row(key, stage)
@@ -914,11 +923,19 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 <div class="bar">
   <span class="views" id="views" role="tablist">
     <button type="button" class="viewbtn on" data-view="sheet">to judge</button>
-    <button type="button" class="viewbtn" data-view="flagged">flagged
-      <b id="nFlagged">0</b></button>
-    <button type="button" class="viewbtn" data-view="all">everything I
-      answered <b id="nAll">0</b></button>
+    <button type="button" class="viewbtn" data-view="judged">my annotations
+      <b id="nAll">0</b></button>
   </span>
+  <!-- only means anything while looking back at annotations, so it is only
+       there then -->
+  <label class="pick" id="annowrap" hidden>showing
+    <select id="anno">
+      <option value="all">everything</option>
+      <option value="__POSV__">__YESTXT__</option>
+      <option value="__NEGV__">__NOTXT__</option>
+      <option value="unsure">unsure</option>
+      <option value="wrong">where we disagreed</option>
+    </select></label>
   <button class="btn" id="prev">&larr; back</button>
   <button class="btn go" id="next">next page &rarr;</button>
   <span class="pos" id="pos">&mdash;</span>
@@ -1002,7 +1019,7 @@ var page=null,idx=0,cur=-1,total=0,band=DEFAULT_BAND,busy=false,size=25,
    The other two read the ledger back, so you can look at what you answered
    and change it -- the ledger already took withdrawals; the only thing
    missing was a way to find the crop again. */
-var view='sheet';
+var view='sheet',anno='all';
 
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
   e.hidden=false;clearTimeout(e._t);e._t=setTimeout(function(){e.hidden=true},1600)}
@@ -1027,7 +1044,12 @@ var CROP_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" '+
    here rather than carried, which means the two can never disagree. */
 function predOf(it){return (+it.p_dog>=THRESH)?POS:NEG}
 function cropSrc(it){
-  return '/audit/crop/'+STAGE+'/'+esc(String(it.key).replace('#','_'))+'.jpg';
+  /* Crops are served with a day of cache, which is right for a picture that
+     never changes -- and wrong the moment one does. A redrawn box carries a
+     version so the browser fetches the new cut instead of the one it already
+     has. */
+  return '/audit/crop/'+STAGE+'/'+esc(String(it.key).replace('#','_'))+'.jpg'+
+    (it.v?('?v='+it.v):'');
 }
 
 /* The verdict is sent the moment it is given and the card is marked from the
@@ -1187,7 +1209,7 @@ function setPos(){
      indexed into BANDS without asking which it is -- doing that threw and
      took the whole page down. */
   posEl.textContent=total?('page '+(idx+1)+' of '+total+
-    (view!=='sheet'?' \u00b7 '+(view==='flagged'?'flagged':'everything I answered'):'')+
+    (view!=='sheet'?' \u00b7 my annotations':'')+
     (page&&page.dropped?' \u00b7 '+page.dropped+' unreadable':'')+
     ' \u00b7 '+bandName(band)+
     (page&&page.items&&page.items.length?' \u00b7 '+remaining()+' left':'')):'—';
@@ -1207,7 +1229,7 @@ function show(doc,at,tot){
 function loadJudged(at){
   busy=true;setPos();
   fetch('/api/audit/judged?stage='+STAGE+'&which='+
-        (view==='flagged'?'flagged':'all')+'&page='+at+'&n='+size)
+        encodeURIComponent(anno)+'&page='+at+'&n='+size)
     .then(function(r){return r.json()})
     .then(function(j){
       busy=false;
@@ -1219,8 +1241,7 @@ function loadJudged(at){
 }
 function counts(c){
   if(!c)return;
-  var a=document.getElementById('nFlagged'),b=document.getElementById('nAll');
-  if(a)a.textContent=fmtn(c.flagged||0);
+  var b=document.getElementById('nAll');
   if(b)b.textContent=fmtn(c.all||0);
 }
 function load(at){
@@ -1392,6 +1413,9 @@ sideEl.addEventListener('click',function(e){
   band=b.getAttribute('data-side');dirty=true;rememberBand();paintFilter();
   toast('drawing from '+bandName(band));
 });
+document.getElementById('anno').addEventListener('change',function(){
+  anno=this.value;idx=0;load(0);
+});
 bandSel.addEventListener('change',function(){
   band=bandSel.value===''?sideOf(band)||DEFAULT_BAND:+bandSel.value;
   dirty=true;rememberBand();paintFilter();
@@ -1414,8 +1438,12 @@ document.getElementById('views').addEventListener('click',function(e){
   var all=document.querySelectorAll('.viewbtn');
   for(var i=0;i<all.length;i++)
     all[i].classList.toggle('on',all[i]===b);
-  /* drawing new crops is only a thing the sheet does */
-  document.getElementById('fresh').hidden=view!=='sheet';
+  /* drawing new crops, and choosing where to draw them from, are things only
+     the sheet does; filtering annotations only means anything in the other */
+  var sheet=view==='sheet';
+  document.getElementById('fresh').hidden=!sheet;
+  document.getElementById('sides').hidden=!sheet;
+  document.getElementById('annowrap').hidden=sheet;
   idx=0;load(0);
 });
 /* lightbox */
@@ -1487,8 +1515,14 @@ function edStart(){
       EDIT.meta=m;EDIT.box=m.box.slice();
       if(EDIT.url)URL.revokeObjectURL(EDIT.url);
       EDIT.url=pair[1];
-      lbimg.onload=function(){edShow(true);edPaint()};
+      /* Show the editor when the picture is measurable, however it gets
+         there. Waiting only on onload left the handles invisible whenever
+         the browser had the image ready already and fired nothing. */
+      function ready(){edShow(true);edPaint()}
+      lbimg.onload=ready;
+      lbimg.onerror=function(){toast('cannot open that frame')};
       lbimg.src=EDIT.url;
+      if(lbimg.complete&&lbimg.clientWidth)ready();
     }).catch(function(){toast('cannot open that frame')});
 }
 function edStop(){
@@ -1508,8 +1542,10 @@ function edSave(){
     .then(function(r){return r.json()})
     .then(function(j){
       if(j&&j.ok){
-        toast('box saved for training');
-        it.corrected=true;paintCard(cur);
+        toast('box saved');
+        it.corrected=true;
+        it.v=(it.v||0)+1;      /* the tile now shows the crop you drew */
+        render();
         edStop();
       }
       else toast((j&&j.msg)||'not saved');
@@ -1528,14 +1564,27 @@ document.addEventListener('mousemove',function(e){
   var k=edK()||1,
       dx=(e.clientX-d.x)/k, dy=(e.clientY-d.y)/k, b=d.box.slice(),
       W=EDIT.meta.view_w, H=EDIT.meta.view_h;
-  if(d.h==='move'){b[0]+=dx;b[1]+=dy;b[2]+=dx;b[3]+=dy}
-  else{
+  if(d.h==='move'){
+    /* Moving keeps its size. Clamping each edge on its own squashed the box
+       against the frame edge instead of stopping it there. */
+    var w=b[2]-b[0],h=b[3]-b[1];
+    b[0]=Math.max(0,Math.min(b[0]+dx,W-w));b[1]=Math.max(0,Math.min(b[1]+dy,H-h));
+    b[2]=b[0]+w;b[3]=b[1]+h;
+  }else{
     if(d.h[0]==='n')b[1]+=dy; else b[3]+=dy;
     if(d.h[1]==='w')b[0]+=dx; else b[2]+=dx;
+    /* Dragging an edge past its opposite SWAPS them, the way every editor
+       does. Forcing a minimum instead dragged the far edge along with the
+       near one, so the box crept across the picture. */
+    if(b[2]<b[0]){var t=b[0];b[0]=b[2];b[2]=t;
+      d.h=d.h[0]+(d.h[1]==='w'?'e':'w')}
+    if(b[3]<b[1]){var u=b[1];b[1]=b[3];b[3]=u;
+      d.h=(d.h[0]==='n'?'s':'n')+d.h[1]}
+    b[0]=Math.max(0,b[0]);b[1]=Math.max(0,b[1]);
+    b[2]=Math.min(W,b[2]);b[3]=Math.min(H,b[3]);
+    if(b[2]-b[0]<4)b[2]=Math.min(W,b[0]+4);
+    if(b[3]-b[1]<4)b[3]=Math.min(H,b[1]+4);
   }
-  /* keep it a box, and keep it inside the picture */
-  b[0]=Math.max(0,Math.min(b[0],W-4));b[1]=Math.max(0,Math.min(b[1],H-4));
-  b[2]=Math.min(W,Math.max(b[2],b[0]+4));b[3]=Math.min(H,Math.max(b[3],b[1]+4));
   EDIT.box=b;edPaint();
 });
 document.addEventListener('mouseup',function(){EDIT.drag=null});
@@ -1635,6 +1684,7 @@ def page_html(stage=DEFAULT_STAGE):
                   json.dumps('rejected' if sp['asymmetric'] else 'all')),
                  ('__THRESH__', json.dumps(fa.THRESHOLD)),
                  ('__YESTXT__', sp['yes']), ('__NOTXT__', sp['no']),
+                 ('__POSV__', sp['positive']), ('__NEGV__', sp['negative']),
                  ('__BELOWTXT__', sp['below']),
                  ('__ABOVETXT__', sp['above']),
                  ('__MISSLAB__', sp['miss']),
@@ -1721,7 +1771,9 @@ def page_size(v, default=25):
 # it. But an answer given at speed is an answer worth being able to look at
 # again -- and the ledger already supports changing your mind, so the only
 # thing missing was a way to find the crop.
-JUDGED_VIEWS = ('flagged', 'wrong', 'all')
+def judged_views(stage=DEFAULT_STAGE):
+    """What `which` may be: a verdict, or one of the two groupings."""
+    return tuple(fa.spec(stage)['answers']) + ('flagged', 'wrong', 'all')
 
 
 def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
@@ -1762,7 +1814,9 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
         for v in rows:
             if v['key'] in got:
                 v['p_dog'], v['band'] = got[v['key']]
-    if which == 'flagged':
+    if which in sp['answers']:
+        rows = [v for v in rows if v['verdict'] == which]
+    elif which == 'flagged':
         rows = [v for v in rows if v['verdict'] == sp['positive']]
     elif which == 'wrong':
         rows = [v for v in rows
