@@ -9381,8 +9381,14 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if a is None:
             return None
         p = self.path.split('?', 1)[0]
+        # /audit/<stage>, and /audit/<anything>/<stage>/... -- named rather
+        # than listed, because the list was crop/ alone and the day a frame/
+        # route appeared it silently answered for the gate on every stage.
+        parts = [x for x in p.split('/') if x]
         for name in a.STAGES:
-            if p == f'/audit/{name}' or p.startswith(f'/audit/crop/{name}/'):
+            if p == f'/audit/{name}':
+                return name
+            if len(parts) >= 3 and parts[0] == 'audit' and parts[2] == name:
                 return name
         v = (q or {}).get('stage', [None])[0]
         return v if v in a.STAGES else a.DEFAULT_STAGE
@@ -9451,6 +9457,31 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self._json(a.api_page(i, n=a.page_size(q.get('n', [None])[0]),
                                   band=a.band_arg(q.get('band', [None])[0]),
                                   stage=stage))
+            return True
+        if path.startswith('/audit/frame/') and path.endswith('.jpg'):
+            stage = self._audit_stage()
+            rest = path[len('/audit/frame/'):-4]
+            if a and rest.startswith(stage + '/'):
+                rest = rest[len(stage) + 1:]
+            body, meta = (a.frame_view(rest, stage) if a else (None, None))
+            if not body:
+                self.send_error(404)
+                return True
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        if path == '/api/audit/box':
+            q = parse_qs(urlparse(self.path).query)
+            stage = self._audit_stage(q)
+            if a is None:
+                self._json({'ok': False, 'msg': 'pool not built'})
+                return True
+            _, meta = a.frame_view(q.get('key', [''])[0], stage)
+            self._json(meta or {'ok': False, 'msg': 'no such box'})
             return True
         if path == '/api/audit/stats':
             q = parse_qs(urlparse(self.path).query)
@@ -9745,6 +9776,18 @@ class BoardHandler(SimpleHTTPRequestHandler):
         return True
 
     def do_POST(self):
+        if self.path.split('?', 1)[0] == '/api/audit/box':
+            try:
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                data = json.loads(self.rfile.read(n) or b'{}')
+                a = _audit()
+                stage = self._audit_stage(parse_qs(urlparse(self.path).query))
+                self._json(a.save_correction(
+                    data.get('key'), data.get('box') or [], stage)
+                    if a else {'ok': False, 'msg': 'pool not built'})
+            except Exception as e:
+                self._json({'ok': False, 'msg': str(e)})
+            return
         if self.path.split('?', 1)[0] in ('/api/audit/draw',
                                           '/api/audit/verdict'):
             try:

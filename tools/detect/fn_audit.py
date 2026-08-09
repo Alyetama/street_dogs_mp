@@ -463,6 +463,11 @@ def export(args):
     """
     import shutil
     full = P['full']
+    # A hand-drawn box wins for TRAINING and only for training: full/ is the
+    # picture the model was judged on and never changes, edited/ is the same
+    # box redrawn by a person. What gets exported is the best framing
+    # available; what was measured is untouched.
+    edited = os.path.join(P['out'], 'edited')
     keep = {}
     for v in read_verdicts(stage=stage):
         cls = verdict_of(v.get('verdict'), stage)
@@ -476,8 +481,13 @@ def export(args):
             if keep.get(f, (None,))[0] != cls:
                 os.remove(os.path.join(d, f))
                 removed += 1
+    redrawn = 0
     for name, (cls, v) in sorted(keep.items()):
         src, dst = os.path.join(full, name), os.path.join(dataset, cls, name)
+        fixed = os.path.join(edited, name)
+        if os.path.exists(fixed):
+            src = fixed
+            redrawn += 1
         if not os.path.exists(src):
             missing += 1
             continue
@@ -505,6 +515,8 @@ def export(args):
                     v.get('p_dog') is not None
                     and ((float(v['p_dog']) >= THRESHOLD)
                          != (cls == sp['positive']))),
+                # whether a person redrew this box before it was exported
+                'corrected': os.path.exists(os.path.join(edited, name)),
                 'judged_at': v.get('ts'),
                 'judged_model': getattr(args, 'model', None) or sp['model'],
                 'stage': stage}) + '\n')
@@ -522,6 +534,9 @@ def export(args):
           f"({n_pos:,} {sp['positive']}, {placed - n_pos:,} {sp['negative']})")
     print(f"  {wrong:,} are cases the {sp['title']} got WRONG -- a person "
           f"disagreed with the side of {THRESHOLD} it put them on")
+    if redrawn:
+        print(f'  {redrawn:,} were exported with a hand-drawn box rather than '
+              f"the detector's")
     if removed:
         print(f'  {removed:,} removed -- the ledger no longer says they '
               f'belong there')

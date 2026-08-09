@@ -292,6 +292,34 @@ def isolation_checks(bad):
     except Exception as e:                     # noqa: BLE001
         if 'No files found' not in str(e) and 'IO Error' not in str(e):
             bad.append(f'could not read the pool schema: {e}')
+    # A correction is geometry and must stay geometry: nothing the audit
+    # writes to the shared box store may carry a verdict, a class or a score.
+    import inspect as _in
+    import re as _re
+    src_sc = _in.getsource(audit.save_correction)
+    # Brace-matched. A lazy regex to the first '}' stopped inside the
+    # f-string on the very first line, so the check was reading six
+    # characters and could never have seen a field smuggled in below it.
+    i = src_sc.find('rec = {')
+    body = None
+    if i >= 0:
+        depth, j = 0, src_sc.index('{', i)
+        for k in range(j, len(src_sc)):
+            if src_sc[k] == '{':
+                depth += 1
+            elif src_sc[k] == '}':
+                depth -= 1
+                if depth == 0:
+                    body = src_sc[j:k + 1]
+                    break
+    if not body:
+        bad.append('save_correction no longer builds a record we can check')
+    else:
+        for word in ('verdict', 'label', 'p_dog', 'class', 'answer'):
+            if f"'{word}'" in body:
+                bad.append(f'a box correction carries {word!r} — that file is '
+                           f'geometry, shared with the review page, and a '
+                           f'verdict in it would be a label nobody asked for')
     # and the ledger has exactly one writer
     asrc = open(os.path.join(REPO, 'tools', 'dashboard', 'audit.py')).read()
     writers = [ln for ln in asrc.splitlines()
@@ -307,11 +335,52 @@ def isolation_checks(bad):
             code = line.split('#', 1)[0]
             if 'open(' not in code and 'join(' not in code:
                 continue
-            for banned in ('annot', 'hard_negative', 'hard_positive',
-                           'box_corrections'):
+            # VERDICT stores, not every store the reviewer touches.
+            # data/box_corrections holds GEOMETRY -- where a box is, drawn by
+            # hand -- and is deliberately shared: the review page writes it,
+            # harvest_flagged.py reads it, and a detection has one true box
+            # whoever redrew it. It says nothing about what the crop contains,
+            # so it cannot carry a label in either direction.
+            for banned in ('annot', 'hard_negative', 'hard_positive'):
                 if banned in code.lower():
                     bad.append(f'{rel} reaches into the reviewer store: '
                                f'{line.strip()[:80]}')
+
+
+def correction_checks(bad):
+    """Redrawing a box changes the TRAINING crop and nothing else.
+
+    The audit's whole claim is that the crop shown is the crop the model saw.
+    A hand-drawn box makes a better example for the next model; it must not
+    quietly rewrite the picture this one was judged on, or the measurement
+    becomes about crops that never existed when the score was given.
+    """
+    import inspect as _in
+    try:
+        import audit
+    except Exception:
+        return
+    # the CALL, not the docstring that describes it -- checking the module
+    # text matched the sentence explaining the flag and passed with the flag
+    # removed from the only place it does anything
+    sc = _in.getsource(audit.save_correction)
+    if "into='edited'" not in sc:
+        bad.append('save_correction does not cut into edited/ — a redrawn '
+                   'box would overwrite full/, and the picture the model was '
+                   'judged on would change after the fact')
+    cut = _in.getsource(audit._cut_one)
+    if "if into == 'edited':\n            return True" not in cut:
+        bad.append('cutting a corrected box does not stop before the '
+                   'thumbnail — the tile would show a crop the model never '
+                   'saw, on a page whose job is to show what it did')
+    # and the export prefers the redrawn one
+    import fn_audit as fa
+    ex = _in.getsource(fa.export)
+    if "edited" not in ex or "os.path.exists(fixed)" not in ex:
+        bad.append('the export ignores hand-drawn boxes, so redrawing one '
+                   'changes nothing that gets trained on')
+    if "'corrected'" not in ex:
+        bad.append('the manifest does not say which rows were redrawn')
 
 
 def concurrency_checks(bad):
@@ -772,7 +841,8 @@ def main():
     bad = []
     stage_checks(bad)
     for fn in (band_checks, wilson_checks, weighting_checks, ledger_checks,
-               serving_checks, isolation_checks, concurrency_checks,
+               serving_checks, isolation_checks, correction_checks,
+               concurrency_checks,
                persistence_checks, selection_checks, page_checks):
         try:
             fn(bad)

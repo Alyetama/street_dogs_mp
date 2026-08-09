@@ -205,12 +205,19 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     return out
 
 
-def _cut_one(cand, roots, stage=DEFAULT_STAGE):
-    """Cut one crop to disk. Returns True if the file is there afterwards."""
+def _cut_one(cand, roots, stage=DEFAULT_STAGE, into=None, force=False):
+    """Cut one crop to disk. Returns True if the file is there afterwards.
+
+    `into='edited'` writes only the full-resolution cut, into the corrected
+    directory: that path exists so a hand-drawn box can be re-cut without
+    disturbing full/, which is the picture the model was actually given.
+    """
     from PIL import Image
     pp = P(stage)
+    if into == 'edited':
+        os.makedirs(os.path.join(pp['out'], 'edited'), exist_ok=True)
     dst = os.path.join(pp['crops'], cand['key'].replace('#', '_') + '.jpg')
-    if os.path.exists(dst):
+    if os.path.exists(dst) and not force:
         return True
     root = roots.get(cand['drive'])
     if not root:
@@ -236,11 +243,15 @@ def _cut_one(cand, roots, stage=DEFAULT_STAGE):
         crop = im.crop((a, b, c, d))
         # full resolution first: this is the one a future dataset uses, and
         # thumbnail() resizes in place
-        os.makedirs(pp['full'], exist_ok=True)
-        fdst = os.path.join(pp['full'], cand['key'].replace('#', '_') + '.jpg')
+        base = os.path.join(pp['out'], 'edited') if into == 'edited' \
+            else pp['full']
+        os.makedirs(base, exist_ok=True)
+        fdst = os.path.join(base, cand['key'].replace('#', '_') + '.jpg')
         ftmp = fdst + '.tmp'
         crop.save(ftmp, 'JPEG', quality=95)
         os.replace(ftmp, fdst)
+        if into == 'edited':
+            return True          # full/ and the thumbnail stay as the model saw
         crop.thumbnail((CROP_PX, CROP_PX), Image.LANCZOS)
         os.makedirs(pp['crops'], exist_ok=True)
         tmp = dst + '.tmp'
@@ -291,6 +302,133 @@ def _pool_row(key, stage=DEFAULT_STAGE):
     d = dict(zip(cols, row))
     d['key'] = f"{d['image_id']}#{d['det_idx']}"
     return d
+
+
+# ── correcting a box ────────────────────────────────────────────────────────
+# The project already has one place for hand-drawn boxes -- the review page
+# writes them and harvest_flagged.py reads them -- so a correction made here
+# lands in the same file, keyed the same way, and every consumer gets it.
+BOX_FILE = os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl')
+_BOX_LOCK = threading.Lock()
+# How much of the frame to show around the box while editing. A box is a dog
+# in a street; you cannot tell whether it is framed right without seeing what
+# is next to it, and you cannot drag an edge that is off-screen.
+VIEW_PAD = 2.2
+VIEW_MAX = 1100
+
+
+def corrections():
+    """{(image_id, det_idx): (x1, y1, x2, y2)} -- last write wins."""
+    out = {}
+    try:
+        with open(BOX_FILE) as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(d, dict) or d.get('image_id') is None:
+                    continue
+                try:
+                    out[(str(d['image_id']), int(d.get('det_idx') or 0))] = (
+                        float(d['x1']), float(d['y1']),
+                        float(d['x2']), float(d['y2']))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def save_correction(key, box, stage=DEFAULT_STAGE):
+    """Record a hand-drawn box and re-cut the crop a future model trains on.
+
+    It does NOT touch what the audit measured. The verdict on this box is a
+    verdict about the picture the model was given, and the score it gave is
+    the same score whatever anyone redraws afterwards. A correction says only
+    "if you train on this crop, train on this framing" -- so the model's cut
+    stays in full/ and the corrected one is written beside it.
+    """
+    cand = _pool_row(str(key).replace('#', '_'), stage)
+    if not cand:
+        return {'ok': False, 'msg': 'not a box in this pool'}
+    try:
+        x1, y1, x2, y2 = (float(box[0]), float(box[1]),
+                          float(box[2]), float(box[3]))
+    except (TypeError, ValueError, IndexError):
+        return {'ok': False, 'msg': 'malformed box'}
+    if x2 - x1 < MIN_SIDE or y2 - y1 < MIN_SIDE:
+        return {'ok': False, 'msg': f'a box under {MIN_SIDE}px is not a box'}
+    rec = {'crop': f"audit:{stage}", 'image_id': str(cand['image_id']),
+           'det_idx': int(cand['det_idx']),
+           'x1': round(x1, 2), 'y1': round(y1, 2),
+           'x2': round(x2, 2), 'y2': round(y2, 2),
+           'saved_at': int(time.time())}
+    with _BOX_LOCK:
+        os.makedirs(os.path.dirname(BOX_FILE), exist_ok=True)
+        with open(BOX_FILE, 'a') as fh:
+            fh.write(json.dumps(rec) + '\n')
+    edited = dict(cand, x1=x1, y1=y1, x2=x2, y2=y2)
+    ok = _cut_one(edited, _roots(), stage, into='edited', force=True)
+    return {'ok': True, 'recut': bool(ok)}
+
+
+def frame_view(key, stage=DEFAULT_STAGE):
+    """A window of the source frame around this box, and the maths to map it.
+
+    The full frame is 8000x4000 and nobody can drag a handle on that, so a
+    region around the box is cut and scaled down. Everything the client sends
+    back is in VIEW pixels; `scale` and the offsets turn them into the
+    original pixels the store speaks.
+    """
+    from PIL import Image
+    cand = _pool_row(str(key).replace('#', '_'), stage)
+    if not cand:
+        return None, None
+    root = _roots().get(cand['drive'])
+    if not root:
+        return None, None
+    src = os.path.join(root, cand['cell'], 'ground_animal_images',
+                       f"{cand['image_id']}.jpg")
+    cur = corrections().get((str(cand['image_id']), int(cand['det_idx'])))
+    x1, y1, x2, y2 = (cur if cur else (cand['x1'], cand['y1'],
+                                       cand['x2'], cand['y2']))
+    try:
+        im = Image.open(src)
+        im.load()
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
+    except Exception:
+        return None, None
+    try:
+        w, h = im.size
+        pad = int(VIEW_PAD * max(x2 - x1, y2 - y1))
+        a, b = max(0, int(x1) - pad), max(0, int(y1) - pad)
+        c, d = min(w, int(x2) + pad), min(h, int(y2) + pad)
+        view = im.crop((a, b, c, d))
+        scale = min(1.0, VIEW_MAX / max(1, max(view.size)))
+        if scale < 1.0:
+            view = view.resize((max(1, int(view.width * scale)),
+                                max(1, int(view.height * scale))),
+                               Image.LANCZOS)
+        import io
+        buf = io.BytesIO()
+        view.save(buf, 'JPEG', quality=88)
+        return buf.getvalue(), {
+            'key': cand['key'], 'stage': stage,
+            'off_x': a, 'off_y': b, 'scale': scale,
+            'view_w': view.width, 'view_h': view.height,
+            'orig_w': w, 'orig_h': h,
+            # where the box sits INSIDE the view, in view pixels
+            'box': [(x1 - a) * scale, (y1 - b) * scale,
+                    (x2 - a) * scale, (y2 - b) * scale],
+            'model_box': [(cand['x1'] - a) * scale, (cand['y1'] - b) * scale,
+                          (cand['x2'] - a) * scale, (cand['y2'] - b) * scale],
+            'corrected': bool(cur)}
+    except Exception:
+        return None, None
+    finally:
+        im.close()
 
 
 def crop_path(key, stage=DEFAULT_STAGE):
@@ -661,7 +799,24 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   align-items:center;justify-content:center;flex-direction:column;gap:12px;
   z-index:50}
 .lb[hidden]{display:none}
+.lbstage{position:relative;line-height:0}
 .lb img{max-width:92vw;max-height:80vh;object-fit:contain}
+/* The editor draws over the SAME element the picture is in, so a box in view
+   pixels lands where the eye says it does. */
+.boxwrap{position:absolute;inset:0}
+.boxwrap[hidden]{display:none}
+.mbox{position:absolute;border:1px dashed rgba(130,140,150,.7);
+  pointer-events:none}
+.ebox{position:absolute;border:2px solid var(--acc);cursor:move;
+  box-shadow:0 0 0 9999px rgba(5,7,10,.45)}
+.ebox i{position:absolute;width:14px;height:14px;background:var(--acc);
+  border-radius:3px}
+.ebox i[data-h=nw]{left:-8px;top:-8px;cursor:nwse-resize}
+.ebox i[data-h=ne]{right:-8px;top:-8px;cursor:nesw-resize}
+.ebox i[data-h=sw]{left:-8px;bottom:-8px;cursor:nesw-resize}
+.ebox i[data-h=se]{right:-8px;bottom:-8px;cursor:nwse-resize}
+.lbnote{font-size:12px;color:var(--dim);max-width:60ch;text-align:center}
+.lbnote[hidden]{display:none}
 .lbcap{font-size:12px;color:var(--mut);display:flex;gap:10px;
   align-items:center}
 .lbcap button{background:var(--panel2);border:1px solid var(--bd);
@@ -741,15 +896,28 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   <kbd>F</kbd> __YESTXT__ &nbsp; <kbd>2</kbd> __NOTXT__ &nbsp;
   <kbd>3</kbd> unsure &nbsp; <kbd>U</kbd> undo &nbsp;
   <kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;
-  <kbd>Enter</kbd> enlarge &nbsp; <kbd>N</kbd> next page
+  <kbd>Enter</kbd> enlarge &nbsp; <kbd>E</kbd> redraw the box &nbsp;
+  <kbd>N</kbd> next page
 </div>
 </div>
 
 <div class="lb" id="lb" hidden>
-  <img id="lbimg" alt="">
+  <div class="lbstage" id="lbstage"><img id="lbimg" alt="">
+    <div class="boxwrap" id="boxwrap" hidden>
+      <div class="mbox" id="mbox"></div>
+      <div class="ebox" id="ebox">
+        <i data-h="nw"></i><i data-h="ne"></i>
+        <i data-h="sw"></i><i data-h="se"></i>
+      </div>
+    </div></div>
   <div class="lbcap"><span id="lbtxt"></span>
+    <button id="lbedit">redraw the box</button>
+    <button id="lbsave" hidden>save box</button>
+    <button id="lbcancel" hidden>cancel</button>
     <button id="lbcopy">copy image id</button>
     <button id="lbclose">close</button></div>
+  <div class="lbnote" id="lbnote" hidden>Drag a corner. This changes the crop
+    a future model trains on &mdash; not what this one was judged on.</div>
 </div>
 <div class="toast" id="toast" hidden></div>
 <div class="undotoast" id="undotoast" hidden></div>
@@ -1125,8 +1293,92 @@ function zoom(i){
     it.p_dog.toFixed(3)+' · '+it.drive;
   lb.hidden=false;
 }
-document.getElementById('lbclose').addEventListener('click',function(){lb.hidden=true});
-lb.addEventListener('click',function(e){if(e.target===lb)lb.hidden=true});
+/* ── redrawing a box ──
+   Everything here is in VIEW pixels -- the coordinates of the picture on
+   screen. The server sends the offset and scale that turn those back into the
+   store's original pixels, and does that conversion itself, because the
+   client has no business deciding where in an 8000px frame a box lands. */
+var EDIT={on:false,meta:null,box:null,drag:null};
+var boxwrap=document.getElementById('boxwrap'),ebox=document.getElementById('ebox'),
+    mbox=document.getElementById('mbox'),lbstage=document.getElementById('lbstage');
+function edParts(){return [document.getElementById('lbedit'),
+  document.getElementById('lbsave'),document.getElementById('lbcancel'),
+  document.getElementById('lbnote')]}
+function edShow(on){
+  var p=edParts();
+  p[0].hidden=on;p[1].hidden=!on;p[2].hidden=!on;p[3].hidden=!on;
+  boxwrap.hidden=!on;EDIT.on=on;
+}
+function edPaint(){
+  if(!EDIT.box)return;
+  var b=EDIT.box;
+  ebox.style.left=b[0]+'px';ebox.style.top=b[1]+'px';
+  ebox.style.width=Math.max(2,b[2]-b[0])+'px';
+  ebox.style.height=Math.max(2,b[3]-b[1])+'px';
+  var m=EDIT.meta.model_box;
+  mbox.style.left=m[0]+'px';mbox.style.top=m[1]+'px';
+  mbox.style.width=Math.max(2,m[2]-m[0])+'px';
+  mbox.style.height=Math.max(2,m[3]-m[1])+'px';
+}
+function edStart(){
+  var it=page&&page.items[cur]; if(!it)return;
+  fetch('/api/audit/box?stage='+STAGE+'&key='+encodeURIComponent(it.key))
+    .then(function(r){return r.json()})
+    .then(function(m){
+      if(!m||m.ok===false||!m.box){toast('cannot open that frame');return}
+      EDIT.meta=m;EDIT.box=m.box.slice();
+      /* the editing view is a different picture from the thumbnail: it is a
+         window on the frame, so the lightbox swaps to it while editing */
+      lbimg.src='/audit/frame/'+STAGE+'/'+it.key.replace('#','_')+'.jpg';
+      lbimg.onload=function(){edShow(true);edPaint()};
+    }).catch(function(){toast('cannot open that frame')});
+}
+function edStop(){
+  edShow(false);
+  var it=page&&page.items[cur];
+  if(it)lbimg.src=cropSrc(it);
+}
+function edSave(){
+  var it=page&&page.items[cur],m=EDIT.meta,b=EDIT.box;
+  if(!it||!m||!b)return;
+  fetch('/api/audit/box?stage='+STAGE,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:it.key,box:[
+      m.off_x+b[0]/m.scale, m.off_y+b[1]/m.scale,
+      m.off_x+b[2]/m.scale, m.off_y+b[3]/m.scale]})})
+    .then(function(r){return r.json()})
+    .then(function(j){
+      if(j&&j.ok){toast('box saved for training');edStop()}
+      else toast((j&&j.msg)||'not saved');
+    }).catch(function(){toast('not saved')});
+}
+document.getElementById('lbedit').addEventListener('click',edStart);
+document.getElementById('lbsave').addEventListener('click',edSave);
+document.getElementById('lbcancel').addEventListener('click',edStop);
+ebox.addEventListener('mousedown',function(e){
+  var h=e.target.getAttribute&&e.target.getAttribute('data-h');
+  EDIT.drag={h:h||'move',x:e.clientX,y:e.clientY,box:EDIT.box.slice()};
+  e.preventDefault();e.stopPropagation();
+});
+document.addEventListener('mousemove',function(e){
+  var d=EDIT.drag; if(!d||!EDIT.on)return;
+  var dx=e.clientX-d.x, dy=e.clientY-d.y, b=d.box.slice(),
+      W=EDIT.meta.view_w, H=EDIT.meta.view_h;
+  if(d.h==='move'){b[0]+=dx;b[1]+=dy;b[2]+=dx;b[3]+=dy}
+  else{
+    if(d.h[0]==='n')b[1]+=dy; else b[3]+=dy;
+    if(d.h[1]==='w')b[0]+=dx; else b[2]+=dx;
+  }
+  /* keep it a box, and keep it inside the picture */
+  b[0]=Math.max(0,Math.min(b[0],W-4));b[1]=Math.max(0,Math.min(b[1],H-4));
+  b[2]=Math.min(W,Math.max(b[2],b[0]+4));b[3]=Math.min(H,Math.max(b[3],b[1]+4));
+  EDIT.box=b;edPaint();
+});
+document.addEventListener('mouseup',function(){EDIT.drag=null});
+document.getElementById('lbclose').addEventListener('click',function(){
+  if(EDIT.on)edStop();lb.hidden=true});
+lb.addEventListener('click',function(e){
+  if(e.target===lb){if(EDIT.on)edStop();lb.hidden=true}});
 document.getElementById('lbcopy').addEventListener('click',function(){
   var it=page&&page.items[cur]; if(!it)return;
   var t=it.image_id;
@@ -1149,7 +1401,12 @@ document.addEventListener('keydown',function(e){
      is a wrong answer recorded by the interface itself. */
   var t=e.target&&e.target.tagName;
   if(t==='SELECT'||t==='INPUT'||t==='TEXTAREA')return;
-  if(!lb.hidden){if(e.key==='Escape'){lb.hidden=true;e.preventDefault()}return}
+  if(!lb.hidden){
+    if(e.key==='Escape'){if(EDIT.on)edStop();else lb.hidden=true;
+      e.preventDefault()}
+    else if(e.key==='e'||e.key==='E'){edStart();e.preventDefault()}
+    else if(EDIT.on&&e.key==='Enter'){edSave();e.preventDefault()}
+    return}
   if(e.key==='1'||e.key==='f'||e.key==='F'){judge(cur,POS);e.preventDefault()}
   else if(e.key==='2'){judge(cur,NEG);e.preventDefault()}
   else if(e.key==='3'){judge(cur,'unsure');e.preventDefault()}
