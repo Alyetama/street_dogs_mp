@@ -758,6 +758,30 @@ view = 'sheet';
 page.items.forEach(function (it) { delete it.verdict });
 render();
 
+// The third control on a tile is the crop mark, and it must OPEN the editor
+// rather than record anything. It replaced the "?" button, so a wiring slip
+// here would quietly file an "unsure" every time someone went to redraw.
+chk(/data-edit=/.test(els.grid.innerHTML),
+  'no tile offers a way to redraw its box');
+chk(!/data-v="unsure"/.test(els.grid.innerHTML),
+  'the tile still carries the old unsure button the crop mark replaced');
+chk(/<svg/.test(els.grid.innerHTML), 'the crop mark is not drawn');
+FETCHES.length = 0;
+// through the CLICK HANDLER, not by calling openEditor() -- calling the
+// function directly proved the function works and said nothing about what
+// the button is wired to, which is the thing that just changed.
+listeners.grid.click({target: {closest: function (sel) {
+  return sel === '[data-edit]' ? {getAttribute: function () { return '0' }}
+                               : null }}});
+chk(FETCHES.some(function (u) { return /audit\/frame/.test(u) }),
+  'the crop mark did not ask for the frame to edit');
+chk(!FETCHES.some(function (u) { return /verdict/.test(u) }),
+  'opening the editor recorded a verdict');
+chk(cur === 0, 'opening the editor did not select the tile it was opened on');
+// put the page back: the editor left the lightbox open, and every keyboard
+// check below returns early while it is
+edStop(); els.lb.hidden = true; cur = -1;
+
 // at rest a tile is a photograph: the buttons ride over it, they are not
 // permanent furniture below it
 chk(/\.acts\{[^}]*position:absolute/.test(PAGE_CSS),

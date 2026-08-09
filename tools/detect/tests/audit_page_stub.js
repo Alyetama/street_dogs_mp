@@ -78,10 +78,22 @@ var FETCHES = [];
 // Enough of a thenable to carry the page's .then().then().catch() chains
 // without pretending to be async -- the assertions run after a synchronous
 // boot, so nothing has to be awaited.
+global.URL = {createObjectURL:function(){ return 'blob:stub' },
+              revokeObjectURL:function(){}};
+// The editor asks for a picture and reads its geometry off a header, so the
+// fake response needs ok/headers/blob as well as json -- without them the
+// whole edit path threw before it began, and every check about it was
+// reporting a crash rather than an answer.
 global.fetch = function(u, o){
   FETCHES.push(u);
   return {then:function(f){
-    var r = f({json:function(){return RESP(u)}});
+    var r = f({
+      ok: true,
+      json: function(){ return RESP(u) },
+      headers: {get: function(k){
+        return k === 'X-Audit-Meta' ? JSON.stringify(FRAME_META) : null }},
+      blob: function(){ return {then:function(g){ return g('BLOB') }} }
+    });
     return {then:function(g){ g && g(r); return {catch:function(){return {}}} },
             catch:function(){ return {then:function(){return {}}} }};
   }};
@@ -93,6 +105,10 @@ function RESP(u){
   if (/draw/.test(u)) return {page:PAGE, index:0, total:1};
   return {};
 }
+// what /audit/frame/... returns alongside the picture
+var FRAME_META = {key:'111#0', stage:'gate', off_x:0, off_y:0, scale:1,
+  view_w:1000, view_h:800, orig_w:5760, orig_h:2880,
+  box:[100,100,200,200], model_box:[100,100,200,200], corrected:false};
 var PAGE = {index:0, dropped:0, items:[
   {key:'111#0', image_id:'111', det_idx:0, p_dog:0.0,  conf:0.31, band:0,
    seq:'s1', drive:'lynx',   cell:'c'},

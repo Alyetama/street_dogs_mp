@@ -825,8 +825,12 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .act:hover{background:#1a1f27}
 .act.m:hover,.act.m.on{background:rgba(232,166,69,.2);color:var(--acc)}
 .act.c:hover,.act.c.on{background:rgba(67,181,129,.18);color:var(--green)}
-.act.u{padding:9px 10px}
-.act.u:hover,.act.u.on{color:var(--acc)}
+/* the crop mark, in line with the two verdicts: redrawing a box is something
+   you do to a tile, so it belongs on the tile rather than two clicks deep in
+   a lightbox */
+.act.e{padding:9px 11px;display:flex;align-items:center;justify-content:center}
+.act.e:hover{color:var(--acc)}
+.act.e.on{color:var(--acc)}
 .empty{color:var(--dim);font-size:13px;padding:40px 0;text-align:center}
 /* ── lightbox ── */
 .lb{position:fixed;inset:0;background:rgba(0,0,0,.9);display:flex;
@@ -949,10 +953,10 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 </div>
 <div class="keys">
   <kbd>F</kbd> __YESTXT__ &nbsp; <kbd>2</kbd> __NOTXT__ &nbsp;
-  <kbd>3</kbd> unsure &nbsp; <kbd>U</kbd> undo &nbsp;
+  <kbd>E</kbd> redraw the box &nbsp; <kbd>3</kbd> unsure &nbsp;
+  <kbd>U</kbd> undo &nbsp;
   <kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;
-  <kbd>Enter</kbd> enlarge &nbsp; <kbd>E</kbd> redraw the box &nbsp;
-  <kbd>N</kbd> next page
+  <kbd>Enter</kbd> enlarge &nbsp; <kbd>N</kbd> next page
 </div>
 </div>
 
@@ -1010,6 +1014,10 @@ function bandName(b){
   return b==='kept'?ABOVE : b==='all'?'every band' : BELOW;
 }
 function fmtn(n){return (n||0).toLocaleString('en-US')}
+var CROP_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" '+
+  'stroke="currentColor" stroke-width="1.9" stroke-linecap="round" '+
+  'stroke-linejoin="round" aria-hidden="true">'+
+  '<path d="M6.5 2v15.5H22"/><path d="M2 6.5h15.5V22"/></svg>';
 /* The ONE place a crop URL is built. There were three, each assembling the
    path by hand, and the stage prefix was added to one of them -- so every
    thumbnail on the leash page asked the gate for a crop it does not have and
@@ -1158,7 +1166,9 @@ function render(){
       '<div class="acts">'+
         '<button class="act m" data-v="'+POS+'" data-i="'+i+'">&#9873; '+YES+'</button>'+
         '<button class="act c" data-v="'+NEG+'" data-i="'+i+'">'+NO+'</button>'+
-        '<button class="act u" data-v="unsure" data-i="'+i+'" title="cannot tell">?</button>'+
+        '<button class="act e" data-edit="'+i+'" title="redraw this box '+
+        '\u2014 changes the crop a future model trains on, not what this one '+
+        'was judged on">'+CROP_SVG+'</button>'+
       '</div></div>';
   }).join('');
   for(var i=0;i<page.items.length;i++)paintCard(i);
@@ -1327,6 +1337,8 @@ function paintStats(s){
 }
 /* clicks */
 grid.addEventListener('click',function(e){
+  var ed=e.target.closest&&e.target.closest('[data-edit]');
+  if(ed){openEditor(+ed.getAttribute('data-edit'));return}
   var z=e.target.closest&&e.target.closest('[data-zoom]');
   if(z){zoom(+z.getAttribute('data-zoom'));return}
   var a=e.target.closest&&e.target.closest('.act');
@@ -1450,6 +1462,14 @@ function edPaint(){
   }
   put(ebox,b);put(mbox,m);
 }
+/* From the sheet straight into the editor. zoom() first so the lightbox is
+   open and captioned; edStart() then swaps the picture for the window on the
+   frame, which is a different image and would otherwise flash the crop. */
+function openEditor(i){
+  if(i==null||i<0)return;
+  zoom(i);
+  edStart();
+}
 function edStart(){
   var it=page&&page.items[cur]; if(!it)return;
   /* One request. The geometry comes back in a header on the picture itself,
@@ -1559,6 +1579,9 @@ document.addEventListener('keydown',function(e){
   else if(e.key==='ArrowRight'){move(1);e.preventDefault()}
   else if(e.key==='ArrowLeft'){move(-1);e.preventDefault()}
   else if(e.key==='Enter'){if(cur>=0)zoom(cur);e.preventDefault()}
+  /* the crop mark's keyboard twin, from the sheet rather than the lightbox */
+  else if(e.key==='e'||e.key==='E'){if(cur>=0)openEditor(cur);
+    e.preventDefault()}
   else if(e.key==='n'||e.key==='N'){
     if(idx+1<total)load(idx+1);else draw();e.preventDefault()}
 });
