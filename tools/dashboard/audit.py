@@ -602,6 +602,7 @@ def record(key, verdict, meta=None, stage=DEFAULT_STAGE):
 
 def stats(stage=DEFAULT_STAGE):
     s = fa.summarise(stage=stage)
+    s['counts'] = _judged_counts(stage)
     s['pages'] = page_count(stage)
     s['drawn'] = len(_drawn_keys(stage)[0])
     return s
@@ -740,6 +741,15 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .pos{font-size:12px;color:var(--dim);margin-left:2px;
   font-variant-numeric:tabular-nums;font-family:var(--num)}
 .spacer{margin-left:auto}
+.views{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--bd);
+  border-radius:10px;margin-right:4px}
+.viewbtn{appearance:none;background:transparent;border:0;color:var(--dim);
+  border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;
+  font-family:inherit}
+.viewbtn:hover{color:var(--tx)}
+.viewbtn.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
+.viewbtn b{font-family:var(--num);font-weight:640;opacity:.75;margin-left:4px}
+.bar.foot{margin:18px 0 0;padding-top:14px;border-top:1px solid var(--bd)}
 .pick{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;
   color:var(--dim)}
 .pick select{background:var(--panel2);border:1px solid var(--bd);
@@ -825,7 +835,9 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   align-items:center;justify-content:center;flex-direction:column;gap:12px;
   z-index:50}
 .lb[hidden]{display:none}
-.lbstage{position:relative;line-height:0}
+/* inline-block so the overlay's `inset:0` is the PICTURE's box and not a
+   full-width block the image merely sits inside */
+.lbstage{position:relative;line-height:0;display:inline-block}
 .lb img{max-width:92vw;max-height:80vh;object-fit:contain}
 /* The editor draws over the SAME element the picture is in, so a box in view
    pixels lands where the eye says it does. */
@@ -898,6 +910,13 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 </details>
 
 <div class="bar">
+  <span class="views" id="views" role="tablist">
+    <button type="button" class="viewbtn on" data-view="sheet">to judge</button>
+    <button type="button" class="viewbtn" data-view="flagged">flagged
+      <b id="nFlagged">0</b></button>
+    <button type="button" class="viewbtn" data-view="all">everything I
+      answered <b id="nAll">0</b></button>
+  </span>
   <button class="btn" id="prev">&larr; back</button>
   <button class="btn go" id="next">next page &rarr;</button>
   <span class="pos" id="pos">&mdash;</span>
@@ -918,6 +937,13 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 
 <div class="grid" id="grid"></div>
 <div class="empty" id="empty" hidden></div>
+<!-- A page of a hundred crops is a long way from the toolbar, and the way
+     out of it should be where the reading finishes, not where it started. -->
+<div class="bar foot" id="foot">
+  <button class="btn" id="prev2">&larr; back</button>
+  <button class="btn go" id="next2">next page &rarr;</button>
+  <span class="pos" id="pos2">&mdash;</span>
+</div>
 <div class="keys">
   <kbd>F</kbd> __YESTXT__ &nbsp; <kbd>2</kbd> __NOTXT__ &nbsp;
   <kbd>3</kbd> unsure &nbsp; <kbd>U</kbd> undo &nbsp;
@@ -965,6 +991,11 @@ var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
    both. */
 var page=null,idx=0,cur=-1,total=0,band=DEFAULT_BAND,busy=false,size=25,
     dirty=false;
+/* 'sheet' draws from the pool and is the only view that spends new crops.
+   The other two read the ledger back, so you can look at what you answered
+   and change it -- the ledger already took withdrawals; the only thing
+   missing was a way to find the crop again. */
+var view='sheet';
 
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
   e.hidden=false;clearTimeout(e._t);e._t=setTimeout(function(){e.hidden=true},1600)}
@@ -999,6 +1030,14 @@ function judge(i,verdict){
   if(i<0)return;
   var it=page.items[i]; if(!it)return;
   it.verdict=verdict;
+  if(view!=='sheet'){
+    /* In a review view the crop is not work to get through -- it is a record
+       you came to look at. Answering again changes the record and leaves it
+       where it is, so you can see what you changed. */
+    paintCard(i);
+    send(it.key,verdict,it);
+    return;
+  }
   /* EVERY answer takes the crop off the grid. The grid is the work left, not
      a record of what was answered -- a page of a hundred where the judged ones
      linger greyed out is a page you have to keep re-reading to find the ones
@@ -1143,16 +1182,44 @@ function setPos(){
      indexed into BANDS without asking which it is -- doing that threw and
      took the whole page down. */
   posEl.textContent=total?('page '+(idx+1)+' of '+total+
+    (view!=='sheet'?' \u00b7 '+(view==='flagged'?'flagged':'everything I answered'):'')+
     (page&&page.dropped?' \u00b7 '+page.dropped+' unreadable':'')+
     ' \u00b7 '+bandName(band)+
     (page&&page.items&&page.items.length?' \u00b7 '+remaining()+' left':'')):'—';
-  document.getElementById('prev').disabled=busy||idx<=0;
-  document.getElementById('next').disabled=busy;
+  ['prev','prev2'].forEach(function(id){
+    document.getElementById(id).disabled=busy||idx<=0});
+  ['next','next2'].forEach(function(id){
+    document.getElementById(id).disabled=busy||
+      (view!=='sheet'&&idx+1>=total)});
+  var f=document.getElementById('foot');
+  if(f)f.hidden=!(page&&page.items&&page.items.length);
+  var p2=document.getElementById('pos2');
+  if(p2)p2.textContent=posEl.textContent;
 }
 function show(doc,at,tot){
   page=doc;idx=at;total=tot;cur=-1;render();setPos();left();
 }
+function loadJudged(at){
+  busy=true;setPos();
+  fetch('/api/audit/judged?stage='+STAGE+'&which='+
+        (view==='flagged'?'flagged':'all')+'&page='+at+'&n='+size)
+    .then(function(r){return r.json()})
+    .then(function(j){
+      busy=false;
+      if(!j){toast('failed');setPos();return}
+      counts(j.counts);
+      show({index:j.page,items:j.items,dropped:0},j.page,j.pages||1);
+    })
+    .catch(function(){busy=false;toast('failed');setPos()});
+}
+function counts(c){
+  if(!c)return;
+  var a=document.getElementById('nFlagged'),b=document.getElementById('nAll');
+  if(a)a.textContent=fmtn(c.flagged||0);
+  if(b)b.textContent=fmtn(c.all||0);
+}
 function load(at){
+  if(view!=='sheet')return loadJudged(at);
   busy=true;setPos();
   fetch('/api/audit/page?stage='+STAGE+'&i='+at+'&n='+size+
         (band==null?'':'&band='+encodeURIComponent(band))).then(function(r){return r.json()})
@@ -1181,6 +1248,7 @@ function loadStats(){
 }
 function paintStats(s){
   if(!s)return;
+  counts(s.counts||{flagged:(s.rejected||{}).wrong,all:s.judged});
   var r=document.getElementById('rate'),ci=document.getElementById('ci'),
       rej=s.rejected||{},kept=s.kept||{};
   document.getElementById('judged').textContent=fmtn(s.judged||0);
@@ -1308,12 +1376,27 @@ bandSel.addEventListener('change',function(){
    queues the next one -- so you would pick a band, press next, and be judging
    crops from the bands you just excluded. Back still replays exactly what was
    drawn: those pages are the record of what you judged. */
-document.getElementById('next').addEventListener('click',function(){
+function goNext(){
+  if(view!=='sheet'){if(idx+1<total)load(idx+1);return}
   if(dirty||idx+1>=total)draw();else load(idx+1);
-});
-document.getElementById('prev').addEventListener('click',function(){
-  if(idx>0)load(idx-1)});
+}
+function goPrev(){if(idx>0)load(idx-1)}
+['next','next2'].forEach(function(id){
+  document.getElementById(id).addEventListener('click',goNext)});
+['prev','prev2'].forEach(function(id){
+  document.getElementById(id).addEventListener('click',goPrev)});
 document.getElementById('fresh').addEventListener('click',draw);
+document.getElementById('views').addEventListener('click',function(e){
+  var b=e.target.closest&&e.target.closest('.viewbtn');
+  if(!b)return;
+  view=b.getAttribute('data-view');
+  var all=document.querySelectorAll('.viewbtn');
+  for(var i=0;i<all.length;i++)
+    all[i].classList.toggle('on',all[i]===b);
+  /* drawing new crops is only a thing the sheet does */
+  document.getElementById('fresh').hidden=view!=='sheet';
+  idx=0;load(0);
+});
 /* lightbox */
 function zoom(i){
   var it=page&&page.items[i]; if(!it)return;
@@ -1338,16 +1421,25 @@ function edShow(on){
   p[0].hidden=on;p[1].hidden=!on;p[2].hidden=!on;p[3].hidden=!on;
   boxwrap.hidden=!on;EDIT.on=on;
 }
+/* View pixels are not screen pixels. The picture is served at up to 1100px
+   and then CSS fits it to the window -- max-width:92vw, max-height:80vh -- so
+   on any screen where that shrinks it, a box drawn at its view coordinates
+   lands somewhere else entirely, further down and to the right by exactly the
+   ratio. Everything is stored in view pixels and drawn through this. */
+function edK(){
+  var m=EDIT.meta;
+  if(!m||!m.view_w||!lbimg.clientWidth)return 1;
+  return lbimg.clientWidth/m.view_w;
+}
 function edPaint(){
-  if(!EDIT.box)return;
-  var b=EDIT.box;
-  ebox.style.left=b[0]+'px';ebox.style.top=b[1]+'px';
-  ebox.style.width=Math.max(2,b[2]-b[0])+'px';
-  ebox.style.height=Math.max(2,b[3]-b[1])+'px';
-  var m=EDIT.meta.model_box;
-  mbox.style.left=m[0]+'px';mbox.style.top=m[1]+'px';
-  mbox.style.width=Math.max(2,m[2]-m[0])+'px';
-  mbox.style.height=Math.max(2,m[3]-m[1])+'px';
+  if(!EDIT.box||!EDIT.meta)return;
+  var k=edK(),b=EDIT.box,m=EDIT.meta.model_box;
+  function put(el,r){
+    el.style.left=(r[0]*k)+'px';el.style.top=(r[1]*k)+'px';
+    el.style.width=Math.max(2,(r[2]-r[0])*k)+'px';
+    el.style.height=Math.max(2,(r[3]-r[1])*k)+'px';
+  }
+  put(ebox,b);put(mbox,m);
 }
 function edStart(){
   var it=page&&page.items[cur]; if(!it)return;
@@ -1404,7 +1496,8 @@ ebox.addEventListener('mousedown',function(e){
 });
 document.addEventListener('mousemove',function(e){
   var d=EDIT.drag; if(!d||!EDIT.on)return;
-  var dx=e.clientX-d.x, dy=e.clientY-d.y, b=d.box.slice(),
+  var k=edK()||1,
+      dx=(e.clientX-d.x)/k, dy=(e.clientY-d.y)/k, b=d.box.slice(),
       W=EDIT.meta.view_w, H=EDIT.meta.view_h;
   if(d.h==='move'){b[0]+=dx;b[1]+=dy;b[2]+=dx;b[3]+=dy}
   else{
@@ -1417,6 +1510,7 @@ document.addEventListener('mousemove',function(e){
   EDIT.box=b;edPaint();
 });
 document.addEventListener('mouseup',function(){EDIT.drag=null});
+window.addEventListener('resize',function(){if(EDIT.on)edPaint()});
 document.getElementById('lbclose').addEventListener('click',function(){
   if(EDIT.on)edStop();lb.hidden=true});
 lb.addEventListener('click',function(e){
@@ -1588,6 +1682,91 @@ def page_size(v, default=25):
     except (TypeError, ValueError):
         return default
     return v if v in PAGE_SIZES else default
+
+
+# ── what you have already answered ──────────────────────────────────────────
+# The sheet only ever shows boxes nobody has seen; that is the whole point of
+# it. But an answer given at speed is an answer worth being able to look at
+# again -- and the ledger already supports changing your mind, so the only
+# thing missing was a way to find the crop.
+JUDGED_VIEWS = ('flagged', 'wrong', 'all')
+
+
+def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
+    """Crops already answered, newest first.
+
+    `flagged` is the positive class -- the dogs found, the leashes seen --
+    because that is what someone means by "what I flagged". `wrong` is every
+    answer that disagrees with the model, which is the same set plus the
+    false positives above the threshold. `all` is everything, unsure included.
+    """
+    sp = fa.spec(stage)
+    rows = [v for v in fa.read_verdicts(stage=stage)
+            if fa.verdict_of(v.get('verdict'), stage)]
+    for v in rows:
+        v['verdict'] = fa.verdict_of(v['verdict'], stage)
+    # p_dog is what decides the tag, the score chip and the threshold rule.
+    # Early rows predate it being sent, so the missing ones are looked up in
+    # one query rather than one per crop.
+    need = [v['key'] for v in rows if v.get('p_dog') is None]
+    if need:
+        got = {}
+        try:
+            import duckdb
+            keys = [tuple(k.split('#')) for k in need]
+            con = duckdb.connect()
+            con.execute('CREATE TEMP TABLE want(i VARCHAR, d INTEGER)')
+            con.executemany('INSERT INTO want VALUES (?, ?)',
+                            [(a, int(b or 0)) for a, b in keys])
+            for iid, di, p, band in con.execute(
+                    f"""SELECT p.image_id, p.det_idx, p.p_dog, p.band
+                        FROM read_parquet('{P(stage)['pool']}') p
+                        JOIN want w ON w.i = p.image_id AND w.d = p.det_idx"""
+            ).fetchall():
+                got[f'{iid}#{di}'] = (float(p), int(band))
+            con.close()
+        except Exception:
+            got = {}
+        for v in rows:
+            if v['key'] in got:
+                v['p_dog'], v['band'] = got[v['key']]
+    if which == 'flagged':
+        rows = [v for v in rows if v['verdict'] == sp['positive']]
+    elif which == 'wrong':
+        rows = [v for v in rows
+                if v.get('p_dog') is not None
+                and ((float(v['p_dog']) >= fa.THRESHOLD)
+                     != (v['verdict'] == sp['positive']))]
+    rows.sort(key=lambda v: -(v.get('ts') or 0))
+    total = len(rows)
+    pages = max(1, -(-total // max(1, n)))
+    page = max(0, min(pages - 1, int(page)))
+    fixed = corrections()
+    out = []
+    for v in rows[page * n:(page + 1) * n]:
+        iid, _, di = str(v['key']).partition('#')
+        it = {'key': v['key'], 'image_id': iid,
+              'det_idx': int(di or 0), 'verdict': v['verdict'],
+              'p_dog': float(v['p_dog']) if v.get('p_dog') is not None else 0.0,
+              'band': v.get('band'), 'seq': v.get('seq'),
+              'judged_at': v.get('ts'),
+              'unknown_score': v.get('p_dog') is None}
+        if (iid, int(di or 0)) in fixed:
+            it['corrected'] = True
+        out.append(it)
+    return {'items': out, 'total': total, 'page': page, 'pages': pages,
+            'which': which, 'stage': stage,
+            'counts': _judged_counts(stage)}
+
+
+def _judged_counts(stage=DEFAULT_STAGE):
+    """How many sit behind each view, so the switch can say so."""
+    sp = fa.spec(stage)
+    rows = [fa.verdict_of(v.get('verdict'), stage)
+            for v in fa.read_verdicts(stage=stage)]
+    rows = [v for v in rows if v]
+    return {'flagged': sum(1 for v in rows if v == sp['positive']),
+            'all': len(rows)}
 
 
 def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):

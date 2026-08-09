@@ -9480,6 +9480,22 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return True
+        if path == '/api/audit/judged':
+            q = parse_qs(urlparse(self.path).query)
+            stage = self._audit_stage(q)
+            if a is None or not a.pool_ready(stage):
+                self._json({'items': [], 'total': 0, 'pages': 1, 'page': 0})
+                return True
+            which = q.get('which', ['flagged'])[0]
+            if which not in a.JUDGED_VIEWS:
+                which = 'flagged'
+            try:
+                pg = int(q.get('page', ['0'])[0])
+            except ValueError:
+                pg = 0
+            self._json(a.judged(stage, which, pg,
+                                a.page_size(q.get('n', [None])[0])))
+            return True
         if path == '/api/audit/stats':
             q = parse_qs(urlparse(self.path).query)
             stage = self._audit_stage(q)

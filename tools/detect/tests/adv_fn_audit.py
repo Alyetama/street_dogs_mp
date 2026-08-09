@@ -644,6 +644,7 @@ def _page_once(bad, audit, probe, stage):
     with _tf.NamedTemporaryFile('w', suffix='.js', delete=False) as f:
         f.write(open(probe).read()
                 + '\nvar PAGE_CSS = ' + json.dumps(css) + ';\n'
+                + 'var PAGE_HTML = ' + json.dumps(html) + ';\n'
                 + script + '\n' + TAIL)
         p = f.name
     r = subprocess.run(['node', p], capture_output=True, text=True)
@@ -685,11 +686,63 @@ paintStats(STATS);
 chk(els.poolwarn.hidden === true, 'an up-to-date pool still warns');
 chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
 chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
+// a page of a hundred crops ends a long way from the toolbar
+chk(/id="next2"/.test(PAGE_HTML) && /id="prev2"/.test(PAGE_HTML),
+  'there is no way to page on from the foot of the sheet');
+chk(/id="views"/.test(PAGE_HTML),
+  'there is no way to look at what has already been answered');
 // every tile says what the model called it, and it must agree with the score
 // it is shown beside -- the label is derived from the score, so a tile that
 // reads "leashed 0.048" would mean the two came from different places
 chk(/class="ptag/.test(els.grid.innerHTML),
   'no tile says what the model predicted');
+// The editing box is drawn in VIEW pixels, but the picture is fitted to the
+// window by CSS -- so on any screen that shrinks it, a box placed at its view
+// coordinates lands down and right of the detection by exactly the ratio.
+EDIT.meta = {view_w:1000, view_h:800, model_box:[100,100,200,200],
+             off_x:0, off_y:0, scale:1};
+EDIT.box = [100,100,200,200];
+els.lbimg.clientWidth = 600;
+edPaint();
+chk(ebox.style.left === '60px' && ebox.style.width === '60px',
+  'with the picture shown at 60% the box is drawn at ' + ebox.style.left +
+  '/' + ebox.style.width + ', not 60px/60px — it would sit away from the '
+  + 'detection it is meant to be on');
+chk(mbox.style.left === '60px',
+  'the detector\'s own box is drawn at ' + mbox.style.left + ' at 60%');
+els.lbimg.clientWidth = 1000;
+edPaint();
+chk(ebox.style.left === '100px' && ebox.style.width === '100px',
+  'unscaled, the box is drawn at ' + ebox.style.left + '/' + ebox.style.width);
+// and a drag moves it by the screen distance, not by that distance in view
+// pixels -- at 60% a 60px drag is 100 view pixels
+els.lbimg.clientWidth = 600;
+EDIT.box = [100,100,200,200];
+EDIT.on = true;                 // the handler does nothing unless editing
+EDIT.drag = {h:'move', x:0, y:0, box:[100,100,200,200]};
+listeners.doc.mousemove({clientX:60, clientY:0});
+chk(Math.abs(EDIT.box[0] - 200) < 0.01,
+  'a 60px drag at 60% moved the box ' + (EDIT.box[0]-100) +
+  ' view pixels, not 100');
+EDIT.drag = null; EDIT.on = false;
+
+// A review view reads the ledger back. Answering there must CHANGE the record
+// and leave the crop where it is -- clearing it off the grid, the way the
+// sheet does, would make the thing you came to look at vanish as you touched it.
+view = 'flagged';
+page.items.forEach(function (it) { it.verdict = POS });
+render();
+var shown = grid.children.filter(function (c) {
+  return c.style.display !== 'none' }).length;
+judge(0, NEG);
+chk(grid.children.filter(function (c) {
+      return c.style.display !== 'none' }).length === shown,
+  'answering in a review view took the crop off the grid');
+chk(page.items[0].verdict === NEG, 'the record was not changed');
+view = 'sheet';
+page.items.forEach(function (it) { delete it.verdict });
+render();
+
 // The sheet is ordered by score and the model's own line is drawn where it
 // crosses -- once, and only when the page actually spans it.
 var rules = (els.grid.innerHTML.match(/class="thr"/g) || []).length;

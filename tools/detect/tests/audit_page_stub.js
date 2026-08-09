@@ -65,7 +65,11 @@ global.document = {getElementById:E, createElement:function(){return mk('new')},
   addEventListener:function(t,f){(listeners.doc = listeners.doc || {})[t] = f},
   body:{appendChild:function(){}, removeChild:function(){}},
   execCommand:function(){return true}};
-global.window = {isSecureContext:false};
+global.window = {isSecureContext:false,
+  // the page listens for resize to redraw the box overlay at the picture's
+  // new displayed size; without this the whole script dies on load
+  addEventListener:function(t,f){ (listeners.win = listeners.win || {})[t] = f },
+  removeEventListener:function(){}};
 global.localStorage = {_d:{}, getItem:function(k){return this._d[k] || null},
   setItem:function(k,v){this._d[k] = String(v)}};
 global.setTimeout = function(){return 1};
