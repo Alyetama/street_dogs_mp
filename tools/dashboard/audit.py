@@ -28,27 +28,26 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
 import fn_audit as fa                                          # noqa: E402
 
-OUT_DIR = fa.OUT_DIR
-CROPS = os.path.join(OUT_DIR, 'crops')
-# The full-resolution cut, kept beside the thumbnail. harvest_flagged.py
-# learned this the hard way: the ~160px thumbnail the review UI copied was
-# "too small and too lossy for training", so it re-opens the original jpg to
-# re-cut every flagged box. The audit already has the frame open to make the
-# thumbnail, so it writes both from that one decode and a verdict costs no
-# second pass over an 8000x4000 panorama.
-FULL = os.path.join(OUT_DIR, 'full')
-DATASET = os.path.join(REPO, 'data', 'audit_finds')
-PAGES = os.path.join(OUT_DIR, 'pages')
-DRAWN = os.path.join(OUT_DIR, 'drawn.jsonl')
-# Two locks, because they guard two different things and one of them is slow.
-# A draw holds its lock across the sample and the page write; cutting the
-# crops -- seconds, or twenty of them off cold drives -- happens between them
-# with nothing held. Sharing one lock meant every verdict recorded while the
-# next page was being cut waited for the cutting to finish, which is exactly
-# when someone is judging: the page they are on loads, the next one starts
-# cutting behind it, and the first keystroke hangs.
-_DRAW_LOCK = threading.Lock()
-_LEDGER_LOCK = threading.Lock()
+DEFAULT_STAGE = fa.DEFAULT_STAGE
+STAGES = fa.STAGES
+# Paths are looked up per request, never held in module state: one process
+# serves both audits and two requests can be in flight at once, so a global
+# "current stage" would have one page writing into the other's ledger.
+P = fa.paths
+# Two locks per stage, because they guard two different things and one of them
+# is slow. A draw holds its lock across the sample and the page write; cutting
+# the crops -- seconds, or twenty of them off cold drives -- happens between
+# them with nothing held. Sharing one lock meant every verdict recorded while
+# the next page was being cut waited for the cutting to finish, which is
+# exactly when someone is judging.
+_LOCKS = {}
+
+
+def _locks(stage):
+    if stage not in _LOCKS:
+        _LOCKS[stage] = (threading.Lock(), threading.Lock())
+    return _LOCKS[stage]
+
 
 # from the runner, never copied -- see the module docstring
 try:
@@ -80,11 +79,11 @@ def _roots():
     return dash._grid_roots()
 
 
-def pool_ready():
-    return os.path.exists(fa.POOL)
+def pool_ready(stage=DEFAULT_STAGE):
+    return os.path.exists(P(stage)['pool'])
 
 
-def _drawn_keys():
+def _drawn_keys(stage=DEFAULT_STAGE):
     """Every box ever put in front of anyone, judged or not.
 
     Two sources, because either alone can be incomplete: the draw log is what
@@ -94,7 +93,8 @@ def _drawn_keys():
     must never come back round.
     """
     keys, seqs = set(), set()
-    for path, get in ((DRAWN, None), (fa.VERDICTS, None)):
+    pp = P(stage)
+    for path in (pp['drawn'], pp['verdicts']):
         try:
             with open(path) as fh:
                 for line in fh:
@@ -113,7 +113,7 @@ def _drawn_keys():
     return keys, seqs
 
 
-def band_list(band):
+def band_list(band, stage=DEFAULT_STAGE):
     """Whatever the caller asked for, as a list of band indices."""
     n = len(fa.BANDS)
     if band is None or band == 'all':
@@ -129,7 +129,7 @@ def band_list(band):
     return [i] if 0 <= i < n else list(range(n))
 
 
-def sample(n=25, band=None, seed=None):
+def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     """A page of candidates: stratified by band, one box per sequence, none
     ever drawn before.
 
@@ -139,7 +139,7 @@ def sample(n=25, band=None, seed=None):
     confidence twenty independent samples would earn and these do not.
     """
     import duckdb
-    keys, seqs = _drawn_keys()
+    keys, seqs = _drawn_keys(stage)
     con = duckdb.connect()
     con.execute("SET preserve_insertion_order=false")
     con.execute("CREATE TEMP TABLE seen_seq(seq VARCHAR)")
@@ -150,7 +150,7 @@ def sample(n=25, band=None, seed=None):
     # the whole reason to run this -- only exist where the gate said no, so
     # "rejected" is a first-class choice and the page's default rather than
     # something to be assembled by picking five bands one at a time.
-    bands = band_list(band)
+    bands = band_list(band, stage)
     # Evenly over the bands asked for, with the remainder going to the ones
     # NEAREST the threshold -- that is where a wrong answer is most likely to
     # be found, and flooring instead quietly dropped four crops off every
@@ -162,7 +162,7 @@ def sample(n=25, band=None, seed=None):
     salt = str(seed if seed is not None else random.getrandbits(48))
     rows = con.execute(f"""
         WITH fresh AS (
-            SELECT p.* FROM read_parquet('{fa.POOL}') p
+            SELECT p.* FROM read_parquet('{P(stage)['pool']}') p
             ANTI JOIN seen_seq s ON s.seq = p.seq
             WHERE p.band IN ({','.join(str(int(b)) for b in bands)})
         ), one_per_seq AS (
@@ -198,10 +198,11 @@ def sample(n=25, band=None, seed=None):
     return out
 
 
-def _cut_one(cand, roots):
+def _cut_one(cand, roots, stage=DEFAULT_STAGE):
     """Cut one crop to disk. Returns True if the file is there afterwards."""
     from PIL import Image
-    dst = os.path.join(CROPS, cand['key'].replace('#', '_') + '.jpg')
+    pp = P(stage)
+    dst = os.path.join(pp['crops'], cand['key'].replace('#', '_') + '.jpg')
     if os.path.exists(dst):
         return True
     root = roots.get(cand['drive'])
@@ -228,13 +229,13 @@ def _cut_one(cand, roots):
         crop = im.crop((a, b, c, d))
         # full resolution first: this is the one a future dataset uses, and
         # thumbnail() resizes in place
-        os.makedirs(FULL, exist_ok=True)
-        fdst = os.path.join(FULL, cand['key'].replace('#', '_') + '.jpg')
+        os.makedirs(pp['full'], exist_ok=True)
+        fdst = os.path.join(pp['full'], cand['key'].replace('#', '_') + '.jpg')
         ftmp = fdst + '.tmp'
         crop.save(ftmp, 'JPEG', quality=95)
         os.replace(ftmp, fdst)
         crop.thumbnail((CROP_PX, CROP_PX), Image.LANCZOS)
-        os.makedirs(CROPS, exist_ok=True)
+        os.makedirs(pp['crops'], exist_ok=True)
         tmp = dst + '.tmp'
         crop.save(tmp, 'JPEG', quality=88)
         os.replace(tmp, dst)
@@ -245,7 +246,7 @@ def _cut_one(cand, roots):
         im.close()
 
 
-def materialise(cands, workers=8):
+def materialise(cands, workers=8, stage=DEFAULT_STAGE):
     """Cut every crop on a page, in parallel.
 
     Decoding one 8000x4000 frame is ~116 ms and each candidate is a different
@@ -255,75 +256,78 @@ def materialise(cands, workers=8):
     """
     from concurrent.futures import ThreadPoolExecutor
     roots = _roots()
-    os.makedirs(CROPS, exist_ok=True)
+    os.makedirs(P(stage)['crops'], exist_ok=True)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        ok = list(ex.map(lambda c: _cut_one(c, roots), cands))
+        ok = list(ex.map(lambda c: _cut_one(c, roots, stage), cands))
     return [c for c, good in zip(cands, ok) if good]
 
 
-def crop_path(key):
+def crop_path(key, stage=DEFAULT_STAGE):
     """Absolute path of a cut crop, or None. The key is checked against the
     shape it is generated in, so nothing a client sends reaches a path."""
     import re
     if not re.fullmatch(r'[0-9]{1,32}_[0-9]{1,6}', str(key or '')):
         return None
-    p = os.path.join(CROPS, f'{key}.jpg')
+    p = os.path.join(P(stage)['crops'], f'{key}.jpg')
     return p if os.path.exists(p) else None
 
 
-def _page_file(i):
-    return os.path.join(PAGES, f'{int(i):05d}.json')
+def _page_file(i, stage=DEFAULT_STAGE):
+    return os.path.join(P(stage)['pages'], f'{int(i):05d}.json')
 
 
-def page_count():
+def page_count(stage=DEFAULT_STAGE):
     try:
-        return len(glob.glob(os.path.join(PAGES, '*.json')))
+        return len(glob.glob(os.path.join(P(stage)['pages'], '*.json')))
     except OSError:
         return 0
 
 
-def get_page(i):
+def get_page(i, stage=DEFAULT_STAGE):
     try:
-        with open(_page_file(i)) as fh:
+        with open(_page_file(i, stage)) as fh:
             return json.load(fh)
     except (OSError, ValueError):
         return None
 
 
-def draw_page(n=25, band=None):
+def draw_page(n=25, band=None, stage=DEFAULT_STAGE):
     """Draw, cut, and keep. Returns the page document."""
-    with _DRAW_LOCK:
-        cands = sample(n=n, band=band)
+    draw_lock, _ = _locks(stage)
+    pp = P(stage)
+    with draw_lock:
+        cands = sample(n=n, band=band, stage=stage)
         if not cands:
-            return {'index': page_count(), 'items': [], 'exhausted': True,
+            return {'index': page_count(stage), 'items': [], 'exhausted': True,
                     'band': band, 'n': n, 'dropped': 0}
         # Reserved before a single frame is opened. A box counts as drawn the
         # moment it is chosen, not when it is judged or even when it is
         # successfully cut: a concurrent draw must not pick it, and a box
         # skipped on screen must not come back three pages later, or "you have
         # not seen this" is untrue and the sample quietly correlates.
-        os.makedirs(OUT_DIR, exist_ok=True)
-        with open(DRAWN, 'a') as fh:
+        os.makedirs(pp['out'], exist_ok=True)
+        with open(pp['drawn'], 'a') as fh:
             for c in cands:
                 fh.write(json.dumps({'key': c['key'], 'seq': c['seq']}) + '\n')
 
-    got = materialise(cands)          # slow, and holds nothing
+    got = materialise(cands, stage=stage)   # slow, and holds nothing
 
-    with _DRAW_LOCK:
-        idx = page_count()
+    with draw_lock:
+        idx = page_count(stage)
         # Frames that would not open. Usually a jpg pruned off a drive after
         # the sweep read it. Counted rather than hidden, so a short page reads
         # as a short page and not as a page that lost its crops.
-        doc = {'index': idx, 'band': band, 'n': n, 'created': time.time(),
+        doc = {'index': idx, 'band': band, 'n': n, 'stage': stage,
+               'created': time.time(),
                'dropped': len(cands) - len(got),
                'items': [{k: c[k] for k in
                           ('key', 'image_id', 'det_idx', 'p_dog', 'conf',
                            'band', 'seq', 'drive', 'cell')} for c in got]}
-        os.makedirs(PAGES, exist_ok=True)
-        tmp = _page_file(idx) + '.tmp'
+        os.makedirs(pp['pages'], exist_ok=True)
+        tmp = _page_file(idx, stage) + '.tmp'
         with open(tmp, 'w') as fh:
             json.dump(doc, fh)
-        os.replace(tmp, _page_file(idx))
+        os.replace(tmp, _page_file(idx, stage))
         return doc
 
 
@@ -331,7 +335,7 @@ VERDICTS = fa.ANSWERS           # 'dog' | 'not_dog' | 'unsure'
 CLASS_OF = fa.CLASS_OF
 
 
-def place(key, verdict):
+def place(key, verdict, stage=DEFAULT_STAGE):
     """Put one judged crop into the dataset, or take it out.
 
     Hard-linked, not copied: the full-resolution cut already exists and a
@@ -339,11 +343,15 @@ def place(key, verdict):
     re-cut. 'unsure' is not a class -- it is removed from both, so changing
     your mind to "I cannot tell" does not leave a stale label behind.
     """
+    sp, pp = fa.spec(stage), P(stage)
     name = str(key).replace('#', '_') + '.jpg'
-    src = os.path.join(FULL, name)
-    want = CLASS_OF.get(fa.verdict_of(verdict))
-    for cls in ('dog', 'not_dog'):
-        dst = os.path.join(DATASET, cls, name)
+    src = os.path.join(pp['full'], name)
+    want = fa.verdict_of(verdict, stage)
+    classes = (sp['positive'], sp['negative'])
+    if want not in classes:
+        want = None
+    for cls in classes:
+        dst = os.path.join(pp['dataset'], cls, name)
         if cls == want:
             continue
         try:
@@ -352,7 +360,7 @@ def place(key, verdict):
             pass
     if not want or not os.path.exists(src):
         return False
-    dst = os.path.join(DATASET, want, name)
+    dst = os.path.join(pp['dataset'], want, name)
     if os.path.exists(dst):
         return True
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -364,7 +372,7 @@ def place(key, verdict):
     return True
 
 
-def record(key, verdict, meta=None):
+def record(key, verdict, meta=None, stage=DEFAULT_STAGE):
     """Append one human judgement.
 
     Append-only and re-readable: a mind changed later is another line, and the
@@ -373,27 +381,29 @@ def record(key, verdict, meta=None):
     """
     # `None` clears: undo is a verdict being withdrawn, not a third opinion,
     # and the ledger is append-only so it is written as one more line.
-    if verdict is not None and fa.verdict_of(verdict) is None:
+    if verdict is not None and fa.verdict_of(verdict, stage) is None:
         return {'ok': False, 'msg': f'unknown verdict {verdict!r}'}
-    verdict = fa.verdict_of(verdict) if verdict is not None else None
+    verdict = fa.verdict_of(verdict, stage) if verdict is not None else None
     rec = {'key': str(key), 'verdict': verdict, 'ts': time.time()}
     for k in ('band', 'p_dog', 'seq'):
         if meta and meta.get(k) is not None:
             rec[k] = meta[k]
-    with _LEDGER_LOCK:
-        os.makedirs(OUT_DIR, exist_ok=True)
-        with open(fa.VERDICTS, 'a') as fh:
+    _, ledger_lock = _locks(stage)
+    pp = P(stage)
+    with ledger_lock:
+        os.makedirs(pp['out'], exist_ok=True)
+        with open(pp['verdicts'], 'a') as fh:
             fh.write(json.dumps(rec) + '\n')
         # the ledger is the record; the dataset is a view of it, kept in step
         # as each verdict lands so it is never a rebuild away from usable
-        placed = place(key, verdict)
+        placed = place(key, verdict, stage)
     return {'ok': True, 'placed': placed}
 
 
-def stats():
-    s = fa.summarise()
-    s['pages'] = page_count()
-    s['drawn'] = len(_drawn_keys()[0])
+def stats(stage=DEFAULT_STAGE):
+    s = fa.summarise(stage=stage)
+    s['pages'] = page_count(stage)
+    s['drawn'] = len(_drawn_keys(stage)[0])
     return s
 
 
@@ -409,7 +419,7 @@ def stats():
 AUDIT_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>What the gate threw away</title><style>
+<title>Audit &mdash; __H1__</title><style>
 :root{--bg:#13151a;--panel:#1b2027;--panel2:#21262d;--bd:rgba(130,140,150,.13);
 --tx:#eef1f4;--mut:#98a2ad;--dim:#69727d;--acc:#e8a645;--green:#43b581;
 --red:#ef5350;--gap:20px}
@@ -424,7 +434,13 @@ header{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;
   padding:22px 0 16px;border-bottom:1px solid var(--bd);margin-bottom:18px}
 h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .sub{color:var(--dim);font-size:12.5px;margin-top:3px;max-width:56ch}
-.back{margin-left:auto;font-size:12px;color:var(--mut);text-decoration:none;
+.tabs{margin-left:auto;display:inline-flex;gap:2px;padding:2px;
+  border:1px solid var(--bd);border-radius:10px}
+.tab{font-size:12px;color:var(--dim);text-decoration:none;padding:5px 11px;
+  border-radius:8px}
+.tab:hover{color:var(--tx)}
+.tab.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
+.back{font-size:12px;color:var(--mut);text-decoration:none;
   border:1px solid var(--bd);border-radius:8px;padding:6px 11px}
 .back:hover{color:var(--tx);border-color:rgba(130,140,150,.3)}
 /* ── the measurement ── */
@@ -562,15 +578,14 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   border-color .12s ease}}
 </style></head><body><div class="wrap">
 <header>
-  <div><h1>Dogs the gate threw away</h1>
-    <div class="sub">Flag anything that is a dog. Below a score of 0.5 the
-      gate rejected it, so a flag there is a dog that is gone from everything
-      downstream. Above 0.5 it kept it, and a flag just says it was right.</div></div>
+  <div><h1>__H1__</h1>
+    <div class="sub">__SUB__</div></div>
+  <span class="tabs">__TABS__</span>
   <a class="back" href="/">&larr; dashboard</a>
 </header>
 
 <div class="meas">
-  <div><div class="mlab">dogs it threw away</div>
+  <div><div class="mlab">__MISSLAB__</div>
     <div class="mbig" id="rate">&mdash;</div>
     <div class="mci" id="ci">nothing flagged yet</div></div>
   <div><div class="mlab">you have flagged</div>
@@ -595,8 +610,8 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
     </select></label>
   <label class="pick">draw from
     <select id="bandsel">
-      <option value="rejected">below 0.5 &mdash; what it rejected</option>
-      <option value="kept">0.5 and up &mdash; what it kept</option>
+      <option value="rejected">below 0.5 &mdash; __BELOWTXT__</option>
+      <option value="kept">0.5 and up &mdash; __ABOVETXT__</option>
       <option value="all">every band</option>
     </select></label>
   <button class="btn" id="fresh">&#8635; draw a new page</button>
@@ -605,7 +620,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 <div class="grid" id="grid"></div>
 <div class="empty" id="empty" hidden></div>
 <div class="keys">
-  <kbd>F</kbd> it&rsquo;s a dog &nbsp; <kbd>2</kbd> not a dog &nbsp;
+  <kbd>F</kbd> __YESTXT__ &nbsp; <kbd>2</kbd> __NOTXT__ &nbsp;
   <kbd>3</kbd> unsure &nbsp; <kbd>U</kbd> undo &nbsp;
   <kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;
   <kbd>Enter</kbd> enlarge &nbsp; <kbd>N</kbd> next page
@@ -622,7 +637,8 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 <div class="undotoast" id="undotoast" hidden></div>
 
 <script>
-var BANDS=__BANDS__;
+var BANDS=__BANDS__,STAGE=__STAGE__,POS=__POS__,NEG=__NEG__,
+    YES=__YES__,NO=__NO__,BELOW=__BELOW__,ABOVE=__ABOVE__;
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
     lbimg=document.getElementById('lbimg'),lbtxt=document.getElementById('lbtxt');
@@ -641,8 +657,7 @@ function pctTxt(v){return (v*100).toFixed(1)+'%'}
 function bandName(b){
   if(typeof b==='number'&&BANDS[b])
     return BANDS[b][0].toFixed(1)+'–'+BANDS[b][1].toFixed(1);
-  return b==='kept'?'what it kept'
-    : b==='all'?'every band' : 'what it rejected';
+  return b==='kept'?ABOVE : b==='all'?'every band' : BELOW;
 }
 function fmtn(n){return (n||0).toLocaleString('en-US')}
 
@@ -651,8 +666,8 @@ function fmtn(n){return (n||0).toLocaleString('en-US')}
    must never wait on a round trip, and the ledger is append-only so a lost
    response costs one line, not the page. */
 var lastUndo=null,toastT=null;
-var VERDICT_TEXT={dog:'Flagged as a dog',not_dog:'Not a dog',
-                  unsure:'Left as unsure'};
+var VERDICT_TEXT={};VERDICT_TEXT[POS]='Flagged \u2014 '+YES;
+VERDICT_TEXT[NEG]=NO;VERDICT_TEXT.unsure='Left as unsure';
 function judge(i,verdict){
   if(i<0)return;
   var it=page.items[i]; if(!it)return;
@@ -669,7 +684,7 @@ function judge(i,verdict){
   send(it.key,verdict,it);
 }
 function send(key,verdict,it){
-  fetch('/api/audit/verdict',{method:'POST',
+  fetch('/api/audit/verdict?stage='+STAGE,{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({key:key,verdict:verdict,band:it?it.band:null,
                          p_dog:it?it.p_dog:null,seq:it?it.seq:null})})
@@ -766,8 +781,8 @@ function render(){
         ' for dog; band '+lo.toFixed(1)+'-'+hi.toFixed(1)+'">'+
         it.p_dog.toFixed(3)+'</span></div>'+
       '<div class="acts">'+
-        '<button class="act m" data-v="dog" data-i="'+i+'">&#9873; it\u2019s a dog</button>'+
-        '<button class="act c" data-v="not_dog" data-i="'+i+'">not a dog</button>'+
+        '<button class="act m" data-v="'+POS+'" data-i="'+i+'">&#9873; '+YES+'</button>'+
+        '<button class="act c" data-v="'+NEG+'" data-i="'+i+'">'+NO+'</button>'+
         '<button class="act u" data-v="unsure" data-i="'+i+'" title="cannot tell">?</button>'+
       '</div></div>';
   }).join('');
@@ -798,7 +813,7 @@ function show(doc,at,tot){
 }
 function load(at){
   busy=true;setPos();
-  fetch('/api/audit/page?i='+at+'&n='+size+
+  fetch('/api/audit/page?stage='+STAGE+'&i='+at+'&n='+size+
         (band==null?'':'&band='+encodeURIComponent(band))).then(function(r){return r.json()})
     .then(function(j){busy=false;if(!j||j.error){toast(j&&j.error||'failed');setPos();return}
       show(j.page,j.index,j.total)})
@@ -807,7 +822,7 @@ function load(at){
 function draw(){
   busy=true;setPos();
   document.getElementById('fresh').textContent='cutting…';
-  fetch('/api/audit/draw',{method:'POST',
+  fetch('/api/audit/draw?stage='+STAGE,{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({band:band,n:size})})
     .then(function(r){return r.json()})
@@ -820,7 +835,7 @@ function draw(){
       toast('failed');setPos()});
 }
 function loadStats(){
-  fetch('/api/audit/stats').then(function(r){return r.json()}).then(paintStats)
+  fetch('/api/audit/stats?stage='+STAGE).then(function(r){return r.json()}).then(paintStats)
     .catch(function(){});
 }
 function paintStats(s){
@@ -829,7 +844,7 @@ function paintStats(s){
       rej=s.rejected||{},kept=s.kept||{};
   document.getElementById('judged').textContent=fmtn(s.judged||0);
   document.getElementById('found').textContent=
-    (rej.wrong||0)+' flagged below 0.5';
+    (rej.wrong||0)+' the model got wrong below 0.5';
   /* The headline is the one number the page exists to produce: how many dogs
      the gate threw away. It used to read "missed dogs 100.0% -- 3,945,390
      dogs across 3,945,390 rejected boxes", which is what a rate of 1.0 off
@@ -838,7 +853,7 @@ function paintStats(s){
      extrapolation is only shown once there is enough behind it to mean
      anything, and it is always written as a range. */
   if(!rej.judged){r.textContent='—';
-    ci.textContent='flag a dog below 0.5 and this starts counting'}
+    ci.textContent='judge some crops below 0.5 and this starts counting'}
   else{
     r.textContent=pctTxt(rej.rate||0);
     var lo=0,hi=0,any=false;
@@ -906,26 +921,26 @@ for(var bi=0;bi<BANDS.length;bi++){
    re-picking the page size after every reload is a small tax on the only
    thing this page is for. */
 try{
-  var sv=localStorage.getItem('sdAuditSize');
+  var sv=localStorage.getItem('sdAuditSize:'+STAGE);
   if(sv&&/^(25|50|75|100)$/.test(sv))sizeSel.value=sv;
-  var bv=localStorage.getItem('sdAuditBand');
+  var bv=localStorage.getItem('sdAuditBand:'+STAGE);
   if(bv==='rejected'||bv==='kept'||bv==='all'){band=bv;bandSel.value=bv}
   else if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length){band=+bv;bandSel.value=bv}
 }catch(_){}
 size=+sizeSel.value||25;
 sizeSel.addEventListener('change',function(){
   size=+sizeSel.value||25;dirty=true;
-  try{localStorage.setItem('sdAuditSize',String(size))}catch(_){}
+  try{localStorage.setItem('sdAuditSize:'+STAGE,String(size))}catch(_){}
   toast(size+' crops on the next page');
 });
 bandSel.addEventListener('change',function(){
   band=/^\d+$/.test(bandSel.value)?+bandSel.value:bandSel.value;dirty=true;
-  try{localStorage.setItem('sdAuditBand',bandSel.value)}catch(_){}
+  try{localStorage.setItem('sdAuditBand:'+STAGE,bandSel.value)}catch(_){}
   toast(band==='all'?'drawing from every band'
     :typeof band==='number'
       ?'drawing from '+BANDS[band][0].toFixed(1)+'–'+BANDS[band][1].toFixed(1)+' only'
-      :band==='rejected'?'drawing from what the gate rejected'
-      :'drawing from what the gate kept');
+      :band==='rejected'?'drawing from '+BELOW
+      :'drawing from '+ABOVE);
 });
 /* Changing the score band or the page size is an instruction about what to
    show NEXT. Paging on regardless would hand back a page drawn under the old
@@ -942,7 +957,7 @@ document.getElementById('fresh').addEventListener('click',draw);
 /* lightbox */
 function zoom(i){
   var it=page&&page.items[i]; if(!it)return;
-  cur=i;lbimg.src='/audit/crop/'+it.key.replace('#','_')+'.jpg';
+  cur=i;lbimg.src='/audit/crop/'+STAGE+'/'+it.key.replace('#','_')+'.jpg';
   lbtxt.textContent=it.image_id+' · box '+it.det_idx+' · scored '+
     it.p_dog.toFixed(3)+' · '+it.drive;
   lb.hidden=false;
@@ -972,8 +987,8 @@ document.addEventListener('keydown',function(e){
   var t=e.target&&e.target.tagName;
   if(t==='SELECT'||t==='INPUT'||t==='TEXTAREA')return;
   if(!lb.hidden){if(e.key==='Escape'){lb.hidden=true;e.preventDefault()}return}
-  if(e.key==='1'||e.key==='f'||e.key==='F'){judge(cur,'dog');e.preventDefault()}
-  else if(e.key==='2'){judge(cur,'not_dog');e.preventDefault()}
+  if(e.key==='1'||e.key==='f'||e.key==='F'){judge(cur,POS);e.preventDefault()}
+  else if(e.key==='2'){judge(cur,NEG);e.preventDefault()}
   else if(e.key==='3'){judge(cur,'unsure');e.preventDefault()}
   else if(e.key==='u'||e.key==='U'){undoLast();e.preventDefault()}
   else if(e.key==='ArrowRight'){move(1);e.preventDefault()}
@@ -983,7 +998,7 @@ document.addEventListener('keydown',function(e){
     if(idx+1<total)load(idx+1);else draw();e.preventDefault()}
 });
 /* boot: the last page if there is one, otherwise an invitation */
-fetch('/api/audit/page?i=-1&n='+size+
+fetch('/api/audit/page?stage='+STAGE+'&i=-1&n='+size+
       (band==null?'':'&band='+encodeURIComponent(band))).then(function(r){return r.json()})
   .then(function(j){
     if(j&&j.page)show(j.page,j.index,j.total);
@@ -992,7 +1007,47 @@ fetch('/api/audit/page?i=-1&n='+size+
   }).catch(function(){loadStats()});
 </script></body></html>
 """
-AUDIT_HTML = AUDIT_HTML.replace('__BANDS__', json.dumps(fa.BANDS))
+_TEMPLATE = AUDIT_HTML
+
+
+def page_html(stage=DEFAULT_STAGE):
+    """The page, with this stage's words in it.
+
+    One template, because the two audits differ in vocabulary and in nothing
+    else -- same grid, same keys, same undo. A second copy would be a second
+    place to fix every bug found in the first.
+    """
+    sp = fa.spec(stage)
+    tabs = ''.join(
+        f'<a class="tab{" on" if k == stage else ""}" '
+        f'href="/audit{"" if k == fa.DEFAULT_STAGE else "/" + k}">'
+        f'{v["title"]}</a>' for k, v in fa.STAGES.items())
+    if sp['asymmetric']:
+        sub = (f'{sp["asks"]} Below a score of 0.5 the model said no, so a '
+               f'yes there is a {sp["positive"]} it threw away and nothing '
+               f'downstream will ever see. Above 0.5 it said yes already.')
+        h1 = sp['miss'].capitalize()
+    else:
+        sub = (f'{sp["asks"]} Both of this model\'s mistakes cost the same, '
+               f'which is why it was promoted on balanced accuracy \u2014 so '
+               f'read the two sides of 0.5 together, not one as the error.')
+        h1 = f'Where the {sp["title"]} is wrong'
+    out = _TEMPLATE
+    for k, v in (('__BANDS__', json.dumps(fa.BANDS)),
+                 ('__STAGE__', json.dumps(stage)),
+                 ('__POS__', json.dumps(sp['positive'])),
+                 ('__NEG__', json.dumps(sp['negative'])),
+                 ('__YES__', json.dumps(sp['yes'])),
+                 ('__NO__', json.dumps(sp['no'])),
+                 ('__BELOW__', json.dumps(sp['below'])),
+                 ('__ABOVE__', json.dumps(sp['above'])),
+                 ('__YESTXT__', sp['yes']), ('__NOTXT__', sp['no']),
+                 ('__BELOWTXT__', sp['below']),
+                 ('__ABOVETXT__', sp['above']),
+                 ('__MISSLAB__', sp['miss']),
+                 ('__H1__', h1), ('__SUB__', sub), ('__TABS__', tabs)):
+        out = out.replace(k, v)
+    return out
 
 
 # ── prefetch ────────────────────────────────────────────────────────────────
@@ -1000,25 +1055,25 @@ AUDIT_HTML = AUDIT_HTML.replace('__BANDS__', json.dumps(fa.BANDS))
 # Warm that is under a second; cold it is twenty, and twenty seconds after
 # pressing Next is long enough to wonder whether the button worked. So the
 # page after the one being read is drawn in the background while it is read.
-_PREFETCH = {'thread': None}
+_PREFETCH = {}
 
 
-def prefetch(band=None, n=25):
+def prefetch(band=None, n=25, stage=DEFAULT_STAGE):
     """Draw the next page in the background, unless one is already coming."""
-    t = _PREFETCH.get('thread')
+    t = _PREFETCH.get(stage)
     if t is not None and t.is_alive():
         return
     def go():
         try:
-            draw_page(n=n, band=band)
+            draw_page(n=n, band=band, stage=stage)
         except Exception:
             pass
     t = threading.Thread(target=go, daemon=True)
-    _PREFETCH['thread'] = t
+    _PREFETCH[stage] = t
     t.start()
 
 
-def with_verdicts(doc):
+def with_verdicts(doc, stage=DEFAULT_STAGE):
     """Stamp each item with the answer already on record for it.
 
     A page document is the draw, not the judging, so paging back to one
@@ -1027,7 +1082,7 @@ def with_verdicts(doc):
     """
     if not doc or not doc.get('items'):
         return doc
-    seen = {v['key']: v.get('verdict') for v in fa.read_verdicts()}
+    seen = {v['key']: v.get('verdict') for v in fa.read_verdicts(stage=stage)}
     for it in doc['items']:
         v = seen.get(it['key'])
         if v:
@@ -1064,28 +1119,28 @@ def page_size(v, default=25):
     return v if v in PAGE_SIZES else default
 
 
-def api_page(i, n=25, band=None):
+def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):
     """One page by index; -1 means the most recent. Draws if there are none."""
-    total = page_count()
+    total = page_count(stage)
     if total == 0:
-        doc = draw_page(n=n, band=band)
-        return {'page': with_verdicts(doc), 'index': doc.get('index', 0),
-                'total': max(1, page_count())}
+        doc = draw_page(n=n, band=band, stage=stage)
+        return {'page': with_verdicts(doc, stage), 'index': doc.get('index', 0),
+                'total': max(1, page_count(stage))}
     if i is None or int(i) < 0:
         i = total - 1
     i = max(0, min(total - 1, int(i)))
-    doc = get_page(i)
+    doc = get_page(i, stage)
     if doc is None:
         return {'error': f'page {i} is missing'}
     if i >= total - 1:
-        prefetch(band=band, n=n)      # reading the last one: line up another
-    return {'page': with_verdicts(doc), 'index': i, 'total': total}
+        prefetch(band=band, n=n, stage=stage)   # line up the next one
+    return {'page': with_verdicts(doc, stage), 'index': i, 'total': total}
 
 
-def api_draw(n=25, band=None):
-    doc = draw_page(n=n, band=band)
-    total = max(1, page_count())
+def api_draw(n=25, band=None, stage=DEFAULT_STAGE):
+    doc = draw_page(n=n, band=band, stage=stage)
+    total = max(1, page_count(stage))
     if doc.get('items'):
-        prefetch(band=band, n=n)
-    return {'page': with_verdicts(doc), 'index': doc.get('index', total - 1),
-            'total': total}
+        prefetch(band=band, n=n, stage=stage)
+    return {'page': with_verdicts(doc, stage),
+            'index': doc.get('index', total - 1), 'total': total}

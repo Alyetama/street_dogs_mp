@@ -206,17 +206,27 @@ def isolation_checks(bad):
     def quiet_export():
         """export() reports what it wrote; a guard's output is its own."""
         with contextlib.redirect_stdout(io.StringIO()):
-            fa.export(types.SimpleNamespace(model='dogbin_008'))
-    o_v, o_full, o_ds = fa.VERDICTS, fa.OUT_DIR, fa.DATASET
-    fa.VERDICTS = os.path.join(tmp, 'v.jsonl')
-    fa.OUT_DIR = tmp
-    fa.DATASET = os.path.join(tmp, 'ds')
+            fa.export(types.SimpleNamespace(model='dogbin_008',
+                                            stage='gate'))
+    # every path this stage owns, redirected in one place -- the module no
+    # longer keeps them as globals because two audits share the process
+    real_paths = fa.paths
+    lay = dict(real_paths('gate'))
+    lay.update(out=tmp, verdicts=os.path.join(tmp, 'v.jsonl'),
+               drawn=os.path.join(tmp, 'drawn.jsonl'),
+               full=os.path.join(tmp, 'full'),
+               crops=os.path.join(tmp, 'crops'),
+               pages=os.path.join(tmp, 'pages'),
+               dataset=os.path.join(tmp, 'ds'))
+    fa.paths = lambda stage='gate': lay
+    for c in ('dog', 'not_dog'):
+        os.makedirs(os.path.join(lay['dataset'], c), exist_ok=True)
     try:
         full = os.path.join(tmp, 'full')
         os.makedirs(full, exist_ok=True)
         for k in ('1_0', '2_0', '3_0', '4_0'):
             open(os.path.join(full, k + '.jpg'), 'wb').close()
-        with open(fa.VERDICTS, 'w') as fh:
+        with open(lay['verdicts'], 'w') as fh:
             for key, v in (('1#0', 'missed'), ('2#0', 'correct'),
                            ('3#0', 'unsure')):
                 fh.write(json.dumps({'key': key, 'verdict': v,
@@ -224,14 +234,15 @@ def isolation_checks(bad):
             # 4#0 is in the pool and the gate called it not_dog -- and no
             # human has looked at it. It must not appear anywhere.
         quiet_export()
-        got = {c: sorted(os.listdir(os.path.join(fa.DATASET, c)))
+        got = {c: sorted(os.listdir(os.path.join(lay['dataset'], c)))
                for c in ('dog', 'not_dog')}
         if got != {'dog': ['1_0.jpg'], 'not_dog': ['2_0.jpg']}:
             bad.append(f'the export wrote {got}; only the human verdicts '
                        f'belong -- "missed" is a dog, "correct" is a not_dog, '
                        f'"unsure" is neither, and an unjudged box is nothing')
         man = [json.loads(x) for x in
-               open(os.path.join(fa.DATASET, 'manifest.jsonl')) if x.strip()]
+               open(os.path.join(lay['dataset'], 'manifest.jsonl'))
+               if x.strip()]
         if len(man) != 2:
             bad.append(f'{len(man)} manifest rows for 2 judged crops')
         if any(not r.get('sequence') for r in man):
@@ -242,24 +253,25 @@ def isolation_checks(bad):
             bad.append(f'a manifest row carries a verdict no human gave: '
                        f'{[r.get("verdict") for r in man]}')
         # changing your mind moves the file rather than leaving both
-        with open(fa.VERDICTS, 'a') as fh:
+        with open(lay['verdicts'], 'a') as fh:
             fh.write(json.dumps({'key': '1#0', 'verdict': 'correct',
                                  'seq': 's1'}) + '\n')
         quiet_export()
-        got = {c: sorted(os.listdir(os.path.join(fa.DATASET, c)))
+        got = {c: sorted(os.listdir(os.path.join(lay['dataset'], c)))
                for c in ('dog', 'not_dog')}
         if got != {'dog': [], 'not_dog': ['1_0.jpg', '2_0.jpg']}:
             bad.append(f'a changed verdict left the old label behind: {got}')
-        if not os.path.exists(os.path.join(fa.DATASET, 'README.md')):
+        if not os.path.exists(os.path.join(lay['dataset'], 'README.md')):
             bad.append('the dataset ships without the note saying it is a '
                        'stratified sample of one model\'s rejections')
     finally:
-        fa.VERDICTS, fa.OUT_DIR, fa.DATASET = o_v, o_full, o_ds
+        fa.paths = real_paths
     # only human verdicts are labels at all
-    for v in fa.CLASS_OF:
-        if v not in audit.VERDICTS:
-            bad.append(f'{v!r} is mapped to a class but is not something a '
-                       f'person can answer')
+    for name, sp in fa.STAGES.items():
+        for v in (sp['positive'], sp['negative']):
+            if v not in sp['answers']:
+                bad.append(f'{name}: {v!r} is a class but not something a '
+                           f'person can answer')
     # A person's answers are now the same two words the model uses, so the
     # separation cannot be a vocabulary check any more -- and it never really
     # was one. It is structural: the pool the page serves from carries the
@@ -268,7 +280,8 @@ def isolation_checks(bad):
     try:
         import duckdb
         cols = [r[0] for r in duckdb.connect().execute(
-            f"DESCRIBE SELECT * FROM read_parquet('{fa.POOL}') LIMIT 1"
+            f"DESCRIBE SELECT * FROM read_parquet("
+            f"'{real_paths('gate')['pool']}') LIMIT 1"
         ).fetchall()]
         if 'label' in cols:
             bad.append("the pool carries the gate's own label — the one thing "
@@ -282,7 +295,7 @@ def isolation_checks(bad):
     # and the ledger has exactly one writer
     asrc = open(os.path.join(REPO, 'tools', 'dashboard', 'audit.py')).read()
     writers = [ln for ln in asrc.splitlines()
-               if 'fa.VERDICTS' in ln and 'open(' in ln]
+               if "pp['verdicts']" in ln and 'open(' in ln]
     if len(writers) != 1:
         bad.append(f'the verdict ledger has {len(writers)} writers; it must '
                    f'have exactly one, so every line in it came through the '
@@ -315,22 +328,28 @@ def concurrency_checks(bad):
         import audit
     except Exception:
         return
-    if audit._DRAW_LOCK is audit._LEDGER_LOCK:
+    draw_lock, ledger_lock = audit._locks('gate')
+    if draw_lock is ledger_lock:
         bad.append('drawing and recording share one lock — a verdict waits '
                    'for a page to finish cutting')
     real = audit.materialise
-    audit.materialise = lambda c, workers=8: (_t.sleep(0.6), c)[1]
+    audit.materialise = (lambda c, workers=8, stage='gate':
+                         (_t.sleep(0.6), c)[1])
     orig_sample, orig_pc = audit.sample, audit.page_count
-    audit.sample = lambda n=24, band=None, seed=None: [
+    audit.sample = lambda n=25, band=None, seed=None, stage='gate': [
         {'key': 'z#0', 'seq': 'zz', 'image_id': 'z', 'det_idx': 0,
          'p_dog': 0.1, 'conf': 0.5, 'band': 1, 'drive': 'd', 'cell': 'c'}]
     try:
         import tempfile as _tf
         tmp = _tf.mkdtemp()
-        o_pages, o_drawn, o_v = audit.PAGES, audit.DRAWN, audit.fa.VERDICTS
-        audit.PAGES = os.path.join(tmp, 'pages')
-        audit.DRAWN = os.path.join(tmp, 'drawn.jsonl')
-        audit.fa.VERDICTS = os.path.join(tmp, 'v.jsonl')
+        real_paths = audit.fa.paths
+        lay = dict(real_paths('gate'))
+        lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
+                   drawn=os.path.join(tmp, 'drawn.jsonl'),
+                   verdicts=os.path.join(tmp, 'v.jsonl'),
+                   full=os.path.join(tmp, 'full'),
+                   dataset=os.path.join(tmp, 'ds'))
+        audit.fa.paths = lambda stage='gate': lay
         t = threading.Thread(target=lambda: audit.draw_page(n=1), daemon=True)
         t.start()
         _t.sleep(0.15)
@@ -344,7 +363,10 @@ def concurrency_checks(bad):
     finally:
         audit.materialise, audit.sample, audit.page_count = (
             real, orig_sample, orig_pc)
-        audit.PAGES, audit.DRAWN, audit.fa.VERDICTS = o_pages, o_drawn, o_v
+        try:
+            audit.fa.paths = real_paths
+        except NameError:
+            pass
 
 
 def persistence_checks(bad):
@@ -361,10 +383,12 @@ def persistence_checks(bad):
     doc = {'index': 0, 'items': [{'key': 'a#0'}, {'key': 'b#1'}]}
     import tempfile as _tf
     tmp = _tf.mkdtemp()
-    o = audit.fa.VERDICTS
-    audit.fa.VERDICTS = os.path.join(tmp, 'v.jsonl')
+    real_paths = audit.fa.paths
+    lay = dict(real_paths('gate'))
+    lay['verdicts'] = os.path.join(tmp, 'v.jsonl')
+    audit.fa.paths = lambda stage='gate': lay
     try:
-        with open(audit.fa.VERDICTS, 'w') as fh:
+        with open(lay['verdicts'], 'w') as fh:
             fh.write(json.dumps({'key': 'a#0', 'verdict': 'missed'}) + '\n')
         got = audit.with_verdicts(json.loads(json.dumps(doc)))
         if got['items'][0].get('verdict') != 'missed':
@@ -373,7 +397,7 @@ def persistence_checks(bad):
         if 'verdict' in got['items'][1]:
             bad.append('an unjudged box came back with a verdict')
     finally:
-        audit.fa.VERDICTS = o
+        audit.fa.paths = real_paths
 
 
 def selection_checks(bad):
@@ -389,10 +413,12 @@ def selection_checks(bad):
         return
     seen = {}
     real = audit.prefetch
-    audit.prefetch = lambda band=None, n=25: seen.update(band=band, n=n)
+    audit.prefetch = (lambda band=None, n=25, stage='gate':
+                      seen.update(band=band, n=n))
     real_get, real_count = audit.get_page, audit.page_count
-    audit.get_page = lambda i: {'index': i, 'items': [], 'band': 4, 'n': 50}
-    audit.page_count = lambda: 3
+    audit.get_page = lambda i, stage='gate': {'index': i, 'items': [],
+                                              'band': 4, 'n': 50}
+    audit.page_count = lambda stage='gate': 3
     try:
         audit.api_page(2, n=50, band=4)
         if seen.get('band') != 4 or seen.get('n') != 50:
@@ -437,7 +463,9 @@ def page_checks(bad):
         import audit
     except Exception:
         return
-    html = audit.AUDIT_HTML
+    # the built page for a stage, not the template -- the template still has
+    # its placeholders in and would throw ReferenceError on the first line
+    html = audit.page_html('gate')
     script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
     probe = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          'audit_page_stub.js')
@@ -562,8 +590,72 @@ chk(/every one has been shown/i.test(els.empty.textContent),
 """
 
 
+def stage_checks(bad):
+    """Two audits, one code path, and no way for either to touch the other.
+
+    They differ in vocabulary and in nothing else, so the danger is not that
+    one breaks -- it is that one writes into the other. Every path either owns
+    must be its own, and a word from one must be refused by the other.
+    """
+    import fn_audit as fa
+    try:
+        import audit
+    except Exception:
+        return
+    import gate_store as gs
+    seen = {}
+    for name, sp in fa.STAGES.items():
+        pp = fa.paths(name)
+        for k, v in pp.items():
+            if seen.setdefault((k, v), name) != name:
+                bad.append(f'stages {seen[(k, v)]} and {name} share {k}: {v} '
+                           f'— one audit would write into the other')
+        # the shards it reads are the stage's own, and the runner agrees
+        # about where they live and what the score column is called
+        run = gs.STAGES.get(name)
+        if not run:
+            bad.append(f'the audit knows a {name!r} stage the runner cannot '
+                       f'produce')
+            continue
+        if sp['dir'] != run['dir']:
+            bad.append(f'{name}: audit reads data/{sp["dir"]}, runner writes '
+                       f'data/{run["dir"]}')
+        if sp['p_col'] != run['p_col']:
+            bad.append(f'{name}: audit bands on {sp["p_col"]}, runner writes '
+                       f'{run["p_col"]} — the pool would be all nulls')
+        if sorted(sp['answers'][:2]) != sorted(run['classes']):
+            bad.append(f'{name}: a person may answer {sp["answers"][:2]} but '
+                       f'the model classifies {run["classes"]}')
+        if sp['positive'] != run['positive']:
+            bad.append(f'{name}: the score predicts {run["positive"]} and the '
+                       f'audit calls {sp["positive"]} the positive')
+    # a word from one audit is not a verdict in the other
+    for name, sp in fa.STAGES.items():
+        for other, osp in fa.STAGES.items():
+            if other == name:
+                continue
+            for w in osp['answers'][:2]:
+                if w in sp['answers'] or w in sp['legacy']:
+                    continue
+                if fa.verdict_of(w, name) is not None:
+                    bad.append(f'{name} accepted {w!r}, which is '
+                               f'{other}\'s vocabulary')
+    # and the page is built per stage, with nothing left unsubstituted
+    for name in fa.STAGES:
+        html = audit.page_html(name)
+        if '__' in html.replace('__', '', 0) and '__H1__' in html:
+            bad.append(f'{name} page has unsubstituted placeholders')
+        for tok in ('__BANDS__', '__STAGE__', '__POS__', '__H1__'):
+            if tok in html:
+                bad.append(f'{name} page still contains {tok}')
+        if f'"{name}"' not in html:
+            bad.append(f'{name} page does not tell its script which stage '
+                       f'it is')
+
+
 def main():
     bad = []
+    stage_checks(bad)
     for fn in (band_checks, wilson_checks, weighting_checks, ledger_checks,
                serving_checks, isolation_checks, concurrency_checks,
                persistence_checks, selection_checks, page_checks):

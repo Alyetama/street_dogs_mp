@@ -9374,11 +9374,25 @@ class BoardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _audit_stage(self, q=None):
+        """Which audit a request is for. Unknown names are the default, never
+        a directory: the stage reaches a path."""
+        a = _audit()
+        if a is None:
+            return None
+        p = self.path.split('?', 1)[0]
+        for name in a.STAGES:
+            if p == f'/audit/{name}' or p.startswith(f'/audit/crop/{name}/'):
+                return name
+        v = (q or {}).get('stage', [None])[0]
+        return v if v in a.STAGES else a.DEFAULT_STAGE
+
     def _audit_get(self):
-        """/audit, its crops and its two read endpoints. True if handled."""
+        """The audit pages, their crops and their two read endpoints."""
         path = self.path.split('?', 1)[0]
         a = _audit()
-        if path == '/audit':
+        pages = ['/audit'] + ([f'/audit/{k}' for k in a.STAGES] if a else [])
+        if path in pages:
             if a is None:
                 self._html(b'<!doctype html><meta charset=utf-8>'
                            b'<body style="background:#13151a;color:#98a2ad;'
@@ -9386,13 +9400,28 @@ class BoardHandler(SimpleHTTPRequestHandler):
                            b'The audit pool has not been built yet. Run '
                            b'<code>python tools/detect/fn_audit.py build</code>'
                            b' once, then reload.</body>')
-            else:
-                self._html(a.AUDIT_HTML.encode('utf-8'))
+                return True
+            stage = self._audit_stage()
+            if not a.pool_ready(stage):
+                self._html(
+                    ('<!doctype html><meta charset=utf-8>'
+                     '<body style="background:#13151a;color:#98a2ad;'
+                     'font:14px system-ui;padding:40px;line-height:1.6">'
+                     f'No audit pool for the {a.STAGES[stage]["title"]} yet.'
+                     '<br>Build one from whatever it has judged so far:<br><br>'
+                     f'<code>python tools/detect/fn_audit.py build '
+                     f'--stage {stage}</code></body>').encode('utf-8'))
+                return True
+            self._html(a.page_html(stage).encode('utf-8'))
             return True
         if path.startswith('/audit/crop/') and path.endswith('.jpg'):
+            stage = self._audit_stage()
+            rest = path[len('/audit/crop/'):-4]
+            if a and rest.startswith(stage + '/'):
+                rest = rest[len(stage) + 1:]
             # the key is matched against the shape it is minted in; nothing a
             # client sends is ever joined onto a directory
-            p = a.crop_path(path[len('/audit/crop/'):-4]) if a else None
+            p = a.crop_path(rest, stage) if a else None
             if not p:
                 self.send_error(404)
                 return True
@@ -9410,20 +9439,24 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return True
         if path == '/api/audit/page':
-            if a is None:
+            q = parse_qs(urlparse(self.path).query)
+            stage = self._audit_stage(q)
+            if a is None or not a.pool_ready(stage):
                 self._json({'error': 'pool not built'})
                 return True
-            q = parse_qs(urlparse(self.path).query)
             try:
                 i = int((q.get('i', ['-1'])[0]))
             except ValueError:
                 i = -1
-            self._json(a.api_page(
-                i, n=a.page_size(q.get('n', [None])[0]),
-                band=a.band_arg(q.get('band', [None])[0])))
+            self._json(a.api_page(i, n=a.page_size(q.get('n', [None])[0]),
+                                  band=a.band_arg(q.get('band', [None])[0]),
+                                  stage=stage))
             return True
         if path == '/api/audit/stats':
-            self._json(a.stats() if a else {'judged': 0, 'bands': []})
+            q = parse_qs(urlparse(self.path).query)
+            stage = self._audit_stage(q)
+            self._json(a.stats(stage) if a and a.pool_ready(stage)
+                       else {'judged': 0, 'bands': []})
             return True
         return False
 
@@ -9722,14 +9755,20 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     self._json({'error': 'the audit pool is not built — run '
                                          'tools/detect/fn_audit.py build'})
                 elif self.path.startswith('/api/audit/draw'):
+                    stage = self._audit_stage(
+                        parse_qs(urlparse(self.path).query))
                     self._json(a.api_draw(
                         n=a.page_size(data.get('n')),
-                        band=a.band_arg(data.get('band'))))
+                        band=a.band_arg(data.get('band')), stage=stage))
                 else:
+                    stage = self._audit_stage(
+                        parse_qs(urlparse(self.path).query))
+                    v = data.get('verdict')
                     self._json(a.record(
-                        data.get('key'), str(data.get('verdict') or ''),
+                        data.get('key'),
+                        None if v is None else str(v),
                         {'band': data.get('band'), 'p_dog': data.get('p_dog'),
-                         'seq': data.get('seq')}))
+                         'seq': data.get('seq')}, stage=stage))
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
             return
@@ -11384,9 +11423,9 @@ outline-offset:2px}
       <div class="dsub">Rejected boxes</div>
       <span class="dcropsub" id="gAuditSub">sample what the gate threw away and
         count what it got wrong</span>
-      <a href="/audit" class="rbtn nav rev" title="judge a stratified sample of
-        rejected boxes — every miss here is a dog nothing downstream will see">
-        &#9873; Audit rejections</a>
+      <a href="/audit" class="rbtn nav rev" id="gAuditLink"
+         title="judge a stratified sample of what this model decided">
+        &#9873; Audit this model</a>
     </div>
   </div>
 </div>
@@ -13004,6 +13043,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
        the run, so it is the one that has to follow the stage */
     var dl=document.getElementById('gDogLbl');
     if(dl)dl.textContent=stage==='leash'?'On a leash':'Called dog';
+    /* each stage audits itself; the link follows the tab rather than always
+       pointing at the gate's */
+    var al=document.getElementById('gAuditLink');
+    if(al)al.href=stage==='leash'?'/audit/leash':'/audit';
     var bs=sw.querySelectorAll('.stagebtn');
     for(var i=0;i<bs.length;i++){
       var on=bs[i].getAttribute('data-stage')===stage;

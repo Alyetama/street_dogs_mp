@@ -43,19 +43,93 @@ import os
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT_DIR = os.path.join(REPO, 'data', 'fn_audit')
-POOL = os.path.join(OUT_DIR, 'pool.parquet')
-VERDICTS = os.path.join(OUT_DIR, 'verdicts.jsonl')
-GATE = os.path.join(REPO, 'data', 'gate')
+
+# One row per model this can audit. The two are the same exercise -- show a
+# person the crop the model saw, ask the question the model was asked, compare
+# -- so they are one code path with a table, not two files that drift.
+#
+# `asymmetric` is the difference that matters to how results are read. A dog
+# the gate throws away is unrecoverable, so its two errors are not worth the
+# same and the headline is about misses. The leash model was promoted on
+# BALANCED accuracy precisely because its two errors DO cost the same, so its
+# headline reports both directions side by side and neither is "the" error.
+STAGES = {
+    'gate': {
+        'dir': 'gate', 'p_col': 'p_dog',
+        'answers': ('dog', 'not_dog', 'unsure'),
+        'positive': 'dog', 'negative': 'not_dog',
+        'audit_dir': 'fn_audit', 'dataset': 'audit_finds',
+        'title': 'dog-bin gate', 'model': 'dogbin_008',
+        'asks': 'Is this a dog?',
+        'yes': 'it\u2019s a dog', 'no': 'not a dog',
+        'asymmetric': True,
+        # what the score below the threshold means, in one phrase
+        'below': 'what it rejected', 'above': 'what it kept',
+        'miss': 'dogs it threw away',
+        'legacy': {'missed': 'dog', 'correct': 'not_dog'},
+    },
+    'leash': {
+        'dir': 'leash', 'p_col': 'p_leashed',
+        'answers': ('leashed', 'unleashed', 'unsure'),
+        'positive': 'leashed', 'negative': 'unleashed',
+        'audit_dir': 'leash_audit', 'dataset': 'audit_finds_leash',
+        'title': 'leash model', 'model': 'leash_v2_001',
+        'asks': 'Is this dog on a lead?',
+        'yes': 'on a lead', 'no': 'loose',
+        'asymmetric': False,
+        'below': 'called it loose', 'above': 'called it leashed',
+        'miss': 'leashed dogs called loose',
+        'legacy': {},
+    },
+}
+DEFAULT_STAGE = 'gate'
+
+
+def spec(stage=DEFAULT_STAGE):
+    if stage not in STAGES:
+        raise KeyError(f'unknown audit stage {stage!r}')
+    return STAGES[stage]
+
+
+def paths(stage=DEFAULT_STAGE):
+    """Every file this stage owns.
+
+    Computed, never module state: one dashboard process serves both audits and
+    two requests can be in flight at once, so a `use(stage)` global -- which is
+    what the runner does, where a process is one stage from start to exit --
+    would have one page writing into the other's ledger.
+    """
+    sp = spec(stage)
+    out = os.path.join(REPO, 'data', sp['audit_dir'])
+    return {
+        'out': out,
+        'pool': os.path.join(out, 'pool.parquet'),
+        'verdicts': os.path.join(out, 'verdicts.jsonl'),
+        'drawn': os.path.join(out, 'drawn.jsonl'),
+        'crops': os.path.join(out, 'crops'),
+        'full': os.path.join(out, 'full'),
+        'pages': os.path.join(out, 'pages'),
+        'dataset': os.path.join(REPO, 'data', sp['dataset']),
+        'store': os.path.join(REPO, 'data', sp['dir']),
+        'shards': os.path.join(REPO, 'data', sp['dir'],
+                               f"{sp['dir']}-*.parquet"),
+        'work': os.path.join(REPO, 'data', sp['dir'], 'work.parquet'),
+    }
+
+
+# kept so the older module-level names still resolve; both name the gate
+OUT_DIR = paths()['out']
+POOL = paths()['pool']
+VERDICTS = paths()['verdicts']
+GATE = paths()['store']
 
 # The whole score range, in tenths. It used to stop at 0.5 because the pool
 # held only rejections, and a rejected box cannot score above the threshold
 # that rejected it -- so half the axis was missing and there was no way to ask
-# whether what the gate KEPT was any good either.
+# whether what the model KEPT was any good either.
 BANDS = [(round(i / 10, 1), round((i + 1) / 10, 1)) for i in range(10)]
 BAND_W = BANDS[0][1] - BANDS[0][0]
-# Where the gate itself draws the line. Everything below is something it threw
-# away; everything above is something it kept.
+# Where the model itself draws the line.
 THRESHOLD = 0.5
 
 
@@ -81,6 +155,8 @@ def _roots():
 
 
 def build(args):
+    stage = getattr(args, 'stage', DEFAULT_STAGE)
+    sp, P = spec(stage), paths(stage)
     """Every rejected box, with the geometry to cut it and the sequence it
     belongs to.
 
@@ -88,13 +164,12 @@ def build(args):
     against a 32.5M-row manifest on every page of the audit.
     """
     import duckdb
-    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(P['out'], exist_ok=True)
     con = duckdb.connect()
     con.execute(f"SET memory_limit='{args.memory}'")
-    shards = os.path.join(GATE, 'gate-*.parquet')
-    work = os.path.join(GATE, 'work.parquet')
+    shards, work = P['shards'], P['work']
     if not glob.glob(shards):
-        raise SystemExit('no gate shards -- has the gate run?')
+        raise SystemExit(f"no {sp['title']} shards -- has it run?")
 
     # image_id -> sequence, for the images that carry a rejected box. Read off
     # the harvest manifests, which is where the field lives; the detection
@@ -117,7 +192,7 @@ def build(args):
     # only way the bands above 0.5 exist at all.
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE rejected AS
-        SELECT s.image_id, s.det_idx, s.p_dog
+        SELECT s.image_id, s.det_idx, s.{sp['p_col']} AS p_dog
         FROM read_parquet('{shards}') s
     """)
     con.execute("CREATE OR REPLACE TEMP TABLE need AS "
@@ -152,29 +227,29 @@ def build(args):
             JOIN read_parquet('{work}') w
               ON w.image_id = r.image_id AND w.det_idx = r.det_idx
             LEFT JOIN seqs q ON q.image_id = r.image_id
-        ) TO '{POOL}' (FORMAT PARQUET, COMPRESSION ZSTD)
+        ) TO '{P['pool']}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """)
     n, seqs, unmatched = con.execute(f"""
         SELECT count(*), count(DISTINCT seq),
                sum(CASE WHEN seq LIKE 'img:%' THEN 1 ELSE 0 END)
-        FROM read_parquet('{POOL}')""").fetchone()
+        FROM read_parquet('{P['pool']}')""").fetchone()
     print(f'{n:,} judged boxes across {seqs:,} sequences '
           f'({unmatched:,} had no sequence and stand alone)')
     for i, (lo, hi) in enumerate(BANDS):
         c = con.execute(f"SELECT count(*), count(DISTINCT seq) "
-                        f"FROM read_parquet('{POOL}') WHERE band = {i}"
+                        f"FROM read_parquet('{P['pool']}') WHERE band = {i}"
                         ).fetchone()
-        print(f'  p_dog {lo:.1f}-{hi:.1f}  {c[0]:>10,} boxes  '
-              f'{c[1]:>9,} sequences')
+        print(f"  {sp['p_col']} {lo:.1f}-{hi:.1f}  {c[0]:>10,} boxes  "
+              f"{c[1]:>9,} sequences")
     return 0
 
 
-def band_totals():
+def band_totals(stage=DEFAULT_STAGE):
     """[(lo, hi, boxes)] -- the weights the headline rate needs."""
     try:
         import duckdb
         rows = duckdb.connect().execute(
-            f"SELECT band, count(*) FROM read_parquet('{POOL}') "
+            f"SELECT band, count(*) FROM read_parquet('{paths(stage)['pool']}') "
             f"GROUP BY 1 ORDER BY 1").fetchall()
     except Exception:
         return []
@@ -182,7 +257,7 @@ def band_totals():
     return [(lo, hi, int(got.get(i, 0))) for i, (lo, hi) in enumerate(BANDS)]
 
 
-def read_verdicts(path=None):
+def read_verdicts(path=None, stage=DEFAULT_STAGE):
     """[{key, verdict, band, p_dog, ts}] -- append-only, last write wins.
 
     Keyed on image_id#det_idx so a crop judged twice (reloaded page, changed
@@ -190,7 +265,7 @@ def read_verdicts(path=None):
     """
     out = {}
     try:
-        with open(path or VERDICTS) as fh:
+        with open(path or paths(stage)['verdicts']) as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -232,19 +307,23 @@ def wilson(k, n, z=1.96):
 # error is derived from the model's own score, not from the wording.
 # NOT `VERDICTS` -- that name is already the path to the ledger a few lines
 # up, and reusing it made read_verdicts() open a tuple.
-ANSWERS = ('dog', 'not_dog', 'unsure')
+ANSWERS = STAGES['gate']['answers']
 CLASS_OF = {'dog': 'dog', 'not_dog': 'not_dog'}
-# the ledger predates this; a verdict written under the old vocabulary still
-# reads correctly rather than being dropped
-LEGACY = {'missed': 'dog', 'correct': 'not_dog'}
 
 
-def verdict_of(v):
-    v = LEGACY.get(v, v)
-    return v if v in ANSWERS else None
+def answers(stage=DEFAULT_STAGE):
+    return spec(stage)['answers']
 
 
-def summarise(verdicts=None, totals=None):
+def verdict_of(v, stage=DEFAULT_STAGE):
+    sp = spec(stage)
+    # the gate's ledger predates the current wording; a verdict written as
+    # 'missed' still reads rather than being dropped
+    v = sp['legacy'].get(v, v)
+    return v if v in sp['answers'] else None
+
+
+def summarise(verdicts=None, totals=None, stage=DEFAULT_STAGE):
     """Per band and overall.
 
     Each band reports the share of its crops a person called a dog. Below the
@@ -256,13 +335,15 @@ def summarise(verdicts=None, totals=None):
     put in each; a flat mean over the bands would report the near-threshold
     error rate as if it were the whole store's.
     """
-    vs = read_verdicts() if verdicts is None else verdicts
-    totals = band_totals() if totals is None else totals
+    sp = spec(stage)
+    vs = read_verdicts(stage=stage) if verdicts is None else verdicts
+    totals = band_totals(stage) if totals is None else totals
+    pos, neg = sp['positive'], sp['negative']
     per = []
     for i, (lo, hi) in enumerate(BANDS):
         seen = [v for v in vs if v.get('band') == i
-                and verdict_of(v.get('verdict')) in ('dog', 'not_dog')]
-        k = sum(1 for v in seen if verdict_of(v['verdict']) == 'dog')
+                and verdict_of(v.get('verdict'), stage) in (pos, neg)]
+        k = sum(1 for v in seen if verdict_of(v['verdict'], stage) == pos)
         p, a, b = wilson(k, len(seen))
         boxes = totals[i][2] if i < len(totals) else 0
         per.append({'lo': lo, 'hi': hi, 'judged': len(seen), 'dogs': k,
@@ -294,23 +375,27 @@ def summarise(verdicts=None, totals=None):
             'covered': seen_pop / pop if pop else 0.0,
             'judged': sum(b['judged'] for b in per),
             'wrong': sum(b['wrong'] for b in per),
-            'threshold': THRESHOLD, 'pool': pop}
+            'threshold': THRESHOLD, 'pool': pop, 'stage': stage,
+            'asymmetric': sp['asymmetric'], 'title': sp['title'],
+            'asks': sp['asks'], 'positive': pos, 'negative': neg,
+            'below': sp['below'], 'above': sp['above'], 'miss': sp['miss']}
 
 
 DATASET = os.path.join(REPO, 'data', 'audit_finds')
-README = """# audit_finds
+README = """# audit crops from the {title}
 
-Crops from the audit of the dog-bin gate, laid out for `yolo classify` so they
-can be folded into a dog-bin dataset the same way `data/hard_negatives` and
-`data/hard_positives` are:
+Laid out for `yolo classify` so they can be folded into a training set the
+same way `data/hard_negatives` and `data/hard_positives` are. The question
+asked of every crop was: **{asks}**
 
-    dog/<image_id>_<det_idx>.jpg       a person said this is a dog
-    not_dog/<image_id>_<det_idx>.jpg   a person said it is not
+    {pos}/<image_id>_<det_idx>.jpg     a person answered yes
+    {neg}/<image_id>_<det_idx>.jpg     a person answered no
     manifest.jsonl                     one line per crop, with its sequence
 
 Every file here carries a HUMAN verdict. The model's own label is what put the
 box in front of someone; it is never what is written down. `p_dog` on each row
-is what {model} thought, kept so the disagreements can be found again.
+is what {model} thought, kept so the disagreements can be found again --
+`disagrees: true` marks every row where the person and the model differ.
 
 ## Read this before training on it
 
@@ -333,6 +418,9 @@ Rebuild at any time with:
 
 
 def export(args):
+    stage = getattr(args, 'stage', DEFAULT_STAGE)
+    sp, P = spec(stage), paths(stage)
+    dataset, classes = P['dataset'], (sp['positive'], sp['negative'])
     """Write the dataset from the ledger. Idempotent.
 
     The dashboard already files each crop as it is judged; this rebuilds the
@@ -343,22 +431,22 @@ def export(args):
     one that is a rebuild out of date.
     """
     import shutil
-    full = os.path.join(OUT_DIR, 'full')
+    full = P['full']
     keep = {}
-    for v in read_verdicts():
-        cls = CLASS_OF.get(verdict_of(v.get('verdict')))
-        if cls:
+    for v in read_verdicts(stage=stage):
+        cls = verdict_of(v.get('verdict'), stage)
+        if cls in classes:
             keep[str(v['key']).replace('#', '_') + '.jpg'] = (cls, v)
     placed = missing = removed = 0
-    for cls in ('dog', 'not_dog'):
-        d = os.path.join(DATASET, cls)
+    for cls in classes:
+        d = os.path.join(dataset, cls)
         os.makedirs(d, exist_ok=True)
         for f in os.listdir(d):
             if keep.get(f, (None,))[0] != cls:
                 os.remove(os.path.join(d, f))
                 removed += 1
     for name, (cls, v) in sorted(keep.items()):
-        src, dst = os.path.join(full, name), os.path.join(DATASET, cls, name)
+        src, dst = os.path.join(full, name), os.path.join(dataset, cls, name)
         if not os.path.exists(src):
             missing += 1
             continue
@@ -368,7 +456,7 @@ def export(args):
             except OSError:
                 shutil.copy2(src, dst)
         placed += 1
-    with open(os.path.join(DATASET, 'manifest.jsonl'), 'w') as fh:
+    with open(os.path.join(dataset, 'manifest.jsonl'), 'w') as fh:
         for name, (cls, v) in sorted(keep.items()):
             iid, _, di = name[:-4].rpartition('_')
             fh.write(json.dumps({
@@ -376,25 +464,33 @@ def export(args):
                 'image_id': iid, 'det_idx': int(di) if di.isdigit() else None,
                 # the split column. Never image_id -- see the README.
                 'sequence': v.get('seq'),
-                'verdict': verdict_of(v.get('verdict')),
+                'verdict': verdict_of(v.get('verdict'), stage),
                 'p_dog': v.get('p_dog'), 'band': v.get('band'),
                 # the row's reason for existing: a dog the gate said no to.
                 # Everything downstream wants to weight or filter on this.
-                'false_negative': bool(
-                    cls == 'dog' and v.get('p_dog') is not None
-                    and float(v['p_dog']) < THRESHOLD),
-                'judged_at': v.get('ts'), 'judged_model': args.model}) + '\n')
-    with open(os.path.join(DATASET, 'README.md'), 'w') as fh:
-        fh.write(README.format(model=args.model))
-    n_dog = sum(1 for name, (c, _) in keep.items() if c == 'dog'
-                and os.path.exists(os.path.join(DATASET, 'dog', name)))
-    fn = sum(1 for c, v in keep.values()
-             if c == 'dog' and v.get('p_dog') is not None
-             and float(v['p_dog']) < THRESHOLD)
-    print(f'{placed:,} crops in {os.path.relpath(DATASET, REPO)} '
-          f'({n_dog:,} dog, {placed - n_dog:,} not_dog)')
-    print(f'  {fn:,} of the dogs are FALSE NEGATIVES -- the gate scored them '
-          f'below {THRESHOLD} and a person said dog')
+                # the row's reason for existing: the model and the person
+                # disagreed, and this is the direction of the disagreement
+                'disagrees': bool(
+                    v.get('p_dog') is not None
+                    and ((float(v['p_dog']) >= THRESHOLD)
+                         != (cls == sp['positive']))),
+                'judged_at': v.get('ts'),
+                'judged_model': getattr(args, 'model', None) or sp['model'],
+                'stage': stage}) + '\n')
+    model = getattr(args, 'model', None) or sp['model']
+    with open(os.path.join(dataset, 'README.md'), 'w') as fh:
+        fh.write(README.format(model=model, title=sp['title'],
+                               pos=sp['positive'], neg=sp['negative'],
+                               asks=sp['asks']))
+    n_pos = sum(1 for name, (c, _) in keep.items() if c == sp['positive']
+                and os.path.exists(os.path.join(dataset, sp['positive'], name)))
+    wrong = sum(1 for c, v in keep.values()
+                if v.get('p_dog') is not None
+                and ((float(v['p_dog']) >= THRESHOLD) != (c == sp['positive'])))
+    print(f'{placed:,} crops in {os.path.relpath(dataset, REPO)} '
+          f"({n_pos:,} {sp['positive']}, {placed - n_pos:,} {sp['negative']})")
+    print(f"  {wrong:,} are cases the {sp['title']} got WRONG -- a person "
+          f"disagreed with the side of {THRESHOLD} it put them on")
     if removed:
         print(f'  {removed:,} removed -- the ledger no longer says they '
               f'belong there')
@@ -408,12 +504,14 @@ def export(args):
 
 
 def stats(args):
-    s = summarise()
+    stage = getattr(args, 'stage', DEFAULT_STAGE)
+    s = summarise(stage=stage)
+    sp = spec(stage)
     if not s['judged']:
         print('nothing judged yet')
         return 0
-    print(f"{s['judged']:,} boxes judged; the gate and a person disagreed on "
-          f"{s['wrong']:,}")
+    print(f"{sp['title']}: {s['judged']:,} boxes judged; the model and a "
+          f"person disagreed on {s['wrong']:,}")
     print(f"\n  band        boxes in store   said dog   share [95% interval]")
     for b in s['bands']:
         side = 'kept' if b['kept'] else 'threw away'
@@ -425,11 +523,11 @@ def stats(args):
               f"{b['dogs']:>4}/{b['judged']:<4}  {b['rate']:6.1%} "
               f"[{b['lo95']:.1%}, {b['hi95']:.1%}]  ({side})")
     r, k = s['rejected'], s['kept']
-    print(f"\ndogs the gate threw away : {r['rate']:.2%} of {r['boxes']:,} "
-          f"rejected boxes  (~{int(r['rate'] * r['boxes']):,}), "
+    print(f"\nwrong below {THRESHOLD}: {r['rate']:.2%} of {r['boxes']:,} "
+          f"({sp['below']})  ~{int(r['rate'] * r['boxes']):,}, "
           f"from {r['judged']:,} judged")
-    print(f"not-dogs the gate kept   : {k['rate']:.2%} of {k['boxes']:,} "
-          f"kept boxes      (~{int(k['rate'] * k['boxes']):,}), "
+    print(f"wrong above {THRESHOLD}: {k['rate']:.2%} of {k['boxes']:,} "
+          f"({sp['above']})  ~{int(k['rate'] * k['boxes']):,}, "
           f"from {k['judged']:,} judged")
     return 0
 
@@ -442,10 +540,14 @@ def main(argv=None):
     b.add_argument('--tmp', default='/tmp/fn_audit_spill',
                    help='where duckdb may spill; needs room')
     e = sub.add_parser('export'); e.set_defaults(fn=export)
-    e.add_argument('--model', default='dogbin_008',
+    e.add_argument('--model', default=None,
                    help='which gate these crops were rejected by; recorded '
                         'on every manifest row')
-    s = sub.add_parser('stats'); s.set_defaults(fn=stats)
+    st = sub.add_parser('stats'); st.set_defaults(fn=stats)
+    for sub_p in (b, e, st):
+        sub_p.add_argument('--stage', default=DEFAULT_STAGE,
+                           choices=sorted(STAGES),
+                           help='which model to audit')
     a = ap.parse_args(argv)
     return a.fn(a)
 
