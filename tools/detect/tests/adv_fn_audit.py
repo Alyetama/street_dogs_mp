@@ -557,6 +557,22 @@ chk(/\.acts\{[^}]*position:absolute/.test(PAGE_CSS),
   + 'it — seventy-five buttons where the photographs should be');
 chk(/\.card:hover \.acts/.test(PAGE_CSS),
   'the actions never appear on hover, so the mouse cannot reach them');
+// A control that rides over a PHOTOGRAPH cannot be nearly-opaque. On paper
+// the old label passed at 7.1:1 against its own button -- but the button was
+// 94% opaque, so the real background was that colour blended with whatever
+// the crop showed, and over a bright cobbled street the text vanished.
+var actBg = /\.act\{[^}]*background:([^;}]+)/.exec(PAGE_CSS);
+chk(actBg && !/rgba\([^)]*,\s*0?\.\d+\s*\)/.test(actBg[1]),
+  'the action buttons are translucent (' + (actBg && actBg[1]) +
+  ') — whatever the crop shows comes through the label');
+chk(actBg && !/transparent|none/.test(actBg[1]),
+  'the action buttons have no background at all');
+// and the score must not sit in the same corner the buttons appear in
+var chip = /\.pchip\{[^}]*\}/.exec(PAGE_CSS)[0];
+var acts = /\.acts\{[^}]*\}/.exec(PAGE_CSS)[0];
+chk(!(/bottom:\s*\d/.test(chip) && /bottom:\s*0/.test(acts)),
+  'the score chip and the action row share the bottom of the tile, so the '
+  + 'score shows through the buttons');
 page.items.forEach(function (it) {
   var want = (+it.p_dog >= THRESH) ? POS : NEG;
   chk(predOf(it) === want,

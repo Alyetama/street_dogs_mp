@@ -614,21 +614,34 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   background:rgba(10,12,16,.82);color:var(--mut)}
 .ptag.yes{background:rgba(232,166,69,.16);border-color:rgba(232,166,69,.42);
   color:var(--acc);font-weight:620}
-.pchip{position:absolute;right:6px;bottom:6px;font-size:10.5px;
+/* Top-right, opposite the model's verdict -- the two things the MODEL says
+   read together along the top, and the bottom belongs to what YOU say. It sat
+   bottom-right, in the same corner the buttons appear in, so the score showed
+   through "not a dog" whenever the row came up. */
+.pchip{position:absolute;right:6px;top:6px;font-size:10.5px;
   font-family:var(--num);
-  background:rgba(10,12,16,.82);border:1px solid var(--bd);border-radius:6px;
+  background:rgba(10,12,16,.86);border:1px solid var(--bd);border-radius:6px;
   padding:2px 6px;color:var(--mut);font-variant-numeric:tabular-nums;
   opacity:0;transition:opacity .12s ease}
 .card:hover .pchip,.card:focus-within .pchip,.card.cur .pchip{opacity:1}
+/* The row rides over a PHOTOGRAPH, so it cannot be nearly-opaque and nearly
+   legible: at 94% a bright cobbled street came through 11.5px type and the
+   labels were unreadable on exactly the tiles that most need looking at. The
+   buttons are solid, the gaps are dark rather than light, and a short scrim
+   above them keeps the row from looking pasted onto the frame. */
 .acts{position:absolute;left:0;right:0;bottom:0;display:grid;
-  grid-template-columns:1fr 1fr auto;gap:1px;background:rgba(130,140,150,.14);
+  grid-template-columns:1fr 1fr auto;gap:1px;background:#05070a;
   opacity:0;transform:translateY(4px);pointer-events:none;
   transition:opacity .13s ease,transform .13s ease}
+.acts::before{content:'';position:absolute;left:0;right:0;bottom:100%;
+  height:26px;pointer-events:none;
+  background:linear-gradient(to top,rgba(5,7,10,.92),rgba(5,7,10,0))}
 .card:hover .acts,.card:focus-within .acts,.card.cur .acts{opacity:1;
   transform:none;pointer-events:auto}
-.act{background:rgba(16,19,24,.94);border:0;color:var(--mut);
-  font-family:inherit;font-size:11.5px;padding:9px 4px;cursor:pointer}
-.act:hover{color:var(--tx)}
+.act{background:#12151b;border:0;color:var(--tx);font-family:inherit;
+  font-size:11.5px;font-weight:560;padding:9px 4px;cursor:pointer;
+  letter-spacing:.01em}
+.act:hover{background:#1a1f27}
 .act.m:hover,.act.m.on{background:rgba(232,166,69,.2);color:var(--acc)}
 .act.c:hover,.act.c.on{background:rgba(67,181,129,.18);color:var(--green)}
 .act.u{padding:9px 10px}
