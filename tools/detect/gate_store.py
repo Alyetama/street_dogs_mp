@@ -10,7 +10,7 @@
 
 TWO STAGES, ONE MACHINE. The pipeline narrows: the detector finds ground
 animals, the gate decides which of them are dogs, and the leash model decides
-which of those dogs are on a lead. Each stage reads the one before it, so the
+which of those dogs are on a leash. Each stage reads the one before it, so the
 leash stage judges the gate's dogs and nothing else -- 4.7M boxes become
 ~870K, which is most of why it is a separate pass rather than a second head.
 

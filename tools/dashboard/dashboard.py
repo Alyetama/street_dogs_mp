@@ -1863,7 +1863,7 @@ color:var(--dim);font-variant-numeric:tabular-nums}
 /* two verdicts, side by side and equal weight -- neither is the default, and
    a hairline keeps them from reading as one wide button */
 /* A CONTACT SHEET. At rest a tile is a photograph and one caption line --
-   nothing else. The verdict and lead rows used to be permanent furniture: 94px
+   nothing else. The verdict and leash rows used to be permanent furniture: 94px
    of every 303px tile, identical on all fifty, which is two hundred buttons on
    screen saying the same four things while the pictures they are about get the
    remainder. They ride over the foot of the frame now, and only when the tile
@@ -1897,7 +1897,7 @@ font-weight:700}
 /* judged a dog and still owing a leash call: dimming it would read as
    "done", so it keeps full weight and gets a rail instead */
 .card.awaitleash{box-shadow:inset 0 0 0 2px rgba(67,181,129,.45)}
-.card.awaitleash .acts.leash::before{content:'lead?';grid-column:1/-1;
+.card.awaitleash .acts.leash::before{content:'leash?';grid-column:1/-1;
 font-size:10px;color:var(--green);letter-spacing:.04em;margin-bottom:-2px}
 .card.unjudged{opacity:.62}
 .card.unjudged .meta::after{content:'no verdict';margin-left:auto;
@@ -2253,7 +2253,7 @@ color:var(--dim);transition:transform .15s}
      the work stay on the summary line where the hand can find them. -->
 <details class="keys" id="keys">
   <summary>
-    <span class="klead"><kbd>F</kbd> not a dog<kbd>D</kbd> is a dog<kbd>L</kbd> leashed<kbd>N</kbd> no lead</span>
+    <span class="klead"><kbd>F</kbd> not a dog<kbd>D</kbd> is a dog<kbd>L</kbd> leashed<kbd>N</kbd> no leash</span>
     <span class="kmore">more</span>
   </summary>
   <div class="kbody">
@@ -2323,8 +2323,8 @@ function leash(name,label){
       if(!held)return;
       held.classList.remove('awaitleash');
       /* Both axes answered, so the tile has nothing left to ask and leaves
-         like any other judged crop. It was only kept back to make the lead
-         askable; taking the lead back (had) leaves it in place, still owing
+         like any other judged crop. It was only kept back to make the leash
+         askable; taking the leash back (had) leaves it in place, still owing
          one. */
       if(had){held.classList.add('awaitleash');return;}
       releaseHeld(name);
@@ -2853,16 +2853,16 @@ function tile(c){
         '">&#10003; Is a dog</button>'+
     '</div>'+
     /* A SECOND axis, kept visually apart from the verdict row above it. A
-       leash label says "this is a dog, and here is whether it is on a lead" --
+       leash label says "this is a dog, and here is whether it is on a leash" --
        it is stored on its own and never touches the dog/not-dog ledgers. */
     (LEASH_ON?('<div class="acts leash">'+
       '<button class="lbtn le'+(LEASH[c.name]==='leashed'?' on':'')+
         '" type="button" title="'+(LEASH[c.name]==='leashed'?
-          'click again to remove this leash verdict':'on a lead (L)')+
+          'click again to remove this leash verdict':'on a leash (L)')+
         '">Leashed</button>'+
       '<button class="lbtn un'+(LEASH[c.name]==='unleashed'?' on':'')+
         '" type="button" title="'+(LEASH[c.name]==='unleashed'?
-          'click again to remove this leash verdict':'no lead (N)')+
+          'click again to remove this leash verdict':'no leash (N)')+
         '">Unleashed</button>'+
     '</div>'):'')+
     '</div>';
@@ -3025,7 +3025,7 @@ function flag(i,viaKey,label){
   }
   /* "Is a dog" is the point at which a leash call becomes askable, so the
      crop stays where it is instead of being consumed -- you can look again,
-     open it, fix the box and answer the lead, all on the tile you just judged.
+     open it, fix the box and answer the leash, all on the tile you just judged.
      Only for that verdict, only while the leash store is on, and only until it
      has a leash call: everything else still leaves the queue on click, which
      is what makes the queue drain. */
@@ -3474,7 +3474,7 @@ document.addEventListener('keydown',function(e){
       flushSave().then(function(){closeLb();if(k2>=0)flag(k2,true,'true_positive')});
       e.preventDefault()}
     /* Leash calls work in here too, and this is the view where they should be
-       made: a lead is a few pixels wide, and at thumbnail size it is simply
+       made: a leash is a few pixels wide, and at thumbnail size it is simply
        not visible -- the same reason the dashboard-thumbnail table reads 54.9%
        where the full-resolution crops read 81.3% for the same detections.
        Unlike F and D these do NOT close the lightbox: deciding the leash does
@@ -7825,7 +7825,7 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
 
     items.sort(key=ANNOT_SORTS[sort])
     # Counted before the filter narrows them, so the option can say how many
-    # it would show -- "dogs I have not called the lead on" is the number this
+    # it would show -- "dogs I have not called the leash on" is the number this
     # whole axis is worked from, and it should be visible without selecting it.
     want_leash = leash if leash in LEASH_FILTERS else 'all'
     dogs = [it for it in items if it['label'] == POS_LABEL]
@@ -8455,7 +8455,7 @@ def _leash_keep(items, want, key='name'):
     """Narrow a list of crops by leash state. 'none' = no verdict recorded.
 
     Kept separate from the dog verdict on purpose: "a dog I have not decided
-    the lead for" is the question this whole axis exists to answer, and it is
+    the leash for" is the question this whole axis exists to answer, and it is
     not expressible as a value of the dog verdict.
     """
     if want not in LEASH_FILTERS or want == 'all':
@@ -11339,7 +11339,7 @@ outline-offset:2px}
 </details>
 
 <details class="fold sec" id="f-detect" open>
-<summary class="sect">Models over the store <span id="stgHint">yolo26x @1280 — live, updates every 5 s while open</span>
+<summary class="sect">Model sweeps <span id="stgHint">yolo26x @1280 — live, updates every 5 s while open</span>
   <!-- Two stages of one pipeline, so one section with a switch rather than
        two sections saying the same six things. The detector finds ground
        animals; the gate decides which of them are dogs. They run at different
