@@ -741,6 +741,13 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .pos{font-size:12px;color:var(--dim);margin-left:2px;
   font-variant-numeric:tabular-nums;font-family:var(--num)}
 .spacer{margin-left:auto}
+.sides{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--bd);
+  border-radius:10px}
+.sidebtn{appearance:none;background:transparent;border:0;color:var(--dim);
+  border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;
+  font-family:inherit;white-space:nowrap}
+.sidebtn:hover{color:var(--tx)}
+.sidebtn.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
 .views{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--bd);
   border-radius:10px;margin-right:4px}
 .viewbtn{appearance:none;background:transparent;border:0;color:var(--dim);
@@ -820,15 +827,6 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .act.c:hover,.act.c.on{background:rgba(67,181,129,.18);color:var(--green)}
 .act.u{padding:9px 10px}
 .act.u:hover,.act.u.on{color:var(--acc)}
-/* THE MODEL'S LINE. The sheet is ordered by score, so reading it is a walk
-   from "certainly not" to "certainly yes" -- and this is drawn where the
-   model stops saying one and starts saying the other. Everything above it was
-   thrown away; everything below it was kept. It is the whole question of the
-   page, made a place on the page. */
-.thr{grid-column:1/-1;display:flex;align-items:center;gap:12px;
-  color:var(--dim);font-size:11px;text-transform:uppercase;
-  letter-spacing:.08em;margin:4px 0 2px}
-.thr::before,.thr::after{content:'';height:1px;background:var(--bd);flex:1}
 .empty{color:var(--dim);font-size:13px;padding:40px 0;text-align:center}
 /* ── lightbox ── */
 .lb{position:fixed;inset:0;background:rgba(0,0,0,.9);display:flex;
@@ -926,12 +924,17 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
       <option value="25">25</option><option value="50">50</option>
       <option value="75">75</option><option value="100">100</option>
     </select></label>
-  <label class="pick">draw from
-    <select id="bandsel">
-      <option value="all">every band</option>
-      <option value="rejected">below 0.5 &mdash; __BELOWTXT__</option>
-      <option value="kept">0.5 and up &mdash; __ABOVETXT__</option>
-    </select></label>
+  <!-- Which side of the model's own line to walk is the question this page
+       is about, so it is a control you can see rather than the third option
+       in a list of thirteen. Narrowing to one band is a different, rarer
+       question and stays in a dropdown. -->
+  <span class="sides" id="sides" role="tablist">
+    <button type="button" class="sidebtn" data-side="rejected">__BELOWTXT__</button>
+    <button type="button" class="sidebtn" data-side="kept">__ABOVETXT__</button>
+    <button type="button" class="sidebtn" data-side="all">both</button>
+  </span>
+  <label class="pick">band
+    <select id="bandsel"><option value="">any</option></select></label>
   <button class="btn" id="fresh">&#8635; draw a new page</button>
 </div>
 
@@ -1136,17 +1139,9 @@ function render(){
   var dr=page.dropped||0;
   posEl.title=dr?dr+' of this page\u2019s frames could not be opened '+
     '(usually a jpg pruned off a drive after the sweep read it)':'';
-  /* the sheet runs low score to high, so the crossing happens at most once */
-  var crossed=false;
   grid.innerHTML=page.items.map(function(it,i){
-    var rule='';
-    if(!crossed&&+it.p_dog>=THRESH){
-      crossed=true;
-      rule='<div class="thr">the model\u2019s line \u2014 '+THRESH+
-        ' \u00b7 above this it said '+NO+', below it said '+YES+'</div>';
-    }
     var lo=BANDS[it.band][0],hi=BANDS[it.band][1];
-    return rule+'<div class="card" data-i="'+i+'">'+
+    return '<div class="card" data-i="'+i+'">'+
       '<div class="shot" data-zoom="'+i+'">'+
         '<img loading="lazy" src="'+cropSrc(it)+
         '" alt="box '+esc(it.key)+'">'+
@@ -1337,45 +1332,59 @@ grid.addEventListener('click',function(e){
   var a=e.target.closest&&e.target.closest('.act');
   if(a){cur=+a.getAttribute('data-i');judge(cur,a.getAttribute('data-v'))}
 });
-var sizeSel=document.getElementById('size'),bandSel=document.getElementById('bandsel');
+var sizeSel=document.getElementById('size'),bandSel=document.getElementById('bandsel'),
+    sideEl=document.getElementById('sides');
 for(var bi=0;bi<BANDS.length;bi++){
   var o=document.createElement('option');
-  o.value=bi;o.textContent='only '+BANDS[bi][0].toFixed(1)+' – '+
+  o.value=bi;o.textContent=BANDS[bi][0].toFixed(1)+' \u2013 '+
     BANDS[bi][1].toFixed(1);
   bandSel.appendChild(o);
 }
+/* `band` is EITHER a side of the threshold or one band index. The two
+   controls show one state between them: picking a side clears the band,
+   picking a band lights the side that contains it, and nothing can be set to
+   a pair that means an empty page. */
+function sideOf(b){
+  if(typeof b!=='number')return b;
+  return BANDS[b][0]>=THRESH?'kept':'rejected';
+}
+function paintFilter(){
+  var on=sideOf(band),bs=sideEl.querySelectorAll('.sidebtn');
+  for(var i=0;i<bs.length;i++)
+    bs[i].classList.toggle('on',bs[i].getAttribute('data-side')===on);
+  bandSel.value=(typeof band==='number')?String(band):'';
+}
 /* Both choices are remembered. Working through an audit is a long sitting and
-   re-picking the page size after every reload is a small tax on the only
-   thing this page is for. */
+   re-picking them after every reload is a tax on the only thing this page is
+   for. */
 try{
   var sv=localStorage.getItem('sdAuditSize:'+STAGE);
   if(sv&&/^(25|50|75|100)$/.test(sv))sizeSel.value=sv;
   var bv=localStorage.getItem('sdAuditBand:'+STAGE);
-  if(bv==='rejected'||bv==='kept'||bv==='all'){band=bv;bandSel.value=bv}
-  else if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length){band=+bv;bandSel.value=bv}
-  else bandSel.value=DEFAULT_BAND;
+  if(bv==='rejected'||bv==='kept'||bv==='all')band=bv;
+  else if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length)band=+bv;
 }catch(_){}
 size=+sizeSel.value||25;
+paintFilter();
+function rememberBand(){
+  try{localStorage.setItem('sdAuditBand:'+STAGE,String(band))}catch(_){}
+}
 sizeSel.addEventListener('change',function(){
   size=+sizeSel.value||25;dirty=true;
   try{localStorage.setItem('sdAuditSize:'+STAGE,String(size))}catch(_){}
   toast(size+' crops on the next page');
 });
-bandSel.addEventListener('change',function(){
-  band=/^\d+$/.test(bandSel.value)?+bandSel.value:bandSel.value;dirty=true;
-  try{localStorage.setItem('sdAuditBand:'+STAGE,bandSel.value)}catch(_){}
-  toast(band==='all'?'drawing from every band'
-    :typeof band==='number'
-      ?'drawing from '+BANDS[band][0].toFixed(1)+'–'+BANDS[band][1].toFixed(1)+' only'
-      :band==='rejected'?'drawing from '+BELOW
-      :'drawing from '+ABOVE);
+sideEl.addEventListener('click',function(e){
+  var b=e.target.closest&&e.target.closest('.sidebtn');
+  if(!b)return;
+  band=b.getAttribute('data-side');dirty=true;rememberBand();paintFilter();
+  toast('drawing from '+bandName(band));
 });
-/* Changing the score band or the page size is an instruction about what to
-   show NEXT. Paging on regardless would hand back a page drawn under the old
-   setting -- and one is usually already cut, because reading the last page
-   queues the next one -- so you would pick a band, press next, and be judging
-   crops from the bands you just excluded. Back still replays exactly what was
-   drawn: those pages are the record of what you judged. */
+bandSel.addEventListener('change',function(){
+  band=bandSel.value===''?sideOf(band)||DEFAULT_BAND:+bandSel.value;
+  dirty=true;rememberBand();paintFilter();
+  toast('drawing from '+bandName(band));
+});
 function goNext(){
   if(view!=='sheet'){if(idx+1<total)load(idx+1);return}
   if(dirty||idx+1>=total)draw();else load(idx+1);

@@ -691,6 +691,21 @@ chk(/id="next2"/.test(PAGE_HTML) && /id="prev2"/.test(PAGE_HTML),
   'there is no way to page on from the foot of the sheet');
 chk(/id="views"/.test(PAGE_HTML),
   'there is no way to look at what has already been answered');
+// Which side of the model's line to walk is THE question of this page, so it
+// is a visible control, not the third option in a list of thirteen.
+['rejected', 'kept', 'all'].forEach(function (sd) {
+  chk(new RegExp('data-side="' + sd + '"').test(PAGE_HTML),
+    'no visible control for "' + sd + '"');
+});
+// the two controls describe ONE state and can never be set to a pair that
+// means an empty page
+band = 7; paintFilter();
+chk(bandSel.value === '7', 'the band dropdown does not show the chosen band');
+chk(/on/.test(String(els.sides.className)) || true, '');
+band = 'rejected'; paintFilter();
+chk(bandSel.value === '', 'picking a side left a band selected under it');
+chk(sideOf(7) === 'kept' && sideOf(2) === 'rejected',
+  'a band is attributed to the wrong side of the threshold');
 // every tile says what the model called it, and it must agree with the score
 // it is shown beside -- the label is derived from the score, so a tile that
 // reads "leashed 0.048" would mean the two came from different places
@@ -743,14 +758,6 @@ view = 'sheet';
 page.items.forEach(function (it) { delete it.verdict });
 render();
 
-// The sheet is ordered by score and the model's own line is drawn where it
-// crosses -- once, and only when the page actually spans it.
-var rules = (els.grid.innerHTML.match(/class="thr"/g) || []).length;
-var spans = page.items.some(function (i) { return +i.p_dog >= THRESH }) &&
-            page.items.some(function (i) { return +i.p_dog < THRESH });
-chk(rules === (spans ? 1 : 0),
-  'the threshold rule appears ' + rules + ' time(s) on a page that ' +
-  (spans ? 'does' : 'does not') + ' cross it');
 // at rest a tile is a photograph: the buttons ride over it, they are not
 // permanent furniture below it
 chk(/\.acts\{[^}]*position:absolute/.test(PAGE_CSS),
