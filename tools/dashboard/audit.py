@@ -266,7 +266,7 @@ def draw_page(n=25, band=None):
         cands = sample(n=n, band=band)
         if not cands:
             return {'index': page_count(), 'items': [], 'exhausted': True,
-                    'band': band, 'dropped': 0}
+                    'band': band, 'n': n, 'dropped': 0}
         # Reserved before a single frame is opened. A box counts as drawn the
         # moment it is chosen, not when it is judged or even when it is
         # successfully cut: a concurrent draw must not pick it, and a box
@@ -284,7 +284,7 @@ def draw_page(n=25, band=None):
         # Frames that would not open. Usually a jpg pruned off a drive after
         # the sweep read it. Counted rather than hidden, so a short page reads
         # as a short page and not as a page that lost its crops.
-        doc = {'index': idx, 'band': band, 'created': time.time(),
+        doc = {'index': idx, 'band': band, 'n': n, 'created': time.time(),
                'dropped': len(cands) - len(got),
                'items': [{k: c[k] for k in
                           ('key', 'image_id', 'det_idx', 'p_dog', 'conf',
@@ -565,7 +565,7 @@ var BANDS=__BANDS__;
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
     lbimg=document.getElementById('lbimg'),lbtxt=document.getElementById('lbtxt');
-var page=null,idx=0,cur=0,total=0,band=null,busy=false,size=25;
+var page=null,idx=0,cur=0,total=0,band=null,busy=false,size=25,dirty=false;
 
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
   e.hidden=false;clearTimeout(e._t);e._t=setTimeout(function(){e.hidden=true},1600)}
@@ -650,7 +650,8 @@ function show(doc,at,tot){
 }
 function load(at){
   busy=true;setPos();
-  fetch('/api/audit/page?i='+at+'&n='+size).then(function(r){return r.json()})
+  fetch('/api/audit/page?i='+at+'&n='+size+
+        (band==null?'':'&band='+band)).then(function(r){return r.json()})
     .then(function(j){busy=false;if(!j||j.error){toast(j&&j.error||'failed');setPos();return}
       show(j.page,j.index,j.total)})
     .catch(function(){busy=false;toast('failed');setPos()});
@@ -665,7 +666,7 @@ function draw(){
     .then(function(j){busy=false;
       document.getElementById('fresh').textContent='↻ draw a new page';
       if(!j||j.error){toast(j&&j.error||'failed');setPos();return}
-      show(j.page,j.index,j.total);loadStats()})
+      dirty=false;show(j.page,j.index,j.total);loadStats()})
     .catch(function(){busy=false;
       document.getElementById('fresh').textContent='↻ draw a new page';
       toast('failed');setPos()});
@@ -743,18 +744,24 @@ try{
 }catch(_){}
 size=+sizeSel.value||25;
 sizeSel.addEventListener('change',function(){
-  size=+sizeSel.value||25;
+  size=+sizeSel.value||25;dirty=true;
   try{localStorage.setItem('sdAuditSize',String(size))}catch(_){}
   toast(size+' crops on the next page');
 });
 bandSel.addEventListener('change',function(){
-  band=bandSel.value===''?null:+bandSel.value;
+  band=bandSel.value===''?null:+bandSel.value;dirty=true;
   try{localStorage.setItem('sdAuditBand',bandSel.value)}catch(_){}
   toast(band==null?'drawing from every band'
     :'drawing from '+BANDS[band][0].toFixed(1)+'–'+BANDS[band][1].toFixed(1)+' only');
 });
+/* Changing the score band or the page size is an instruction about what to
+   show NEXT. Paging on regardless would hand back a page drawn under the old
+   setting -- and one is usually already cut, because reading the last page
+   queues the next one -- so you would pick a band, press next, and be judging
+   crops from the bands you just excluded. Back still replays exactly what was
+   drawn: those pages are the record of what you judged. */
 document.getElementById('next').addEventListener('click',function(){
-  if(idx+1<total)load(idx+1);else draw();
+  if(dirty||idx+1>=total)draw();else load(idx+1);
 });
 document.getElementById('prev').addEventListener('click',function(){
   if(idx>0)load(idx-1)});
@@ -786,6 +793,11 @@ document.getElementById('lbcopy').addEventListener('click',function(){
 /* keys */
 document.addEventListener('keydown',function(e){
   if(e.metaKey||e.ctrlKey||e.altKey)return;
+  /* 1/2/3 are verdicts and also the way a keyboard user picks an option in a
+     focused <select>. Judging a crop because someone was choosing a page size
+     is a wrong answer recorded by the interface itself. */
+  var t=e.target&&e.target.tagName;
+  if(t==='SELECT'||t==='INPUT'||t==='TEXTAREA')return;
   if(!lb.hidden){if(e.key==='Escape'){lb.hidden=true;e.preventDefault()}return}
   if(e.key==='1'){judge(cur,'missed');e.preventDefault()}
   else if(e.key==='2'){judge(cur,'correct');e.preventDefault()}
@@ -797,7 +809,8 @@ document.addEventListener('keydown',function(e){
     if(idx+1<total)load(idx+1);else draw();e.preventDefault()}
 });
 /* boot: the last page if there is one, otherwise an invitation */
-fetch('/api/audit/page?i=-1&n='+size).then(function(r){return r.json()})
+fetch('/api/audit/page?i=-1&n='+size+
+      (band==null?'':'&band='+band)).then(function(r){return r.json()})
   .then(function(j){
     if(j&&j.page)show(j.page,j.index,j.total);
     else{total=0;setPos();render()}

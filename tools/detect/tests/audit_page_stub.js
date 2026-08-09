@@ -18,6 +18,10 @@ function mk(id){
     setSelectionRange:function(){}};
 }
 function E(id){ return els[id] || (els[id] = mk(id)) }
+// Elements the MARKUP starts hidden. Defaulting every node to visible made
+// the keydown handler believe the lightbox was open, so it returned before
+// any verdict key was read and the check passed on a branch it never entered.
+['lb', 'toast', 'empty'].forEach(function(id){ E(id).hidden = true });
 global.document = {getElementById:E, createElement:function(){return mk('new')},
   addEventListener:function(t,f){(listeners.doc = listeners.doc || {})[t] = f},
   body:{appendChild:function(){}, removeChild:function(){}},

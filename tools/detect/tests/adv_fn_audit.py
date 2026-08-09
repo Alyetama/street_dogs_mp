@@ -334,6 +334,43 @@ def persistence_checks(bad):
         audit.fa.VERDICTS = o
 
 
+def selection_checks(bad):
+    """The band and the size a page was drawn with have to follow it.
+
+    Reading the last page queues the next one, and that prefetch took its band
+    from a parameter the client never sent -- so an audit filtered to one band
+    quietly cut an all-bands page and handed it over on the next click.
+    """
+    try:
+        import audit
+    except Exception:
+        return
+    seen = {}
+    real = audit.prefetch
+    audit.prefetch = lambda band=None, n=25: seen.update(band=band, n=n)
+    real_get, real_count = audit.get_page, audit.page_count
+    audit.get_page = lambda i: {'index': i, 'items': [], 'band': 4, 'n': 50}
+    audit.page_count = lambda: 3
+    try:
+        audit.api_page(2, n=50, band=4)
+        if seen.get('band') != 4 or seen.get('n') != 50:
+            bad.append(f'reading the last page of a band-4 audit queued '
+                       f'{seen} — the next page would be from bands the '
+                       f'reader excluded')
+    finally:
+        audit.prefetch, audit.get_page, audit.page_count = (
+            real, real_get, real_count)
+    for v, want in ((None, 25), (25, 25), (50, 50), (100, 100),
+                    ('75', 75), (40, 25), (10 ** 9, 25), ('; DROP', 25)):
+        if audit.page_size(v) != want:
+            bad.append(f'page_size({v!r}) = {audit.page_size(v)}, want {want}')
+    for n in audit.PAGE_SIZES:
+        import fn_audit as fa
+        if n % len(fa.BANDS):
+            bad.append(f'a page of {n} does not divide by the {len(fa.BANDS)} '
+                       f'bands, so the strata come out uneven')
+
+
 def page_checks(bad):
     """The page renders, and renders numbers rather than NaN.
 
@@ -381,6 +418,28 @@ chk(els.judged.textContent === '12', 'judged reads ' + els.judged.textContent);
 chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
 chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
 chk(els.bands.innerHTML.length > 100, 'the band strip rendered nothing');
+// 1/2/3 are verdicts AND the way a keyboard picks an option in a focused
+// <select>; a page size chosen by keyboard must not record a verdict
+var before = FETCHES.length;
+listeners.doc.keydown({key:'1', target:{tagName:'SELECT'},
+  preventDefault:function(){}});
+chk(FETCHES.length === before,
+  'a keypress inside a dropdown recorded a verdict');
+listeners.doc.keydown({key:'1', target:{tagName:'DIV'},
+  preventDefault:function(){}});
+chk(FETCHES.some(function(u){return /verdict/.test(u)}),
+  'a keypress on the page did NOT record a verdict');
+// changing the selection must draw rather than replay a page cut under the
+// old one. Each click lands a stubbed response that resets total, so the
+// state under test is set immediately before each one.
+dirty = true; total = 5; idx = 0; FETCHES.length = 0;
+listeners.next.click();
+chk(FETCHES.some(function(u){return /audit\/draw/.test(u)}),
+  'after changing the band, next replayed an old page instead of drawing');
+dirty = false; total = 5; idx = 0; FETCHES.length = 0;
+listeners.next.click();
+chk(FETCHES.some(function(u){return /audit\/page/.test(u)}),
+  'with the selection unchanged, next did not page forward');
 chk(/not sampled/.test(els.bands.innerHTML),
   'a band nobody judged does not say so');
 chk(/0 &ndash; |0 – /.test(els.bands.innerHTML) || /0 . \d/.test(els.bands.innerHTML),
@@ -403,7 +462,7 @@ def main():
     bad = []
     for fn in (band_checks, wilson_checks, weighting_checks, ledger_checks,
                serving_checks, isolation_checks, concurrency_checks,
-               persistence_checks, page_checks):
+               persistence_checks, selection_checks, page_checks):
         try:
             fn(bad)
         except Exception as e:                 # noqa: BLE001 - report, not die
