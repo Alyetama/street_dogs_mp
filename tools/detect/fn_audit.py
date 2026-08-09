@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""Measure what the dog-bin gate threw away.
+"""Measure how often the dog-bin gate is right, across its whole score range.
 
     python tools/detect/fn_audit.py build     # one-off: the candidate pool
     python tools/detect/fn_audit.py stats     # what the verdicts say so far
 
-WHY. The gate rejected 3,945,390 of 4,688,510 boxes. Its accuracy was measured
-on a few hundred held-out crops before it ran; this measures it on the thing
-it actually did, at the scale it did it. The question is not "is the model
-good" but "how many dogs are in the 3.9M boxes it discarded, and what do they
-look like" -- because a discarded dog is unrecoverable and nothing downstream
-will ever see it again.
+WHY. The gate judged 4,688,510 boxes and its accuracy was measured on a few
+hundred held-out crops before it ran. This measures it on the thing it
+actually did, at the scale it did it, in BOTH directions:
 
-WHY THE SAMPLE IS STRATIFIED. 89.5% of the rejected boxes score under 0.1, so
-a uniform sample is 9 parts obvious-not-a-dog to 1 part everything else, and
-tells you almost nothing about where the model's edge actually is. The pool is
-banded by p_dog and drawn from evenly; each band's rate is reported on its own,
-and the headline rate weights those bands by how many boxes each really holds.
-That is the difference between "we looked at 500 crops" and a number.
+    a dog it rejected   is gone -- nothing downstream will ever see it
+    a not-dog it kept   is work, and noise in whatever is trained next
+
+Both are found the same way: show a person the crop, ask "is this a dog", and
+compare the answer to what the model said. So the pool is every box the gate
+judged, not only the ones it threw away -- bands under 0.5 are its rejections
+and bands over 0.5 are its acceptances, and the same question is asked of all
+of them.
+
+WHY THE SAMPLE IS STRATIFIED. Three quarters of the boxes score under 0.1, so
+a uniform sample is mostly obvious-not-a-dog and tells you almost nothing
+about where the model's edge is. The pool is banded by p_dog and drawn from
+evenly; each band's rate is reported on its own, and the headline weights
+those bands by how many boxes each really holds. That is the difference
+between "we looked at 500 crops" and a number.
 
 WHY SEQUENCES. Mapillary frames come in sequences -- one car, one road, one
 second apart. Twenty crops from one sequence are twenty photographs of the
@@ -42,15 +48,15 @@ POOL = os.path.join(OUT_DIR, 'pool.parquet')
 VERDICTS = os.path.join(OUT_DIR, 'verdicts.jsonl')
 GATE = os.path.join(REPO, 'data', 'gate')
 
-# Edges in p_dog. Not equal-width by accident: the gate's own threshold is
-# 0.5, so the bands nearest it are the ones that decide whether the threshold
-# is in the right place, and the 0.0-0.1 band -- nine tenths of the pool --
-# only has to be shown to be empty of dogs, not characterised.
-BANDS = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5)]
-# The bands are 0.1 wide and stop at the gate's own threshold, so the index of
-# a score is p/0.1 -- NOT p*len(BANDS), which is the same thing only when the
-# bands happen to span the whole 0..1 and silently buckets by 0.2 here.
+# The whole score range, in tenths. It used to stop at 0.5 because the pool
+# held only rejections, and a rejected box cannot score above the threshold
+# that rejected it -- so half the axis was missing and there was no way to ask
+# whether what the gate KEPT was any good either.
+BANDS = [(round(i / 10, 1), round((i + 1) / 10, 1)) for i in range(10)]
 BAND_W = BANDS[0][1] - BANDS[0][0]
+# Where the gate itself draws the line. Everything below is something it threw
+# away; everything above is something it kept.
+THRESHOLD = 0.5
 
 
 def band_of(p):
@@ -106,16 +112,18 @@ def build(args):
     # filtered against them rather than aggregated and joined afterwards.
     con.execute("SET preserve_insertion_order=false")
     con.execute(f"SET temp_directory='{args.tmp}'")
+    # Every box the gate judged, not only the ones it rejected: the question
+    # "is this a dog" is worth asking of what it kept as well, and that is the
+    # only way the bands above 0.5 exist at all.
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE rejected AS
         SELECT s.image_id, s.det_idx, s.p_dog
         FROM read_parquet('{shards}') s
-        WHERE s.label = 'not_dog'
     """)
     con.execute("CREATE OR REPLACE TEMP TABLE need AS "
                 "SELECT DISTINCT image_id FROM rejected")
     need = con.execute("SELECT count(*) FROM need").fetchone()[0]
-    print(f'{need:,} frames carry a rejected box', flush=True)
+    print(f'{need:,} frames carry a judged box', flush=True)
 
     # SEMI JOIN, not GROUP BY: one row per wanted image, nothing else kept.
     # A frame harvested into two cells appears twice with the same sequence,
@@ -150,7 +158,7 @@ def build(args):
         SELECT count(*), count(DISTINCT seq),
                sum(CASE WHEN seq LIKE 'img:%' THEN 1 ELSE 0 END)
         FROM read_parquet('{POOL}')""").fetchone()
-    print(f'{n:,} rejected boxes across {seqs:,} sequences '
+    print(f'{n:,} judged boxes across {seqs:,} sequences '
           f'({unmatched:,} had no sequence and stand alone)')
     for i, (lo, hi) in enumerate(BANDS):
         c = con.execute(f"SELECT count(*), count(DISTINCT seq) "
@@ -192,7 +200,12 @@ def read_verdicts(path=None):
                 except ValueError:
                     continue
                 if isinstance(d, dict) and d.get('key'):
-                    out[d['key']] = d
+                    # a null verdict is a withdrawal -- the box goes back to
+                    # unjudged rather than becoming a third kind of answer
+                    if d.get('verdict') is None:
+                        out.pop(d['key'], None)
+                    else:
+                        out[d['key']] = d
     except OSError:
         pass
     return list(out.values())
@@ -212,59 +225,102 @@ def wilson(k, n, z=1.96):
     return (p, max(0.0, c - h), min(1.0, c + h))
 
 
+# What a person can answer, and what it means as a label. "missed"/"correct"
+# only made sense while the pool was rejections -- once it holds what the gate
+# KEPT as well, "missed a dog" is meaningless on a box the gate called a dog.
+# The question is the same everywhere now: is this a dog. Whether that is an
+# error is derived from the model's own score, not from the wording.
+# NOT `VERDICTS` -- that name is already the path to the ledger a few lines
+# up, and reusing it made read_verdicts() open a tuple.
+ANSWERS = ('dog', 'not_dog', 'unsure')
+CLASS_OF = {'dog': 'dog', 'not_dog': 'not_dog'}
+# the ledger predates this; a verdict written under the old vocabulary still
+# reads correctly rather than being dropped
+LEGACY = {'missed': 'dog', 'correct': 'not_dog'}
+
+
+def verdict_of(v):
+    v = LEGACY.get(v, v)
+    return v if v in ANSWERS else None
+
+
 def summarise(verdicts=None, totals=None):
-    """Per band and overall. The overall rate weights each band by how many
-    boxes the gate actually put in it -- a flat mean over the bands would
-    report the near-threshold error rate as if it were the whole store's."""
+    """Per band and overall.
+
+    Each band reports the share of its crops a person called a dog. Below the
+    threshold that share IS the false-negative rate -- the gate rejected them
+    all. Above it, the share that are NOT dogs is the false-positive rate. One
+    measurement, read from either end.
+
+    The two headline rates weight bands by how many boxes the gate actually
+    put in each; a flat mean over the bands would report the near-threshold
+    error rate as if it were the whole store's.
+    """
     vs = read_verdicts() if verdicts is None else verdicts
     totals = band_totals() if totals is None else totals
     per = []
     for i, (lo, hi) in enumerate(BANDS):
         seen = [v for v in vs if v.get('band') == i
-                and v.get('verdict') in ('missed', 'correct')]
-        k = sum(1 for v in seen if v['verdict'] == 'missed')
+                and verdict_of(v.get('verdict')) in ('dog', 'not_dog')]
+        k = sum(1 for v in seen if verdict_of(v['verdict']) == 'dog')
         p, a, b = wilson(k, len(seen))
         boxes = totals[i][2] if i < len(totals) else 0
-        per.append({'lo': lo, 'hi': hi, 'judged': len(seen), 'missed': k,
-                    'rate': p, 'lo95': a, 'hi95': b, 'boxes': boxes})
+        per.append({'lo': lo, 'hi': hi, 'judged': len(seen), 'dogs': k,
+                    'rate': p, 'lo95': a, 'hi95': b, 'boxes': boxes,
+                    # what the gate said about this whole band
+                    'kept': lo >= THRESHOLD,
+                    # crops where the person and the model disagree
+                    'wrong': (len(seen) - k) if lo >= THRESHOLD else k})
+    def side(kept):
+        rows = [b for b in per if b['kept'] == kept and b['judged']]
+        pop = sum(b['boxes'] for b in rows)
+        allpop = sum(b['boxes'] for b in per if b['kept'] == kept)
+        if not pop:
+            # nothing judged on this side yet -- but how many boxes are
+            # waiting is still a fact, and reporting it as zero read as "the
+            # gate kept nothing"
+            return {'rate': 0.0, 'judged': 0, 'wrong': 0, 'boxes': allpop,
+                    'covered': 0.0}
+        rate = sum((b['wrong'] / b['judged']) * b['boxes']
+                   for b in rows) / pop
+        return {'rate': rate, 'judged': sum(b['judged'] for b in rows),
+                'wrong': sum(b['wrong'] for b in rows), 'boxes': allpop,
+                'covered': pop / allpop if allpop else 0.0}
     pop = sum(b['boxes'] for b in per) or 1
-    # bands with nothing judged contribute nothing and are excluded from the
-    # weight, so the headline says what HAS been measured rather than assuming
-    # zero for what has not
     seen_pop = sum(b['boxes'] for b in per if b['judged'])
-    rate = (sum(b['rate'] * b['boxes'] for b in per if b['judged'])
-            / seen_pop) if seen_pop else 0.0
-    return {'bands': per, 'weighted_rate': rate,
+    return {'bands': per,
+            # dogs it threw away, and not-dogs it kept
+            'rejected': side(False), 'kept': side(True),
             'covered': seen_pop / pop if pop else 0.0,
             'judged': sum(b['judged'] for b in per),
-            'missed': sum(b['missed'] for b in per),
-            'pool': pop}
+            'wrong': sum(b['wrong'] for b in per),
+            'threshold': THRESHOLD, 'pool': pop}
 
 
 DATASET = os.path.join(REPO, 'data', 'audit_finds')
-CLASS_OF = {'missed': 'dog', 'correct': 'not_dog'}
 README = """# audit_finds
 
-Crops from the false-negative audit of the dog-bin gate, laid out for
-`yolo classify` so they can be folded into a dog-bin dataset the same way
-`data/hard_negatives` and `data/hard_positives` are:
+Crops from the audit of the dog-bin gate, laid out for `yolo classify` so they
+can be folded into a dog-bin dataset the same way `data/hard_negatives` and
+`data/hard_positives` are:
 
-    dog/<image_id>_<det_idx>.jpg       a human said the gate threw a dog away
-    not_dog/<image_id>_<det_idx>.jpg   a human confirmed the rejection
+    dog/<image_id>_<det_idx>.jpg       a person said this is a dog
+    not_dog/<image_id>_<det_idx>.jpg   a person said it is not
     manifest.jsonl                     one line per crop, with its sequence
 
-Every file here carries a HUMAN verdict. The model's own label is what put
-the box in front of someone; it is never what is written down.
+Every file here carries a HUMAN verdict. The model's own label is what put the
+box in front of someone; it is never what is written down. `p_dog` on each row
+is what {model} thought, kept so the disagreements can be found again.
 
 ## Read this before training on it
 
-**This is not a random sample of anything.** Every crop was rejected by
-{model}, and the audit draws evenly from five p_dog bands rather than in
-proportion to how many boxes each holds -- so the near-threshold cases are
-massively over-represented relative to the store. That is deliberate: it is
-where the model is wrong, and it is what makes these worth training on. It
-also means class balance here says nothing about the store's, and accuracy
-measured on a split of these says nothing about accuracy in production.
+**This is not a random sample of anything.** The audit draws evenly from ten
+p_dog bands rather than in proportion to how many boxes each holds, so the
+near-threshold cases are massively over-represented relative to the store.
+That is deliberate -- it is where the model is wrong, and it is what makes
+these worth training on. It also means class balance here says nothing about
+the store's, and accuracy measured on a split of these says nothing about
+accuracy in production.
 
 **Split on `sequence`, never on `image_id`.** The manifest carries it for
 every crop. Splitting per image looked clean once before and put 70.8% of a
@@ -288,10 +344,9 @@ def export(args):
     """
     import shutil
     full = os.path.join(OUT_DIR, 'full')
-    vs = read_verdicts()
     keep = {}
-    for v in vs:
-        cls = CLASS_OF.get(v.get('verdict'))
+    for v in read_verdicts():
+        cls = CLASS_OF.get(verdict_of(v.get('verdict')))
         if cls:
             keep[str(v['key']).replace('#', '_') + '.jpg'] = (cls, v)
     placed = missing = removed = 0
@@ -321,9 +376,9 @@ def export(args):
                 'image_id': iid, 'det_idx': int(di) if di.isdigit() else None,
                 # the split column. Never image_id -- see the README.
                 'sequence': v.get('seq'),
-                'verdict': v.get('verdict'), 'p_dog': v.get('p_dog'),
-                'band': v.get('band'), 'judged_at': v.get('ts'),
-                'rejected_by': args.model}) + '\n')
+                'verdict': verdict_of(v.get('verdict')),
+                'p_dog': v.get('p_dog'), 'band': v.get('band'),
+                'judged_at': v.get('ts'), 'judged_model': args.model}) + '\n')
     with open(os.path.join(DATASET, 'README.md'), 'w') as fh:
         fh.write(README.format(model=args.model))
     n_dog = sum(1 for name, (c, _) in keep.items() if c == 'dog'
@@ -347,20 +402,25 @@ def stats(args):
     if not s['judged']:
         print('nothing judged yet')
         return 0
-    print(f"{s['judged']:,} boxes judged, {s['missed']:,} were dogs the gate "
-          f"threw away")
+    print(f"{s['judged']:,} boxes judged; the gate and a person disagreed on "
+          f"{s['wrong']:,}")
+    print(f"\n  band        boxes in store   said dog   share [95% interval]")
     for b in s['bands']:
+        side = 'kept' if b['kept'] else 'threw away'
         if not b['judged']:
-            print(f"  p_dog {b['lo']:.1f}-{b['hi']:.1f}  "
-                  f"{b['boxes']:>10,} boxes   not sampled")
+            print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['boxes']:>14,}   "
+                  f"not sampled ({side})")
             continue
-        print(f"  p_dog {b['lo']:.1f}-{b['hi']:.1f}  {b['boxes']:>10,} boxes   "
-              f"{b['missed']:>4}/{b['judged']:<4} missed  "
-              f"{b['rate']:6.1%}  [{b['lo95']:.1%}, {b['hi95']:.1%}]")
-    print(f"\nweighted false-negative rate: {s['weighted_rate']:.2%} "
-          f"of the {s['pool']:,} rejected boxes "
-          f"(~{int(s['weighted_rate'] * s['pool']):,} dogs)")
-    print(f"bands covering {s['covered']:.0%} of the pool have been sampled")
+        print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['boxes']:>14,}   "
+              f"{b['dogs']:>4}/{b['judged']:<4}  {b['rate']:6.1%} "
+              f"[{b['lo95']:.1%}, {b['hi95']:.1%}]  ({side})")
+    r, k = s['rejected'], s['kept']
+    print(f"\ndogs the gate threw away : {r['rate']:.2%} of {r['boxes']:,} "
+          f"rejected boxes  (~{int(r['rate'] * r['boxes']):,}), "
+          f"from {r['judged']:,} judged")
+    print(f"not-dogs the gate kept   : {k['rate']:.2%} of {k['boxes']:,} "
+          f"kept boxes      (~{int(k['rate'] * k['boxes']):,}), "
+          f"from {k['judged']:,} judged")
     return 0
 
 

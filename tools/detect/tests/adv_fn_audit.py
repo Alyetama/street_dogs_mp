@@ -79,43 +79,58 @@ def wilson_checks(bad):
 
 
 def weighting_checks(bad):
-    """The headline weights bands by population. A flat mean would take the
-    near-threshold band -- 1.8% of the pool, and where every error lives --
-    and report its rate as the whole store's."""
+    """The two headline rates weight bands by population, and read from the
+    right end of the threshold.
+
+    A flat mean would take the near-threshold band -- a sliver of the pool,
+    and where every error lives -- and report its rate as the whole store's.
+    And the two directions are different questions: below the line, a dog is
+    an error; above it, a not-dog is.
+    """
     import fn_audit as fa
-    totals = [(0.0, 0.1, 900), (0.1, 0.2, 50), (0.2, 0.3, 30),
-              (0.3, 0.4, 15), (0.4, 0.5, 5)]
-    # every band judged, only the top one has misses
-    vs = ([{'key': f'a{i}', 'band': 0, 'verdict': 'correct'} for i in range(10)]
-          + [{'key': f'e{i}', 'band': 4, 'verdict': 'missed'} for i in range(5)]
-          + [{'key': f'f{i}', 'band': 4, 'verdict': 'correct'} for i in range(5)])
+    n = len(fa.BANDS)
+    totals = [(fa.BANDS[i][0], fa.BANDS[i][1],
+               900 if i == 0 else 5) for i in range(n)]
+    # band 0 (rejected) all clean; band 4 (rejected, near the line) all dogs
+    vs = ([{'key': f'a{i}', 'band': 0, 'verdict': 'not_dog'} for i in range(10)]
+          + [{'key': f'e{i}', 'band': 4, 'verdict': 'dog'} for i in range(5)])
     s = fa.summarise(vs, totals)
-    flat = 0.5 / 5
-    # over the population of the bands actually SAMPLED (900 + 5), not all
-    # 910 -- a band nobody has looked at is unknown, not clean
-    want = 0.5 * 5 / 905
-    if abs(s['weighted_rate'] - want) > 1e-9:
-        bad.append(f"weighted rate {s['weighted_rate']} is not the "
+    rej = s['rejected']
+    want = (0.0 * 900 + 1.0 * 5) / 905
+    if abs(rej['rate'] - want) > 1e-9:
+        bad.append(f"rejected-side rate {rej['rate']} is not the "
                    f"population-weighted {want}")
-    if abs(s['weighted_rate'] - flat) < 1e-6:
-        bad.append('the rate is a flat mean over the bands — the tiny band '
-                   'where the errors are would dominate the headline')
-    # an unsampled band must not be read as a band with no errors
-    vs2 = [{'key': 'x', 'band': 4, 'verdict': 'missed'}]
+    if abs(rej['rate'] - 0.5) < 1e-6:
+        bad.append('the rate is a flat mean over the bands')
+    # a dog found above the threshold is NOT a miss -- the gate kept it
+    vs2 = vs + [{'key': 'k1', 'band': n - 1, 'verdict': 'dog'}]
     s2 = fa.summarise(vs2, totals)
-    if abs(s2['weighted_rate'] - 1.0) > 1e-9:
-        bad.append(f"one miss in the only band sampled gives "
-                   f"{s2['weighted_rate']}, expected 1.0 — bands nobody has "
-                   f"looked at must not be counted as clean")
-    if s2['covered'] >= 0.99:
-        bad.append(f"covered = {s2['covered']} with four bands unsampled")
-    # 'unsure' is neither a find nor a clean look
-    vs3 = [{'key': 'a', 'band': 4, 'verdict': 'unsure'},
-           {'key': 'b', 'band': 4, 'verdict': 'missed'}]
+    if abs(s2['rejected']['rate'] - rej['rate']) > 1e-12:
+        bad.append('a dog found in a band the gate KEPT changed the '
+                   'thrown-away rate — it is not a miss, the gate agreed')
+    if s2['kept']['wrong'] != 0:
+        bad.append(f"a dog in a kept band counted as an error: "
+                   f"{s2['kept']['wrong']}")
+    # a NOT-dog above the threshold is the false positive
+    vs3 = vs + [{'key': 'k2', 'band': n - 1, 'verdict': 'not_dog'}]
     s3 = fa.summarise(vs3, totals)
-    if s3['bands'][4]['judged'] != 1:
+    if s3['kept']['wrong'] != 1 or s3['kept']['rate'] <= 0:
+        bad.append(f"a not-dog the gate kept is a false positive and was not "
+                   f"counted: {s3['kept']}")
+    # bands nobody looked at are unknown, not clean
+    if s['covered'] >= 0.99:
+        bad.append(f"covered = {s['covered']} with most bands unsampled")
+    # 'unsure' is neither a find nor a clean look
+    s4 = fa.summarise([{'key': 'a', 'band': 4, 'verdict': 'unsure'},
+                       {'key': 'b', 'band': 4, 'verdict': 'dog'}], totals)
+    if s4['bands'][4]['judged'] != 1:
         bad.append(f"'unsure' counted in the denominator: "
-                   f"{s3['bands'][4]['judged']} judged, expected 1")
+                   f"{s4['bands'][4]['judged']}")
+    # the old vocabulary still reads
+    s5 = fa.summarise([{'key': 'a', 'band': 4, 'verdict': 'missed'}], totals)
+    if s5['bands'][4]['dogs'] != 1:
+        bad.append("a verdict written as 'missed' before the wording changed "
+                   "is no longer counted")
 
 
 def ledger_checks(bad):
@@ -124,14 +139,18 @@ def ledger_checks(bad):
     with tempfile.TemporaryDirectory() as tmp:
         p = os.path.join(tmp, 'v.jsonl')
         with open(p, 'w') as fh:
-            fh.write(json.dumps({'key': 'a', 'verdict': 'missed'}) + '\n')
+            fh.write(json.dumps({'key': 'a', 'verdict': 'dog'}) + '\n')
             fh.write('not json at all\n')
             fh.write('\n')
-            fh.write(json.dumps({'key': 'a', 'verdict': 'correct'}) + '\n')
+            fh.write(json.dumps({'key': 'a', 'verdict': 'not_dog'}) + '\n')
             fh.write(json.dumps({'no_key': 1}) + '\n')
             fh.write(json.dumps({'key': 'b', 'verdict': 'unsure'}) + '\n')
+            fh.write(json.dumps({'key': 'c', 'verdict': 'dog'}) + '\n')
+            # a withdrawal: the box goes back to unjudged, it does not become
+            # a third kind of answer
+            fh.write(json.dumps({'key': 'c', 'verdict': None}) + '\n')
         got = {v['key']: v['verdict'] for v in fa.read_verdicts(p)}
-        if got != {'a': 'correct', 'b': 'unsure'}:
+        if got != {'a': 'not_dog', 'b': 'unsure'}:
             bad.append(f'ledger read {got}; a changed mind must win and a '
                        f'corrupt line must be skipped, not fatal')
 
@@ -219,7 +238,7 @@ def isolation_checks(bad):
             bad.append('a manifest row has no sequence — the only column a '
                        'future split may use, and the one whose absence put '
                        '70.8% of a val set in train last time')
-        if any(r.get('verdict') not in ('missed', 'correct') for r in man):
+        if any(r.get('verdict') not in ('dog', 'not_dog') for r in man):
             bad.append(f'a manifest row carries a verdict no human gave: '
                        f'{[r.get("verdict") for r in man]}')
         # changing your mind moves the file rather than leaving both
@@ -241,10 +260,33 @@ def isolation_checks(bad):
         if v not in audit.VERDICTS:
             bad.append(f'{v!r} is mapped to a class but is not something a '
                        f'person can answer')
-    for m in ('dog', 'not_dog'):
-        if audit.record('k#0', m)['ok']:
-            bad.append(f'{m!r} was accepted as a human verdict — the gate\'s '
-                       f'own labels must not enter this ledger')
+    # A person's answers are now the same two words the model uses, so the
+    # separation cannot be a vocabulary check any more -- and it never really
+    # was one. It is structural: the pool the page serves from carries the
+    # SCORE and not the LABEL, so the gate's own verdict is not available to
+    # anything that could write it down.
+    try:
+        import duckdb
+        cols = [r[0] for r in duckdb.connect().execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{fa.POOL}') LIMIT 1"
+        ).fetchall()]
+        if 'label' in cols:
+            bad.append("the pool carries the gate's own label — the one thing "
+                       "that must never be reachable from the page that "
+                       "records human answers")
+        if 'p_dog' not in cols:
+            bad.append('the pool carries no score, so nothing can be banded')
+    except Exception as e:                     # noqa: BLE001
+        if 'No files found' not in str(e) and 'IO Error' not in str(e):
+            bad.append(f'could not read the pool schema: {e}')
+    # and the ledger has exactly one writer
+    asrc = open(os.path.join(REPO, 'tools', 'dashboard', 'audit.py')).read()
+    writers = [ln for ln in asrc.splitlines()
+               if 'fa.VERDICTS' in ln and 'open(' in ln]
+    if len(writers) != 1:
+        bad.append(f'the verdict ledger has {len(writers)} writers; it must '
+                   f'have exactly one, so every line in it came through the '
+                   f'same door: {writers}')
     # and the audit still never writes into the reviewer's own stores
     for rel in ('tools/detect/fn_audit.py', 'tools/dashboard/audit.py'):
         src = open(os.path.join(REPO, rel)).read()
@@ -364,11 +406,19 @@ def selection_checks(bad):
                     ('75', 75), (40, 25), (10 ** 9, 25), ('; DROP', 25)):
         if audit.page_size(v) != want:
             bad.append(f'page_size({v!r}) = {audit.page_size(v)}, want {want}')
+    # the offered sizes need not divide by the band count -- with ten bands
+    # and a page of 25 they cannot -- but every crop asked for must be drawn,
+    # and no band may get two more than another
+    import fn_audit as fa
     for n in audit.PAGE_SIZES:
-        import fn_audit as fa
-        if n % len(fa.BANDS):
-            bad.append(f'a page of {n} does not divide by the {len(fa.BANDS)} '
-                       f'bands, so the strata come out uneven')
+        base, extra = divmod(n, len(fa.BANDS))
+        quota = [base + (1 if i >= len(fa.BANDS) - extra else 0)
+                 for i in range(len(fa.BANDS))]
+        if sum(quota) != n:
+            bad.append(f'a page of {n} plans {sum(quota)} crops')
+        if max(quota) - min(quota) > 1:
+            bad.append(f'a page of {n} gives one band {max(quota)} crops and '
+                       f'another {min(quota)}')
 
 
 def page_checks(bad):
@@ -415,6 +465,12 @@ function chk(c, m){ if(!c) console.log('FAIL ' + m) }
 chk(/^\d/.test(els.rate.textContent), 'headline rate is ' +
   JSON.stringify(els.rate.textContent));
 chk(els.judged.textContent === '12', 'judged reads ' + els.judged.textContent);
+// the axis runs 0-100% and says where the gate's own line falls
+chk(/100%/.test(els.bands.innerHTML) && /where the gate/.test(els.bands.innerHTML),
+  'the band axis does not state its range or the threshold');
+// bands above the threshold must exist now
+chk(/0\.9–1\.0/.test(els.bands.innerHTML),
+  'the bands stop before 1.0 — the gate\'s acceptances are unauditable');
 chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
 chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
 chk(els.bands.innerHTML.length > 100, 'the band strip rendered nothing');
@@ -425,10 +481,19 @@ listeners.doc.keydown({key:'1', target:{tagName:'SELECT'},
   preventDefault:function(){}});
 chk(FETCHES.length === before,
   'a keypress inside a dropdown recorded a verdict');
-listeners.doc.keydown({key:'1', target:{tagName:'DIV'},
+listeners.doc.keydown({key:'f', target:{tagName:'DIV'},
   preventDefault:function(){}});
 chk(FETCHES.some(function(u){return /verdict/.test(u)}),
-  'a keypress on the page did NOT record a verdict');
+  'F did not flag the crop under the cursor');
+// the cursor must NOT walk on by itself -- the page choosing the next crop
+// for you is what made it feel like it was selecting things
+var was = cur;
+judge(cur, 'dog');
+chk(cur === was, 'the cursor advanced on its own after a verdict');
+// "not a dog" clears the crop off the grid and offers a way back
+judge(0, 'not_dog');
+chk(grid.children.length === 0 || els.undotoast.hidden === false,
+  'dismissing a crop offered no undo');
 // changing the selection must draw rather than replay a page cut under the
 // old one. Each click lands a stubbed response that resets total, so the
 // state under test is set immediately before each one.
@@ -440,10 +505,10 @@ dirty = false; total = 5; idx = 0; FETCHES.length = 0;
 listeners.next.click();
 chk(FETCHES.some(function(u){return /audit\/page/.test(u)}),
   'with the selection unchanged, next did not page forward');
-chk(/not sampled/.test(els.bands.innerHTML),
+chk(/none seen/.test(els.bands.innerHTML),
   'a band nobody judged does not say so');
-chk(/0 &ndash; |0 – /.test(els.bands.innerHTML) || /0 . \d/.test(els.bands.innerHTML),
-  'the interval axis has no stated top — a bar with no scale is a shape');
+chk(/0%/.test(els.bands.innerHTML),
+  'the interval axis has no stated ends — a bar with no scale is a shape');
 chk(!/left:NaN|width:NaN/.test(els.bands.innerHTML),
   'an interval bar is positioned at NaN');
 var junk = Object.keys(els).map(function(k){

@@ -168,12 +168,29 @@ def shadowed(trees):
     for rel, tree in trees.items():
         seen = {}
         for n in tree.body:
-            if not isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
-                                  _ast.ClassDef)):
-                continue
-            if n.name in seen:
-                out.append((rel, n.name, (seen[n.name], n.lineno)))
-            seen[n.name] = n.lineno
+            names = []
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                              _ast.ClassDef)):
+                names = [n.name]
+            elif isinstance(n, _ast.Assign):
+                # A MODULE CONSTANT shadows exactly as quietly as a function:
+                # a verdict vocabulary named VERDICTS took the name of the
+                # path to the verdict ledger, and the reader opened a tuple.
+                # Only UPPER_CASE names -- lower-case module state is
+                # reassigned on purpose all over this codebase.
+                names = [t.id for t in n.targets
+                         if isinstance(t, _ast.Name) and t.id.isupper()
+                         and not t.id.startswith('_')]
+                # `X = X.replace(...)` is the page-template substitution
+                # idiom, not a shadow: the second assignment consumes the
+                # first rather than hiding it.
+                refs = {v.id for v in _ast.walk(n.value)
+                        if isinstance(v, _ast.Name)}
+                names = [x for x in names if x not in refs]
+            for name in names:
+                if name in seen:
+                    out.append((rel, name, (seen[name], n.lineno)))
+                seen[name] = n.lineno
     return out
 
 

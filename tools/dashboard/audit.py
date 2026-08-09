@@ -85,21 +85,31 @@ def pool_ready():
 
 
 def _drawn_keys():
-    """Every box ever put in front of anyone, judged or not."""
+    """Every box ever put in front of anyone, judged or not.
+
+    Two sources, because either alone can be incomplete: the draw log is what
+    was shown, and the verdict ledger is what was answered. A box can be
+    answered without the draw log surviving -- the pool was rebuilt once and
+    the log went with it -- and an answered box is seen by definition, so it
+    must never come back round.
+    """
     keys, seqs = set(), set()
-    try:
-        with open(DRAWN) as fh:
-            for line in fh:
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                if d.get('key'):
-                    keys.add(d['key'])
-                if d.get('seq'):
-                    seqs.add(d['seq'])
-    except OSError:
-        pass
+    for path, get in ((DRAWN, None), (fa.VERDICTS, None)):
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(d, dict):
+                        continue
+                    if d.get('key'):
+                        keys.add(d['key'])
+                    if d.get('seq'):
+                        seqs.add(d['seq'])
+        except OSError:
+            pass
     return keys, seqs
 
 
@@ -297,11 +307,8 @@ def draw_page(n=25, band=None):
         return doc
 
 
-VERDICTS = ('missed', 'correct', 'unsure')
-# What a human verdict means as a training label. The audit only ever shows
-# boxes the gate REJECTED, so "missed" is a dog the model threw away -- the
-# expensive error, and the example worth the most to a retrain.
-CLASS_OF = {'missed': 'dog', 'correct': 'not_dog'}
+VERDICTS = fa.ANSWERS           # 'dog' | 'not_dog' | 'unsure'
+CLASS_OF = fa.CLASS_OF
 
 
 def place(key, verdict):
@@ -314,7 +321,7 @@ def place(key, verdict):
     """
     name = str(key).replace('#', '_') + '.jpg'
     src = os.path.join(FULL, name)
-    want = CLASS_OF.get(verdict)
+    want = CLASS_OF.get(fa.verdict_of(verdict))
     for cls in ('dog', 'not_dog'):
         dst = os.path.join(DATASET, cls, name)
         if cls == want:
@@ -344,8 +351,11 @@ def record(key, verdict, meta=None):
     reader keeps the last one. Nothing rewrites history in place, so a crash
     mid-write costs one line rather than the file.
     """
-    if verdict not in VERDICTS:
+    # `None` clears: undo is a verdict being withdrawn, not a third opinion,
+    # and the ledger is append-only so it is written as one more line.
+    if verdict is not None and fa.verdict_of(verdict) is None:
         return {'ok': False, 'msg': f'unknown verdict {verdict!r}'}
+    verdict = fa.verdict_of(verdict) if verdict is not None else None
     rec = {'key': str(key), 'verdict': verdict, 'ts': time.time()}
     for k in ('band', 'p_dog', 'seq'):
         if meta and meta.get(k) is not None:
@@ -417,6 +427,14 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    a shape, not a measurement. */
 .bands{background:var(--panel);border:1px solid var(--bd);border-radius:14px;
   padding:14px 18px 16px;margin-bottom:16px}
+.bfoot{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
+  font-size:10px;color:var(--dim);padding-top:7px;margin-top:4px;
+  border-top:1px solid var(--bd)}
+.bfoot span:nth-child(3){display:flex;justify-content:space-between;
+  grid-column:3}
+.bfoot span:first-child,.bfoot span:nth-child(2){display:none}
+/* the axis runs the width of the track column, so its end labels sit under it */
+.bfoot{grid-template-columns:118px 96px 1fr 116px}
 .bhead{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
   align-items:baseline;font-size:10px;text-transform:uppercase;
   letter-spacing:.07em;color:var(--dim);padding-bottom:8px;
@@ -433,6 +451,10 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 /* the axis line the intervals sit on, not a container the bar fills */
 .btrack::before{content:'';position:absolute;left:0;right:0;top:50%;
   height:1px;background:rgba(130,140,150,.14)}
+/* the gate's threshold, drawn where it actually is on the axis */
+.btrack::after{content:'';position:absolute;left:50%;top:-2px;bottom:-2px;
+  width:1px;background:rgba(130,140,150,.3)}
+.btrack.kept{opacity:.72}
 .bci{position:absolute;top:50%;transform:translateY(-50%);height:7px;
   border-radius:4px;background:rgba(232,166,69,.28);min-width:2px}
 .bdot{position:absolute;top:50%;transform:translate(-50%,-50%);width:3px;
@@ -464,8 +486,11 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   gap:14px}
 .card{background:var(--panel);border:1px solid var(--bd);border-radius:13px;
   overflow:hidden;display:flex;flex-direction:column}
-.card.done{opacity:.42}
-.card.miss{border-color:rgba(239,83,80,.55)}
+.card.done{opacity:.5}
+/* a flag is the FINDING -- it stays lit rather than greying out like an
+   answered question, because the whole point of the page is the pile of them */
+.card.miss{border-color:var(--acc);opacity:1;
+  box-shadow:0 0 0 1px rgba(232,166,69,.35)}
 .card.ok{border-color:rgba(67,181,129,.4)}
 .shot{position:relative;background:#0e1014;aspect-ratio:1;display:flex;
   align-items:center;justify-content:center;cursor:zoom-in}
@@ -494,6 +519,16 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .lbcap button{background:var(--panel2);border:1px solid var(--bd);
   color:var(--mut);border-radius:7px;padding:4px 9px;font-size:11.5px;
   cursor:pointer;font-family:inherit}
+.undotoast{position:fixed;right:24px;bottom:24px;display:flex;gap:12px;
+  align-items:center;background:var(--panel2);border:1px solid var(--bd);
+  border-radius:12px;padding:10px 12px;z-index:60;
+  box-shadow:0 10px 30px rgba(0,0,0,.45)}
+.undotoast[hidden]{display:none}
+.undotoast img{width:38px;height:38px;object-fit:cover;border-radius:8px;
+  background:#000;flex:none}
+.undotoast .tt{color:var(--dim);font-size:11px;white-space:nowrap}
+.undotoast .tt b{display:block;color:var(--tx);font-size:12.5px;
+  font-weight:620}
 .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
   background:var(--panel2);border:1px solid var(--bd);border-radius:9px;
   padding:8px 14px;font-size:12.5px;color:var(--tx);z-index:60}
@@ -507,23 +542,23 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   border-color .12s ease}}
 </style></head><body><div class="wrap">
 <header>
-  <div><h1>What the gate threw away</h1>
-    <div class="sub">dogbin_008 rejected 3.9M of 4.7M boxes. This samples them
-      so the ones it got wrong can be counted &mdash; a dog dropped here is
-      gone from everything downstream.</div></div>
+  <div><h1>Dogs the gate threw away</h1>
+    <div class="sub">Flag anything that is a dog. Below a score of 0.5 the
+      gate rejected it, so a flag there is a dog that is gone from everything
+      downstream. Above 0.5 it kept it, and a flag just says it was right.</div></div>
   <a class="back" href="/">&larr; dashboard</a>
 </header>
 
 <div class="meas">
-  <div><div class="mlab">missed dogs</div>
+  <div><div class="mlab">dogs it threw away</div>
     <div class="mbig" id="rate">&mdash;</div>
-    <div class="mci" id="ci">nothing judged yet</div></div>
-  <div><div class="mlab">boxes judged</div>
+    <div class="mci" id="ci">nothing flagged yet</div></div>
+  <div><div class="mlab">you have flagged</div>
     <div class="mbig" id="judged">0</div>
     <div class="mci" id="found">&nbsp;</div></div>
-  <div class="mnote" id="note">Each band is drawn from evenly, so these are
-    not proportions of what you have seen &mdash; the headline weights each
-    band by how many boxes the gate really put in it.</div>
+  <div class="mnote" id="note">Bands are drawn from evenly, so this is not a
+    proportion of what you have seen &mdash; it weights each band by how many
+    boxes the gate really put in it.</div>
 </div>
 
 <div class="bands" id="bands"></div>
@@ -546,8 +581,9 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 <div class="grid" id="grid"></div>
 <div class="empty" id="empty" hidden></div>
 <div class="keys">
-  <kbd>1</kbd> missed a dog &nbsp; <kbd>2</kbd> not a dog &nbsp;
-  <kbd>3</kbd> unsure &nbsp; <kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;
+  <kbd>F</kbd> it&rsquo;s a dog &nbsp; <kbd>2</kbd> not a dog &nbsp;
+  <kbd>3</kbd> unsure &nbsp; <kbd>U</kbd> undo &nbsp;
+  <kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;
   <kbd>Enter</kbd> enlarge &nbsp; <kbd>N</kbd> next page
 </div>
 </div>
@@ -559,6 +595,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
     <button id="lbclose">close</button></div>
 </div>
 <div class="toast" id="toast" hidden></div>
+<div class="undotoast" id="undotoast" hidden></div>
 
 <script>
 var BANDS=__BANDS__;
@@ -577,26 +614,74 @@ function fmtn(n){return (n||0).toLocaleString('en-US')}
    local answer, not from a reload: a reviewer working through a page at speed
    must never wait on a round trip, and the ledger is append-only so a lost
    response costs one line, not the page. */
+var lastUndo=null,toastT=null;
 function judge(i,verdict){
   var it=page.items[i]; if(!it)return;
-  it.verdict=verdict; paintCard(i);
+  it.verdict=verdict;
+  /* The cursor stays where it was put. It used to step to the next crop after
+     every answer, which reads as the page choosing for you -- and on a grid,
+     where the eye is already on the crop it means to judge, moving the ring
+     somewhere else is just wrong. Arrows move it; nothing else does. */
+  if(verdict==='not_dog'){
+    /* Not a dog is a DISMISSAL: it is the answer for almost every crop here,
+       and leaving three hundred of them on screen greyed out buries the few
+       that matter. It leaves the grid, and the toast is the way back. */
+    hide(i);
+    offerUndo(it,i);
+  }else{
+    paintCard(i);
+  }
+  send(it.key,verdict,it);
+}
+function send(key,verdict,it){
   fetch('/api/audit/verdict',{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({key:it.key,verdict:verdict,band:it.band,
-                         p_dog:it.p_dog,seq:it.seq})})
+    body:JSON.stringify({key:key,verdict:verdict,band:it?it.band:null,
+                         p_dog:it?it.p_dog:null,seq:it?it.seq:null})})
     .then(function(r){return r.json()})
     .then(function(j){if(!j||!j.ok)toast('not recorded');else loadStats()})
     .catch(function(){toast('not recorded')});
-  if(i===cur&&cur<page.items.length-1)move(1);
+}
+function hide(i){
+  var el=grid.children[i];
+  if(el){el.style.display='none';el.setAttribute('data-gone','1')}
+}
+function unhide(i){
+  var el=grid.children[i];
+  if(el){el.style.display='';el.removeAttribute('data-gone')}
+}
+function offerUndo(it,i){
+  lastUndo={key:it.key,i:i};
+  var t=document.getElementById('undotoast');
+  t.innerHTML='<img src="/audit/crop/'+esc(it.key.replace("#","_"))+
+    '.jpg" alt="">'+
+    '<span class="tt"><b>Not a dog</b>'+it.image_id+'</span>'+
+    '<button class="btn" id="undoB">Undo</button>';
+  t.hidden=false;
+  document.getElementById('undoB').onclick=undoLast;
+  clearTimeout(toastT);
+  /* five seconds and it stands -- it is already on disk either way */
+  toastT=setTimeout(function(){lastUndo=null;t.hidden=true},5000);
+}
+function undoLast(){
+  var u=lastUndo; if(!u)return;
+  lastUndo=null;clearTimeout(toastT);
+  document.getElementById('undotoast').hidden=true;
+  var it=page.items[u.i];
+  if(it){delete it.verdict;unhide(u.i);paintCard(u.i)}
+  /* a withdrawal, not a third opinion: the ledger takes a null and the box
+     goes back to unjudged */
+  send(u.key,null,it);
+  toast('put back');
 }
 function paintCard(i){
   var el=grid.children[i],it=page.items[i]; if(!el||!it)return;
-  el.className='card'+(it.verdict?' done':'')+
-    (it.verdict==='missed'?' miss':it.verdict==='correct'?' ok':'')+
+  el.className='card'+(it.verdict&&it.verdict!=='dog'?' done':'')+
+    (it.verdict==='dog'?' miss':it.verdict==='not_dog'?' ok':'')+
     (i===cur?' cur':'');
   var b=el.querySelectorAll('.act');
-  b[0].classList.toggle('on',it.verdict==='missed');
-  b[1].classList.toggle('on',it.verdict==='correct');
+  b[0].classList.toggle('on',it.verdict==='dog');
+  b[1].classList.toggle('on',it.verdict==='not_dog');
   b[2].classList.toggle('on',it.verdict==='unsure');
   el.style.boxShadow=i===cur?'0 0 0 2px var(--acc)':'';
 }
@@ -624,9 +709,9 @@ function render(){
         ' for dog; band '+lo.toFixed(1)+'-'+hi.toFixed(1)+'">'+
         it.p_dog.toFixed(3)+'</span></div>'+
       '<div class="acts">'+
-        '<button class="act m" data-v="missed" data-i="'+i+'">missed a dog</button>'+
-        '<button class="act c" data-v="correct" data-i="'+i+'">not a dog</button>'+
-        '<button class="act u" data-v="unsure" data-i="'+i+'" title="unsure">?</button>'+
+        '<button class="act m" data-v="dog" data-i="'+i+'">&#9873; it\u2019s a dog</button>'+
+        '<button class="act c" data-v="not_dog" data-i="'+i+'">not a dog</button>'+
+        '<button class="act u" data-v="unsure" data-i="'+i+'" title="cannot tell">?</button>'+
       '</div></div>';
   }).join('');
   for(var i=0;i<page.items.length;i++)paintCard(i);
@@ -677,48 +762,68 @@ function loadStats(){
 }
 function paintStats(s){
   if(!s)return;
-  var r=document.getElementById('rate'),ci=document.getElementById('ci');
-  document.getElementById('judged').textContent=(s.judged||0).toLocaleString();
+  var r=document.getElementById('rate'),ci=document.getElementById('ci'),
+      rej=s.rejected||{},kept=s.kept||{};
+  document.getElementById('judged').textContent=fmtn(s.judged||0);
   document.getElementById('found').textContent=
-    (s.missed||0)+' were dogs';
-  if(!s.judged){r.textContent='—';ci.textContent='nothing judged yet'}
+    (rej.wrong||0)+' flagged below 0.5';
+  /* The headline is the one number the page exists to produce: how many dogs
+     the gate threw away. It used to read "missed dogs 100.0% -- 3,945,390
+     dogs across 3,945,390 rejected boxes", which is what a rate of 1.0 off
+     five crops extrapolates to, stated as though it were known. An estimate
+     from a handful of crops is not a count of four million things, so the
+     extrapolation is only shown once there is enough behind it to mean
+     anything, and it is always written as a range. */
+  if(!rej.judged){r.textContent='—';
+    ci.textContent='flag a dog below 0.5 and this starts counting'}
   else{
-    r.textContent=pctTxt(s.weighted_rate||0);
-    ci.textContent='≈'+Math.round((s.weighted_rate||0)*(s.pool||0)).toLocaleString()+
-      ' dogs across the '+(s.pool||0).toLocaleString()+' rejected boxes';
+    r.textContent=pctTxt(rej.rate||0);
+    var lo=0,hi=0,any=false;
+    (s.bands||[]).forEach(function(b){
+      if(b.kept||!b.judged)return; any=true;
+      lo+=b.lo95*b.boxes; hi+=b.hi95*b.boxes;
+    });
+    var pop=0;(s.bands||[]).forEach(function(b){
+      if(!b.kept&&b.judged)pop+=b.boxes});
+    ci.textContent = rej.judged<20
+      ? 'from '+rej.judged+' crops — too few to put a number on '+
+        fmtn(rej.boxes)+' boxes yet'
+      : 'somewhere between '+fmtn(Math.round(lo/(pop||1)*rej.boxes))+' and '+
+        fmtn(Math.round(hi/(pop||1)*rej.boxes))+' of the '+
+        fmtn(rej.boxes)+' it rejected';
   }
-  /* One axis for every row, topped at the widest interval any band has --
-     rates here live between 0 and a few percent, so a 0-100% axis would draw
-     every band as a dot on the left. The top is written down, because an
-     adaptive scale that does not say so is a lie by omission. */
-  var top=0;
-  (s.bands||[]).forEach(function(b){if(b.judged)top=Math.max(top,b.hi95||0)});
-  top=top>0?top:0.05;
+  /* One axis, 0 to 100%, with the gate's own threshold drawn on it. The share
+     of a band that really is a dog is what the model is trying to predict, so
+     against the band's own score it reads as a calibration curve: it should
+     climb, and where it crosses 50% is where the threshold belongs. */
   document.getElementById('bands').innerHTML=
-    '<div class="bhead" id="bhead"><span>score the gate gave</span>'+
-    '<span>in the store</span><span>share that were dogs, 95% interval</span>'+
-    '<span class="ax">0 – '+pctTxt(top)+'</span></div>'+
+    '<div class="bhead"><span>score the gate gave</span>'+
+    '<span>in the store</span>'+
+    '<span>share that really are dogs, with its 95% interval</span>'+
+    '<span class="ax">flagged</span></div>'+
     (s.bands||[]).map(function(b){
+      var side=b.kept?' kept':' threw away';
       if(!b.judged)return '<div class="brow nil"><span class="bname">'+
         b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
-        '<span class="bwhat">'+fmtn(b.boxes)+'</span>'+
-        '<div class="btrack"></div>'+
-        '<span class="bval bnil">not sampled</span></div>';
-      function at(v){var x=(+v||0)/top*100;
+        '<span class="bwhat">'+fmtn(b.boxes)+side+'</span>'+
+        '<div class="btrack'+(b.kept?' kept':'')+'"></div>'+
+        '<span class="bval bnil">none seen</span></div>';
+      function at(v){var x=(+v||0)*100;
         return Math.max(0,Math.min(100,x!==x?0:x))}
       var l=at(b.lo95),h=at(b.hi95),m=at(b.rate);
-      return '<div class="brow'+(b.missed?'':' bzero')+'">'+
+      return '<div class="brow'+(b.dogs?'':' bzero')+'">'+
         '<span class="bname">'+b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
-        '<span class="bwhat">'+fmtn(b.boxes)+'</span>'+
-        '<div class="btrack" title="'+b.missed+' of '+b.judged+
-          ' judged were dogs the gate threw away — the bar is the 95% '+
-          'interval, the tick is the estimate">'+
+        '<span class="bwhat">'+fmtn(b.boxes)+side+'</span>'+
+        '<div class="btrack'+(b.kept?' kept':'')+'" title="'+b.dogs+' of '+
+          b.judged+' were dogs — the bar is the 95% interval, the tick is the '+
+          'estimate">'+
           '<div class="bci" style="left:'+l.toFixed(2)+'%;width:'+
             Math.max(0.6,h-l).toFixed(2)+'%"></div>'+
           '<div class="bdot" style="left:'+m.toFixed(2)+'%"></div></div>'+
-        '<span class="bval"><b>'+pctTxt(b.rate)+'</b> · '+b.missed+'/'+
-          b.judged+'</span></div>';
-    }).join('');
+        '<span class="bval"><b>'+b.dogs+'</b>/'+b.judged+'</span></div>';
+    }).join('')+
+    '<div class="bfoot"><span>0%</span><span>50% — where the gate '+
+    'draws its line</span><span>100%</span></div>';
 }
 /* clicks */
 grid.addEventListener('click',function(e){
@@ -799,9 +904,10 @@ document.addEventListener('keydown',function(e){
   var t=e.target&&e.target.tagName;
   if(t==='SELECT'||t==='INPUT'||t==='TEXTAREA')return;
   if(!lb.hidden){if(e.key==='Escape'){lb.hidden=true;e.preventDefault()}return}
-  if(e.key==='1'){judge(cur,'missed');e.preventDefault()}
-  else if(e.key==='2'){judge(cur,'correct');e.preventDefault()}
+  if(e.key==='1'||e.key==='f'||e.key==='F'){judge(cur,'dog');e.preventDefault()}
+  else if(e.key==='2'){judge(cur,'not_dog');e.preventDefault()}
   else if(e.key==='3'){judge(cur,'unsure');e.preventDefault()}
+  else if(e.key==='u'||e.key==='U'){undoLast();e.preventDefault()}
   else if(e.key==='ArrowRight'){move(1);e.preventDefault()}
   else if(e.key==='ArrowLeft'){move(-1);e.preventDefault()}
   else if(e.key==='Enter'){zoom(cur);e.preventDefault()}

@@ -57,15 +57,27 @@ var PAGE = {index:0, dropped:0, items:[
    seq:'s2', drive:'bobcat', cell:'c'}]};
 // summarise() returns lo95/hi95 on every band; a fixture without them was a
 // payload the server never sends, and the page drew left:NaN% against it
-var STATS = {judged:12, missed:1, weighted_rate:0.0031, pool:3945390,
-  covered:0.9, bands:[
-  {lo:0.0, hi:0.1, judged:8, missed:0, rate:0.0,  lo95:0.0,  hi95:0.324,
-   boxes:3530147},
-  {lo:0.1, hi:0.2, judged:0, missed:0, rate:0.0,  lo95:0.0,  hi95:0.0,
-   boxes:162866},
-  {lo:0.2, hi:0.3, judged:0, missed:0, rate:0.0,  lo95:0.0,  hi95:0.0,
-   boxes:102513},
-  {lo:0.3, hi:0.4, judged:0, missed:0, rate:0.0,  lo95:0.0,  hi95:0.0,
-   boxes:80241},
-  {lo:0.4, hi:0.5, judged:4, missed:1, rate:0.25, lo95:0.046, hi95:0.699,
-   boxes:69623}]};
+var STATS = {judged:12, wrong:1, pool:4688510, covered:0.9, threshold:0.5,
+  rejected:{rate:0.0031, judged:12, wrong:1, boxes:3945390, covered:0.9},
+  kept:{rate:0.0, judged:0, wrong:0, boxes:743120, covered:0.0},
+  bands:[
+  {lo:0.0, hi:0.1, judged:8, dogs:0, wrong:0, kept:false, rate:0.0,
+   lo95:0.0, hi95:0.324, boxes:3530147},
+  {lo:0.1, hi:0.2, judged:0, dogs:0, wrong:0, kept:false, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:162866},
+  {lo:0.2, hi:0.3, judged:0, dogs:0, wrong:0, kept:false, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:102513},
+  {lo:0.3, hi:0.4, judged:0, dogs:0, wrong:0, kept:false, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:80241},
+  {lo:0.4, hi:0.5, judged:4, dogs:1, wrong:1, kept:false, rate:0.25,
+   lo95:0.046, hi95:0.699, boxes:69623},
+  {lo:0.5, hi:0.6, judged:0, dogs:0, wrong:0, kept:true, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:120000},
+  {lo:0.6, hi:0.7, judged:0, dogs:0, wrong:0, kept:true, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:110000},
+  {lo:0.7, hi:0.8, judged:0, dogs:0, wrong:0, kept:true, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:120000},
+  {lo:0.8, hi:0.9, judged:0, dogs:0, wrong:0, kept:true, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:150000},
+  {lo:0.9, hi:1.0, judged:0, dogs:0, wrong:0, kept:true, rate:0.0,
+   lo95:0.0, hi95:0.0, boxes:243120}]};

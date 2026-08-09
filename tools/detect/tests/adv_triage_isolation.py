@@ -234,7 +234,6 @@ def _lift(path, name):
     return None
 
 
-DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
 _a, _b = _lift(TRIAGE, 'backend_of'), _lift(DASH, 'backend_of')
 if _a and _b:
     # Every model string either backend can stamp on a record. A backend the
