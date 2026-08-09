@@ -576,6 +576,16 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .shot{position:relative;background:#0e1014;aspect-ratio:1;display:flex;
   align-items:center;justify-content:center;cursor:zoom-in}
 .shot img{max-width:100%;max-height:100%;display:block}
+/* The model's own verdict, top-left, opposite the score. Told apart by
+   WEIGHT rather than hue -- filled for the class the score predicts, outlined
+   for the other -- because these are two categories and not a good and a bad,
+   and colouring one green would put a judgement on the tile before the reader
+   has made one. The word is always there, so it is never colour alone. */
+.ptag{position:absolute;left:6px;top:6px;font-size:10.5px;border-radius:6px;
+  padding:2px 7px;letter-spacing:.02em;border:1px solid var(--bd);
+  background:rgba(10,12,16,.82);color:var(--mut)}
+.ptag.yes{background:rgba(232,166,69,.16);border-color:rgba(232,166,69,.42);
+  color:var(--acc);font-weight:620}
 .pchip{position:absolute;right:6px;bottom:6px;font-size:10.5px;
   background:rgba(10,12,16,.82);border:1px solid var(--bd);border-radius:6px;
   padding:2px 6px;color:var(--mut);font-variant-numeric:tabular-nums}
@@ -685,7 +695,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 <script>
 var BANDS=__BANDS__,STAGE=__STAGE__,POS=__POS__,NEG=__NEG__,
     YES=__YES__,NO=__NO__,BELOW=__BELOW__,ABOVE=__ABOVE__,
-    DEFAULT_BAND=__DEFBAND__;
+    DEFAULT_BAND=__DEFBAND__,THRESH=__THRESH__;
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
     lbimg=document.getElementById('lbimg'),lbtxt=document.getElementById('lbtxt');
@@ -714,6 +724,10 @@ function fmtn(n){return (n||0).toLocaleString('en-US')}
    path by hand, and the stage prefix was added to one of them -- so every
    thumbnail on the leash page asked the gate for a crop it does not have and
    the grid came back as rows of alt text. */
+/* What the model called this box. It is not stored on the row -- the score
+   is, and the label is the score against the threshold -- so it is derived
+   here rather than carried, which means the two can never disagree. */
+function predOf(it){return (+it.p_dog>=THRESH)?POS:NEG}
 function cropSrc(it){
   return '/audit/crop/'+STAGE+'/'+esc(String(it.key).replace('#','_'))+'.jpg';
 }
@@ -833,6 +847,9 @@ function render(){
       '<div class="shot" data-zoom="'+i+'">'+
         '<img loading="lazy" src="'+cropSrc(it)+
         '" alt="box '+esc(it.key)+'">'+
+        '<span class="ptag '+(predOf(it)===POS?'yes':'no')+
+        '" title="what the model called it: '+predOf(it)+', scoring '+
+        it.p_dog.toFixed(3)+' for '+POS+'">'+esc(predOf(it))+'</span>'+
         '<span class="pchip" title="the model scored this '+
         it.p_dog.toFixed(3)+' for '+POS+'; band '+lo.toFixed(1)+'-'+
         hi.toFixed(1)+'">'+
@@ -1115,6 +1132,7 @@ def page_html(stage=DEFAULT_STAGE):
                  # unrecoverable error lives; symmetric ones from both
                  ('__DEFBAND__',
                   json.dumps('rejected' if sp['asymmetric'] else 'all')),
+                 ('__THRESH__', json.dumps(fa.THRESHOLD)),
                  ('__YESTXT__', sp['yes']), ('__NOTXT__', sp['no']),
                  ('__BELOWTXT__', sp['below']),
                  ('__ABOVETXT__', sp['above']),

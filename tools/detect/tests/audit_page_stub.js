@@ -3,7 +3,7 @@
 // is not becomes a TypeError, which is the point.
 var els = {}, listeners = {};
 function mk(id){
-  var el = {id:id, textContent:'', className:'', title:'',
+  var el = {id:id, className:'', title:'',
     hidden:false, disabled:false, style:{}, children:[], value:'', src:'',
     dataset:{}, options:[],
     // a <select> the page fills at boot: without these the option list is
@@ -30,11 +30,25 @@ function mk(id){
   // innerHTML must MAKE CHILDREN. Without this, grid.children stayed [] for
   // ever, so every check about a card being hidden, restored or counted
   // passed against a grid that had none -- a test of nothing at all.
-  var _html = '';
+  //
+  // And textContent must show through innerHTML, because that is exactly how
+  // the page escapes text: esc() sets textContent on a scratch div and reads
+  // innerHTML back. With the two unrelated, esc() returned '' and EVERY
+  // escaped string on the page was invisible to these checks.
+  var _html = '', _text = '';
+  Object.defineProperty(el, 'textContent', {
+    get: function(){ return _text },
+    set: function(v){
+      _text = String(v);
+      _html = _text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                   .replace(/>/g, '&gt;');
+    }
+  });
   Object.defineProperty(el, 'innerHTML', {
     get: function(){ return _html },
     set: function(v){
       _html = String(v);
+      _text = '';
       var n = (_html.match(/<div class="card/g) || []).length;
       el.children = [];
       for (var i = 0; i < n; i++) el.children.push(mk(el.id + ':card' + i));

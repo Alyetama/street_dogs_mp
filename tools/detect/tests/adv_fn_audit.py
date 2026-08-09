@@ -534,6 +534,21 @@ paintStats(STATS);
 chk(els.poolwarn.hidden === true, 'an up-to-date pool still warns');
 chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
 chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
+// every tile says what the model called it, and it must agree with the score
+// it is shown beside -- the label is derived from the score, so a tile that
+// reads "leashed 0.048" would mean the two came from different places
+chk(/class="ptag/.test(els.grid.innerHTML),
+  'no tile says what the model predicted');
+page.items.forEach(function (it) {
+  var want = (+it.p_dog >= THRESH) ? POS : NEG;
+  chk(predOf(it) === want,
+    'the tag for ' + it.key + ' (scored ' + it.p_dog + ') reads ' +
+    predOf(it) + ', not ' + want);
+});
+// the two classes are told apart by weight, not by hue alone: the word is
+// in the tile either way
+chk(/>(dog|not_dog|leashed|unleashed)</.test(els.grid.innerHTML),
+  'the predicted class is not written out, only styled');
 chk(els.bands.innerHTML.length > 100, 'the band strip rendered nothing');
 // 1/2/3 are verdicts AND the way a keyboard picks an option in a focused
 // <select>; a page size chosen by keyboard must not record a verdict
@@ -699,8 +714,8 @@ def stage_checks(bad):
     # to one would contradict that in the same screen.
     import re as _re
     for name, sp in fa.STAGES.items():
-        m = _re.search(r'DEFAULT_BAND=(\S+?);', audit.page_html(name))
-        got = m.group(1).strip('"') if m else None
+        m = _re.search(r'DEFAULT_BAND="([^"]*)"', audit.page_html(name))
+        got = m.group(1) if m else None
         want = 'rejected' if sp['asymmetric'] else 'all'
         if got != want:
             bad.append(f'{name} opens drawing from {got!r}, expected {want!r} '
