@@ -9471,17 +9471,14 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'image/jpeg')
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
+            # The geometry rides along with the picture. Asking for it
+            # separately meant opening the same 8000x4000 frame twice for one
+            # click -- a quarter of a second of decoding to learn four numbers
+            # that the decode had already produced.
+            self.send_header('X-Audit-Meta', json.dumps(meta))
+            self.send_header('Access-Control-Expose-Headers', 'X-Audit-Meta')
             self.end_headers()
             self.wfile.write(body)
-            return True
-        if path == '/api/audit/box':
-            q = parse_qs(urlparse(self.path).query)
-            stage = self._audit_stage(q)
-            if a is None:
-                self._json({'ok': False, 'msg': 'pool not built'})
-                return True
-            _, meta = a.frame_view(q.get('key', [''])[0], stage)
-            self._json(meta or {'ok': False, 'msg': 'no such box'})
             return True
         if path == '/api/audit/stats':
             q = parse_qs(urlparse(self.path).query)

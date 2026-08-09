@@ -368,11 +368,47 @@ def correction_checks(bad):
         bad.append('save_correction does not cut into edited/ — a redrawn '
                    'box would overwrite full/, and the picture the model was '
                    'judged on would change after the fact')
-    cut = _in.getsource(audit._cut_one)
-    if "if into == 'edited':\n            return True" not in cut:
-        bad.append('cutting a corrected box does not stop before the '
-                   'thumbnail — the tile would show a crop the model never '
-                   'saw, on a page whose job is to show what it did')
+    # Behavioural, not textual. This matched an exact indentation, so
+    # reformatting the function would have silently retired the check.
+    import tempfile as _tf
+    from PIL import Image as _Im
+    tmp = _tf.mkdtemp()
+    real_paths = audit.fa.paths
+    lay = dict(real_paths('gate'))
+    lay.update(out=tmp, crops=os.path.join(tmp, 'crops'),
+               full=os.path.join(tmp, 'full'))
+    audit.fa.paths = lambda stage='gate': lay
+    src_dir = os.path.join(tmp, 'src', 'cell', 'ground_animal_images')
+    os.makedirs(src_dir, exist_ok=True)
+    _Im.new('RGB', (400, 300), (30, 40, 50)).save(
+        os.path.join(src_dir, '9.jpg'))
+    cand = {'key': '9#0', 'image_id': '9', 'det_idx': 0, 'cell': 'cell',
+            'drive': 'd', 'x1': 40, 'y1': 40, 'x2': 140, 'y2': 140}
+    roots = {'d': os.path.join(tmp, 'src')}
+    try:
+        audit._cut_one(cand, roots, 'gate')
+        thumb = os.path.join(lay['crops'], '9_0.jpg')
+        full = os.path.join(lay['full'], '9_0.jpg')
+        if not (os.path.exists(thumb) and os.path.exists(full)):
+            bad.append('a normal cut did not write both the thumbnail and '
+                       'the full-resolution crop')
+        was = open(full, 'rb').read()
+        wasthumb = open(thumb, 'rb').read()
+        bigger = dict(cand, x1=20, y1=20, x2=200, y2=200)
+        audit._cut_one(bigger, roots, 'gate', into='edited', force=True)
+        if open(full, 'rb').read() != was:
+            bad.append('a redrawn box overwrote full/ — the picture the '
+                       'model was judged on changed after the fact')
+        if open(thumb, 'rb').read() != wasthumb:
+            bad.append('a redrawn box overwrote the thumbnail — the sheet '
+                       'would show a crop the model never saw')
+        if not os.path.exists(os.path.join(tmp, 'edited', '9_0.jpg')):
+            bad.append('a redrawn box was not cut into edited/, so nothing '
+                       'downstream can use it')
+    except Exception as e:                     # noqa: BLE001
+        bad.append(f'cutting a corrected box threw {type(e).__name__}: {e}')
+    finally:
+        audit.fa.paths = real_paths
     # and the export prefers the redrawn one
     import fn_audit as fa
     ex = _in.getsource(fa.export)

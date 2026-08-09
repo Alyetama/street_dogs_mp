@@ -752,6 +752,11 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   background:rgba(10,12,16,.82);color:var(--mut)}
 .ptag.yes{background:rgba(232,166,69,.16);border-color:rgba(232,166,69,.42);
   color:var(--acc);font-weight:620}
+/* a box you redrew, so the sheet shows which ones you have been through */
+.redrawn{position:absolute;left:6px;bottom:6px;font-size:10px;
+  letter-spacing:.04em;text-transform:uppercase;border-radius:5px;
+  padding:2px 6px;background:rgba(10,12,16,.86);color:var(--mut);
+  border:1px solid var(--bd)}
 /* Top-right, opposite the model's verdict -- the two things the MODEL says
    read together along the top, and the bottom belongs to what YOU say. It sat
    bottom-right, in the same corner the buttons appear in, so the score showed
@@ -1085,6 +1090,9 @@ function render(){
       '<div class="shot" data-zoom="'+i+'">'+
         '<img loading="lazy" src="'+cropSrc(it)+
         '" alt="box '+esc(it.key)+'">'+
+        (it.corrected?'<span class="redrawn" title="you redrew this box; '+
+          'the training crop uses your framing, the measurement uses the '+
+          'model\u2019s">redrawn</span>':'')+
         '<span class="ptag '+(predOf(it)===POS?'yes':'no')+
         '" title="what the model called it: '+predOf(it)+', scoring '+
         it.p_dog.toFixed(3)+' for '+POS+'">'+esc(predOf(it))+'</span>'+
@@ -1298,7 +1306,7 @@ function zoom(i){
    screen. The server sends the offset and scale that turn those back into the
    store's original pixels, and does that conversion itself, because the
    client has no business deciding where in an 8000px frame a box lands. */
-var EDIT={on:false,meta:null,box:null,drag:null};
+var EDIT={on:false,meta:null,box:null,drag:null,url:null};
 var boxwrap=document.getElementById('boxwrap'),ebox=document.getElementById('ebox'),
     mbox=document.getElementById('mbox'),lbstage=document.getElementById('lbstage');
 function edParts(){return [document.getElementById('lbedit'),
@@ -1322,19 +1330,28 @@ function edPaint(){
 }
 function edStart(){
   var it=page&&page.items[cur]; if(!it)return;
-  fetch('/api/audit/box?stage='+STAGE+'&key='+encodeURIComponent(it.key))
-    .then(function(r){return r.json()})
-    .then(function(m){
-      if(!m||m.ok===false||!m.box){toast('cannot open that frame');return}
+  /* One request. The geometry comes back in a header on the picture itself,
+     because both are products of the same decode and asking twice meant
+     opening an 8000x4000 frame twice for one click. */
+  fetch('/audit/frame/'+STAGE+'/'+it.key.replace('#','_')+'.jpg')
+    .then(function(r){
+      if(!r.ok)throw 0;
+      var m=JSON.parse(r.headers.get('X-Audit-Meta')||'null');
+      return r.blob().then(function(b){return [m,URL.createObjectURL(b)]});
+    })
+    .then(function(pair){
+      var m=pair[0];
+      if(!m||!m.box){toast('cannot open that frame');return}
       EDIT.meta=m;EDIT.box=m.box.slice();
-      /* the editing view is a different picture from the thumbnail: it is a
-         window on the frame, so the lightbox swaps to it while editing */
-      lbimg.src='/audit/frame/'+STAGE+'/'+it.key.replace('#','_')+'.jpg';
+      if(EDIT.url)URL.revokeObjectURL(EDIT.url);
+      EDIT.url=pair[1];
       lbimg.onload=function(){edShow(true);edPaint()};
+      lbimg.src=EDIT.url;
     }).catch(function(){toast('cannot open that frame')});
 }
 function edStop(){
   edShow(false);
+  if(EDIT.url){URL.revokeObjectURL(EDIT.url);EDIT.url=null}
   var it=page&&page.items[cur];
   if(it)lbimg.src=cropSrc(it);
 }
@@ -1348,7 +1365,11 @@ function edSave(){
       m.off_x+b[2]/m.scale, m.off_y+b[3]/m.scale]})})
     .then(function(r){return r.json()})
     .then(function(j){
-      if(j&&j.ok){toast('box saved for training');edStop()}
+      if(j&&j.ok){
+        toast('box saved for training');
+        it.corrected=true;paintCard(cur);
+        edStop();
+      }
       else toast((j&&j.msg)||'not saved');
     }).catch(function(){toast('not saved')});
 }
@@ -1508,10 +1529,14 @@ def with_verdicts(doc, stage=DEFAULT_STAGE):
     if not doc or not doc.get('items'):
         return doc
     seen = {v['key']: v.get('verdict') for v in fa.read_verdicts(stage=stage)}
+    fixed = corrections()
     for it in doc['items']:
         v = seen.get(it['key'])
         if v:
             it['verdict'] = v
+        iid, _, di = str(it['key']).partition('#')
+        if (iid, int(di or 0)) in fixed:
+            it['corrected'] = True
     return doc
 
 

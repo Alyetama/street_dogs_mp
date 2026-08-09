@@ -155,14 +155,14 @@ def _roots():
 
 
 def build(args):
-    stage = getattr(args, 'stage', DEFAULT_STAGE)
-    sp, P = spec(stage), paths(stage)
-    """Every rejected box, with the geometry to cut it and the sequence it
-    belongs to.
+    """Every box this stage judged, with the geometry to cut it and the
+    sequence it belongs to.
 
     One pass, kept on disk, because the alternative is re-joining 4.7M rows
     against a 32.5M-row manifest on every page of the audit.
     """
+    stage = getattr(args, 'stage', DEFAULT_STAGE)
+    sp, P = spec(stage), paths(stage)
     import duckdb
     os.makedirs(P['out'], exist_ok=True)
     con = duckdb.connect()
@@ -449,9 +449,6 @@ Rebuild at any time with:
 
 
 def export(args):
-    stage = getattr(args, 'stage', DEFAULT_STAGE)
-    sp, P = spec(stage), paths(stage)
-    dataset, classes = P['dataset'], (sp['positive'], sp['negative'])
     """Write the dataset from the ledger. Idempotent.
 
     The dashboard already files each crop as it is judged; this rebuilds the
@@ -461,6 +458,9 @@ def export(args):
     because a dataset that keeps a label nobody stands behind is worse than
     one that is a rebuild out of date.
     """
+    stage = getattr(args, 'stage', DEFAULT_STAGE)
+    sp, P = spec(stage), paths(stage)
+    dataset, classes = P['dataset'], (sp['positive'], sp['negative'])
     import shutil
     full = P['full']
     # A hand-drawn box wins for TRAINING and only for training: full/ is the
