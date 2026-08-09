@@ -1164,7 +1164,7 @@ function render(){
         hi.toFixed(1)+'">'+
         it.p_dog.toFixed(3)+'</span></div>'+
       '<div class="acts">'+
-        '<button class="act m" data-v="'+POS+'" data-i="'+i+'">&#9873; '+YES+'</button>'+
+        '<button class="act m" data-v="'+POS+'" data-i="'+i+'">'+YES+'</button>'+
         '<button class="act c" data-v="'+NEG+'" data-i="'+i+'">'+NO+'</button>'+
         '<button class="act e" data-edit="'+i+'" title="redraw this box '+
         '\u2014 changes the crop a future model trains on, not what this one '+
