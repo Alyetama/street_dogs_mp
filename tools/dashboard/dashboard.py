@@ -9164,6 +9164,14 @@ def _gate_plan(stage, sp):
             tail = lines[-1] if lines else ''
         except OSError:
             pass
+        # An exit inside the window is not a failure -- it is a planner that
+        # finished. The leash plan is a 1-second query over the gate's own
+        # shards, so it is USUALLY done before this wait is, and reporting a
+        # clean exit as "planning failed (code 0)" told the reader the
+        # opposite of what had just happened.
+        if code == 0:
+            return {'ok': True, 'running': False,
+                    'msg': f'{sp["title"]} planned. ' + tail[:200]}
         return {'ok': False, 'running': False,
                 'msg': f'planning failed (code {code}). ' + tail[:200]}
     except subprocess.TimeoutExpired:
@@ -9276,6 +9284,13 @@ def gate_control(action, stage='gate'):
                 tail = lines[-1] if lines else ''
             except OSError:
                 pass
+            # A run that ends this fast has done nothing -- but say WHICH
+            # kind of nothing: a clean exit means there was no work left,
+            # not that it fell over.
+            if code == 0:
+                return {'ok': True, 'running': False,
+                        'msg': f'the {sp["title"]} finished immediately — '
+                               f'nothing left to judge. ' + tail[:160]}
             return {'ok': False, 'running': False,
                     'msg': f'the {sp["title"]} exited immediately '
                            f'(code {code}). ' + tail[:160]}

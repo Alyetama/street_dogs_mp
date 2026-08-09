@@ -19,6 +19,7 @@ about a process rather than a record of work. The shards stay the record.
 """
 
 import ast
+import inspect
 import json
 import os
 import sys
@@ -296,9 +297,33 @@ def stage_table_checks(bad):
             cur = gs.STAGES[cur]['feeds_on']
 
 
+def exit_code_checks(bad):
+    """A process that finished is not a process that failed.
+
+    The planner is a one-second query over the gate's own shards, so it is
+    normally done before the 2.5s window this code waits out -- and every
+    completed process was read as a failure, so a plan that had just written
+    743,120 rows reported "planning failed (code 0)".
+    """
+    try:
+        import dashboard as d
+    except ImportError:
+        return
+    src = inspect.getsource(d)
+    for fn, what in (('_gate_plan', 'the planner'),
+                     ('gate_control', 'the runner')):
+        i = src.index(f'def {fn}(')
+        body = src[i:src.index('\ndef ', i + 1)]
+        if 'code == 0' not in body:
+            bad.append(f'{what} treats any exit inside its wait as a '
+                       f'failure — a job that simply finished quickly is '
+                       f'reported as one that fell over')
+
+
 def main():
     bad = []
     stage_table_checks(bad)
+    exit_code_checks(bad)
     runner_checks(bad)
     try:
         reader_checks(bad)
