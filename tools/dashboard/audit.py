@@ -370,7 +370,16 @@ def save_correction(key, box, stage=DEFAULT_STAGE):
             fh.write(json.dumps(rec) + '\n')
     edited = dict(cand, x1=x1, y1=y1, x2=x2, y2=y2)
     ok = _cut_one(edited, _roots(), stage, into='edited', force=True)
-    return {'ok': True, 'recut': bool(ok)}
+    # If this box has already been judged it is already IN the dataset, cut to
+    # the old framing. The rebuild would pick the new one up, but until
+    # someone ran it the exported crop and the box on record disagreed -- so
+    # the crop is re-filed here, the moment the correction is made.
+    placed = None
+    seen = {v['key']: v.get('verdict') for v in fa.read_verdicts(stage=stage)}
+    if cand['key'] in seen:
+        placed = place(cand['key'], seen[cand['key']], stage,
+                       force=True)
+    return {'ok': True, 'recut': bool(ok), 'refiled': placed}
 
 
 def frame_view(key, stage=DEFAULT_STAGE):
@@ -514,7 +523,7 @@ def draw_page(n=25, band=None, stage=DEFAULT_STAGE):
         return doc
 
 
-def place(key, verdict, stage=DEFAULT_STAGE):
+def place(key, verdict, stage=DEFAULT_STAGE, force=False):
     """Put one judged crop into the dataset, or take it out.
 
     Hard-linked, not copied: the full-resolution cut already exists and a
@@ -524,7 +533,11 @@ def place(key, verdict, stage=DEFAULT_STAGE):
     """
     sp, pp = fa.spec(stage), P(stage)
     name = str(key).replace('#', '_') + '.jpg'
-    src = os.path.join(pp['full'], name)
+    # the hand-drawn framing when there is one, exactly as export() chooses:
+    # two paths that pick a different file for the same crop is a dataset that
+    # depends on which one ran last
+    fixed = os.path.join(pp['out'], 'edited', name)
+    src = fixed if os.path.exists(fixed) else os.path.join(pp['full'], name)
     want = fa.verdict_of(verdict, stage)
     classes = (sp['positive'], sp['negative'])
     if want not in classes:
@@ -541,7 +554,15 @@ def place(key, verdict, stage=DEFAULT_STAGE):
         return False
     dst = os.path.join(pp['dataset'], want, name)
     if os.path.exists(dst):
-        return True
+        # `force` is what a correction needs: the file is already filed under
+        # the right class, but it is the OLD framing, and returning early here
+        # made re-filing after a redraw a no-op.
+        if not force:
+            return True
+        try:
+            os.remove(dst)
+        except OSError:
+            return True
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
         os.link(src, dst)

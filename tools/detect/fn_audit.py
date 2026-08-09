@@ -227,8 +227,13 @@ def build(args):
             JOIN read_parquet('{work}') w
               ON w.image_id = r.image_id AND w.det_idx = r.det_idx
             LEFT JOIN seqs q ON q.image_id = r.image_id
-        ) TO '{P['pool']}' (FORMAT PARQUET, COMPRESSION ZSTD)
+        ) TO '{P['pool']}.tmp' (FORMAT PARQUET, COMPRESSION ZSTD)
     """)
+    # Swapped in, never written over. COPY truncates and refills in place, so
+    # for the minutes a rebuild takes the pool on disk is a partial file --
+    # and the dashboard serves pages out of it the whole time. Every other
+    # writer in this project lands its file this way; this one did not.
+    os.replace(P['pool'] + '.tmp', P['pool'])
     n, seqs, unmatched = con.execute(f"""
         SELECT count(*), count(DISTINCT seq),
                sum(CASE WHEN seq LIKE 'img:%' THEN 1 ELSE 0 END)

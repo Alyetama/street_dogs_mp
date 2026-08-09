@@ -409,6 +409,49 @@ def correction_checks(bad):
         bad.append(f'cutting a corrected box threw {type(e).__name__}: {e}')
     finally:
         audit.fa.paths = real_paths
+    # The two paths that file a crop must pick the same one. place() runs on
+    # every verdict and export() rebuilds from the ledger; if only one of them
+    # preferred the hand-drawn cut, the dataset depended on which ran last.
+    pl = _in.getsource(audit.place)
+    if "'edited'" not in pl:
+        bad.append('place() ignores a hand-drawn box while export() prefers '
+                   'it — the crop in the dataset would depend on whether a '
+                   'rebuild had happened since')
+    # Behavioural: file a crop, redraw it, and the dataset must hold the new
+    # framing. A source check for 'place(' passed while place() itself
+    # returned early on a file that was already there, so the re-file did
+    # nothing at all.
+    import tempfile as _tf2
+    t2 = _tf2.mkdtemp()
+    rp2 = audit.fa.paths
+    l2 = dict(rp2('gate'))
+    l2.update(out=t2, full=os.path.join(t2, 'full'),
+              dataset=os.path.join(t2, 'ds'))
+    audit.fa.paths = lambda stage='gate': l2
+    try:
+        os.makedirs(l2['full'], exist_ok=True)
+        os.makedirs(os.path.join(t2, 'edited'), exist_ok=True)
+        open(os.path.join(l2['full'], '7_0.jpg'), 'wb').write(b'ORIGINAL')
+        audit.place('7#0', 'dog', 'gate')
+        got = os.path.join(l2['dataset'], 'dog', '7_0.jpg')
+        if not os.path.exists(got) or open(got, 'rb').read() != b'ORIGINAL':
+            bad.append('a judged crop was not filed into the dataset')
+        open(os.path.join(t2, 'edited', '7_0.jpg'), 'wb').write(b'REDRAWN')
+        audit.place('7#0', 'dog', 'gate', force=True)
+        if open(got, 'rb').read() != b'REDRAWN':
+            bad.append('re-filing after a redraw left the old framing in the '
+                       'dataset — place() returns early on a file that is '
+                       'already there')
+    except Exception as e:                     # noqa: BLE001
+        bad.append(f're-filing threw {type(e).__name__}: {e}')
+    finally:
+        audit.fa.paths = rp2
+    # the pool is swapped in, not written over: a rebuild takes minutes and
+    # the dashboard serves pages out of that file the whole time
+    fsrc = open(os.path.join(REPO, 'tools', 'detect', 'fn_audit.py')).read()
+    if ".tmp' (FORMAT PARQUET" not in fsrc or "os.replace(P['pool']" not in fsrc:
+        bad.append('the pool is written in place — for the minutes a rebuild '
+                   'takes, every page is drawn from a half-written file')
     # and the export prefers the redrawn one
     import fn_audit as fa
     ex = _in.getsource(fa.export)
