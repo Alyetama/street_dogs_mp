@@ -350,6 +350,9 @@ def concurrency_checks(bad):
                    full=os.path.join(tmp, 'full'),
                    dataset=os.path.join(tmp, 'ds'))
         audit.fa.paths = lambda stage='gate': lay
+        live = audit.fa.paths.__wrapped__('gate')['pages'] \
+            if hasattr(audit.fa.paths, '__wrapped__') else real_paths('gate')['pages']
+        before = len(os.listdir(live)) if os.path.isdir(live) else 0
         t = threading.Thread(target=lambda: audit.draw_page(n=1), daemon=True)
         t.start()
         _t.sleep(0.15)
@@ -360,6 +363,12 @@ def concurrency_checks(bad):
         if waited > 0.25:
             bad.append(f'a verdict waited {waited:.2f}s while a page was '
                        f'cut — cutting must hold no lock a verdict needs')
+        # and none of that fake work may have landed in the real audit
+        after = len(os.listdir(live)) if os.path.isdir(live) else 0
+        if after != before:
+            bad.append(f'this check wrote {after - before} page(s) into the '
+                       f'LIVE audit at {live} — redirecting fa.paths did not '
+                       f'take, so the fixtures went to real data')
     finally:
         audit.materialise, audit.sample, audit.page_count = (
             real, orig_sample, orig_pc)
@@ -664,6 +673,27 @@ def stage_checks(bad):
                 if fa.verdict_of(w, name) is not None:
                     bad.append(f'{name} accepted {w!r}, which is '
                                f'{other}\'s vocabulary')
+    # Every crop URL the page builds must carry the stage. Three places built
+    # one by hand and only the lightbox got the prefix, so every thumbnail on
+    # the leash page asked the gate for a crop it does not have -- and a DOM
+    # stub never loads an image, so nothing driving the script could see it.
+    # Checked in the source: exactly one builder, and it uses STAGE.
+    import re as _re
+    for name in fa.STAGES:
+        html = audit.page_html(name)
+        script = html[html.rindex('<script>'):]
+        hand = _re.findall(r"['\"]/audit/crop/[^'\"]*['\"]", script)
+        if len(hand) != 1:
+            bad.append(f'{name} page builds a crop URL in {len(hand)} places '
+                       f'({hand}); one of them will forget the stage')
+        elif 'STAGE' not in script[script.index(hand[0]):
+                                   script.index(hand[0]) + 90]:
+            bad.append(f'{name} page builds a crop URL without the stage: '
+                       f'{hand[0]}')
+        # and it must resolve to this stage's directory
+        if f"'/audit/crop/'+STAGE" not in script:
+            bad.append(f'{name} page does not put STAGE in the crop path')
+
     # A model whose two errors cost the same must not open on one side of
     # the threshold: its own page says to read both together, and defaulting
     # to one would contradict that in the same screen.

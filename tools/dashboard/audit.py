@@ -33,7 +33,14 @@ STAGES = fa.STAGES
 # Paths are looked up per request, never held in module state: one process
 # serves both audits and two requests can be in flight at once, so a global
 # "current stage" would have one page writing into the other's ledger.
-P = fa.paths
+#
+# A function, not `P = fa.paths`. Binding the function object once looked
+# identical and was not: a test that redirects fa.paths at a temp directory
+# had no effect here, so the guard that fakes a draw wrote seventeen fixture
+# pages into the live audit and the first tile of the real one came back as
+# alt text for a box named "z".
+def P(stage=DEFAULT_STAGE):
+    return fa.paths(stage)
 # Two locks per stage, because they guard two different things and one of them
 # is slow. A draw holds its lock across the sample and the page write; cutting
 # the crops -- seconds, or twenty of them off cold drives -- happens between
@@ -262,14 +269,52 @@ def materialise(cands, workers=8, stage=DEFAULT_STAGE):
     return [c for c, good in zip(cands, ok) if good]
 
 
+def _pool_row(key, stage=DEFAULT_STAGE):
+    """One box out of the pool, by key, with the geometry to cut it."""
+    iid, _, di = str(key).rpartition('_')
+    if not iid or not di.isdigit():
+        return None
+    try:
+        import duckdb
+        row = duckdb.connect().execute(
+            f"""SELECT band, image_id, det_idx, p_dog, x1, y1, x2, y2,
+                       cell, drive, seq, conf
+                FROM read_parquet('{P(stage)['pool']}')
+                WHERE image_id = ? AND det_idx = ?""",
+            [iid, int(di)]).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    cols = ('band', 'image_id', 'det_idx', 'p_dog', 'x1', 'y1', 'x2', 'y2',
+            'cell', 'drive', 'seq', 'conf')
+    d = dict(zip(cols, row))
+    d['key'] = f"{d['image_id']}#{d['det_idx']}"
+    return d
+
+
 def crop_path(key, stage=DEFAULT_STAGE):
-    """Absolute path of a cut crop, or None. The key is checked against the
-    shape it is generated in, so nothing a client sends reaches a path."""
+    """Absolute path of a cut crop, cutting it again if it has gone.
+
+    A page is kept for ever and its crops are not: the pool can be rebuilt,
+    the crop directory cleared, a disk swapped. When that happens the page
+    still lists the boxes and every tile comes back as alt text -- which reads
+    as a broken page rather than a missing file. The box is still in the pool,
+    so it can just be cut again.
+
+    The key is checked against the shape it is generated in, so nothing a
+    client sends reaches a path.
+    """
     import re
     if not re.fullmatch(r'[0-9]{1,32}_[0-9]{1,6}', str(key or '')):
         return None
     p = os.path.join(P(stage)['crops'], f'{key}.jpg')
-    return p if os.path.exists(p) else None
+    if os.path.exists(p):
+        return p
+    cand = _pool_row(key, stage)
+    if cand and _cut_one(cand, _roots(), stage) and os.path.exists(p):
+        return p
+    return None
 
 
 def _page_file(i, stage=DEFAULT_STAGE):
@@ -665,6 +710,13 @@ function bandName(b){
   return b==='kept'?ABOVE : b==='all'?'every band' : BELOW;
 }
 function fmtn(n){return (n||0).toLocaleString('en-US')}
+/* The ONE place a crop URL is built. There were three, each assembling the
+   path by hand, and the stage prefix was added to one of them -- so every
+   thumbnail on the leash page asked the gate for a crop it does not have and
+   the grid came back as rows of alt text. */
+function cropSrc(it){
+  return '/audit/crop/'+STAGE+'/'+esc(String(it.key).replace('#','_'))+'.jpg';
+}
 
 /* The verdict is sent the moment it is given and the card is marked from the
    local answer, not from a reload: a reviewer working through a page at speed
@@ -729,8 +781,7 @@ function left(){
 function offerUndo(it,i,verdict){
   lastUndo={key:it.key,i:i};
   var t=document.getElementById('undotoast');
-  t.innerHTML='<img src="/audit/crop/'+esc(it.key.replace("#","_"))+
-    '.jpg" alt="">'+
+  t.innerHTML='<img src="'+cropSrc(it)+'" alt="">'+
     '<span class="tt"><b>'+(VERDICT_TEXT[verdict]||'Recorded')+'</b>'+
     esc(it.image_id)+'</span>'+
     '<button class="btn" id="undoB">Undo</button>';
@@ -780,10 +831,11 @@ function render(){
     var lo=BANDS[it.band][0],hi=BANDS[it.band][1];
     return '<div class="card" data-i="'+i+'">'+
       '<div class="shot" data-zoom="'+i+'">'+
-        '<img loading="lazy" src="/audit/crop/'+esc(it.key.replace("#","_"))+
-        '.jpg" alt="rejected box '+esc(it.key)+'">'+
-        '<span class="pchip" title="the gate scored this '+it.p_dog.toFixed(3)+
-        ' for dog; band '+lo.toFixed(1)+'-'+hi.toFixed(1)+'">'+
+        '<img loading="lazy" src="'+cropSrc(it)+
+        '" alt="box '+esc(it.key)+'">'+
+        '<span class="pchip" title="the model scored this '+
+        it.p_dog.toFixed(3)+' for '+POS+'; band '+lo.toFixed(1)+'-'+
+        hi.toFixed(1)+'">'+
         it.p_dog.toFixed(3)+'</span></div>'+
       '<div class="acts">'+
         '<button class="act m" data-v="'+POS+'" data-i="'+i+'">&#9873; '+YES+'</button>'+
@@ -975,7 +1027,7 @@ document.getElementById('fresh').addEventListener('click',draw);
 /* lightbox */
 function zoom(i){
   var it=page&&page.items[i]; if(!it)return;
-  cur=i;lbimg.src='/audit/crop/'+STAGE+'/'+it.key.replace('#','_')+'.jpg';
+  cur=i;lbimg.src=cropSrc(it);
   lbtxt.textContent=it.image_id+' · box '+it.det_idx+' · scored '+
     it.p_dog.toFixed(3)+' · '+it.drive;
   lb.hidden=false;
