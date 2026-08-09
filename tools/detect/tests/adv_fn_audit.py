@@ -171,29 +171,92 @@ def isolation_checks(bad):
     as though the model had produced it. Checked in source: nothing here may
     write into the reviewer ledgers or the training sets.
     """
-    for rel in ('tools/detect/fn_audit.py', 'tools/dashboard/audit.py'):
-        src = open(os.path.join(REPO, rel)).read()
-        # Not "does the word appear" -- these files talk about labels and
-        # datasets in prose, and they should. What must not exist is a PATH
-        # into one: the audit reads the model's verdicts and writes a human's,
-        # and the two stores never meet.
-        for line in src.splitlines():
-            code = line.split('#', 1)[0]
-            if 'open(' not in code and 'join(' not in code:
-                continue
-            for banned in ('annot', 'hard_negative', 'training',
-                           'dataset', 'ledger'):
-                if banned in code.lower():
-                    bad.append(f'{rel} builds a path into a {banned} store: '
-                               f'{line.strip()[:80]}')
-        if 'VERDICTS' not in src:
-            bad.append(f'{rel} does not name its own ledger')
-    # ...and the model's own opinion is never written as a verdict
+    # The rule is about PROVENANCE, not vocabulary: this tool does write a
+    # dataset now, and it should. What it must never do is write the gate's
+    # own label as if a person had given it. A keyword blacklist could not
+    # tell those apart -- it failed the legitimate export -- so the export is
+    # run against a ledger and checked for what came out.
     import audit
+    import fn_audit as fa
+    import contextlib
+    import io
+    import tempfile as _tf
+    import types
+    tmp = _tf.mkdtemp()
+
+    def quiet_export():
+        """export() reports what it wrote; a guard's output is its own."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            fa.export(types.SimpleNamespace(model='dogbin_008'))
+    o_v, o_full, o_ds = fa.VERDICTS, fa.OUT_DIR, fa.DATASET
+    fa.VERDICTS = os.path.join(tmp, 'v.jsonl')
+    fa.OUT_DIR = tmp
+    fa.DATASET = os.path.join(tmp, 'ds')
+    try:
+        full = os.path.join(tmp, 'full')
+        os.makedirs(full, exist_ok=True)
+        for k in ('1_0', '2_0', '3_0', '4_0'):
+            open(os.path.join(full, k + '.jpg'), 'wb').close()
+        with open(fa.VERDICTS, 'w') as fh:
+            for key, v in (('1#0', 'missed'), ('2#0', 'correct'),
+                           ('3#0', 'unsure')):
+                fh.write(json.dumps({'key': key, 'verdict': v,
+                                     'seq': 's' + key[0]}) + '\n')
+            # 4#0 is in the pool and the gate called it not_dog -- and no
+            # human has looked at it. It must not appear anywhere.
+        quiet_export()
+        got = {c: sorted(os.listdir(os.path.join(fa.DATASET, c)))
+               for c in ('dog', 'not_dog')}
+        if got != {'dog': ['1_0.jpg'], 'not_dog': ['2_0.jpg']}:
+            bad.append(f'the export wrote {got}; only the human verdicts '
+                       f'belong -- "missed" is a dog, "correct" is a not_dog, '
+                       f'"unsure" is neither, and an unjudged box is nothing')
+        man = [json.loads(x) for x in
+               open(os.path.join(fa.DATASET, 'manifest.jsonl')) if x.strip()]
+        if len(man) != 2:
+            bad.append(f'{len(man)} manifest rows for 2 judged crops')
+        if any(not r.get('sequence') for r in man):
+            bad.append('a manifest row has no sequence — the only column a '
+                       'future split may use, and the one whose absence put '
+                       '70.8% of a val set in train last time')
+        if any(r.get('verdict') not in ('missed', 'correct') for r in man):
+            bad.append(f'a manifest row carries a verdict no human gave: '
+                       f'{[r.get("verdict") for r in man]}')
+        # changing your mind moves the file rather than leaving both
+        with open(fa.VERDICTS, 'a') as fh:
+            fh.write(json.dumps({'key': '1#0', 'verdict': 'correct',
+                                 'seq': 's1'}) + '\n')
+        quiet_export()
+        got = {c: sorted(os.listdir(os.path.join(fa.DATASET, c)))
+               for c in ('dog', 'not_dog')}
+        if got != {'dog': [], 'not_dog': ['1_0.jpg', '2_0.jpg']}:
+            bad.append(f'a changed verdict left the old label behind: {got}')
+        if not os.path.exists(os.path.join(fa.DATASET, 'README.md')):
+            bad.append('the dataset ships without the note saying it is a '
+                       'stratified sample of one model\'s rejections')
+    finally:
+        fa.VERDICTS, fa.OUT_DIR, fa.DATASET = o_v, o_full, o_ds
+    # only human verdicts are labels at all
+    for v in fa.CLASS_OF:
+        if v not in audit.VERDICTS:
+            bad.append(f'{v!r} is mapped to a class but is not something a '
+                       f'person can answer')
     for m in ('dog', 'not_dog'):
         if audit.record('k#0', m)['ok']:
             bad.append(f'{m!r} was accepted as a human verdict — the gate\'s '
                        f'own labels must not enter this ledger')
+    # and the audit still never writes into the reviewer's own stores
+    for rel in ('tools/detect/fn_audit.py', 'tools/dashboard/audit.py'):
+        src = open(os.path.join(REPO, rel)).read()
+        for line in src.splitlines():
+            code = line.split('#', 1)[0]
+            if 'open(' not in code and 'join(' not in code:
+                continue
+            for banned in ('annot', 'hard_negative', 'hard_positive',
+                           'box_corrections'):
+                if banned in code.lower():
+                    bad.append(f'{rel} reaches into the reviewer store: '
+                               f'{line.strip()[:80]}')
 
 
 def concurrency_checks(bad):
@@ -318,7 +381,12 @@ chk(els.judged.textContent === '12', 'judged reads ' + els.judged.textContent);
 chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
 chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
 chk(els.bands.innerHTML.length > 100, 'the band strip rendered nothing');
-chk(/unsampled/.test(els.bands.innerHTML), 'a band nobody judged does not say so');
+chk(/not sampled/.test(els.bands.innerHTML),
+  'a band nobody judged does not say so');
+chk(/0 &ndash; |0 – /.test(els.bands.innerHTML) || /0 . \d/.test(els.bands.innerHTML),
+  'the interval axis has no stated top — a bar with no scale is a shape');
+chk(!/left:NaN|width:NaN/.test(els.bands.innerHTML),
+  'an interval bar is positioned at NaN');
 var junk = Object.keys(els).map(function(k){
   return String(els[k].textContent) + ' ' + String(els[k].innerHTML)}).join(' ');
 chk(!/NaN|undefined|\[object Object\]/.test(junk), 'junk on the page');

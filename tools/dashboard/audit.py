@@ -30,6 +30,14 @@ import fn_audit as fa                                          # noqa: E402
 
 OUT_DIR = fa.OUT_DIR
 CROPS = os.path.join(OUT_DIR, 'crops')
+# The full-resolution cut, kept beside the thumbnail. harvest_flagged.py
+# learned this the hard way: the ~160px thumbnail the review UI copied was
+# "too small and too lossy for training", so it re-opens the original jpg to
+# re-cut every flagged box. The audit already has the frame open to make the
+# thumbnail, so it writes both from that one decode and a verdict costs no
+# second pass over an 8000x4000 panorama.
+FULL = os.path.join(OUT_DIR, 'full')
+DATASET = os.path.join(REPO, 'data', 'audit_finds')
 PAGES = os.path.join(OUT_DIR, 'pages')
 DRAWN = os.path.join(OUT_DIR, 'drawn.jsonl')
 # Two locks, because they guard two different things and one of them is slow.
@@ -95,7 +103,7 @@ def _drawn_keys():
     return keys, seqs
 
 
-def sample(n=24, band=None, seed=None):
+def sample(n=25, band=None, seed=None):
     """A page of candidates: stratified by band, one box per sequence, none
     ever drawn before.
 
@@ -188,6 +196,13 @@ def _cut_one(cand, roots):
         if c - a < MIN_SIDE or d - b < MIN_SIDE:
             return False
         crop = im.crop((a, b, c, d))
+        # full resolution first: this is the one a future dataset uses, and
+        # thumbnail() resizes in place
+        os.makedirs(FULL, exist_ok=True)
+        fdst = os.path.join(FULL, cand['key'].replace('#', '_') + '.jpg')
+        ftmp = fdst + '.tmp'
+        crop.save(ftmp, 'JPEG', quality=95)
+        os.replace(ftmp, fdst)
         crop.thumbnail((CROP_PX, CROP_PX), Image.LANCZOS)
         os.makedirs(CROPS, exist_ok=True)
         tmp = dst + '.tmp'
@@ -245,7 +260,7 @@ def get_page(i):
         return None
 
 
-def draw_page(n=24, band=None):
+def draw_page(n=25, band=None):
     """Draw, cut, and keep. Returns the page document."""
     with _DRAW_LOCK:
         cands = sample(n=n, band=band)
@@ -283,6 +298,43 @@ def draw_page(n=24, band=None):
 
 
 VERDICTS = ('missed', 'correct', 'unsure')
+# What a human verdict means as a training label. The audit only ever shows
+# boxes the gate REJECTED, so "missed" is a dog the model threw away -- the
+# expensive error, and the example worth the most to a retrain.
+CLASS_OF = {'missed': 'dog', 'correct': 'not_dog'}
+
+
+def place(key, verdict):
+    """Put one judged crop into the dataset, or take it out.
+
+    Hard-linked, not copied: the full-resolution cut already exists and a
+    second copy of it would drift from the first the moment either is
+    re-cut. 'unsure' is not a class -- it is removed from both, so changing
+    your mind to "I cannot tell" does not leave a stale label behind.
+    """
+    name = str(key).replace('#', '_') + '.jpg'
+    src = os.path.join(FULL, name)
+    want = CLASS_OF.get(verdict)
+    for cls in ('dog', 'not_dog'):
+        dst = os.path.join(DATASET, cls, name)
+        if cls == want:
+            continue
+        try:
+            os.remove(dst)             # a changed mind moves the file
+        except OSError:
+            pass
+    if not want or not os.path.exists(src):
+        return False
+    dst = os.path.join(DATASET, want, name)
+    if os.path.exists(dst):
+        return True
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        os.link(src, dst)
+    except OSError:                    # different filesystem, or no hardlinks
+        import shutil
+        shutil.copy2(src, dst)
+    return True
 
 
 def record(key, verdict, meta=None):
@@ -302,7 +354,10 @@ def record(key, verdict, meta=None):
         os.makedirs(OUT_DIR, exist_ok=True)
         with open(fa.VERDICTS, 'a') as fh:
             fh.write(json.dumps(rec) + '\n')
-    return {'ok': True}
+        # the ledger is the record; the dataset is a view of it, kept in step
+        # as each verdict lands so it is never a rebuild away from usable
+        placed = place(key, verdict)
+    return {'ok': True, 'placed': placed}
 
 
 def stats():
@@ -353,20 +408,40 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .mci{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
 .mnote{font-size:12px;color:var(--dim);max-width:44ch}
 .mnote b{color:var(--mut);font-weight:600}
-/* ── per band ── */
-.bands{display:grid;gap:7px;margin-bottom:16px}
-.brow{display:grid;grid-template-columns:104px 1fr 128px;gap:12px;
-  align-items:center;font-size:11.5px;color:var(--mut);
+/* ── per band ──
+   Each row is an ESTIMATE, so it is drawn as one: the 95% interval as a
+   segment, the point estimate as a tick inside it. It used to be a plain bar
+   whose length was the rate times an invented factor of six, which made a
+   25% rate off four crops look exactly as solid as one off four hundred.
+   The axis is shared and its top is labelled, because a bar with no scale is
+   a shape, not a measurement. */
+.bands{background:var(--panel);border:1px solid var(--bd);border-radius:14px;
+  padding:14px 18px 16px;margin-bottom:16px}
+.bhead{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
+  align-items:baseline;font-size:10px;text-transform:uppercase;
+  letter-spacing:.07em;color:var(--dim);padding-bottom:8px;
+  border-bottom:1px solid var(--bd);margin-bottom:4px}
+.bhead .ax{text-align:right}
+.brow{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
+  align-items:center;font-size:11.5px;color:var(--mut);padding:6px 0;
   font-variant-numeric:tabular-nums}
-.btrack{height:7px;border-radius:4px;background:rgba(130,140,150,.12);
-  position:relative;overflow:hidden}
-.bfill{height:100%;border-radius:4px;background:var(--acc)}
+.brow+.brow{border-top:1px solid rgba(130,140,150,.07)}
+.bname{color:var(--tx)}
+.brow.nil .bname{color:var(--dim)}
+.bwhat{color:var(--dim)}
+.btrack{position:relative;height:16px}
+/* the axis line the intervals sit on, not a container the bar fills */
+.btrack::before{content:'';position:absolute;left:0;right:0;top:50%;
+  height:1px;background:rgba(130,140,150,.14)}
+.bci{position:absolute;top:50%;transform:translateY(-50%);height:7px;
+  border-radius:4px;background:rgba(232,166,69,.28);min-width:2px}
+.bdot{position:absolute;top:50%;transform:translate(-50%,-50%);width:3px;
+  height:13px;border-radius:2px;background:var(--acc)}
+.bzero .bci{background:rgba(67,181,129,.24)}
+.bzero .bdot{background:var(--green)}
+.bval{text-align:right}
+.bval b{color:var(--tx);font-weight:640}
 .bnil{color:var(--dim)}
-.bsel{cursor:pointer;background:none;border:0;color:inherit;font:inherit;
-  text-align:left;padding:0}
-.bsel:hover{color:var(--tx)}
-.brow.on{color:var(--tx)}
-.brow.on .bnil{color:var(--mut)}
 /* ── toolbar ── */
 .bar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
 .btn{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
@@ -378,6 +453,12 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .pos{font-size:12px;color:var(--dim);margin-left:2px;
   font-variant-numeric:tabular-nums}
 .spacer{margin-left:auto}
+.pick{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;
+  color:var(--dim)}
+.pick select{background:var(--panel2);border:1px solid var(--bd);
+  color:var(--mut);border-radius:9px;padding:7px 9px;font-size:12.5px;
+  font-family:inherit;cursor:pointer}
+.pick select:hover{color:var(--tx)}
 /* ── the grid ── */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(212px,1fr));
   gap:14px}
@@ -452,6 +533,13 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   <button class="btn go" id="next">next page &rarr;</button>
   <span class="pos" id="pos">&mdash;</span>
   <span class="spacer"></span>
+  <label class="pick">crops per page
+    <select id="size">
+      <option value="25">25</option><option value="50">50</option>
+      <option value="75">75</option><option value="100">100</option>
+    </select></label>
+  <label class="pick">score
+    <select id="bandsel"><option value="">every band</option></select></label>
   <button class="btn" id="fresh">&#8635; draw a new page</button>
 </div>
 
@@ -477,12 +565,13 @@ var BANDS=__BANDS__;
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
     lbimg=document.getElementById('lbimg'),lbtxt=document.getElementById('lbtxt');
-var page=null,idx=0,cur=0,total=0,band=null,busy=false;
+var page=null,idx=0,cur=0,total=0,band=null,busy=false,size=25;
 
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
   e.hidden=false;clearTimeout(e._t);e._t=setTimeout(function(){e.hidden=true},1600)}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function pctTxt(v){return (v*100).toFixed(1)+'%'}
+function fmtn(n){return (n||0).toLocaleString('en-US')}
 
 /* The verdict is sent the moment it is given and the card is marked from the
    local answer, not from a reload: a reviewer working through a page at speed
@@ -561,7 +650,7 @@ function show(doc,at,tot){
 }
 function load(at){
   busy=true;setPos();
-  fetch('/api/audit/page?i='+at).then(function(r){return r.json()})
+  fetch('/api/audit/page?i='+at+'&n='+size).then(function(r){return r.json()})
     .then(function(j){busy=false;if(!j||j.error){toast(j&&j.error||'failed');setPos();return}
       show(j.page,j.index,j.total)})
     .catch(function(){busy=false;toast('failed');setPos()});
@@ -571,7 +660,7 @@ function draw(){
   document.getElementById('fresh').textContent='cutting…';
   fetch('/api/audit/draw',{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({band:band})})
+    body:JSON.stringify({band:band,n:size})})
     .then(function(r){return r.json()})
     .then(function(j){busy=false;
       document.getElementById('fresh').textContent='↻ draw a new page';
@@ -597,17 +686,38 @@ function paintStats(s){
     ci.textContent='≈'+Math.round((s.weighted_rate||0)*(s.pool||0)).toLocaleString()+
       ' dogs across the '+(s.pool||0).toLocaleString()+' rejected boxes';
   }
-  document.getElementById('bands').innerHTML=(s.bands||[]).map(function(b,i){
-    var w=b.judged?Math.max(1.2,Math.min(100,b.rate*100*6)):0;
-    return '<div class="brow'+(band===i?' on':'')+'">'+
-      '<button class="bsel" data-band="'+i+'">p_dog '+b.lo.toFixed(1)+'–'+
-        b.hi.toFixed(1)+'</button>'+
-      '<div class="btrack">'+(b.judged?'<div class="bfill" style="width:'+
-        w.toFixed(1)+'%"></div>':'')+'</div>'+
-      '<span class="'+(b.judged?'':'bnil')+'">'+
-        (b.judged?b.missed+'/'+b.judged+'  '+pctTxt(b.rate):
-          b.boxes.toLocaleString()+' unsampled')+'</span></div>';
-  }).join('');
+  /* One axis for every row, topped at the widest interval any band has --
+     rates here live between 0 and a few percent, so a 0-100% axis would draw
+     every band as a dot on the left. The top is written down, because an
+     adaptive scale that does not say so is a lie by omission. */
+  var top=0;
+  (s.bands||[]).forEach(function(b){if(b.judged)top=Math.max(top,b.hi95||0)});
+  top=top>0?top:0.05;
+  document.getElementById('bands').innerHTML=
+    '<div class="bhead" id="bhead"><span>score the gate gave</span>'+
+    '<span>in the store</span><span>share that were dogs, 95% interval</span>'+
+    '<span class="ax">0 – '+pctTxt(top)+'</span></div>'+
+    (s.bands||[]).map(function(b){
+      if(!b.judged)return '<div class="brow nil"><span class="bname">'+
+        b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
+        '<span class="bwhat">'+fmtn(b.boxes)+'</span>'+
+        '<div class="btrack"></div>'+
+        '<span class="bval bnil">not sampled</span></div>';
+      function at(v){var x=(+v||0)/top*100;
+        return Math.max(0,Math.min(100,x!==x?0:x))}
+      var l=at(b.lo95),h=at(b.hi95),m=at(b.rate);
+      return '<div class="brow'+(b.missed?'':' bzero')+'">'+
+        '<span class="bname">'+b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
+        '<span class="bwhat">'+fmtn(b.boxes)+'</span>'+
+        '<div class="btrack" title="'+b.missed+' of '+b.judged+
+          ' judged were dogs the gate threw away — the bar is the 95% '+
+          'interval, the tick is the estimate">'+
+          '<div class="bci" style="left:'+l.toFixed(2)+'%;width:'+
+            Math.max(0.6,h-l).toFixed(2)+'%"></div>'+
+          '<div class="bdot" style="left:'+m.toFixed(2)+'%"></div></div>'+
+        '<span class="bval"><b>'+pctTxt(b.rate)+'</b> · '+b.missed+'/'+
+          b.judged+'</span></div>';
+    }).join('');
 }
 /* clicks */
 grid.addEventListener('click',function(e){
@@ -616,12 +726,32 @@ grid.addEventListener('click',function(e){
   var a=e.target.closest&&e.target.closest('.act');
   if(a){cur=+a.getAttribute('data-i');judge(cur,a.getAttribute('data-v'))}
 });
-document.getElementById('bands').addEventListener('click',function(e){
-  var b=e.target.closest&&e.target.closest('[data-band]');
-  if(!b)return;
-  var v=+b.getAttribute('data-band');
-  band=(band===v)?null:v;
-  loadStats();toast(band==null?'drawing from every band':'drawing from that band only');
+var sizeSel=document.getElementById('size'),bandSel=document.getElementById('bandsel');
+for(var bi=0;bi<BANDS.length;bi++){
+  var o=document.createElement('option');
+  o.value=bi;o.textContent=BANDS[bi][0].toFixed(1)+' – '+BANDS[bi][1].toFixed(1);
+  bandSel.appendChild(o);
+}
+/* Both choices are remembered. Working through an audit is a long sitting and
+   re-picking the page size after every reload is a small tax on the only
+   thing this page is for. */
+try{
+  var sv=localStorage.getItem('sdAuditSize');
+  if(sv&&/^(25|50|75|100)$/.test(sv))sizeSel.value=sv;
+  var bv=localStorage.getItem('sdAuditBand');
+  if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length){band=+bv;bandSel.value=bv}
+}catch(_){}
+size=+sizeSel.value||25;
+sizeSel.addEventListener('change',function(){
+  size=+sizeSel.value||25;
+  try{localStorage.setItem('sdAuditSize',String(size))}catch(_){}
+  toast(size+' crops on the next page');
+});
+bandSel.addEventListener('change',function(){
+  band=bandSel.value===''?null:+bandSel.value;
+  try{localStorage.setItem('sdAuditBand',bandSel.value)}catch(_){}
+  toast(band==null?'drawing from every band'
+    :'drawing from '+BANDS[band][0].toFixed(1)+'–'+BANDS[band][1].toFixed(1)+' only');
 });
 document.getElementById('next').addEventListener('click',function(){
   if(idx+1<total)load(idx+1);else draw();
@@ -667,7 +797,7 @@ document.addEventListener('keydown',function(e){
     if(idx+1<total)load(idx+1);else draw();e.preventDefault()}
 });
 /* boot: the last page if there is one, otherwise an invitation */
-fetch('/api/audit/page?i=-1').then(function(r){return r.json()})
+fetch('/api/audit/page?i=-1&n='+size).then(function(r){return r.json()})
   .then(function(j){
     if(j&&j.page)show(j.page,j.index,j.total);
     else{total=0;setPos();render()}
@@ -686,7 +816,7 @@ AUDIT_HTML = AUDIT_HTML.replace('__BANDS__', json.dumps(fa.BANDS))
 _PREFETCH = {'thread': None}
 
 
-def prefetch(band=None, n=24):
+def prefetch(band=None, n=25):
     """Draw the next page in the background, unless one is already coming."""
     t = _PREFETCH.get('thread')
     if t is not None and t.is_alive():
@@ -718,7 +848,22 @@ def with_verdicts(doc):
     return doc
 
 
-def api_page(i, n=24, band=None):
+# The sizes the page offers. Anything else is somebody's URL, not a choice
+# the interface made, and a page of 40,000 crops is a way to take the server
+# down by typing. Each divides by the band count, so every band gets the same
+# quota and the strata stay even.
+PAGE_SIZES = (25, 50, 75, 100)
+
+
+def page_size(v, default=25):
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return default
+    return v if v in PAGE_SIZES else default
+
+
+def api_page(i, n=25, band=None):
     """One page by index; -1 means the most recent. Draws if there are none."""
     total = page_count()
     if total == 0:
@@ -736,7 +881,7 @@ def api_page(i, n=24, band=None):
     return {'page': with_verdicts(doc), 'index': i, 'total': total}
 
 
-def api_draw(n=24, band=None):
+def api_draw(n=25, band=None):
     doc = draw_page(n=n, band=band)
     total = max(1, page_count())
     if doc.get('items'):

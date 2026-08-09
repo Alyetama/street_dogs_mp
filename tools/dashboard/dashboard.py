@@ -9403,7 +9403,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 i = int((q.get('i', ['-1'])[0]))
             except ValueError:
                 i = -1
-            self._json(a.api_page(i))
+            self._json(a.api_page(i, n=a.page_size(q.get('n', [None])[0])))
             return True
         if path == '/api/audit/stats':
             self._json(a.stats() if a else {'judged': 0, 'bands': []})
@@ -9707,7 +9707,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 elif self.path.startswith('/api/audit/draw'):
                     b = data.get('band')
                     self._json(a.api_draw(
-                        n=24, band=None if b is None else int(b)))
+                        n=a.page_size(data.get('n')),
+                        band=None if b is None else int(b)))
                 else:
                     self._json(a.record(
                         data.get('key'), str(data.get('verdict') or ''),

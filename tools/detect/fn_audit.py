@@ -241,6 +241,107 @@ def summarise(verdicts=None, totals=None):
             'pool': pop}
 
 
+DATASET = os.path.join(REPO, 'data', 'audit_finds')
+CLASS_OF = {'missed': 'dog', 'correct': 'not_dog'}
+README = """# audit_finds
+
+Crops from the false-negative audit of the dog-bin gate, laid out for
+`yolo classify` so they can be folded into a dog-bin dataset the same way
+`data/hard_negatives` and `data/hard_positives` are:
+
+    dog/<image_id>_<det_idx>.jpg       a human said the gate threw a dog away
+    not_dog/<image_id>_<det_idx>.jpg   a human confirmed the rejection
+    manifest.jsonl                     one line per crop, with its sequence
+
+Every file here carries a HUMAN verdict. The model's own label is what put
+the box in front of someone; it is never what is written down.
+
+## Read this before training on it
+
+**This is not a random sample of anything.** Every crop was rejected by
+{model}, and the audit draws evenly from five p_dog bands rather than in
+proportion to how many boxes each holds -- so the near-threshold cases are
+massively over-represented relative to the store. That is deliberate: it is
+where the model is wrong, and it is what makes these worth training on. It
+also means class balance here says nothing about the store's, and accuracy
+measured on a split of these says nothing about accuracy in production.
+
+**Split on `sequence`, never on `image_id`.** The manifest carries it for
+every crop. Splitting per image looked clean once before and put 70.8% of a
+val set in a sequence that was also in train.
+
+Rebuild at any time with:
+
+    python tools/detect/fn_audit.py export
+"""
+
+
+def export(args):
+    """Write the dataset from the ledger. Idempotent.
+
+    The dashboard already files each crop as it is judged; this rebuilds the
+    whole thing from the record -- after the ledger is edited by hand, after
+    crops are re-cut, or just to be sure the two agree. Anything in a class
+    directory that the ledger does not still say belongs there is removed,
+    because a dataset that keeps a label nobody stands behind is worse than
+    one that is a rebuild out of date.
+    """
+    import shutil
+    full = os.path.join(OUT_DIR, 'full')
+    vs = read_verdicts()
+    keep = {}
+    for v in vs:
+        cls = CLASS_OF.get(v.get('verdict'))
+        if cls:
+            keep[str(v['key']).replace('#', '_') + '.jpg'] = (cls, v)
+    placed = missing = removed = 0
+    for cls in ('dog', 'not_dog'):
+        d = os.path.join(DATASET, cls)
+        os.makedirs(d, exist_ok=True)
+        for f in os.listdir(d):
+            if keep.get(f, (None,))[0] != cls:
+                os.remove(os.path.join(d, f))
+                removed += 1
+    for name, (cls, v) in sorted(keep.items()):
+        src, dst = os.path.join(full, name), os.path.join(DATASET, cls, name)
+        if not os.path.exists(src):
+            missing += 1
+            continue
+        if not os.path.exists(dst):
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+        placed += 1
+    with open(os.path.join(DATASET, 'manifest.jsonl'), 'w') as fh:
+        for name, (cls, v) in sorted(keep.items()):
+            iid, _, di = name[:-4].rpartition('_')
+            fh.write(json.dumps({
+                'file': f'{cls}/{name}', 'label': cls,
+                'image_id': iid, 'det_idx': int(di) if di.isdigit() else None,
+                # the split column. Never image_id -- see the README.
+                'sequence': v.get('seq'),
+                'verdict': v.get('verdict'), 'p_dog': v.get('p_dog'),
+                'band': v.get('band'), 'judged_at': v.get('ts'),
+                'rejected_by': args.model}) + '\n')
+    with open(os.path.join(DATASET, 'README.md'), 'w') as fh:
+        fh.write(README.format(model=args.model))
+    n_dog = sum(1 for name, (c, _) in keep.items() if c == 'dog'
+                and os.path.exists(os.path.join(DATASET, 'dog', name)))
+    print(f'{placed:,} crops in {os.path.relpath(DATASET, REPO)} '
+          f'({n_dog:,} dog, {placed - n_dog:,} not_dog)')
+    if removed:
+        print(f'  {removed:,} removed -- the ledger no longer says they '
+              f'belong there')
+    if missing:
+        print(f'  {missing:,} judged but the full-resolution crop is gone; '
+              f'they are in the manifest of neither')
+    seqs = {v.get('seq') for _, v in keep.values() if v.get('seq')}
+    print(f'  {len(seqs):,} distinct sequences -- split on those, not on '
+          f'image_id')
+    return 0
+
+
 def stats(args):
     s = summarise()
     if not s['judged']:
@@ -270,6 +371,10 @@ def main(argv=None):
     b.add_argument('--memory', default='8GB')
     b.add_argument('--tmp', default='/tmp/fn_audit_spill',
                    help='where duckdb may spill; needs room')
+    e = sub.add_parser('export'); e.set_defaults(fn=export)
+    e.add_argument('--model', default='dogbin_008',
+                   help='which gate these crops were rejected by; recorded '
+                        'on every manifest row')
     s = sub.add_parser('stats'); s.set_defaults(fn=stats)
     a = ap.parse_args(argv)
     return a.fn(a)
