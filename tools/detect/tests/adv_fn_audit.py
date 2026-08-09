@@ -463,15 +463,26 @@ def page_checks(bad):
         import audit
     except Exception:
         return
-    # the built page for a stage, not the template -- the template still has
-    # its placeholders in and would throw ReferenceError on the first line
-    html = audit.page_html('gate')
-    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
     probe = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          'audit_page_stub.js')
     if not os.path.exists(probe):
         bad.append('audit_page_stub.js is missing')
         return
+    # EVERY stage's page, not just the gate's. They are one template with
+    # different words substituted in, and a substitution that goes wrong goes
+    # wrong in exactly one of them.
+    import fn_audit as _fa
+    for stage in _fa.STAGES:
+        _page_once(bad, audit, probe, stage)
+
+
+def _page_once(bad, audit, probe, stage):
+    import subprocess
+    import tempfile as _tf
+    # the built page for a stage, not the template -- the template still has
+    # its placeholders in and would throw ReferenceError on the first line
+    html = audit.page_html(stage)
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
     with _tf.NamedTemporaryFile('w', suffix='.js', delete=False) as f:
         f.write(open(probe).read() + '\n' + script + '\n' + TAIL)
         p = f.name
@@ -481,11 +492,11 @@ def page_checks(bad):
         # line is the first one naming the error
         err = [x.strip() for x in (r.stderr or '').splitlines() if x.strip()]
         why = next((x for x in err if 'Error' in x), err[0] if err else '?')
-        bad.append(f'the audit page threw: {why[:200]}')
+        bad.append(f'the {stage} audit page threw: {why[:200]}')
         return
     for line in r.stdout.splitlines():
         if line.startswith('FAIL '):
-            bad.append('audit page: ' + line[5:])
+            bad.append(f'{stage} audit page: ' + line[5:])
 
 
 TAIL = r"""
@@ -498,7 +509,20 @@ chk(/100%/.test(els.bands.innerHTML) && /where the gate/.test(els.bands.innerHTM
   'the band axis does not state its range or the threshold');
 // bands above the threshold must exist now
 chk(/0\.9–1\.0/.test(els.bands.innerHTML),
-  'the bands stop before 1.0 — the gate\'s acceptances are unauditable');
+  'the bands stop before 1.0 — what the model accepted is unauditable');
+// a pool that does not know what it covers must say so rather than present
+// a snapshot of a running job as the whole store
+STATS.pool_info = {unknown:true, shards_now:9};
+paintStats(STATS);
+chk(els.poolwarn.hidden === false,
+  'a pool with no provenance is presented as though it covered everything');
+STATS.pool_info = {unknown:false, stale:true, shards:2, shards_now:9};
+paintStats(STATS);
+chk(/2 shards/.test(String(els.poolwarn.textContent)),
+  'a stale pool does not say how far behind it is');
+STATS.pool_info = {unknown:false, stale:false, shards:9, shards_now:9};
+paintStats(STATS);
+chk(els.poolwarn.hidden === true, 'an up-to-date pool still warns');
 chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
 chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
 chk(els.bands.innerHTML.length > 100, 'the band strip rendered nothing');
@@ -534,7 +558,7 @@ judge(cur, 'dog');
 chk(cur === was, 'the cursor advanced on its own after a verdict');
 // EVERY verdict clears the crop off the grid -- the grid is the work left,
 // not a record of what was answered -- and every one offers a way back.
-['dog', 'not_dog', 'unsure'].forEach(function (v, n) {
+[POS, NEG, 'unsure'].forEach(function (v, n) {
   page.items.forEach(function (it) { delete it.verdict });
   render();
   var before = grid.children.filter(function (c) {
@@ -640,6 +664,18 @@ def stage_checks(bad):
                 if fa.verdict_of(w, name) is not None:
                     bad.append(f'{name} accepted {w!r}, which is '
                                f'{other}\'s vocabulary')
+    # A model whose two errors cost the same must not open on one side of
+    # the threshold: its own page says to read both together, and defaulting
+    # to one would contradict that in the same screen.
+    import re as _re
+    for name, sp in fa.STAGES.items():
+        m = _re.search(r'DEFAULT_BAND=(\S+?);', audit.page_html(name))
+        got = m.group(1).strip('"') if m else None
+        want = 'rejected' if sp['asymmetric'] else 'all'
+        if got != want:
+            bad.append(f'{name} opens drawing from {got!r}, expected {want!r} '
+                       f'— it is '
+                       f'{"asymmetric" if sp["asymmetric"] else "symmetric"}')
     # and the page is built per stage, with nothing left unsubstituted
     for name in fa.STAGES:
         html = audit.page_html(name)

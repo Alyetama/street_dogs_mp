@@ -41,6 +41,7 @@ import glob
 import json
 import os
 import sys
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -117,11 +118,10 @@ def paths(stage=DEFAULT_STAGE):
     }
 
 
-# kept so the older module-level names still resolve; both name the gate
-OUT_DIR = paths()['out']
-POOL = paths()['pool']
-VERDICTS = paths()['verdicts']
-GATE = paths()['store']
+# No module-level OUT_DIR/POOL/VERDICTS here. They existed for a moment as
+# "the older names still resolve", and every one of them was the GATE's path
+# wearing a stage-neutral name -- so any later code reaching for one would
+# quietly read the wrong audit. paths(stage) is the only way in.
 
 # The whole score range, in tenths. It used to stop at 0.5 because the pool
 # held only rejections, and a rejected box cannot score above the threshold
@@ -235,6 +235,15 @@ def build(args):
         FROM read_parquet('{P['pool']}')""").fetchone()
     print(f'{n:,} judged boxes across {seqs:,} sequences '
           f'({unmatched:,} had no sequence and stand alone)')
+    # What this pool is a snapshot OF. A stage still running has more shards
+    # every few minutes, and a pool built early covers one stretch of the
+    # interleave rather than a spread over the store -- so the page can say
+    # how far behind it is instead of presenting a seventh of the job as "the
+    # store".
+    with open(os.path.join(P['out'], 'pool.json'), 'w') as fh:
+        json.dump({'stage': stage, 'built': time.time(), 'rows': int(n),
+                   'shards': len(glob.glob(shards)),
+                   'sequences': int(seqs)}, fh)
     for i, (lo, hi) in enumerate(BANDS):
         c = con.execute(f"SELECT count(*), count(DISTINCT seq) "
                         f"FROM read_parquet('{P['pool']}') WHERE band = {i}"
@@ -242,6 +251,31 @@ def build(args):
         print(f"  {sp['p_col']} {lo:.1f}-{hi:.1f}  {c[0]:>10,} boxes  "
               f"{c[1]:>9,} sequences")
     return 0
+
+
+def pool_info(stage=DEFAULT_STAGE):
+    """When the pool was cut, and whether the stage has moved on since.
+
+    A pool is a snapshot. The leash model was 7% through its run when its
+    first pool was built, so every band count in it was a seventh of the
+    truth -- and the column is headed "in the store".
+    """
+    P = paths(stage)
+    try:
+        with open(os.path.join(P['out'], 'pool.json')) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        doc = {}
+    now = len(glob.glob(P['shards']))
+    doc['shards_now'] = now
+    # A pool cut before this file existed carries no provenance, and "behind
+    # by 165 shards" is a worse answer than "cannot tell" -- rebuilding is
+    # what establishes it either way.
+    doc['unknown'] = 'shards' not in doc
+    then = int(doc.get('shards') or 0)
+    doc['stale'] = (not doc['unknown']) and now > then
+    doc['behind'] = max(0, now - then) if not doc['unknown'] else 0
+    return doc
 
 
 def band_totals(stage=DEFAULT_STAGE):
@@ -307,10 +341,6 @@ def wilson(k, n, z=1.96):
 # error is derived from the model's own score, not from the wording.
 # NOT `VERDICTS` -- that name is already the path to the ledger a few lines
 # up, and reusing it made read_verdicts() open a tuple.
-ANSWERS = STAGES['gate']['answers']
-CLASS_OF = {'dog': 'dog', 'not_dog': 'not_dog'}
-
-
 def answers(stage=DEFAULT_STAGE):
     return spec(stage)['answers']
 
@@ -376,6 +406,7 @@ def summarise(verdicts=None, totals=None, stage=DEFAULT_STAGE):
             'judged': sum(b['judged'] for b in per),
             'wrong': sum(b['wrong'] for b in per),
             'threshold': THRESHOLD, 'pool': pop, 'stage': stage,
+            'pool_info': pool_info(stage),
             'asymmetric': sp['asymmetric'], 'title': sp['title'],
             'asks': sp['asks'], 'positive': pos, 'negative': neg,
             'below': sp['below'], 'above': sp['above'], 'miss': sp['miss']}
@@ -512,6 +543,15 @@ def stats(args):
         return 0
     print(f"{sp['title']}: {s['judged']:,} boxes judged; the model and a "
           f"person disagreed on {s['wrong']:,}")
+    pi = s.get('pool_info') or {}
+    if pi.get('unknown'):
+        print(f"  NOTE: this pool predates provenance tracking -- rebuild to "
+              f"record what it covers: `fn_audit.py build --stage {stage}`")
+    elif pi.get('stale'):
+        print(f"  NOTE: cut from {pi['shards']} shards; the run has written "
+              f"{pi['shards_now']} since, so the counts below are a snapshot "
+              f"and not the store. Rebuild with "
+              f"`fn_audit.py build --stage {stage}`.")
     print(f"\n  band        boxes in store   said dog   share [95% interval]")
     for b in s['bands']:
         side = 'kept' if b['kept'] else 'threw away'

@@ -331,10 +331,6 @@ def draw_page(n=25, band=None, stage=DEFAULT_STAGE):
         return doc
 
 
-VERDICTS = fa.ANSWERS           # 'dog' | 'not_dog' | 'unsure'
-CLASS_OF = fa.CLASS_OF
-
-
 def place(key, verdict, stage=DEFAULT_STAGE):
     """Put one judged crop into the dataset, or take it out.
 
@@ -461,6 +457,10 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    25% rate off four crops look exactly as solid as one off four hundred.
    The axis is shared and its top is labelled, because a bar with no scale is
    a shape, not a measurement. */
+.poolwarn{background:rgba(232,166,69,.09);border:1px solid rgba(232,166,69,.3);
+  border-radius:11px;padding:9px 14px;margin-bottom:12px;font-size:12px;
+  color:var(--acc)}
+.poolwarn[hidden]{display:none}
 .bands{background:var(--panel);border:1px solid var(--bd);border-radius:14px;
   padding:14px 18px 16px;margin-bottom:16px}
 .bfoot{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
@@ -596,6 +596,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
     boxes the gate really put in it.</div>
 </div>
 
+<div class="poolwarn" id="poolwarn" hidden></div>
 <div class="bands" id="bands"></div>
 
 <div class="bar">
@@ -610,9 +611,9 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
     </select></label>
   <label class="pick">draw from
     <select id="bandsel">
+      <option value="all">every band</option>
       <option value="rejected">below 0.5 &mdash; __BELOWTXT__</option>
       <option value="kept">0.5 and up &mdash; __ABOVETXT__</option>
-      <option value="all">every band</option>
     </select></label>
   <button class="btn" id="fresh">&#8635; draw a new page</button>
 </div>
@@ -638,16 +639,20 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 
 <script>
 var BANDS=__BANDS__,STAGE=__STAGE__,POS=__POS__,NEG=__NEG__,
-    YES=__YES__,NO=__NO__,BELOW=__BELOW__,ABOVE=__ABOVE__;
+    YES=__YES__,NO=__NO__,BELOW=__BELOW__,ABOVE=__ABOVE__,
+    DEFAULT_BAND=__DEFBAND__;
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
     lbimg=document.getElementById('lbimg'),lbtxt=document.getElementById('lbtxt');
 /* -1 is NOT a crop. The page used to open with the first one ringed, which
    reads as a choice already made on your behalf before you have looked. */
-/* A false negative is a dog the gate said no to, so it can only be found
-   below the threshold. That is what this page is for, so that is where it
-   draws from unless told otherwise. */
-var page=null,idx=0,cur=-1,total=0,band='rejected',busy=false,size=25,
+/* Where to draw from by default depends on which model this is. A dog the
+   gate said no to is gone, so that side is the one worth walking and the
+   default is "below 0.5". The leash model's two errors cost the same -- it
+   was promoted on balanced accuracy -- so defaulting to one side would
+   contradict the sentence at the top of its own page telling you to read
+   both. */
+var page=null,idx=0,cur=-1,total=0,band=DEFAULT_BAND,busy=false,size=25,
     dirty=false;
 
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
@@ -874,6 +879,18 @@ function paintStats(s){
      of a band that really is a dog is what the model is trying to predict, so
      against the band's own score it reads as a calibration curve: it should
      climb, and where it crosses 50% is where the threshold belongs. */
+  var pi=s.pool_info||{},warn=document.getElementById('poolwarn');
+  if(warn){
+    warn.textContent=pi.stale
+      ? 'This pool was cut from '+pi.shards+' shards and the run has written '+
+        pi.shards_now+' since \u2014 the counts below are a snapshot of part '+
+        'of the store, not all of it. Rebuild the pool to take them in.'
+      : pi.unknown
+        ? 'This pool does not record what it was cut from. Rebuild it to find '+
+          'out whether it still covers the whole run.'
+        : '';
+    warn.hidden=!warn.textContent;
+  }
   document.getElementById('bands').innerHTML=
     '<div class="bhead"><span>score the gate gave</span>'+
     '<span>in the store</span>'+
@@ -926,6 +943,7 @@ try{
   var bv=localStorage.getItem('sdAuditBand:'+STAGE);
   if(bv==='rejected'||bv==='kept'||bv==='all'){band=bv;bandSel.value=bv}
   else if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length){band=+bv;bandSel.value=bv}
+  else bandSel.value=DEFAULT_BAND;
 }catch(_){}
 size=+sizeSel.value||25;
 sizeSel.addEventListener('change',function(){
@@ -1041,6 +1059,10 @@ def page_html(stage=DEFAULT_STAGE):
                  ('__NO__', json.dumps(sp['no'])),
                  ('__BELOW__', json.dumps(sp['below'])),
                  ('__ABOVE__', json.dumps(sp['above'])),
+                 # asymmetric models get walked from the side where the
+                 # unrecoverable error lives; symmetric ones from both
+                 ('__DEFBAND__',
+                  json.dumps('rejected' if sp['asymmetric'] else 'all')),
                  ('__YESTXT__', sp['yes']), ('__NOTXT__', sp['no']),
                  ('__BELOWTXT__', sp['below']),
                  ('__ABOVETXT__', sp['above']),
