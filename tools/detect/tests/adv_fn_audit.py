@@ -173,32 +173,169 @@ def isolation_checks(bad):
     """
     for rel in ('tools/detect/fn_audit.py', 'tools/dashboard/audit.py'):
         src = open(os.path.join(REPO, rel)).read()
-        tree = ast.parse(src)
-        writes = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                    and node.func.id == 'open' and len(node.args) > 1:
-                m = node.args[1]
-                if isinstance(m, ast.Constant) and 'w' in str(m.value) \
-                        or isinstance(m, ast.Constant) and 'a' in str(m.value):
-                    writes.add(ast.dump(node.args[0])[:60])
-        for banned in ('annot', 'review_ledger', 'hard_negative', 'dataset',
-                       'labels'):
-            if banned in src.lower().replace('fn_audit', ''):
-                # a mention is fine in prose; a path is not
-                for line in src.splitlines():
-                    low = line.lower()
-                    if banned in low and ('open(' in low or 'join(' in low):
-                        bad.append(f'{rel} touches a {banned} path: '
-                                   f'{line.strip()[:80]}')
-        if 'verdicts.jsonl' not in src and 'VERDICTS' not in src:
+        # Not "does the word appear" -- these files talk about labels and
+        # datasets in prose, and they should. What must not exist is a PATH
+        # into one: the audit reads the model's verdicts and writes a human's,
+        # and the two stores never meet.
+        for line in src.splitlines():
+            code = line.split('#', 1)[0]
+            if 'open(' not in code and 'join(' not in code:
+                continue
+            for banned in ('annot', 'hard_negative', 'training',
+                           'dataset', 'ledger'):
+                if banned in code.lower():
+                    bad.append(f'{rel} builds a path into a {banned} store: '
+                               f'{line.strip()[:80]}')
+        if 'VERDICTS' not in src:
             bad.append(f'{rel} does not name its own ledger')
+    # ...and the model's own opinion is never written as a verdict
+    import audit
+    for m in ('dog', 'not_dog'):
+        if audit.record('k#0', m)['ok']:
+            bad.append(f'{m!r} was accepted as a human verdict — the gate\'s '
+                       f'own labels must not enter this ledger')
+
+
+def concurrency_checks(bad):
+    """Recording a verdict must not wait on a page being cut.
+
+    They shared one lock, so every keystroke made while the next page was
+    being prefetched blocked until the cutting finished -- which is precisely
+    when someone is judging, because the prefetch starts the moment a page is
+    handed over. Measured at 0.59 s warm and the full cut time cold.
+    """
+    import threading
+    import time as _t
+    try:
+        import audit
+    except Exception:
+        return
+    if audit._DRAW_LOCK is audit._LEDGER_LOCK:
+        bad.append('drawing and recording share one lock — a verdict waits '
+                   'for a page to finish cutting')
+    real = audit.materialise
+    audit.materialise = lambda c, workers=8: (_t.sleep(0.6), c)[1]
+    orig_sample, orig_pc = audit.sample, audit.page_count
+    audit.sample = lambda n=24, band=None, seed=None: [
+        {'key': 'z#0', 'seq': 'zz', 'image_id': 'z', 'det_idx': 0,
+         'p_dog': 0.1, 'conf': 0.5, 'band': 1, 'drive': 'd', 'cell': 'c'}]
+    try:
+        import tempfile as _tf
+        tmp = _tf.mkdtemp()
+        o_pages, o_drawn, o_v = audit.PAGES, audit.DRAWN, audit.fa.VERDICTS
+        audit.PAGES = os.path.join(tmp, 'pages')
+        audit.DRAWN = os.path.join(tmp, 'drawn.jsonl')
+        audit.fa.VERDICTS = os.path.join(tmp, 'v.jsonl')
+        t = threading.Thread(target=lambda: audit.draw_page(n=1), daemon=True)
+        t.start()
+        _t.sleep(0.15)
+        a = _t.time()
+        audit.record('probe#0', 'unsure')
+        waited = _t.time() - a
+        t.join(timeout=5)
+        if waited > 0.25:
+            bad.append(f'a verdict waited {waited:.2f}s while a page was '
+                       f'cut — cutting must hold no lock a verdict needs')
+    finally:
+        audit.materialise, audit.sample, audit.page_count = (
+            real, orig_sample, orig_pc)
+        audit.PAGES, audit.DRAWN, audit.fa.VERDICTS = o_pages, o_drawn, o_v
+
+
+def persistence_checks(bad):
+    """A page re-read carries the verdicts already given on it.
+
+    The page document is the draw, not the judging. Read back without the
+    ledger merged in, every card on a page you had already worked through
+    came back blank and the work looked lost.
+    """
+    try:
+        import audit
+    except Exception:
+        return
+    doc = {'index': 0, 'items': [{'key': 'a#0'}, {'key': 'b#1'}]}
+    import tempfile as _tf
+    tmp = _tf.mkdtemp()
+    o = audit.fa.VERDICTS
+    audit.fa.VERDICTS = os.path.join(tmp, 'v.jsonl')
+    try:
+        with open(audit.fa.VERDICTS, 'w') as fh:
+            fh.write(json.dumps({'key': 'a#0', 'verdict': 'missed'}) + '\n')
+        got = audit.with_verdicts(json.loads(json.dumps(doc)))
+        if got['items'][0].get('verdict') != 'missed':
+            bad.append('a verdict already on record is not shown when the '
+                       'page is read again')
+        if 'verdict' in got['items'][1]:
+            bad.append('an unjudged box came back with a verdict')
+    finally:
+        audit.fa.VERDICTS = o
+
+
+def page_checks(bad):
+    """The page renders, and renders numbers rather than NaN.
+
+    16 KB of script that had never been executed. Everything else in this
+    repo that draws a panel is driven under node before it ships; this was
+    not, which is how it got here with no check at all.
+    """
+    import subprocess
+    import tempfile as _tf
+    if not __import__('shutil').which('node'):
+        print('SKIP: node not on PATH — audit page not driven')
+        return
+    try:
+        import audit
+    except Exception:
+        return
+    html = audit.AUDIT_HTML
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    probe = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         'audit_page_stub.js')
+    if not os.path.exists(probe):
+        bad.append('audit_page_stub.js is missing')
+        return
+    with _tf.NamedTemporaryFile('w', suffix='.js', delete=False) as f:
+        f.write(open(probe).read() + '\n' + script + '\n' + TAIL)
+        p = f.name
+    r = subprocess.run(['node', p], capture_output=True, text=True)
+    if r.returncode != 0:
+        # the LAST line of node's stderr is its version banner; the useful
+        # line is the first one naming the error
+        err = [x.strip() for x in (r.stderr or '').splitlines() if x.strip()]
+        why = next((x for x in err if 'Error' in x), err[0] if err else '?')
+        bad.append(f'the audit page threw: {why[:200]}')
+        return
+    for line in r.stdout.splitlines():
+        if line.startswith('FAIL '):
+            bad.append('audit page: ' + line[5:])
+
+
+TAIL = r"""
+function chk(c, m){ if(!c) console.log('FAIL ' + m) }
+chk(/^\d/.test(els.rate.textContent), 'headline rate is ' +
+  JSON.stringify(els.rate.textContent));
+chk(els.judged.textContent === '12', 'judged reads ' + els.judged.textContent);
+chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
+chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
+chk(els.bands.innerHTML.length > 100, 'the band strip rendered nothing');
+chk(/unsampled/.test(els.bands.innerHTML), 'a band nobody judged does not say so');
+var junk = Object.keys(els).map(function(k){
+  return String(els[k].textContent) + ' ' + String(els[k].innerHTML)}).join(' ');
+chk(!/NaN|undefined|\[object Object\]/.test(junk), 'junk on the page');
+// a page with no items must say why rather than sit blank. `page` is the
+// script's own state; PAGE is only what the stubbed fetch hands back.
+page = {index:0, items:[], exhausted:true};
+try { render() } catch(e) { console.log('FAIL render([]) threw ' + e.message) }
+chk(/every one has been shown/i.test(els.empty.textContent),
+  'an exhausted band does not explain itself: ' + els.empty.textContent);
+"""
 
 
 def main():
     bad = []
     for fn in (band_checks, wilson_checks, weighting_checks, ledger_checks,
-               serving_checks, isolation_checks):
+               serving_checks, isolation_checks, concurrency_checks,
+               persistence_checks, page_checks):
         try:
             fn(bad)
         except Exception as e:                 # noqa: BLE001 - report, not die

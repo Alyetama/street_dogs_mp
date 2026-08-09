@@ -32,7 +32,15 @@ OUT_DIR = fa.OUT_DIR
 CROPS = os.path.join(OUT_DIR, 'crops')
 PAGES = os.path.join(OUT_DIR, 'pages')
 DRAWN = os.path.join(OUT_DIR, 'drawn.jsonl')
-_LOCK = threading.Lock()
+# Two locks, because they guard two different things and one of them is slow.
+# A draw holds its lock across the sample and the page write; cutting the
+# crops -- seconds, or twenty of them off cold drives -- happens between them
+# with nothing held. Sharing one lock meant every verdict recorded while the
+# next page was being cut waited for the cutting to finish, which is exactly
+# when someone is judging: the page they are on loads, the next one starts
+# cutting behind it, and the first keystroke hangs.
+_DRAW_LOCK = threading.Lock()
+_LEDGER_LOCK = threading.Lock()
 
 # from the runner, never copied -- see the module docstring
 try:
@@ -239,14 +247,30 @@ def get_page(i):
 
 def draw_page(n=24, band=None):
     """Draw, cut, and keep. Returns the page document."""
-    with _LOCK:
-        idx = page_count()
+    with _DRAW_LOCK:
         cands = sample(n=n, band=band)
         if not cands:
-            return {'index': idx, 'items': [], 'exhausted': True,
-                    'band': band}
-        got = materialise(cands)
+            return {'index': page_count(), 'items': [], 'exhausted': True,
+                    'band': band, 'dropped': 0}
+        # Reserved before a single frame is opened. A box counts as drawn the
+        # moment it is chosen, not when it is judged or even when it is
+        # successfully cut: a concurrent draw must not pick it, and a box
+        # skipped on screen must not come back three pages later, or "you have
+        # not seen this" is untrue and the sample quietly correlates.
+        os.makedirs(OUT_DIR, exist_ok=True)
+        with open(DRAWN, 'a') as fh:
+            for c in cands:
+                fh.write(json.dumps({'key': c['key'], 'seq': c['seq']}) + '\n')
+
+    got = materialise(cands)          # slow, and holds nothing
+
+    with _DRAW_LOCK:
+        idx = page_count()
+        # Frames that would not open. Usually a jpg pruned off a drive after
+        # the sweep read it. Counted rather than hidden, so a short page reads
+        # as a short page and not as a page that lost its crops.
         doc = {'index': idx, 'band': band, 'created': time.time(),
+               'dropped': len(cands) - len(got),
                'items': [{k: c[k] for k in
                           ('key', 'image_id', 'det_idx', 'p_dog', 'conf',
                            'band', 'seq', 'drive', 'cell')} for c in got]}
@@ -255,13 +279,6 @@ def draw_page(n=24, band=None):
         with open(tmp, 'w') as fh:
             json.dump(doc, fh)
         os.replace(tmp, _page_file(idx))
-        # A box counts as drawn the moment it is shown, not when it is
-        # judged: skipping one and meeting it again three pages later would
-        # make "I have not seen this" untrue and quietly correlate the sample.
-        with open(DRAWN, 'a') as fh:
-            for c in got:
-                fh.write(json.dumps({'key': c['key'], 'seq': c['seq'],
-                                     'page': idx}) + '\n')
         return doc
 
 
@@ -281,7 +298,7 @@ def record(key, verdict, meta=None):
     for k in ('band', 'p_dog', 'seq'):
         if meta and meta.get(k) is not None:
             rec[k] = meta[k]
-    with _LOCK:
+    with _LEDGER_LOCK:
         os.makedirs(OUT_DIR, exist_ok=True)
         with open(fa.VERDICTS, 'a') as fh:
             fh.write(json.dumps(rec) + '\n')
@@ -503,6 +520,11 @@ function render(){
     return;
   }
   empty.hidden=true;
+  /* A frame that would not open is a shorter page, and a shorter page with
+     no explanation reads as crops that failed to load. */
+  var dr=page.dropped||0;
+  posEl.title=dr?dr+' of this page\u2019s frames could not be opened '+
+    '(usually a jpg pruned off a drive after the sweep read it)':'';
   grid.innerHTML=page.items.map(function(it,i){
     var lo=BANDS[it.band][0],hi=BANDS[it.band][1];
     return '<div class="card" data-i="'+i+'">'+
@@ -529,6 +551,7 @@ function move(d){
 }
 function setPos(){
   posEl.textContent=total?('page '+(idx+1)+' of '+total+
+    (page&&page.dropped?' · '+page.dropped+' unreadable':'')+
     (band!=null?' · band '+BANDS[band][0].toFixed(1)+'-'+BANDS[band][1].toFixed(1):'')):'—';
   document.getElementById('prev').disabled=busy||idx<=0;
   document.getElementById('next').disabled=busy;
@@ -678,12 +701,29 @@ def prefetch(band=None, n=24):
     t.start()
 
 
+def with_verdicts(doc):
+    """Stamp each item with the answer already on record for it.
+
+    A page document is the draw, not the judging, so paging back to one
+    re-read it as untouched and every verdict on it looked lost. The ledger is
+    the record; the page is just which boxes were on screen.
+    """
+    if not doc or not doc.get('items'):
+        return doc
+    seen = {v['key']: v.get('verdict') for v in fa.read_verdicts()}
+    for it in doc['items']:
+        v = seen.get(it['key'])
+        if v:
+            it['verdict'] = v
+    return doc
+
+
 def api_page(i, n=24, band=None):
     """One page by index; -1 means the most recent. Draws if there are none."""
     total = page_count()
     if total == 0:
         doc = draw_page(n=n, band=band)
-        return {'page': doc, 'index': doc.get('index', 0),
+        return {'page': with_verdicts(doc), 'index': doc.get('index', 0),
                 'total': max(1, page_count())}
     if i is None or int(i) < 0:
         i = total - 1
@@ -693,7 +733,7 @@ def api_page(i, n=24, band=None):
         return {'error': f'page {i} is missing'}
     if i >= total - 1:
         prefetch(band=band, n=n)      # reading the last one: line up another
-    return {'page': doc, 'index': i, 'total': total}
+    return {'page': with_verdicts(doc), 'index': i, 'total': total}
 
 
 def api_draw(n=24, band=None):
@@ -701,4 +741,5 @@ def api_draw(n=24, band=None):
     total = max(1, page_count())
     if doc.get('items'):
         prefetch(band=band, n=n)
-    return {'page': doc, 'index': doc.get('index', total - 1), 'total': total}
+    return {'page': with_verdicts(doc), 'index': doc.get('index', total - 1),
+            'total': total}
