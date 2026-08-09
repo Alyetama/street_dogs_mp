@@ -9173,6 +9173,28 @@ def _gate_plan(stage, sp):
                    f'whole store; the Run button appears when it lands'}
 
 
+_AUDIT = {'mod': None, 'tried': False}
+
+
+def _audit():
+    """The audit module, imported once and only when asked for.
+
+    It pulls in duckdb and the pool, neither of which a dashboard that nobody
+    has opened /audit on should pay for -- and a missing pool is a state the
+    page reports rather than an import error at boot.
+    """
+    if not _AUDIT['tried']:
+        _AUDIT['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import audit as _a
+            _AUDIT['mod'] = _a
+        except Exception:
+            _AUDIT['mod'] = None
+    m = _AUDIT['mod']
+    return m if (m is not None and m.pool_ready()) else None
+
+
 def gate_planning():
     """True while a planner is building a work list."""
     return bool(_script_pids('gate_store.py', 'plan'))
@@ -9329,6 +9351,65 @@ class BoardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _html(self, body):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-cache, must-revalidate')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _audit_get(self):
+        """/audit, its crops and its two read endpoints. True if handled."""
+        path = self.path.split('?', 1)[0]
+        a = _audit()
+        if path == '/audit':
+            if a is None:
+                self._html(b'<!doctype html><meta charset=utf-8>'
+                           b'<body style="background:#13151a;color:#98a2ad;'
+                           b'font:14px system-ui;padding:40px">'
+                           b'The audit pool has not been built yet. Run '
+                           b'<code>python tools/detect/fn_audit.py build</code>'
+                           b' once, then reload.</body>')
+            else:
+                self._html(a.AUDIT_HTML.encode('utf-8'))
+            return True
+        if path.startswith('/audit/crop/') and path.endswith('.jpg'):
+            # the key is matched against the shape it is minted in; nothing a
+            # client sends is ever joined onto a directory
+            p = a.crop_path(path[len('/audit/crop/'):-4]) if a else None
+            if not p:
+                self.send_error(404)
+                return True
+            try:
+                with open(p, 'rb') as fh:
+                    body = fh.read()
+            except OSError:
+                self.send_error(404)
+                return True
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'public, max-age=86400')
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        if path == '/api/audit/page':
+            if a is None:
+                self._json({'error': 'pool not built'})
+                return True
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                i = int((q.get('i', ['-1'])[0]))
+            except ValueError:
+                i = -1
+            self._json(a.api_page(i))
+            return True
+        if path == '/api/audit/stats':
+            self._json(a.stats() if a else {'judged': 0, 'bands': []})
+            return True
+        return False
+
     def do_GET(self):
         if self.path == '/api/board':
             try:
@@ -9368,6 +9449,10 @@ class BoardHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
+        _p = self.path.split('?', 1)[0]
+        if _p.startswith('/audit') or _p.startswith('/api/audit'):
+            if self._audit_get():
+                return
         if self.path.split('?', 1)[0] == '/review':
             body = REVIEW_HTML.encode('utf-8')
             self.send_response(200)
@@ -9610,6 +9695,27 @@ class BoardHandler(SimpleHTTPRequestHandler):
         return True
 
     def do_POST(self):
+        if self.path.split('?', 1)[0] in ('/api/audit/draw',
+                                          '/api/audit/verdict'):
+            try:
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                data = json.loads(self.rfile.read(n) or b'{}')
+                a = _audit()
+                if a is None:
+                    self._json({'error': 'the audit pool is not built — run '
+                                         'tools/detect/fn_audit.py build'})
+                elif self.path.startswith('/api/audit/draw'):
+                    b = data.get('band')
+                    self._json(a.api_draw(
+                        n=24, band=None if b is None else int(b)))
+                else:
+                    self._json(a.record(
+                        data.get('key'), str(data.get('verdict') or ''),
+                        {'band': data.get('band'), 'p_dog': data.get('p_dog'),
+                         'seq': data.get('seq')}))
+            except Exception as e:
+                self._json({'ok': False, 'error': str(e)})
+            return
         if self.path == '/api/board':
             try:
                 n = int(self.headers.get('Content-Length', 0) or 0)
@@ -11254,6 +11360,17 @@ outline-offset:2px}
     <div class="dcount" id="gCount">—</div>
     <div class="drun" id="gRun">—</div>
     <div class="dmeta" id="gMeta"></div>
+    <!-- The rejected pile is the one nothing downstream will ever look at
+         again, so the way in has to be here, next to the number that made
+         it. -->
+    <div class="dcrophead" style="margin-top:14px">
+      <div class="dsub">Rejected boxes</div>
+      <span class="dcropsub" id="gAuditSub">sample what the gate threw away and
+        count what it got wrong</span>
+      <a href="/audit" class="rbtn nav rev" title="judge a stratified sample of
+        rejected boxes — every miss here is a dog nothing downstream will see">
+        &#9873; Audit rejections</a>
+    </div>
   </div>
 </div>
 </details>
