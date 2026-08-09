@@ -323,7 +323,13 @@ VIEW_MAX = 1100
 
 
 def corrections():
-    """{(image_id, det_idx): (x1, y1, x2, y2)} -- last write wins."""
+    """{(image_id, det_idx): (x1, y1, x2, y2, saved_at)} -- last write wins.
+
+    The timestamp is carried because the tile has to be able to ASK for the
+    redrawn crop. Crops are served with a day of browser cache, so without a
+    version on the URL a redraw showed until the page was reloaded and then
+    silently reverted to the cut it replaced.
+    """
     out = {}
     try:
         with open(BOX_FILE) as fh:
@@ -337,7 +343,8 @@ def corrections():
                 try:
                     out[(str(d['image_id']), int(d.get('det_idx') or 0))] = (
                         float(d['x1']), float(d['y1']),
-                        float(d['x2']), float(d['y2']))
+                        float(d['x2']), float(d['y2']),
+                        int(d.get('saved_at') or 0))
                 except (KeyError, TypeError, ValueError):
                     continue
     except OSError:
@@ -405,8 +412,8 @@ def frame_view(key, stage=DEFAULT_STAGE):
     src = os.path.join(root, cand['cell'], 'ground_animal_images',
                        f"{cand['image_id']}.jpg")
     cur = corrections().get((str(cand['image_id']), int(cand['det_idx'])))
-    x1, y1, x2, y2 = (cur if cur else (cand['x1'], cand['y1'],
-                                       cand['x2'], cand['y2']))
+    x1, y1, x2, y2 = (cur[:4] if cur else (cand['x1'], cand['y1'],
+                                           cand['x2'], cand['y2']))
     try:
         im = Image.open(src)
         im.load()
@@ -1274,7 +1281,7 @@ function loadStats(){
 }
 function paintStats(s){
   if(!s)return;
-  counts(s.counts||{flagged:(s.rejected||{}).wrong,all:s.judged});
+  counts(s.counts||{all:s.judged});
   var r=document.getElementById('rate'),ci=document.getElementById('ci'),
       rej=s.rejected||{},kept=s.kept||{};
   document.getElementById('judged').textContent=fmtn(s.judged||0);
@@ -1732,8 +1739,10 @@ def with_verdicts(doc, stage=DEFAULT_STAGE):
         if v:
             it['verdict'] = v
         iid, _, di = str(it['key']).partition('#')
-        if (iid, int(di or 0)) in fixed:
+        got = fixed.get((iid, int(di or 0)))
+        if got:
             it['corrected'] = True
+            it['v'] = got[4]
     return doc
 
 
@@ -1837,8 +1846,10 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
               'band': v.get('band'), 'seq': v.get('seq'),
               'judged_at': v.get('ts'),
               'unknown_score': v.get('p_dog') is None}
-        if (iid, int(di or 0)) in fixed:
+        got = fixed.get((iid, int(di or 0)))
+        if got:
             it['corrected'] = True
+            it['v'] = got[4]
         out.append(it)
     return {'items': out, 'total': total, 'page': page, 'pages': pages,
             'which': which, 'stage': stage,
@@ -1851,8 +1862,8 @@ def _judged_counts(stage=DEFAULT_STAGE):
     rows = [fa.verdict_of(v.get('verdict'), stage)
             for v in fa.read_verdicts(stage=stage)]
     rows = [v for v in rows if v]
-    return {'flagged': sum(1 for v in rows if v == sp['positive']),
-            'all': len(rows)}
+    # only `all` is read -- the button shows one number now
+    return {'all': len(rows)}
 
 
 def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):

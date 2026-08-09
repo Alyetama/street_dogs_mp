@@ -414,6 +414,28 @@ def correction_checks(bad):
         elif audit.crop_path('9_0', 'gate') != rt:
             bad.append(f'the served crop is {audit.crop_path("9_0", "gate")}, '
                        f'not the redrawn one')
+        # A crop is cached for a day, so the tile must be able to ASK for the
+        # new one. Without a version from the SERVER this worked until the
+        # page was reloaded and then quietly reverted to the old cut.
+        import time as _t3
+        bf = audit.BOX_FILE
+        audit.BOX_FILE = os.path.join(tmp, 'boxes.jsonl')
+        try:
+            with open(audit.BOX_FILE, 'w') as fh:
+                fh.write(json.dumps({'image_id': '9', 'det_idx': 0,
+                                     'x1': 1, 'y1': 1, 'x2': 9, 'y2': 9,
+                                     'saved_at': 1234}) + '\n')
+            doc = audit.with_verdicts(
+                {'items': [{'key': '9#0'}]}, 'gate')
+            it = doc['items'][0]
+            if not it.get('corrected'):
+                bad.append('a redrawn box is not marked on the tile')
+            if it.get('v') != 1234:
+                bad.append(f'the tile is given v={it.get("v")}, so after a '
+                           f'reload it asks for the same URL the browser has '
+                           f'already cached and the redraw disappears')
+        finally:
+            audit.BOX_FILE = bf
     except Exception as e:                     # noqa: BLE001
         bad.append(f'cutting a corrected box threw {type(e).__name__}: {e}')
     finally:
