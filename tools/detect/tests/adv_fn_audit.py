@@ -1064,6 +1064,29 @@ chk(!/somewhere between/.test(els.ci.textContent),
 chk(/<b>9<\/b>\/216/.test(els.bands.innerHTML),
   'the band table has no answered column, and that rate ran 1.7% to 10.2% '
   + 'across these ten rows');
+// The two errors are not one number. Below the line a wrong answer is
+// something thrown away that nothing downstream will ever see again; above it
+// a wrong answer is a click. A single "N the model got wrong" said which of
+// the two the run was making only by accident of which side had been judged.
+STATS.rejected.wrong = 136; STATS.kept.wrong = 25; STATS.judged = 270;
+paintStats(STATS);
+chk(/136<\/b> false negatives/.test(els.figline.innerHTML),
+  'the summary does not report false negatives on their own: '
+  + els.figline.innerHTML);
+chk(/25<\/b> false positives/.test(els.figline.innerHTML),
+  'the summary does not report false positives on their own: '
+  + els.figline.innerHTML);
+chk(/below/.test(els.figline.title) && /above/.test(els.figline.title),
+  'nothing says which side of the threshold each error is: '
+  + JSON.stringify(els.figline.title));
+// singular reads as singular -- "1 false negatives" is how a count betrays
+// that nobody looked at it with one find on the board
+STATS.rejected.wrong = 1; STATS.kept.wrong = 1;
+paintStats(STATS);
+chk(/1<\/b> false negative,/.test(els.figline.innerHTML) &&
+    /1<\/b> false positive /.test(els.figline.innerHTML),
+  'one error is reported in the plural: ' + els.figline.innerHTML);
+STATS.rejected.wrong = 1; STATS.kept.wrong = 0; STATS.judged = 12;
 // answered in full, and the estimate is a measurement again
 STATS.rejected.answered = 1080;
 paintStats(STATS);

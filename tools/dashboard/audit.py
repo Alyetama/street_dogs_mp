@@ -1364,14 +1364,28 @@ function paintStats(s){
       (sh.unrecorded?' \u00b7 '+fmtn(sh.unrecorded)+
         ' more judged before the sheets were kept':'');
   var fl=document.getElementById('figline');
-  if(fl)fl.innerHTML=s.judged
-    ? '<b>'+fmtn(s.judged)+'</b> judged'+
-      (shr===null?'':', <b>'+pctTxt(shr)+'</b> of what you were shown')+
-      ' \u00b7 <b>'+fmtn(s.wrong||0)+
-      '</b> the model got wrong \u00b7 '+(ceil?'at most ':'')+
-      '<b>'+pctTxt(rej.rate||0)+
-      '</b> of what it '+(STAGE==='gate'?'rejected':'called '+NO)
-    : 'nothing judged yet \u2014 the numbers fill in as you go';
+  /* The two errors split, because they are not the same error and this page
+     was built around that. Below the line a wrong answer is a false negative
+     -- something thrown away, which nothing downstream will ever see again.
+     Above it a wrong answer is a false positive, which costs a click. One
+     total hid which of the two the run was actually making. */
+  if(fl){
+    fl.title=s.judged
+      ? 'false negatives scored below '+THRESH+' and you answered '+YES+
+        '; false positives scored above it and you answered '+NO
+      : '';
+    fl.innerHTML=s.judged
+      ? '<b>'+fmtn(s.judged)+'</b> judged'+
+        (shr===null?'':', <b>'+pctTxt(shr)+'</b> of what you were shown')+
+        ' \u00b7 <b>'+fmtn(rej.wrong||0)+'</b> false negative'+
+        ((rej.wrong||0)===1?'':'s')+
+        ', <b>'+fmtn(kept.wrong||0)+'</b> false positive'+
+        ((kept.wrong||0)===1?'':'s')+
+        ' \u00b7 '+(ceil?'at most ':'')+
+        '<b>'+pctTxt(rej.rate||0)+
+        '</b> of what it '+(STAGE==='gate'?'rejected':'called '+NO)
+      : 'nothing judged yet \u2014 the numbers fill in as you go';
+  }
   document.getElementById('found').textContent=
     (rej.wrong||0)+' the model got wrong below '+THRESH;
   /* The headline is the one number the page exists to produce: how many dogs
