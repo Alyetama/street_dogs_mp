@@ -10816,8 +10816,62 @@ line-height:1.5;padding:0 24px 56px;-webkit-font-smoothing:antialiased}
 header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;
   margin:0 -24px 20px;padding:18px 24px 15px;position:sticky;top:0;z-index:20;
   background:rgba(19,21,26,.82);backdrop-filter:saturate(140%) blur(12px);
-  border-bottom:1px solid var(--bd)}
-h1{font-size:clamp(21px,3vw,29px);font-weight:650;letter-spacing:-.4px}
+  border-bottom:1px solid var(--bd);transition:padding .18s ease}
+h1{font-size:clamp(21px,3vw,29px);font-weight:650;letter-spacing:-.4px;
+transition:font-size .18s ease,letter-spacing .18s ease}
+/* ── the header at work ───────────────────────────────────────────────────
+   The top of this page is identity, and identity is read once. Once the page
+   has scrolled the header keeps only what someone ACTS on -- the queue count,
+   the two links, the refresh button -- and sheds the tagline, the "updated
+   ... auto-refreshes hourly" line, the sub-labels under the two button
+   numbers, and most of a 29px title. Those are ambient: worth a glance, not
+   worth 100px of every screen on a page seven sections tall. */
+/* 96px, not 1px. A one-pixel sentinel flips the header the instant the page
+   moves at all, so a small scroll near the top snapped ~60px of chrome in and
+   out repeatedly on /review. 96px of content past the header is more than
+   anyone nudges by accident. The negative margin cancels the height, so the
+   sentinel costs no layout. */
+.scrollcue{display:block;height:96px;margin-bottom:-96px;pointer-events:none}
+/* 24px shorter once folded, so the point the header unfolds at sits a little
+   below the point it folded at. Without that they are the SAME point to
+   within a pixel -- the sentinel rides under the header, so folding moves it
+   and the browser's scroll anchoring moves the viewport by the same amount,
+   and the crossing lands back exactly on itself -- and an exact boundary
+   ping-pongs on a rounding error. */
+body.compact .scrollcue{height:72px;margin-bottom:-72px}
+body.compact header{padding-top:8px;padding-bottom:8px}
+/* Shrunk, not hidden. display:none takes the height in one frame and every
+   section below lurches, and this header is sticky so that is the whole page
+   moving under the cursor. Type rather than the max-height /review folds its
+   rows with, because all three of these are one run of text: max-height needs
+   a cap to transition FROM, and any cap is a clip waiting for the width where
+   the tagline wraps to a third line or "what runs trained on" to a second.
+   Shrinking the type collapses both axes and needs no such number -- and the
+   "updated ..." line shares a row with the button it belongs to, so what it
+   costs is width, which a folded max-height would have left as a hole. The
+   words stay in the accessibility tree either way, which is the point: they
+   are ambient on screen, not gone from the page. */
+.sub,.updt,.revbtn em{transition:font-size .18s ease,opacity .18s ease,
+margin .18s ease}
+body.compact .sub,body.compact .updt,body.compact .revbtn em{font-size:0;
+opacity:0;margin-top:0}
+/* A flex item of zero width still takes the gap on BOTH sides, so shedding
+   the sentence left the live dot floating 14px off the Refresh button it
+   annotates, reading as a stray light rather than a status one. */
+body.compact .updt{margin-right:-7px}
+/* the count is what the button is for and stays full size; the padding
+   around it is what gives way */
+body.compact .revbtn{padding:4px 10px 4px 11px}
+/* /review drops its h1 by 3px and can snap it. 29px to 15px is a fifth of
+   the header's height arriving in one frame while the padding around it
+   eases, which read as a jolt, so the title is eased too (above). */
+body.compact h1{font-size:15px;letter-spacing:-.2px}
+/* Last, not first: a media query adds no specificity, so this block sitting
+   above h1's own rule left the biggest text on the page as the ONE thing
+   still easing for the reader who asked for no motion. */
+@media(prefers-reduced-motion:reduce){
+  header,h1,.sub,.updt,.revbtn em{transition:none}
+}
 h1 .o{color:var(--acc)}
 .sub{color:var(--dim);font-size:13px;margin-top:3px}
 .upd{display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12.5px}
@@ -10832,7 +10886,8 @@ justify-content:flex-end}
 .revbtn{display:inline-flex;align-items:center;gap:10px;text-decoration:none;
 background:var(--acc);color:#13151a;border:1px solid var(--acc);
 border-radius:10px;padding:7px 12px 7px 13px;line-height:1.1;
-transition:transform .12s ease,box-shadow .12s ease,background .12s ease}
+transition:transform .12s ease,box-shadow .12s ease,background .12s ease,
+padding .18s ease}
 .revbtn:hover{background:#f0b45c;transform:translateY(-1px);
 box-shadow:0 6px 16px rgba(232,166,69,.18)}
 .revbtn:focus-visible{outline:2px solid var(--acc);outline-offset:3px}
@@ -11790,9 +11845,27 @@ outline-offset:2px}
       <span class="rvf">&#9638;</span>
       <span class="rvn"><b>Datasets</b><em>what runs trained on</em>
       </span></a>
-    <div class="upd"><span class="dot"></span>updated __NOW__ · auto-refreshes hourly<button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
+    <!-- The sentence is wrapped because a bare text node has nothing to
+         style, and the scrolled header sheds the sentence while keeping the
+         button that sits after it and the dot that says the page is live. -->
+    <div class="upd"><span class="dot"></span><span class="updt">updated __NOW__ · auto-refreshes hourly</span><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
   </div>
 </header>
+
+<!-- Scrolled past this, a screenful of the page has gone by and the header
+     sheds everything nobody acts on. A sentinel, not a scroll handler: the
+     browser reports the crossing once instead of the page measuring itself
+     on every frame.
+     It rides UNDER the header, not above it, and that is the whole trick.
+     Above the header it stays put while folding takes 54px (140px narrow)
+     out of a sticky element, and the browser's scroll anchoring answers that
+     by moving the viewport the same distance -- straight back over a
+     sentinel that had only just been crossed. The header then asked to
+     unfold, was refused as a flutter, and stayed folded at the very top of
+     the page with no title and no tagline. Down here the sentinel moves with
+     the fold, the anchoring moves the viewport with it, and the two cancel:
+     measured, the crossing point holds to within a pixel at every width. -->
+<i class="scrollcue" id="scrollcue" aria-hidden="true"></i>
 
 <div class="ring-row">
   <div class="ring">
@@ -14311,6 +14384,57 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         function(el){var c=echarts.getInstanceByDom(el);if(c)c.resize()});
     });
   });
+})();
+/* Fold the header once a screenful of the page has gone by. Guarded because
+   the test harness has no IntersectionObserver, and a page that threw here
+   would lose every handler bound after it. */
+(function(){
+  var cue=document.getElementById('scrollcue');
+  if(!cue||typeof IntersectionObserver!=='function')return;
+  /* hold is the timestamp of the last change, and null until there has been
+     one. Not 0: entry.time counts from navigation start, so 0 is not "long
+     ago", it is the load — and the callback that arrives at observe() time
+     only records where the page started. Arming the window there spent it on
+     the load, and a scroll in the first quarter-second was refused. */
+  var at=null,hold=null,pend=null,tid=0;
+  function set(want,now){
+    at=want;hold=now;
+    document.body.classList.toggle('compact',want);
+  }
+  new IntersectionObserver(function(es){
+    var want=!es[0].isIntersecting;
+    /* back where we already are: whatever was being held is stale */
+    if(want===at){pend=null;return;}
+    /* the observer's own timestamp, not the wall clock: it is what the
+       browser measured the crossing at, and it can be driven in a test */
+    var now=(typeof es[0].time==='number')?es[0].time:Date.now();
+    /* Hysteresis. Compacting removes height from a sticky header, which moves
+       everything below it — and that settling can cross the sentinel again
+       and ask for the opposite. Refusing a reversal for a moment turns a
+       flutter into one change. */
+    if(hold!==null&&now-hold<260){
+      /* Held, NOT dropped. An IntersectionObserver only reports changes, so a
+         reversal thrown away here is never offered again: a wheel flicked
+         down and straight back up folded the header and left it folded at
+         the top of the page with nothing left to unfold it. pend carries the
+         observer's latest reading, and a later crossing either replaces it or
+         cancels it above. */
+      pend=want;
+      /* hold+260 is when the window closes, on the same clock the crossings
+         are stamped with. Reading a fresh Date.now() here would put an epoch
+         millisecond into hold and make every later comparison nonsense. */
+      if(!tid)tid=setTimeout(function(){
+        tid=0;
+        var w=pend;pend=null;
+        if(w!==null&&w!==at)set(w,hold+260);
+      },260-(now-hold));
+      return;
+    }
+    /* at===null is the callback observe() delivers straight away: it records
+       where the page started and is nobody's scroll, so it leaves hold unset
+       rather than spending the window on the load. */
+    set(want,at===null?null:now);
+  },{threshold:0}).observe(cue);
 })();
 </script></body></html>"""
 

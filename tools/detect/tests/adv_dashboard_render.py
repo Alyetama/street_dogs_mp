@@ -30,6 +30,15 @@ that lets an element be hidden at all is derived here rather than listed for
 the same reason -- an author ``display:`` outranks the UA's ``[hidden]``, and
 ``.swctl`` and ``.wrkeyi`` were each found by a person noticing.
 
+The header that folds once the page has scrolled is graded three ways,
+because it fails three ways. Its rules are read (does the fold shed height,
+can prefers-reduced-motion still win, does the sentinel sit under the
+header); its observer is driven under node over the crossings that broke it;
+and the page is opened in chromium and measured, because the failure that
+took two review passes to find is a layout feedback loop -- folding a sticky
+header scrolls the page, and the scroll is an input to the decision that
+caused it. Nothing static can see that one. No chromium is a loud SKIP.
+
 What a caller sees after nvidia-smi exits is driven too. It was not: this
 file called its own reset(), which sets the process to None, and then
 asserted the process was None, without ever calling _gpu() again. A check
@@ -374,6 +383,466 @@ def check_markup(html):
     if bad:
         raise SystemExit('MARKUP FAILURES: ' + ' | '.join(bad))
     print('ok   markup (Processed card + live detection grid + lightbox)')
+
+
+def _css_rules(css):
+    """[(offset, selector, declarations, enclosing at-rule)], comments gone.
+
+    Flattens @media so a rule inside one is reported at its own offset, which
+    is what the cascade actually goes on: a media query adds no specificity,
+    so where its declaration SITS is the whole of its power over an equally
+    specific rule. @keyframes and @font-face are skipped whole -- their inner
+    blocks are percentages and descriptors, not selectors.
+    """
+    css = re.sub(r'/\*.*?\*/', ' ', css, flags=re.S)
+    out, i, n, stack = [], 0, len(css), []
+    while i < n:
+        j = css.find('{', i)
+        if j < 0:
+            break
+        head = css[i:j]
+        for _ in range(min(head.count('}'), len(stack))):
+            stack.pop()            # every } here closed an at-rule we entered
+        # the closing brace of whatever block just ended leads the next
+        # selector; leaving it on turned `h1` into `} h1` and every lookup
+        # for a rule that happens to follow an @media silently missed
+        sel = ' '.join(re.sub(r'^[\s}]+', '', head).split())
+        if sel.startswith('@'):
+            if sel.split('(')[0].split()[0] in ('@media', '@supports'):
+                stack.append(sel)  # step inside: its children are real rules
+                i = j + 1
+                continue
+            depth, k = 0, j
+            while k < n:           # skip the block whole
+                if css[k] == '{':
+                    depth += 1
+                elif css[k] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            i = k + 1
+            continue
+        k = css.find('}', j)
+        if k < 0:
+            break
+        out.append((i, sel, css[j + 1:k], ' '.join(stack)))
+        i = k + 1
+    return out
+
+
+def _px(decls, prop):
+    """The px number a declaration block gives ``prop``, or None.
+
+    Bare ``0`` counts -- ``font-size:0`` is how the header collapses its
+    ambient text, and demanding the unit read that as "no rule at all".
+    """
+    m = re.search(r'(?:^|;)\s*%s\s*:\s*(-?[\d.]+)(px)?(?=[;\s}]|$)'
+                  % re.escape(prop), decls)
+    if not m or (m.group(2) is None and float(m.group(1)) != 0):
+        return None
+    return float(m.group(1))
+
+
+def check_header_compact(html):
+    """The header folds what is ambient once the page has scrolled.
+
+    Three things here are only visible statically, and each one shipped.
+
+    WHERE THE SENTINEL SITS. Folding takes 54px -- 140px at a narrow width --
+    out of a POSITION:STICKY element, and the browser answers a shrink above
+    the reader's position by scrolling back the same distance to keep the
+    content under their eye still. A sentinel above the header does not move
+    when the header does, so that scroll-back carried the page straight over
+    a sentinel it had only just crossed; the unfold that followed was refused
+    as a flutter and the header stayed folded at the top of the page, no
+    title and no tagline, with no gesture that brought it back. Below the
+    header the sentinel moves with the fold and the two cancel -- measured,
+    the crossing point holds to within a pixel at every width.
+
+    THE CASCADE. ``@media(prefers-reduced-motion:reduce){h1{transition:none}}``
+    placed ABOVE ``h1{...;transition:font-size .18s}`` does nothing at all: a
+    media query adds no specificity and both selectors are (0,0,1), so the
+    later one wins in both media states. That left the largest text on the
+    page as the one thing still easing for the reader who asked for no
+    motion, which is louder than the uniform ease the setting exists to stop.
+
+    WHAT IS SHED. The point of the whole thing is viewport, so the folded
+    header has to be shorter. check_header_shrinks() measures that in a
+    browser; here it is read out of the rules, which is the half that still
+    works on a machine with no chromium.
+    """
+    body = html[html.index('</style>'):]
+    css = '\n'.join(re.findall(r'<style[^>]*>(.*?)</style>', html, re.S))
+    rules = _css_rules(css)
+    bad = []
+
+    def one(sel):
+        got = [(o, d) for o, s, d, _a in rules if s == sel]
+        if not got:
+            bad.append(f'no {sel}{{...}} rule on the page')
+            return -1, ''
+        return got[-1]
+
+    cue = re.search(r'<i[^>]*\bclass="scrollcue"[^>]*>', body)
+    if not cue:
+        bad.append('no <i class="scrollcue"> sentinel in the markup — nothing '
+                   'for the observer to watch, so the header never folds')
+    else:
+        if 'id="scrollcue"' not in cue.group(0):
+            bad.append('the sentinel carries no id="scrollcue" — the observer '
+                       'looks it up by id and gives up quietly without one')
+        if 'aria-hidden="true"' not in cue.group(0):
+            bad.append('the sentinel is not aria-hidden — it is a scroll '
+                       'landmark with no content, and a screen reader should '
+                       'never be told about it')
+        if not (body.index('</header>') < cue.start()):
+            bad.append('the scrollcue sentinel sits ABOVE the header. Folding '
+                       'the header scrolls the viewport back by what it shed, '
+                       'and a sentinel that did not move with it is re-crossed '
+                       'by that scroll-back — the unfold is then refused as a '
+                       'flutter and the header stays folded at the top of the '
+                       'page. It has to sit after </header>')
+
+    # the sentinel must cost no layout in EITHER state, or folding the header
+    # would move the page by the sentinel as well as by the header
+    box = {}
+    for sel, why in (
+            ('.scrollcue', 'there is no sentinel to observe, so the header '
+                           'never folds'),
+            ('body.compact .scrollcue',
+             'the folded sentinel then measures the same as the unfolded one, '
+             'and unfolding happens on the exact pixel folding did — the '
+             'sentinel rides under the header, so the fold moves it and the '
+             'browser\'s compensating scroll moves the viewport by the same '
+             'amount, landing the crossing back on itself. An exact boundary '
+             'ping-pongs on a rounding error')):
+        got = [d for o, s, d, _a in rules if s == sel]
+        if not got:
+            bad.append(f'no {sel}{{...}} rule — {why}')
+            continue
+        h, mb = _px(got[-1], 'height'), _px(got[-1], 'margin-bottom')
+        if h is None or mb is None:
+            bad.append(f'{sel} does not set both a height and a margin-bottom')
+        elif h + mb != 0:
+            bad.append(f'{sel} is {h}px tall with {mb}px of margin-bottom — '
+                       f'the negative margin has to cancel the height exactly '
+                       f'or the sentinel costs {h + mb}px of layout')
+        else:
+            box[sel] = h
+    if len(box) == 2 and not box['body.compact .scrollcue'] < box['.scrollcue']:
+        bad.append(f'the folded sentinel is {box["body.compact .scrollcue"]}px '
+                   f'against {box[".scrollcue"]}px unfolded — it has to be '
+                   f'SHORTER, so the point the header unfolds at sits below '
+                   f'the point it folded at rather than exactly on it')
+
+    # ── what the fold actually takes off the height ──
+    # A floor, not a measurement: three declared sheds that each stand for
+    # real height, added up at the page's own line-height of 1.5. The browser
+    # is what measures; this is what still runs without one, and what says
+    # WHICH rule went missing when the number collapses.
+    shed = []
+    _, hdr = one('header')
+    _, hdrc = one('body.compact header')
+    pad = re.search(r'(?:^|;)\s*padding\s*:\s*(-?[\d.]+)px\s+[\d.]+px\s+'
+                    r'(-?[\d.]+)px', hdr)
+    if not pad:
+        bad.append('the header rule no longer sets a three-value padding, so '
+                   'there is nothing to compare the folded one against')
+    else:
+        was = float(pad.group(1)) + float(pad.group(2))
+        now = (_px(hdrc, 'padding-top') or 0) + (_px(hdrc, 'padding-bottom') or 0)
+        shed.append(('header padding', was - now))
+    _, h1 = one('h1')
+    _, h1c = one('body.compact h1')
+    big = re.search(r'font-size\s*:\s*clamp\([^)]*?(-?[\d.]+)px\s*\)', h1)
+    if not big:
+        bad.append('the h1 rule no longer sets a clamp() font-size')
+    else:
+        shed.append(('title', float(big.group(1)) - (_px(h1c, 'font-size') or 0)))
+    _, sub = one('.sub')
+    subc = [d for o, s, d, _a in rules
+            if 'body.compact .sub' in s.split(',')]
+    grown = (_px(sub, 'font-size') or 0) * 1.5 + (_px(sub, 'margin-top') or 0)
+    if not subc or _px(subc[-1], 'font-size') != 0:
+        bad.append('body.compact does not collapse .sub — the tagline is the '
+                   'tallest ambient thing in the header and shedding it is '
+                   'most of the point')
+    else:
+        shed.append(('tagline', grown))
+    thin = sum(v for _, v in shed)
+    if any(v <= 0 for _, v in shed) or thin < 30:
+        bad.append('the folded header is not measurably shorter: '
+                   + ', '.join(f'{n} {v:+.1f}px' for n, v in shed)
+                   + f' = {thin:+.1f}px. The whole point is viewport')
+
+    # ── prefers-reduced-motion has to be able to win ──
+    for off, sel, decls, at in rules:
+        # only rules inside a reduced-motion query -- an ordinary rule turning
+        # a transition off is just a rule
+        if 'reduced-motion' not in at:
+            continue
+        if 'transition:none' not in decls.replace(' ', ''):
+            continue
+        for name in [s.strip() for s in sel.split(',')]:
+            for o2, s2, d2, at2 in rules:
+                if o2 <= off or 'reduced-motion' in at2:
+                    continue
+                if not re.search(r'(?:^|;)\s*transition\s*:', d2):
+                    continue
+                if name in [x.strip() for x in s2.split(',')]:
+                    bad.append(
+                        f'{name}{{transition:...}} is declared AFTER the '
+                        f'reduced-motion block that tries to silence it '
+                        f'({sel}). A media query adds no specificity, so the '
+                        f'later rule wins in both media states and {name} '
+                        f'keeps easing for the one reader who asked for no '
+                        f'motion — move the base rule above the query')
+
+    # the file has been bitten twice by an author display: outranking the UA's
+    # [hidden]{display:none}; the fold is a place it would be easy to reach for
+    for off, sel, decls, at in rules:
+        if sel.startswith('body.compact') and re.search(r'(?:^|;)\s*display\s*:',
+                                                        decls):
+            bad.append(f'{sel} names a display. Fold with max-height/opacity/'
+                       f'font-size instead: an author display: outranks the '
+                       f'UA\'s [hidden]{{display:none}}, which is how .swctl '
+                       f'and .wrkeyi each stayed on screen while the page '
+                       f'thought they were hidden')
+    if bad:
+        raise SystemExit('HEADER FOLD FAILURES: ' + ' | '.join(bad))
+    print('ok   header fold: sentinel under the header and aria-hidden, '
+          'reduced-motion can win, folded header sheds '
+          + ' + '.join(f'{n} {v:.0f}px' for n, v in shed)
+          + f' = {thin:.0f}px')
+
+
+HEADER_FOLD_STUB = r'''
+'use strict';
+var BAD = [];
+function ck(c, m) { if (!c) BAD.push(m) }
+var CLASS = {}, TIMERS = [], CB = null, THREW = null;
+global.AFTER = false;
+global.setTimeout = function (f) { TIMERS.push(f); return TIMERS.length };
+function runTimers() { var t = TIMERS.slice(); TIMERS.length = 0;
+                       t.forEach(function (f) { if (f) f() }) }
+function compact() { return !!CLASS.compact }
+// Cross the sentinel the way a scroll does, with the timestamp the browser
+// would have stamped the crossing with -- `time` is what the page reads, so
+// the hold window can be driven from both sides without the test sleeping.
+function cross(out, t) { CB([{isIntersecting: !out, time: t}]) }
+function start(withIO, withCue) {
+  CLASS = {}; TIMERS = []; CB = null; THREW = null; global.AFTER = false;
+  global.document = {
+    getElementById: function (id) {
+      return (withCue && id === 'scrollcue') ? {id: id} : null;
+    },
+    body: {classList: {
+      toggle: function (n, on) { CLASS[n] = !!on },
+      contains: function (n) { return !!CLASS[n] },
+    }},
+  };
+  if (withIO) {
+    global.IntersectionObserver = function (cb) {
+      CB = cb;
+      return {observe: function () {}, disconnect: function () {}};
+    };
+  } else {
+    delete global.IntersectionObserver;
+  }
+  // AFTER stands for every handler the page binds below this block: they are
+  // in the same <script>, so a throw here takes all of them with it.
+  try { (0, eval)(SRC + '\nglobal.AFTER = true;') } catch (e) { THREW = e }
+}
+var SRC = require('fs').readFileSync(process.argv[2], 'utf8');
+
+start(false, true);
+ck(THREW === null, 'a browser with no IntersectionObserver threw: ' + THREW);
+ck(global.AFTER, 'no IntersectionObserver killed the rest of the script — '
+   + 'every handler bound after this block is gone');
+start(true, false);
+ck(THREW === null, 'a page with no #scrollcue threw: ' + THREW);
+ck(global.AFTER, 'a missing #scrollcue killed the rest of the script');
+
+start(true, true);
+ck(THREW === null, 'the fold block threw on a normal page: ' + THREW);
+ck(CB !== null, 'no IntersectionObserver was constructed — nothing watches '
+   + 'the sentinel, so the header never folds');
+if (CB) {
+  // the callback observe() delivers straight away, before anything scrolled
+  cross(false, 120);
+  ck(!compact(), 'the header starts folded, before anything has scrolled');
+  // 19 ms later: a wheel flicked while the page is still painting, which is
+  // how an ops page actually gets used
+  cross(true, 139);
+  ck(compact(), 'a scroll 19ms after load did not fold the header — the '
+     + 'load-time callback armed the hold window, so the first real scroll '
+     + 'lands inside it and is refused');
+  cross(false, 170);
+  ck(compact(), 'a reversal 31ms later unfolded it — that is the flutter the '
+     + 'hold window exists to stop');
+  runTimers();
+  ck(!compact(), 'the refused reversal was DROPPED, not held. An '
+     + 'IntersectionObserver only reports changes, so it is never offered '
+     + 'again: the header stays folded at the top of the page with nothing '
+     + 'left to unfold it');
+  cross(true, 1500);
+  ck(compact(), 'a crossing well outside the hold window was refused too');
+  cross(false, 1550);
+  ck(compact(), 'a reversal 50ms later was applied at once — the hold window '
+     + 'is not being applied');
+  cross(true, 1600);            // the reader put it back themselves
+  runTimers();
+  ck(compact(), 'a held reversal the reader had already undone was applied '
+     + 'anyway when the window closed');
+}
+if (BAD.length) { BAD.forEach(function (b) { console.log('FAIL ' + b) });
+                  process.exit(1) }
+console.log('ok   header fold observer (guarded, folds, holds a reversal '
+            + 'without losing it, and is not armed by the load)');
+'''
+
+
+def check_header_fold(html):
+    """Drive the fold observer itself, over the sequences that broke it.
+
+    Node has no IntersectionObserver, which is the point twice over: it is
+    the case the page's own guard exists for, and it means the block has to
+    be handed a stub before any of its behaviour can be looked at. Without
+    one the whole thing returns on its first line and every assertion below
+    would pass against a page that never folds.
+    """
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    mark = '/* Fold the header once a screenful'
+    if mark not in script:
+        raise SystemExit('the header-fold block is not in the built script — '
+                         'the header never folds and nothing below can see it')
+    s = script.index(mark)
+    src = script[s:script.index('})();', s) + 5]
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'fold.js')
+        with open(js, 'w', encoding='utf-8') as f:
+            f.write(src)
+        run = os.path.join(tmp, 'run.js')
+        with open(run, 'w', encoding='utf-8') as f:
+            f.write(HEADER_FOLD_STUB)
+        r = subprocess.run(['node', run, js], capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    return r.returncode
+
+
+def check_header_shrinks():
+    """Measure the folded header, and prove it unfolds again, in a browser.
+
+    Everything this catches is a layout feedback loop, and no amount of
+    reading the rules can see one. Folding removes height from a sticky
+    element, the browser compensates by scrolling, and the scroll is an input
+    to the same decision that caused it -- so the header could fold at
+    scrollY 110, be carried back to 56 by that compensation, refuse the
+    unfold as a flutter, and sit folded at the very top of the page for the
+    rest of the session. Every static check in this file passed on that page.
+
+    Loud SKIP, not a quiet pass, when there is no browser: what goes
+    unchecked is named, because this is the half that found the bug.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        print(f'SKIP: no playwright ({e}) — the folded header was not '
+              f'measured and the scroll-anchoring latch went unchecked')
+        return 0
+    bad, url = [], 'file://' + INDEX
+    try:
+        pw = sync_playwright().start()
+    except Exception as e:
+        print(f'SKIP: playwright would not start ({e}) — the folded header '
+              f'was not measured')
+        return 0
+    try:
+        try:
+            br = pw.chromium.launch()
+        except Exception as e:
+            print(f'SKIP: no chromium ({str(e).splitlines()[0]}) — the folded '
+                  f'header was not measured')
+            return 0
+        tall = 'return document.querySelector("header").getBoundingClientRect().height'
+        on = 'return document.body.classList.contains("compact")'
+        sizes = []
+        for w in (1440, 760):
+            pg = br.new_page(viewport={'width': w, 'height': 900})
+            pg.goto(url, wait_until='load')
+            pg.wait_for_timeout(400)
+            # measured with the easing off: mid-transition is not a height
+            pg.add_style_tag(content='*{transition:none!important;'
+                                     'animation:none!important}')
+            pg.evaluate('()=>document.body.classList.remove("compact")')
+            e = pg.evaluate('()=>{%s}' % tall)
+            pg.evaluate('()=>document.body.classList.add("compact")')
+            c = pg.evaluate('()=>{%s}' % tall)
+            sizes.append((w, e, c))
+            if e - c < 24:
+                bad.append(f'at {w}px the folded header is {c:.0f}px against '
+                           f'{e:.0f}px unfolded — it sheds {e - c:.0f}px, '
+                           f'which is not worth moving the page for. The '
+                           f'point of folding it is viewport')
+            pg.close()
+
+        pg = br.new_page(viewport={'width': 1440, 'height': 900})
+        pg.goto(url, wait_until='load')
+        pg.wait_for_timeout(600)
+        # count every change of the class, not just where it ends up: the
+        # loop this guards can settle into a flip every 260ms rather than
+        # latching, and a page read only at rest calls that fine
+        pg.evaluate('()=>{window.__n=0;new MutationObserver(function(){'
+                    'window.__n++}).observe(document.body,{attributes:true,'
+                    'attributeFilter:["class"]})}')
+        folded = False
+        # 110 and 140 are inside the band a sentinel ABOVE the header cannot
+        # survive: folding there scrolls the page back over a sentinel it has
+        # only just crossed, and it is asked to unfold again straight away.
+        for y in (110, 140, 420):
+            pg.evaluate('()=>{window.__n=0;window.scrollTo(0,%d)}' % y)
+            pg.wait_for_timeout(1100)
+            folded = folded or pg.evaluate('()=>{%s}' % on)
+            n = pg.evaluate('()=>window.__n')
+            if n > 1:
+                bad.append(f'parked at y={y} the header folded and unfolded '
+                           f'{n} times over a second with nobody touching it '
+                           f'— folding scrolls the page back over the sentinel '
+                           f'and the crossing feeds its own cause')
+            pg.evaluate('()=>window.scrollTo(0,0)')
+            pg.wait_for_timeout(650)
+            if pg.evaluate('()=>{%s}' % on):
+                bad.append(f'scrolled to y={y} and back to the top, and the '
+                           f'header is STILL folded — the reader is looking at '
+                           f'the top of the page with no title and no tagline, '
+                           f'and no scrolling gets them back')
+        if not folded:
+            bad.append('the header never folded at any scroll position — the '
+                       'sentinel is never crossed, or nothing is watching it')
+        # the wheel flicked down and straight back up: two crossings inside
+        # the hold window, and the second one used to be thrown away
+        pg.mouse.move(700, 500)
+        pg.mouse.wheel(0, 700)
+        pg.mouse.wheel(0, -700)
+        pg.wait_for_timeout(1400)
+        if pg.evaluate('()=>{%s}' % on) and not pg.evaluate('()=>window.scrollY'):
+            bad.append('a wheel flicked down and straight back up left the '
+                       'header folded at scrollY 0 — the reversal was refused '
+                       'as a flutter and then dropped')
+        pg.close()
+        br.close()
+    finally:
+        pw.stop()
+    if bad:
+        for b in bad:
+            print('FAIL ' + b)
+        return 1
+    print('ok   folded header measures '
+          + ', '.join(f'{c:.0f}px against {e:.0f} at {w}px' for w, e, c in sizes)
+          + ', and unfolds again from every scroll position')
+    return 0
 
 
 def check_flag_api():
@@ -2330,6 +2799,11 @@ def main():
     if check_copy_say(html):
         return 1
     check_markup(html)
+    check_header_compact(html)
+    if check_header_fold(html):
+        return 1
+    if check_header_shrinks():
+        return 1
     check_key_metrics()
     check_training_tracker()
     check_flag_api()
