@@ -365,7 +365,16 @@ def main(argv=None):
 
     found = discover(root)
     if a.run:
-        found = [f for f in found if f[0] == a.run]
+        # The project is spelled two ways on this box -- args.yaml says
+        # `dogdetection` where the run directory says `DogDetection` -- and the
+        # dashboard hands us whichever spelling data/best_models.json uses,
+        # which need not be the one canon_projects settles on here. Matching
+        # exactly found no detector at all, so the panel spawned a scoring run
+        # that could only exit 1, every fifteen minutes, for as long as anyone
+        # looked at it. _mistake_path reads the cache back with this same
+        # exact-first-then-case-fold fallback.
+        found = ([f for f in found if f[0] == a.run]
+                 or [f for f in found if f[0].lower() == a.run.lower()])
         if not found:
             print(f'{a.run}: not a run with weights and a dataset still on '
                   f'disk', file=sys.stderr)
@@ -378,6 +387,7 @@ def main(argv=None):
         print('\npass --run <project/name> or --all')
         return 0
 
+    bad = 0
     for key, task, w, ds in found:
         if os.path.exists(out_path(key)) and not a.force:
             print(f'  {key}: already scored (--force to redo)')
@@ -385,8 +395,13 @@ def main(argv=None):
         try:
             run_one(key, task, w, ds, a.split, a.device, a.imgsz)
         except Exception as e:
+            bad += 1
             print(f'  {key}: {type(e).__name__}: {e}', file=sys.stderr)
-    return 0
+    # A run that could not be scored has to say so in the exit code. Silence
+    # here is indistinguishable from success -- nothing is written either way --
+    # so a caller that spawns this and then looks for the file cannot tell a
+    # scoring that died inside ultralytics from one it simply has to wait for.
+    return 1 if bad else 0
 
 
 if __name__ == '__main__':

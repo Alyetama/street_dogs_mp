@@ -18,7 +18,9 @@ cell, so a set can be selected on purpose:
   the review queue applies. Default 48.
 
   SPREAD OVER GROUND. One cell can hold thousands of frames of one street.
-  --per-cell caps how many come from any single cell.
+  --per-cell caps how many come from any single cell, and no image gives up
+  more than one crop -- the review page serves one per image and retires the
+  rest with it.
 
   NOTHING ALREADY SPOKEN FOR. Excludes every image_id already flagged, already
   kept, already in the crop dataset, and every id reserved into an acceptance
@@ -63,33 +65,55 @@ def default_dir():
 
 
 def judged_ids(repo):
-    """Every image_id already spoken for, from every ledger that decides one."""
+    """Every image_id already spoken for, from every ledger that decides one.
+
+    Each ledger says how many ids it brought, and one that is not where this
+    looks for it says so on stderr instead of quietly contributing nothing.
+    The kept ledger was read from data/dashboard/seen.jsonl, a file that has
+    never existed anywhere in this repo -- the dashboard banks kept crops in
+    data/hard_negatives/reviewed.jsonl -- so the largest of the three ledgers,
+    8,196 ids against 2,653 and 125, excluded nothing at all. The only symptom
+    was a set that came up short: a picked-and-already-kept crop was written,
+    counted in n_written, and then dropped at serve time by the review page's
+    own judged-or-seen filter.
+    """
     out = set()
+
+    def note(rel, ids):
+        p = os.path.join(*rel)
+        if ids is None:
+            print(f'WARNING: no ledger at {p}; it is excluding nothing',
+                  file=sys.stderr)
+            return
+        print(f'  {len(ids):,} ids from {p}')
+        out.update(ids)
+
     for rel in (('data', 'hard_negatives', 'labels.jsonl'),
                 ('data', 'hard_positives', 'labels.jsonl'),
-                ('data', 'dashboard', 'seen.jsonl')):
-        p = os.path.join(repo, *rel)
+                ('data', 'hard_negatives', 'reviewed.jsonl')):
+        ids = set()
         try:
-            with open(p) as fh:
+            with open(os.path.join(repo, *rel)) as fh:
                 for ln in fh:
                     try:
                         r = json.loads(ln)
                     except ValueError:
                         continue
                     if isinstance(r, dict) and r.get('image_id'):
-                        out.add(str(r['image_id']))
+                        ids.add(str(r['image_id']))
         except OSError:
-            pass
+            ids = None
+        note(rel, ids)
     # reserved acceptance sets: these ids are withheld from training on
     # purpose, and re-reviewing one is how it finds its way back in
     for rel in (('data', 'dogbin_acceptance_set.json'),
                 ('data', 'leash_acceptance_set.json')):
-        p = os.path.join(repo, *rel)
         try:
-            with open(p) as fh:
-                out |= {str(i) for i in (json.load(fh).get('image_ids') or [])}
+            with open(os.path.join(repo, *rel)) as fh:
+                ids = {str(i) for i in (json.load(fh).get('image_ids') or [])}
         except (OSError, ValueError):
-            pass
+            ids = None
+        note(rel, ids)
     return out
 
 
@@ -131,18 +155,24 @@ def candidates(root, args, exclude):
 
 
 def choose(cands, args, rng):
-    """Stratify over confidence deciles, capped per cell.
+    """Stratify over confidence deciles, capped per cell and one per image.
 
     A flat sample of a band is dominated by wherever the sweep spent its time.
     Deciles keep the band's shape, and the per-cell cap keeps one long street
     from filling the set.
+
+    One crop per image_id, because that is all the review page can serve: it
+    emits a single crop per image and either verdict then retires the whole
+    image. A second detection from the same frame is cut, counted in
+    n_written, and never shown to anyone -- 39 of the 2,000 in the set on
+    disk are exactly that.
     """
     by_dec = collections.defaultdict(list)
     span = max(1e-9, args.conf_max - args.conf_min)
     for c in cands:
         d = min(9, int((c[2] - args.conf_min) / span * 10))
         by_dec[d].append(c)
-    picked, per_cell = [], collections.Counter()
+    picked, per_cell, taken = [], collections.Counter(), set()
     want_each = max(1, args.n // max(1, len(by_dec)))
     for d in sorted(by_dec):
         pool = by_dec[d]
@@ -152,23 +182,24 @@ def choose(cands, args, rng):
         for c in pool:
             if took >= want_each or len(picked) >= args.n:
                 break
-            if per_cell[c[3]] >= args.per_cell:
+            if per_cell[c[3]] >= args.per_cell or c[0] in taken:
                 continue
             per_cell[c[3]] += 1
+            taken.add(c[0])
             picked.append(c)
             took += 1
     # top up from whatever is left if a decile ran dry
     if len(picked) < args.n:
-        seen = {(c[0], c[1]) for c in picked}
-        rest = [c for c in cands if (c[0], c[1]) not in seen]
+        rest = [c for c in cands if c[0] not in taken]
         rest.sort(key=lambda r: (r[0], r[1]))
         rng.shuffle(rest)
         for c in rest:
             if len(picked) >= args.n:
                 break
-            if per_cell[c[3]] >= args.per_cell:
+            if per_cell[c[3]] >= args.per_cell or c[0] in taken:
                 continue
             per_cell[c[3]] += 1
+            taken.add(c[0])
             picked.append(c)
     return picked
 
@@ -200,15 +231,33 @@ def main():
     out = args.out or default_dir()
     rng = random.Random(args.seed)
 
-    exclude = judged_ids(REPO) | dataset_ids(args.dataset)
+    exclude = judged_ids(REPO)
+    # the dataset and the set's own directory are two more exclusions that go
+    # quiet when they are not where they are meant to be, so they report the
+    # same way the ledgers do
+    if not args.dataset:
+        print('  no crop dataset named (--dataset, or DOGBIN_DATASET), so '
+              'none of its ids are excluded')
+    elif not os.path.isdir(args.dataset):
+        print(f'WARNING: no crop dataset at {args.dataset}; it is excluding '
+              f'nothing', file=sys.stderr)
+    else:
+        ds = dataset_ids(args.dataset)
+        print(f'  {len(ds):,} ids from the crop dataset')
+        exclude |= ds
     # already harvested into this set on an earlier run
+    harvested = set()
     if os.path.isdir(out):
         for f in os.listdir(out):
             m = re.match(r'^\d{10,}_(\d{6,})_\d{3}\.jpg$', f)
             if m:
-                exclude.add(m.group(1))
-    print(f'{len(exclude):,} image_ids already spoken for (judged, kept, '
-          f'in the dataset, reserved, or already harvested)')
+                harvested.add(m.group(1))
+    print(f'  {len(harvested):,} ids already harvested into the set')
+    exclude |= harvested
+    # distinct, not the sum of the lines above: a kept crop is usually in a
+    # flag ledger too
+    print(f'{len(exclude):,} distinct image_ids already spoken for (judged, '
+          f'kept, in the dataset, reserved, or already harvested)')
 
     cands = candidates(root, args, exclude)
     print(f'{len(cands):,} detections pass conf {args.conf_min}-'
@@ -244,14 +293,19 @@ def main():
     by_drive = roots_by_drive(roots)
     os.makedirs(out, exist_ok=True)
 
-    # boxes for the chosen detections, in original pixels
+    # boxes for the chosen detections, in original pixels. Pinned to the same
+    # gen the candidates were drawn from: this dict is keyed on
+    # (image_id, det_idx), which a second generation's row for the same
+    # detection would overwrite, and the crop would then be cut at a box the
+    # chosen conf never belonged to.
     import duckdb
     det = store._sql_src(store._store_globs(root, 'det'))
     ids = ','.join("'%s'" % i for i in sorted({c[0] for c in picked}))
     con = duckdb.connect()
     box = {(str(i), int(d)): (a, b, cc, e) for i, d, a, b, cc, e in con.execute(
         f"SELECT CAST(image_id AS VARCHAR), det_idx, x1, y1, x2, y2 "
-        f"FROM {det} WHERE CAST(image_id AS VARCHAR) IN ({ids})").fetchall()}
+        f"FROM {det} WHERE gen = ? AND CAST(image_id AS VARCHAR) IN ({ids})",
+        [f'{args.gen:04d}']).fetchall()}
     con.close()
 
     ms = int(time.time() * 1000)

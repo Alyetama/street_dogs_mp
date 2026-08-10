@@ -167,6 +167,25 @@ def corrections():
     return out
 
 
+def is_reset(fix, det):
+    """Whether a "correction" is really the reviewer pressing Reset box.
+
+    Reset writes the detector's own box back into the ledger, which is the
+    right thing for it to do -- the ledger is append-only and last-wins, so
+    withdrawing a hand-drawn box has to be another line rather than a deletion.
+    But it means a record's existence is not evidence that anybody drew
+    anything, and counting one as a correction overstates how much of this
+    dataset carries human geometry. The training box is the same either way;
+    only the count is wrong.
+
+    Sub-pixel rather than exact: a box drawn within half a pixel of the
+    detector's is not a correction anyone could see.
+    """
+    if fix is None or det is None:
+        return False
+    return all(abs(f - d) < 0.5 for f, d in zip(fix, det))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--out', default=os.path.join(TRAINING_ROOT,
@@ -320,8 +339,10 @@ def main():
         'added_confirmed_positives': len(added),
         'added_ids': sorted(i for i, *_ in added),
         'additions_skipped': skipped,
-        'corrections_applied': sum(1 for i, *_ in added
-                                   if (i, 0) in fixes),
+        'corrections_applied': sum(
+            1 for i, *_ in added
+            if (i, 0) in fixes
+            and not is_reset(fixes[(i, 0)], boxes.get((i, 0)))),
         'sequences': {i: seq.get(i) for i in sorted(new_train | new_val
                                                     | {x[0] for x in added})},
     }
