@@ -1378,6 +1378,69 @@ console.log('ok   gate panel: two stages, and an unplanned one says so');
         return r.returncode
 
 
+def check_run_diff():
+    """A comparison must subtract in the direction it is written.
+
+    _delta computed B minus A while the table is headed "A vs B", so a run
+    scoring 0.3699 against a promoted 0.4968 reported +0.1270 in the colour of
+    a win. Every regression read as an improvement, on the one screen someone
+    uses to decide what to promote.
+
+    And it must show the metrics the model is SHIPPED on. This detector is
+    selected on mAP and lives or dies on recall; a diff that omits recall
+    cannot answer the question a retrain was run to answer.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+    try:
+        import dashboard as d
+    except ImportError as e:
+        print(f'SKIP: cannot import the dashboard ({e})')
+        return 0
+    bad = []
+    # direction: A worse than B must render as a loss, in the losing colour
+    worse = d._delta(0.3699, 0.4968, 4, True, lambda v: f'{v:.4f}')
+    if 'ddn' not in worse or '&minus;' not in worse:
+        bad.append(f'A scoring below B rendered as {worse!r} — a regression '
+                   f'must not read as a gain')
+    better = d._delta(0.60, 0.50, 4, True, lambda v: f'{v:.4f}')
+    if 'dup' not in better or '+' not in better:
+        bad.append(f'A scoring above B rendered as {better!r}')
+    # lower-is-better rows invert the colour, not the sign
+    slower = d._delta(300.0, 180.0, 1, False, None)
+    if 'ddn' not in slower or '+' not in slower:
+        bad.append(f'a slower run rendered as {slower!r} — the sign says '
+                   f'which way it moved, the colour says whether that is good')
+    # the rows that matter are present
+    runs = d.training_runs()
+    det = [r for r in runs if r.get('task') == 'detect'
+           and (r.get('latest') or [])]
+    if len(det) < 2:
+        print('SKIP: fewer than two detector runs on disk')
+    else:
+        html = d.render_run_diff(f"{det[0]['project']}/{det[0]['name']}",
+                                 f"{det[1]['project']}/{det[1]['name']}")
+        for want in ('recall at best epoch', 'precision at best epoch',
+                     'mAP50 at best epoch'):
+            if want not in html:
+                bad.append(f'the comparison omits "{want}" — a detector is '
+                           f'promoted on mAP and shipped on recall')
+        # and those rows carry the value at the promoted checkpoint, not the
+        # peak of a metric at some epoch nobody would ship
+        for r in det[:2]:
+            for m in r['latest']:
+                if m['key'] == 'recall' and m.get('at_best') is None:
+                    bad.append(f"{r['name']}: recall has no value at the best "
+                               f"epoch, so the diff would fall back to a peak "
+                               f"belonging to a different checkpoint")
+    if bad:
+        for b in bad:
+            print(f'FAIL {b}')
+        return 1
+    print('ok   run comparison: subtracts A from B, and shows what the model '
+          'is shipped on')
+    return 0
+
+
 def check_progress_ramp():
     """One quantity, one ramp -- in both languages that draw it.
 
@@ -1654,6 +1717,8 @@ def main():
     if check_machine_stats():
         return 1
     if check_progress_ramp():
+        return 1
+    if check_run_diff():
         return 1
     if check_gate_panel(html, extract_snippets(html)):
         return 1

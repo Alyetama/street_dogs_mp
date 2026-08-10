@@ -198,8 +198,13 @@ LATEST = {
 }
 
 
-def latest_metrics(rows, task):
-    """[{key, latest, peak, peak_epoch, series}] for the newest epoch.
+def latest_metrics(rows, task, best_index=None):
+    """[{key, latest, peak, peak_epoch, at_best, series}] for the newest epoch.
+
+    `at_best` is the value this metric held at the run's BEST-FITNESS epoch --
+    the checkpoint that actually gets promoted, so it is the number that
+    describes the model you would ship. It is not the same as `peak`, and on
+    a recall-first project the difference is the whole argument.
 
     `peak` is the running max of THAT metric, which is not the value at the
     best-fitness epoch -- reporting the latter as "best recall" would
@@ -224,9 +229,12 @@ def latest_metrics(rows, task):
         pk, pi = max(seen)                      # ties keep the EARLIER epoch
         pk, pi = max(seen, key=lambda t: (t[0], -t[1]))
         e = rows[pi].get('epoch')
+        at_best = None
+        if best_index is not None and 0 <= best_index < len(series):
+            at_best = series[best_index]
         out.append({'key': key, 'latest': v, 'peak': pk,
                     'peak_epoch': int(e) if e is not None else pi + 1,
-                    'peak_index': pi, 'series': series})
+                    'peak_index': pi, 'at_best': at_best, 'series': series})
     return out
 
 
@@ -693,7 +701,7 @@ def summarize(run, live=None, registry=None):
         'since_best': since_best, 'secs_per_epoch': secs,
         'headline_key': head_key, 'headline_label': head_label,
         'wall_clock_s': (tcol[-1] if tcol else None),
-        'latest': latest_metrics(rows, task),
+        'latest': latest_metrics(rows, task, bi),
         'latest_train_loss': (tr[-1] if tr else None),
         'latest_val_loss': (va[-1] if va else None),
         'lr': rows[-1].get('lr/pg0') if rows else None,

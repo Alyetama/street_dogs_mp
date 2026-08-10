@@ -5136,7 +5136,12 @@ def _diff_args(a, b):
 
 
 def _delta(av, bv, digits=4, higher_better=True, fmt=None):
-    """B relative to A, as a signed cell that says which way is good.
+    """A relative to B, as a signed cell that says which way is good.
+
+    A is the run being examined -- the first column, the one named first in
+    the heading. It used to subtract the other way, so a run that scored 0.37
+    against a promoted 0.50 reported "+0.1270" in the colour of an
+    improvement. Every regression read as a win.
 
     Formatted with the row's own formatter when it has one: a wall clock shown
     as "1h 55m" whose change reads "-559" makes the reader do arithmetic in a
@@ -5144,7 +5149,7 @@ def _delta(av, bv, digits=4, higher_better=True, fmt=None):
     """
     if av is None or bv is None:
         return '<td class="dnum dmid">&mdash;</td>'
-    d = bv - av
+    d = av - bv
     if abs(d) < 10 ** -(digits + 1):
         return '<td class="dnum dmid">no change</td>'
     good = (d > 0) if higher_better else (d < 0)
@@ -5192,6 +5197,35 @@ def render_run_diff(a_key, b_key):
          a.get('best_headline'), b.get('best_headline'),
          fmt=lambda v: f'{v:.4f}', digits=4,
          hint='The peak the run reached, not where it finished.')
+    # Every metric the run recorded, not just the one that picks the
+    # checkpoint. A detector is promoted on mAP but SHIPPED on recall -- a
+    # missed dog is unrecoverable and a false positive is one click -- and a
+    # comparison that shows only the headline cannot answer the question the
+    # retrain was for. Reported at each run's BEST-FITNESS epoch, because
+    # that is the checkpoint that would be promoted; the peak of a metric at
+    # some other epoch belongs to a model nobody would ship.
+    am = {m['key']: m for m in (a.get('latest') or [])}
+    bm = {m['key']: m for m in (b.get('latest') or [])}
+    for key in [k for k in ('recall', 'precision', 'mAP50')
+                if k in am or k in bm]:
+        hint = {'recall': 'Of the dogs really there, the share it found. The '
+                          'error this project cannot recover from.',
+                'precision': 'Of what it called a dog, the share that was '
+                             'one. Costs a click, not a dog.',
+                'mAP50': 'The same question as mAP50-95 but forgiving about '
+                         'how tightly the box fits.'}[key]
+        line(f'{key} at best epoch',
+             (am.get(key) or {}).get('at_best'),
+             (bm.get(key) or {}).get('at_best'),
+             fmt=lambda v: f'{v:.4f}', digits=4, hint=hint)
+    # and the ceiling each run reached, which is what a longer or better-timed
+    # run could have been promoted on
+    for key in [k for k in ('recall',) if k in am or k in bm]:
+        line(f'best {key} at any epoch',
+             (am.get(key) or {}).get('peak'), (bm.get(key) or {}).get('peak'),
+             fmt=lambda v: f'{v:.4f}', digits=4,
+             hint='The highest this metric ever reached, which may be a '
+                  'different epoch from the promoted one.')
     line('epochs run', a.get('epochs_done'), b.get('epochs_done'),
          digits=0, higher_better=False,
          hint='More epochs is not better; it is what the run cost.')
