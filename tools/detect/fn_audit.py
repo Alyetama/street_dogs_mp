@@ -24,6 +24,14 @@ evenly; each band's rate is reported on its own, and the headline weights
 those bands by how many boxes each really holds. That is the difference
 between "we looked at 500 crops" and a number.
 
+AND WHY IT IS STILL A CEILING. Which crops are DRAWN is even; which of them
+get answered is not. A sheet of twenty-five can be scrolled past as easily as
+it can be clicked, and the one worth stopping on is the one that already looks
+like the answer -- measured on the gate's own store, 63 of 1,175 crops shown
+came back, band by band between 1.7% and 10.2%. So every share here is an
+upper bound until a sheet is answered in full, and the answer rate is printed
+beside each band so the bound can be read for what it is.
+
 WHY SEQUENCES. Mapillary frames come in sequences -- one car, one road, one
 second apart. Twenty crops from one sequence are twenty photographs of the
 same dog from twenty metres, and scoring them as twenty independent samples
@@ -296,6 +304,44 @@ def band_totals(stage=DEFAULT_STAGE):
     return [(lo, hi, int(got.get(i, 0))) for i, (lo, hi) in enumerate(BANDS)]
 
 
+# Page documents already parsed, by (path, mtime). A page is written under an
+# index that is the count of the pages before it and never touched again, so a
+# stats poll only ever has a newly drawn sheet to read; the mtime is in the key
+# because a rebuilt store starts over at 00000.
+_SHEETS = {}
+
+
+def sheets(stage=DEFAULT_STAGE):
+    """{band: {key, ...}} -- what was actually put in front of a person.
+
+    Every draw is written to pages/ before it is served and the document names
+    its crops, so the sheets are the record of what was SHOWN and the ledger is
+    the record of what came back. Without them a band's answers were counted as
+    a sample OF the band, when they are a sample of what someone chose to click
+    on a sheet where every other tile could be scrolled past.
+    """
+    P = paths(stage)
+    out = {}
+    for f in glob.glob(os.path.join(P['pages'], '*.json')):
+        try:
+            ck = (f, os.path.getmtime(f))
+        except OSError:
+            continue
+        got = _SHEETS.get(ck)
+        if got is None:
+            try:
+                with open(f) as fh:
+                    doc = json.load(fh)
+            except (OSError, ValueError):
+                doc = {}
+            got = [(it.get('band'), it['key'])
+                   for it in (doc.get('items') or []) if it.get('key')]
+            _SHEETS[ck] = got
+        for band, key in got:
+            out.setdefault(band, set()).add(key)
+    return out
+
+
 def read_verdicts(path=None, stage=DEFAULT_STAGE):
     """[{key, verdict, band, p_dog, ts}] -- append-only, last write wins.
 
@@ -358,7 +404,7 @@ def verdict_of(v, stage=DEFAULT_STAGE):
     return v if v in sp['answers'] else None
 
 
-def summarise(verdicts=None, totals=None, stage=DEFAULT_STAGE):
+def summarise(verdicts=None, totals=None, shown=None, stage=DEFAULT_STAGE):
     """Per band and overall.
 
     Each band reports the share of its crops a person called a dog. Below the
@@ -369,11 +415,23 @@ def summarise(verdicts=None, totals=None, stage=DEFAULT_STAGE):
     The two headline rates weight bands by how many boxes the gate actually
     put in each; a flat mean over the bands would report the near-threshold
     error rate as if it were the whole store's.
+
+    WHAT A BAND'S RATE IS NOT. `shown` counts the crops the sheets put in front
+    of a person; `answered` counts the ones that came back, and they are a long
+    way apart -- 63 of 1,175 when this was first measured, band by band between
+    1.7% and 10.2%. The crops that come back are the ones someone chose to
+    click, and on a contact sheet the one worth stopping on is the one that
+    already looks like the answer. So a band's share is a CEILING on the band's
+    real share until its sheets are answered in full, the bias does not cancel
+    across bands because the answer rate is not the same in any two of them,
+    and the answer rate travels beside every rate here for that reason.
     """
     sp = spec(stage)
     vs = read_verdicts(stage=stage) if verdicts is None else verdicts
     totals = band_totals(stage) if totals is None else totals
+    shown = sheets(stage) if shown is None else shown
     pos, neg = sp['positive'], sp['negative']
+    back = {v.get('key') for v in vs}
     per = []
     for i, (lo, hi) in enumerate(BANDS):
         seen = [v for v in vs if v.get('band') == i
@@ -381,8 +439,13 @@ def summarise(verdicts=None, totals=None, stage=DEFAULT_STAGE):
         k = sum(1 for v in seen if verdict_of(v['verdict'], stage) == pos)
         p, a, b = wilson(k, len(seen))
         boxes = totals[i][2] if i < len(totals) else 0
+        put = shown.get(i) or ()
         per.append({'lo': lo, 'hi': hi, 'judged': len(seen), 'dogs': k,
                     'rate': p, 'lo95': a, 'hi95': b, 'boxes': boxes,
+                    # the denominator the rate above is missing: crops served
+                    # on a sheet, and how many of them anyone answered
+                    'shown': len(put),
+                    'answered': sum(1 for key in put if key in back),
                     # what the gate said about this whole band
                     'kept': lo >= THRESHOLD,
                     # crops where the person and the model disagree
@@ -391,22 +454,39 @@ def summarise(verdicts=None, totals=None, stage=DEFAULT_STAGE):
         rows = [b for b in per if b['kept'] == kept and b['judged']]
         pop = sum(b['boxes'] for b in rows)
         allpop = sum(b['boxes'] for b in per if b['kept'] == kept)
+        # over EVERY band on this side, not only the ones with an answer in
+        # them: a band that was shown and never answered is exactly what the
+        # rate beside it needs to be read against
+        was = [b for b in per if b['kept'] == kept]
+        put = sum(b['shown'] for b in was)
+        got = sum(b['answered'] for b in was)
         if not pop:
             # nothing judged on this side yet -- but how many boxes are
             # waiting is still a fact, and reporting it as zero read as "the
             # gate kept nothing"
             return {'rate': 0.0, 'judged': 0, 'wrong': 0, 'boxes': allpop,
-                    'covered': 0.0}
+                    'covered': 0.0, 'shown': put, 'answered': got}
         rate = sum((b['wrong'] / b['judged']) * b['boxes']
                    for b in rows) / pop
         return {'rate': rate, 'judged': sum(b['judged'] for b in rows),
                 'wrong': sum(b['wrong'] for b in rows), 'boxes': allpop,
-                'covered': pop / allpop if allpop else 0.0}
+                'covered': pop / allpop if allpop else 0.0,
+                'shown': put, 'answered': got}
     pop = sum(b['boxes'] for b in per) or 1
     seen_pop = sum(b['boxes'] for b in per if b['judged'])
+    # 'unrecorded' is the ledger's own past: the first sessions were served
+    # before pages/ was written, so their crops have an answer and no sheet to
+    # be a share OF. They are still verdicts, they are just not a rate.
+    on_sheet = set().union(*shown.values()) if shown else set()
     return {'bands': per,
             # dogs it threw away, and not-dogs it kept
             'rejected': side(False), 'kept': side(True),
+            'sheets': {'shown': sum(b['shown'] for b in per),
+                       'answered': sum(b['answered'] for b in per),
+                       'unrecorded': len(back - on_sheet)},
+            # NOT the share of the audit that has been done: every band holding
+            # one answer reads as 1.0 here. 'sheets' above is the one that says
+            # how much of what was shown came back.
             'covered': seen_pop / pop if pop else 0.0,
             'judged': sum(b['judged'] for b in per),
             'wrong': sum(b['wrong'] for b in per),
@@ -442,6 +522,13 @@ That is deliberate -- it is where the model is wrong, and it is what makes
 these worth training on. It also means class balance here says nothing about
 the store's, and accuracy measured on a split of these says nothing about
 accuracy in production.
+
+**And within a band, the crops that were answered chose themselves.** A sheet
+of twenty-five can be scrolled past as easily as it can be clicked, and the
+crop worth stopping on is the one that already looks like the answer. So a
+band's measured share is an upper bound on its real one until that band's
+sheets are answered in full -- `pages/` records what was shown, and
+`fn_audit.py stats` prints the answer rate beside every band.
 
 **Split on `sequence`, never on `image_id`.** The manifest carries it for
 every crop. Splitting per image looked clean once before and put 70.8% of a
@@ -558,8 +645,13 @@ def stats(args):
     stage = getattr(args, 'stage', DEFAULT_STAGE)
     s = summarise(stage=stage)
     sp = spec(stage)
+    sh = s['sheets']
     if not s['judged']:
-        print('nothing judged yet')
+        # the sheets have still been drawn and cut, and how many crops are
+        # sitting on them unanswered is the first thing worth knowing
+        print('nothing judged yet'
+              + (f" -- 0 of the {sh['shown']:,} crops already on a sheet"
+                 if sh['shown'] else ''))
         return 0
     print(f"{sp['title']}: {s['judged']:,} boxes judged; the model and a "
           f"person disagreed on {s['wrong']:,}")
@@ -572,23 +664,42 @@ def stats(args):
               f"{pi['shards_now']} since, so the counts below are a snapshot "
               f"and not the store. Rebuild with "
               f"`fn_audit.py build --stage {stage}`.")
-    print(f"\n  band        boxes in store   said dog   share [95% interval]")
+    print(f"\n  band        boxes in store   answered   said dog   "
+          f"share [95% interval]")
     for b in s['bands']:
         side = 'kept' if b['kept'] else 'threw away'
+        # how many of the crops served in this band anyone answered. The share
+        # to its right is a share of THIS, not of the band.
+        ans = (f"{b['answered']:>4}/{b['shown']:<5}" if b['shown']
+               else '     -   ')
         if not b['judged']:
-            print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['boxes']:>14,}   "
-                  f"not sampled ({side})")
+            print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['boxes']:>14,}  "
+                  f"{ans}  not sampled ({side})")
             continue
-        print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['boxes']:>14,}   "
-              f"{b['dogs']:>4}/{b['judged']:<4}  {b['rate']:6.1%} "
+        print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['boxes']:>14,}  "
+              f"{ans}  {b['dogs']:>4}/{b['judged']:<4}  {b['rate']:6.1%} "
               f"[{b['lo95']:.1%}, {b['hi95']:.1%}]  ({side})")
     r, k = s['rejected'], s['kept']
-    print(f"\nwrong below {THRESHOLD}: {r['rate']:.2%} of {r['boxes']:,} "
-          f"({sp['below']})  ~{int(r['rate'] * r['boxes']):,}, "
+    # A rate off a sheet nobody finished is an upper bound, and saying so is
+    # the whole difference between a measurement and a number.
+    def cap(d):
+        return 'at most ' if d['answered'] < d['shown'] else ''
+    print(f"\nwrong below {THRESHOLD}: {cap(r)}{r['rate']:.2%} of "
+          f"{r['boxes']:,} ({sp['below']})  ~{int(r['rate'] * r['boxes']):,}, "
           f"from {r['judged']:,} judged")
-    print(f"wrong above {THRESHOLD}: {k['rate']:.2%} of {k['boxes']:,} "
-          f"({sp['above']})  ~{int(k['rate'] * k['boxes']):,}, "
+    print(f"wrong above {THRESHOLD}: {cap(k)}{k['rate']:.2%} of "
+          f"{k['boxes']:,} ({sp['above']})  ~{int(k['rate'] * k['boxes']):,}, "
           f"from {k['judged']:,} judged")
+    if sh['shown']:
+        print(f"\nanswered {sh['answered']:,} of the {sh['shown']:,} crops "
+              f"the sheets put in front of someone "
+              f"({sh['answered'] / sh['shown']:.1%})")
+        print('  the ones that came back are the ones someone chose to click, '
+              'which is not a\n  random sample of what was shown -- every '
+              'share above is a ceiling until a\n  sheet is answered in full')
+    if sh['unrecorded']:
+        print(f"  {sh['unrecorded']:,} more verdicts predate pages/ and have "
+              f"no sheet to be a share of")
     return 0
 
 

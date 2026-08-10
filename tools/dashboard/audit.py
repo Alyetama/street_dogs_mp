@@ -691,6 +691,13 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   padding:16px 20px}
 .mbig{font-size:34px;font-weight:680;letter-spacing:-1.2px;line-height:1.1;
   font-variant-numeric:tabular-nums;font-family:var(--num)}
+/* Rides on the headline itself rather than sitting in the small print under
+   it, because the small print is where "93.8% of 3.5 million" was already
+   being qualified and nobody reads a qualification quieter than the thing it
+   qualifies. */
+.upto{font-family:inherit;font-size:11.5px;font-weight:600;letter-spacing:0;
+  color:var(--acc);vertical-align:middle;margin-left:7px;
+  border:1px solid rgba(232,166,69,.42);border-radius:6px;padding:2px 6px}
 .mlab{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;
   color:var(--dim)}
 .mci{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
@@ -709,20 +716,20 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .poolwarn[hidden]{display:none}
 .bands{background:var(--panel);border:1px solid var(--bd);border-radius:14px;
   padding:14px 18px 16px;margin-bottom:16px}
-.bfoot{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
+/* the axis runs the width of the track column, so its end labels sit under it.
+   The three labels were three grid children, and two of them landed in the
+   band and store columns -- so they were hidden to get them out of the way,
+   and the axis read "100%" alone, at the wrong end. */
+.bfoot{display:grid;grid-template-columns:118px 96px 1fr 100px 100px;gap:14px;
   font-size:10px;color:var(--dim);padding-top:7px;margin-top:4px;
   border-top:1px solid var(--bd)}
-.bfoot span:nth-child(3){display:flex;justify-content:space-between;
-  grid-column:3}
-.bfoot span:first-child,.bfoot span:nth-child(2){display:none}
-/* the axis runs the width of the track column, so its end labels sit under it */
-.bfoot{grid-template-columns:118px 96px 1fr 116px}
-.bhead{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
+.bfoot .axis{grid-column:3;display:flex;justify-content:space-between}
+.bhead{display:grid;grid-template-columns:118px 96px 1fr 100px 100px;gap:14px;
   align-items:baseline;font-size:10px;text-transform:uppercase;
   letter-spacing:.07em;color:var(--dim);padding-bottom:8px;
   border-bottom:1px solid var(--bd);margin-bottom:4px}
 .bhead .ax{text-align:right}
-.brow{display:grid;grid-template-columns:118px 96px 1fr 116px;gap:14px;
+.brow{display:grid;grid-template-columns:118px 96px 1fr 100px 100px;gap:14px;
   align-items:center;font-size:11.5px;color:var(--mut);padding:6px 0;
   font-variant-numeric:tabular-nums}
 .brow+.brow{border-top:1px solid rgba(130,140,150,.07)}
@@ -746,6 +753,11 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .bval{text-align:right}
 .bval b{color:var(--tx);font-weight:640}
 .bnil{color:var(--dim)}
+/* The denominator the interval beside it is missing. Dim, because it is not a
+   finding -- it is how much of the band was ever looked at, and a band read
+   1.7% one row and 10.2% another, which is why a single "we sampled evenly"
+   sentence could not stand in for it. */
+.bans{text-align:right;color:var(--dim)}
 /* ── toolbar ── */
 .bar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
 .btn{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
@@ -804,8 +816,12 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .ptag{position:absolute;left:6px;top:6px;font-size:10.5px;border-radius:6px;
   padding:2px 7px;letter-spacing:.02em;border:1px solid var(--bd);
   background:rgba(10,12,16,.82);color:var(--mut)}
-.ptag.yes{background:rgba(232,166,69,.16);border-color:rgba(232,166,69,.42);
-  color:var(--acc);font-weight:620}
+/* No background of its own: the plate above stays under the amber. This rule
+   used to replace the scrim with a 16% wash, which left the model's own
+   verdict -- the one thing on a tile that is always visible -- reading at
+   1.2:1 over a pale pavement or an overexposed sky. It is the same defect the
+   verdict buttons were fixed for, one element along. */
+.ptag.yes{border-color:rgba(232,166,69,.42);color:var(--acc);font-weight:620}
 /* a box you redrew, so the sheet shows which ones you have been through */
 .redrawn{position:absolute;left:6px;bottom:6px;font-size:10px;
   letter-spacing:.04em;text-transform:uppercase;border-radius:5px;
@@ -919,9 +935,18 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
     <div><div class="mlab">you have judged</div>
       <div class="mbig" id="judged">0</div>
       <div class="mci" id="found">&nbsp;</div></div>
+    <!-- The share of the sheets that came back. It is the denominator every
+         rate on this page is quietly missing: the crops are not a sample of
+         their band, they are the ones somebody chose to click. -->
+    <div><div class="mlab">of what you were shown</div>
+      <div class="mbig" id="ansrate">&mdash;</div>
+      <div class="mci" id="answ">&nbsp;</div></div>
     <div class="mnote">Bands are drawn from evenly, so this is not a
       proportion of what you have seen &mdash; it weights each band by how
-      many boxes the model really put in it.</div>
+      many boxes the model really put in it. And within a band it counts only
+      the crops that came back: a sheet is scrolled past as easily as it is
+      clicked, so until one is answered in full its share is a ceiling rather
+      than an estimate.</div>
   </div>
 <div class="poolwarn" id="poolwarn" hidden></div>
 <div class="bands" id="bands"></div>
@@ -1035,7 +1060,10 @@ function pctTxt(v){return (v*100).toFixed(1)+'%'}
 function bandName(b){
   if(typeof b==='number'&&BANDS[b])
     return BANDS[b][0].toFixed(1)+'–'+BANDS[b][1].toFixed(1);
-  return b==='kept'?ABOVE : b==='all'?'every band' : BELOW;
+  /* A page drawn with no band at all was drawn from all of them -- the server
+     reads a missing band exactly as 'all' -- and the early pages in the store
+     carry one, so it cannot fall through to the below-the-line wording. */
+  return b==='kept'?ABOVE : (b==='all'||b==null)?'every band' : BELOW;
 }
 function fmtn(n){return (n||0).toLocaleString('en-US')}
 var CROP_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" '+
@@ -1140,10 +1168,17 @@ function offerUndo(it,i,verdict){
   /* five seconds and it stands -- it is already on disk either way */
   toastT=setTimeout(function(){lastUndo=null;t.hidden=true},5000);
 }
-function undoLast(){
-  var u=lastUndo; if(!u)return;
+/* An undo belongs to the page it was offered on. It holds an item INDEX, and
+   a page arriving under it re-points that index at a different crop -- so
+   undoing after a page turn cleared an unrelated tile and sent that crop's
+   band and score as the metadata of the withdrawal. */
+function dropUndo(){
   lastUndo=null;clearTimeout(toastT);
   document.getElementById('undotoast').hidden=true;
+}
+function undoLast(){
+  var u=lastUndo; if(!u)return;
+  dropUndo();
   var it=page.items[u.i];
   if(it){delete it.verdict;unhide(u.i);paintCard(u.i)}
   /* a withdrawal, not a third opinion: the ledger takes a null and the box
@@ -1153,13 +1188,20 @@ function undoLast(){
 }
 function paintCard(i){
   var el=grid.children[i],it=page.items[i]; if(!el||!it)return;
-  el.className='card'+(it.verdict&&it.verdict!=='dog'?' done':'')+
-    (it.verdict==='dog'?' miss':it.verdict==='not_dog'?' ok':'')+
+  /* POS and NEG, never the words themselves. These were the gate's 'dog' and
+     'not_dog' spelled out, so on the leash page nothing a person answered
+     ever matched: a leashed find and a loose one painted the same grey card,
+     neither button lit, and the review view -- whose whole job is reading
+     back what you recorded -- could not say which answer was on record. */
+  el.className='card'+(it.verdict&&it.verdict!==POS?' done':'')+
+    (it.verdict===POS?' miss':it.verdict===NEG?' ok':'')+
     (i===cur?' cur':'');
   var b=el.querySelectorAll('.act');
-  b[0].classList.toggle('on',it.verdict==='dog');
-  b[1].classList.toggle('on',it.verdict==='not_dog');
-  b[2].classList.toggle('on',it.verdict==='unsure');
+  b[0].classList.toggle('on',it.verdict===POS);
+  b[1].classList.toggle('on',it.verdict===NEG);
+  /* the third button is the crop mark, not the unsure verdict it replaced --
+     it was still being lit for 'unsure', which reads as a box you redrew */
+  b[2].classList.toggle('on',!!it.corrected);
   el.style.boxShadow=i===cur?'0 0 0 2px var(--acc)':'';
 }
 function render(){
@@ -1200,7 +1242,14 @@ function render(){
         'was judged on">'+CROP_SVG+'</button>'+
       '</div></div>';
   }).join('');
-  for(var i=0;i<page.items.length;i++)paintCard(i);
+  for(var i=0;i<page.items.length;i++){
+    paintCard(i);
+    /* Whether a crop is still to do is the ITEM's verdict, not a display
+       style on a card. It was kept only on the node, which this function has
+       just replaced, so saving a redrawn box put every crop already answered
+       on the page back on the sheet to be read through again. */
+    if(view==='sheet'&&page.items[i].verdict)hide(i);
+  }
 }
 function move(d){
   if(!page||!page.items.length)return;
@@ -1211,6 +1260,12 @@ function move(d){
   var el=grid.children[cur];
   if(el&&el.scrollIntoView)el.scrollIntoView({block:'nearest'});
 }
+/* Which band the crops ON SCREEN came from. The side control describes the
+   next draw, and a stored page was drawn with a band of its own -- so one
+   press of "back" across the boundary announced a sheet of crops the gate
+   KEPT as "what it rejected", on the one line whose job is saying which side
+   of the threshold you are reading. The page document is the authority. */
+function shownBand(){return (page&&'band' in page)?page.band:band}
 function setPos(){
   /* `band` is a band index OR a side of the threshold, so it cannot be
      indexed into BANDS without asking which it is -- doing that threw and
@@ -1218,7 +1273,10 @@ function setPos(){
   posEl.textContent=total?('page '+(idx+1)+' of '+total+
     (view!=='sheet'?' \u00b7 my annotations':'')+
     (page&&page.dropped?' \u00b7 '+page.dropped+' unreadable':'')+
-    ' \u00b7 '+bandName(band)+
+    /* and annotations are not a band of anything -- they are the ledger read
+       back under a verdict filter, so naming a band beside them described
+       them by a control that does not touch them */
+    (view==='sheet'?' \u00b7 '+bandName(shownBand()):'')+
     (page&&page.items&&page.items.length?' \u00b7 '+remaining()+' left':'')):'—';
   ['prev','prev2'].forEach(function(id){
     document.getElementById(id).disabled=busy||idx<=0});
@@ -1231,6 +1289,8 @@ function setPos(){
   if(p2)p2.textContent=posEl.textContent;
 }
 function show(doc,at,tot){
+  /* the crop the toast is offering to put back is on the page being replaced */
+  dropUndo();
   page=doc;idx=at;total=tot;cur=-1;render();setPos();left();
 }
 function loadJudged(at){
@@ -1285,38 +1345,77 @@ function paintStats(s){
   var r=document.getElementById('rate'),ci=document.getElementById('ci'),
       rej=s.rejected||{},kept=s.kept||{};
   document.getElementById('judged').textContent=fmtn(s.judged||0);
+  /* How much of what was SHOWN came back. The sheets record every crop put in
+     front of you and the ledger records the ones you answered: 63 of 1,175 the
+     first time the two were compared, and between 1.7% and 10.2% band by band.
+     A share off a sheet nobody finished is a share of the crops somebody chose
+     to click, and on this page the one worth clicking is the one that already
+     looks like a dog -- so it is a ceiling, and it says so where it shows. */
+  var sh=s.sheets||{},shr=sh.shown?sh.answered/sh.shown:null,
+      /* not `rej.answered<rej.shown` on its own: with no sheet on record there
+         is nothing to be short of, and a bound nobody can check is worse than
+         the plain number */
+      ceil=!!rej.shown&&rej.answered<rej.shown,
+      ar=document.getElementById('ansrate'),aw=document.getElementById('answ');
+  if(ar)ar.textContent=shr===null?'\u2014':pctTxt(shr);
+  if(aw)aw.textContent=shr===null
+    ? 'no sheet on record for these'
+    : fmtn(sh.answered)+' of '+fmtn(sh.shown)+' crops on your sheets'+
+      (sh.unrecorded?' \u00b7 '+fmtn(sh.unrecorded)+
+        ' more judged before the sheets were kept':'');
   var fl=document.getElementById('figline');
   if(fl)fl.innerHTML=s.judged
-    ? '<b>'+fmtn(s.judged)+'</b> judged \u00b7 <b>'+fmtn(s.wrong||0)+
-      '</b> the model got wrong \u00b7 <b>'+pctTxt(rej.rate||0)+
+    ? '<b>'+fmtn(s.judged)+'</b> judged'+
+      (shr===null?'':', <b>'+pctTxt(shr)+'</b> of what you were shown')+
+      ' \u00b7 <b>'+fmtn(s.wrong||0)+
+      '</b> the model got wrong \u00b7 '+(ceil?'at most ':'')+
+      '<b>'+pctTxt(rej.rate||0)+
       '</b> of what it '+(STAGE==='gate'?'rejected':'called '+NO)
     : 'nothing judged yet \u2014 the numbers fill in as you go';
   document.getElementById('found').textContent=
-    (rej.wrong||0)+' the model got wrong below 0.5';
+    (rej.wrong||0)+' the model got wrong below '+THRESH;
   /* The headline is the one number the page exists to produce: how many dogs
      the gate threw away. It used to read "missed dogs 100.0% -- 3,945,390
      dogs across 3,945,390 rejected boxes", which is what a rate of 1.0 off
      five crops extrapolates to, stated as though it were known. An estimate
      from a handful of crops is not a count of four million things, so the
      extrapolation is only shown once there is enough behind it to mean
-     anything, and it is always written as a range. */
+     anything, and it is always written as a range. There are two ways to have
+     too little behind it and they are guarded in that order: too few answers,
+     and answers off a sheet nobody finished. */
   if(!rej.judged){r.textContent='—';
-    ci.textContent='judge some crops below 0.5 and this starts counting'}
+    ci.textContent='judge some crops below '+THRESH+' and this starts counting'}
   else{
-    r.textContent=pctTxt(rej.rate||0);
-    var lo=0,hi=0,any=false;
-    (s.bands||[]).forEach(function(b){
-      if(b.kept||!b.judged)return; any=true;
-      lo+=b.lo95*b.boxes; hi+=b.hi95*b.boxes;
-    });
-    var pop=0;(s.bands||[]).forEach(function(b){
-      if(!b.kept&&b.judged)pop+=b.boxes});
-    ci.textContent = rej.judged<20
-      ? 'from '+rej.judged+' crops — too few to put a number on '+
-        fmtn(rej.boxes)+' boxes yet'
-      : 'somewhere between '+fmtn(Math.round(lo/(pop||1)*rej.boxes))+' and '+
+    /* An upper bound said out loud beats a point estimate that is wrong, so
+       the ceiling rides on the number itself and the extrapolated range is not
+       printed under it at all: a 95% interval over the crops somebody chose to
+       click is arithmetic about a population nobody sampled, and it was the
+       part of this block that read as rigour. */
+    if(ceil)r.innerHTML=pctTxt(rej.rate||0)+
+      ' <span class="upto">at most</span>';
+    else r.textContent=pctTxt(rej.rate||0);
+    if(rej.judged<20)
+      ci.textContent='from '+rej.judged+' crops — too few to put a number on '+
+        fmtn(rej.boxes)+' boxes yet';
+    else if(ceil)
+      ci.textContent=fmtn(rej.answered)+' of the '+fmtn(rej.shown)+' crops '+
+        'shown below '+THRESH+' came back — the rest were scrolled past, so '+
+        'this is a ceiling on the '+fmtn(rej.boxes)+' boxes below the line, '+
+        'not an estimate';
+    else{
+      var lo=0,hi=0,pop=0;
+      (s.bands||[]).forEach(function(b){
+        if(b.kept||!b.judged)return;
+        lo+=b.lo95*b.boxes; hi+=b.hi95*b.boxes; pop+=b.boxes;
+      });
+      /* "boxes below the line", not "it rejected": below the threshold is the
+         one description that is true of both models, and the leash page was
+         telling a reader its 743,120 loose calls had been rejected. */
+      ci.textContent='somewhere between '+
+        fmtn(Math.round(lo/(pop||1)*rej.boxes))+' and '+
         fmtn(Math.round(hi/(pop||1)*rej.boxes))+' of the '+
-        fmtn(rej.boxes)+' it rejected';
+        fmtn(rej.boxes)+' boxes below the line';
+    }
   }
   /* One axis, 0 to 100%, with the gate's own threshold drawn on it. The share
      of a band that really is a dog is what the model is trying to predict, so
@@ -1334,18 +1433,27 @@ function paintStats(s){
         : '';
     warn.hidden=!warn.textContent;
   }
+  /* The answer rate belongs BESIDE each band, not in one sentence over the
+     whole table: it ran from 1.7% to 10.2% across these ten rows, so it is not
+     a constant that cancels, and a row read off 1 crop in 59 is not the same
+     measurement as one read off 14 in 176. */
+  function ansTxt(b){return b.shown
+    ? '<b>'+fmtn(b.answered)+'</b>/'+fmtn(b.shown)
+    : '—'}
   document.getElementById('bands').innerHTML=
     '<div class="bhead"><span>score the gate gave</span>'+
     '<span>in the store</span>'+
     '<span>share that really are dogs, with its 95% interval</span>'+
-    '<span class="ax">flagged</span></div>'+
+    '<span class="ax">flagged</span>'+
+    '<span class="ax">answered</span></div>'+
     (s.bands||[]).map(function(b){
       var side=b.kept?' kept':' threw away';
       if(!b.judged)return '<div class="brow nil"><span class="bname">'+
         b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
         '<span class="bwhat">'+fmtn(b.boxes)+side+'</span>'+
         '<div class="btrack'+(b.kept?' kept':'')+'"></div>'+
-        '<span class="bval bnil">none seen</span></div>';
+        '<span class="bval bnil">none seen</span>'+
+        '<span class="bans">'+ansTxt(b)+'</span></div>';
       function at(v){var x=(+v||0)*100;
         return Math.max(0,Math.min(100,x!==x?0:x))}
       var l=at(b.lo95),h=at(b.hi95),m=at(b.rate);
@@ -1354,14 +1462,17 @@ function paintStats(s){
         '<span class="bwhat">'+fmtn(b.boxes)+side+'</span>'+
         '<div class="btrack'+(b.kept?' kept':'')+'" title="'+b.dogs+' of '+
           b.judged+' were dogs — the bar is the 95% interval, the tick is the '+
-          'estimate">'+
+          'estimate'+(b.shown?', off '+b.answered+' of the '+b.shown+
+            ' crops this band put on a sheet':'')+'">'+
           '<div class="bci" style="left:'+l.toFixed(2)+'%;width:'+
             Math.max(0.6,h-l).toFixed(2)+'%"></div>'+
           '<div class="bdot" style="left:'+m.toFixed(2)+'%"></div></div>'+
-        '<span class="bval"><b>'+b.dogs+'</b>/'+b.judged+'</span></div>';
+        '<span class="bval"><b>'+b.dogs+'</b>/'+b.judged+'</span>'+
+        '<span class="bans">'+ansTxt(b)+'</span></div>';
     }).join('')+
-    '<div class="bfoot"><span>0%</span><span>50% — where the gate '+
-    'draws its line</span><span>100%</span></div>';
+    '<div class="bfoot"><span class="axis"><span>0%</span>'+
+    '<span>50% — where the gate draws its line</span>'+
+    '<span>100%</span></span></div>';
 }
 /* clicks */
 grid.addEventListener('click',function(e){
@@ -1412,13 +1523,47 @@ function rememberBand(){
 sizeSel.addEventListener('change',function(){
   size=+sizeSel.value||25;dirty=true;
   try{localStorage.setItem('sdAuditSize:'+STAGE,String(size))}catch(_){}
+  /* The annotations re-page on the spot, the way the verdict filter beside
+     them does. They are a read-back of the ledger paged by index, so keeping
+     the index while the size changed under it stepped over a block of
+     records -- page 3 of 5 at 25 became the last page at 50 and twenty-five
+     annotations were passed with nothing saying so. The sheet waits, because
+     there a new size is a new draw. */
+  if(view!=='sheet'){idx=0;load(0);return}
   toast(size+' crops on the next page');
 });
+/* A filter is a question, and it gets answered when it is asked. Both controls
+   used to set `band` and arm the draw button, so the crops on screen stayed the
+   ones the LAST filter drew until you clicked a second time -- the page read
+   "what it kept" over a sheet of rejections.
+
+   Debounced, because a draw is not free: clicking through rejected, kept and
+   both is one question, and each cut spends a page of sample the pool never
+   offers again. And a filter the sheet was already drawn from redraws nothing,
+   for the same reason. */
+var filterT=null;
+function applyFilter(){
+  clearTimeout(filterT);
+  filterT=setTimeout(function go(){
+    filterT=null;
+    if(busy){filterT=setTimeout(go,150);return}   /* let a cut in flight land */
+    if(view!=='sheet'){
+      /* the ledger read-back is paged by index and filtered by verdict, not by
+         the model's score -- so say where the choice landed rather than
+         re-fetching a list it cannot change */
+      toast(bandName(band)+' — applies to the sheet');
+      return;
+    }
+    var was=(page&&'band' in page)?page.band:null;
+    if(was===band){dirty=false;return}
+    draw();
+  },250);
+}
 sideEl.addEventListener('click',function(e){
   var b=e.target.closest&&e.target.closest('.sidebtn');
   if(!b)return;
   band=b.getAttribute('data-side');dirty=true;rememberBand();paintFilter();
-  toast('drawing from '+bandName(band));
+  applyFilter();
 });
 document.getElementById('anno').addEventListener('change',function(){
   anno=this.value;idx=0;load(0);
@@ -1426,11 +1571,18 @@ document.getElementById('anno').addEventListener('change',function(){
 bandSel.addEventListener('change',function(){
   band=bandSel.value===''?sideOf(band)||DEFAULT_BAND:+bandSel.value;
   dirty=true;rememberBand();paintFilter();
-  toast('drawing from '+bandName(band));
+  applyFilter();
 });
 function goNext(){
   if(view!=='sheet'){if(idx+1<total)load(idx+1);return}
-  if(dirty||idx+1>=total)draw();else load(idx+1);
+  /* Ask for the next page and let the server decide whether it already has
+     one. Deciding here meant deciding from a `total` counted BEFORE the
+     prefetch that was started to serve this very click, so it was always one
+     short: every Next drew a fresh page, paid the twenty seconds the
+     prefetch exists to avoid, and stepped over the queued page -- whose
+     boxes and sequences are reserved the moment they are chosen and never
+     come round again. Only a changed band or size draws now. */
+  if(dirty)draw();else load(idx+1);
 }
 function goPrev(){if(idx>0)load(idx-1)}
 ['next','next2'].forEach(function(id){
@@ -1519,6 +1671,12 @@ function edStart(){
     .then(function(pair){
       var m=pair[0];
       if(!m||!m.box){toast('cannot open that frame');return}
+      /* Cutting the window on the frame takes seconds off a cold drive, and
+         the reader can close the lightbox or move to another crop while it
+         is being cut. Arming the editor then would open it over a crop it
+         was never asked for, holding this one's offsets. */
+      var now=page&&page.items[cur];
+      if(lb.hidden||!now||now.key!==it.key){URL.revokeObjectURL(pair[1]);return}
       EDIT.meta=m;EDIT.box=m.box.slice();
       if(EDIT.url)URL.revokeObjectURL(EDIT.url);
       EDIT.url=pair[1];
@@ -1533,6 +1691,17 @@ function edStart(){
     }).catch(function(){toast('cannot open that frame')});
 }
 function edStop(){
+  /* Everything the editor armed comes off BEFORE the picture is swapped
+     back. Putting the crop back in the <img> is a real src change and fires
+     load, and edStart()'s handler was still on it -- so cancel, close and
+     Escape all re-opened the editor over the crop, holding the FRAME's
+     offsets and scale. From then on every enlarge opened in edit mode with
+     another crop's geometry, and one press of save mapped that frame's
+     off_x/off_y through this crop's key: a box for a different picture
+     appended to the shared corrections store, re-cut, and re-filed into the
+     dataset if the crop had already been judged. */
+  lbimg.onload=null;lbimg.onerror=null;
+  EDIT.meta=null;EDIT.box=null;EDIT.drag=null;
   edShow(false);
   if(EDIT.url){URL.revokeObjectURL(EDIT.url);EDIT.url=null}
   var it=page&&page.items[cur];
@@ -1638,8 +1807,9 @@ document.addEventListener('keydown',function(e){
   /* the crop mark's keyboard twin, from the sheet rather than the lightbox */
   else if(e.key==='e'||e.key==='E'){if(cur>=0)openEditor(cur);
     e.preventDefault()}
-  else if(e.key==='n'||e.key==='N'){
-    if(idx+1<total)load(idx+1);else draw();e.preventDefault()}
+  /* the same door as the button: N had its own copy of the paging rule, and
+     it was the copy that kept drawing over the page already queued */
+  else if(e.key==='n'||e.key==='N'){goNext();e.preventDefault()}
 });
 /* boot: the last page if there is one, otherwise an invitation */
 fetch('/api/audit/page?stage='+STAGE+'&i=-1&n='+size+
@@ -1723,6 +1893,20 @@ def prefetch(band=None, n=25, stage=DEFAULT_STAGE):
     t.start()
 
 
+def await_prefetch(stage=DEFAULT_STAGE, timeout=120):
+    """Wait for the queued page to land, if one is being cut.
+
+    Asking for the page after the last one usually means the prefetch is
+    still finishing it. Drawing a second page instead would leave the queued
+    one behind -- and its boxes are reserved the moment they are chosen, so a
+    page nobody ever sees is a page of sample spent. This costs at worst the
+    cut the reader was going to pay for anyway.
+    """
+    t = _PREFETCH.get(stage)
+    if t is not None and t.is_alive():
+        t.join(timeout)
+
+
 def with_verdicts(doc, stage=DEFAULT_STAGE):
     """Stamp each item with the answer already on record for it.
 
@@ -1735,7 +1919,11 @@ def with_verdicts(doc, stage=DEFAULT_STAGE):
     seen = {v['key']: v.get('verdict') for v in fa.read_verdicts(stage=stage)}
     fixed = corrections()
     for it in doc['items']:
-        v = seen.get(it['key'])
+        # through verdict_of, because the page paints from this stage's own
+        # two words and the gate's ledger still holds forty rows written in
+        # the older ones -- those came back as 'missed', matched nothing on
+        # the tile, and a find read as an ordinary answered card
+        v = fa.verdict_of(seen.get(it['key']), stage)
         if v:
             it['verdict'] = v
         iid, _, di = str(it['key']).partition('#')
@@ -1867,7 +2055,14 @@ def _judged_counts(stage=DEFAULT_STAGE):
 
 
 def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):
-    """One page by index; -1 means the most recent. Draws if there are none."""
+    """One page by index; -1 means the most recent. Draws if there are none.
+
+    One past the last stored page is a request for the page that was queued
+    when the page before it was handed over. It used to be clamped back onto
+    the page already on screen, so the client could never reach the queued
+    one: it drew instead, paid the full cut, and the prefetched page was
+    stepped over with its boxes and sequences already retired.
+    """
     total = page_count(stage)
     if total == 0:
         doc = draw_page(n=n, band=band, stage=stage)
@@ -1875,7 +2070,18 @@ def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):
                 'total': max(1, page_count(stage))}
     if i is None or int(i) < 0:
         i = total - 1
-    i = max(0, min(total - 1, int(i)))
+    i = int(i)
+    if i == total:
+        await_prefetch(stage)
+        total = page_count(stage)
+        if i >= total:                  # nothing was queued, so cut it now
+            doc = draw_page(n=n, band=band, stage=stage)
+            total = max(1, page_count(stage))
+            if doc.get('items'):
+                prefetch(band=band, n=n, stage=stage)   # and queue the next
+            return {'page': with_verdicts(doc, stage),
+                    'index': doc.get('index', total - 1), 'total': total}
+    i = max(0, min(total - 1, i))
     doc = get_page(i, stage)
     if doc is None:
         return {'error': f'page {i} is missing'}

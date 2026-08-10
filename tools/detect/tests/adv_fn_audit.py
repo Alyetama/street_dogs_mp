@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """The false-negative audit has to produce a number, not a pile of clicks.
 
-Everything here guards one of the three claims the page makes:
+Everything here guards one of the four claims the page makes:
 
   * you will never be shown the same box twice, and never two frames from one
     sequence -- otherwise the sample is correlated and the interval is a lie;
   * the rate is weighted by how many boxes the gate really put in each band,
     because the bands are drawn from evenly and a flat mean would report the
     near-threshold error rate as if it were the whole store's;
+  * and it says what it is a share OF -- the sheets record every crop put in
+    front of a person, a fraction of them come back, and until one is answered
+    in full the rate off it is a ceiling rather than an estimate;
   * the crop shown is the crop the model saw.
 
 And one the page must NOT make: a human verdict here is ground truth about a
@@ -131,6 +134,230 @@ def weighting_checks(bad):
     if s5['bands'][4]['dogs'] != 1:
         bad.append("a verdict written as 'missed' before the wording changed "
                    "is no longer counted")
+
+
+def _sheet(pages, i, items):
+    """One page document, written the way draw_page writes it: under an index
+    that is the count of the pages before it, and never touched again."""
+    with open(os.path.join(pages, f'{i:05d}.json'), 'w') as fh:
+        json.dump({'index': i, 'band': None, 'n': len(items),
+                   'items': [{'key': k, 'band': b} for b, k in items]}, fh)
+
+
+def _leaked(P, mark):
+    """Where a fixture's own keys turn up in a store it must never reach.
+
+    Not a byte comparison: the dashboard is serving these audits while this
+    runs and somebody answering a crop mid-check is not a fault. A key only
+    this file invents is, and it says exactly which redirect did not take.
+    """
+    hit = []
+    for k in ('verdicts', 'drawn'):
+        try:
+            with open(P[k]) as fh:
+                if mark in fh.read():
+                    hit.append(os.path.basename(P[k]))
+        except OSError:
+            pass
+    try:
+        for f in sorted(os.listdir(P['pages'])):
+            with open(os.path.join(P['pages'], f)) as fh:
+                if mark in fh.read():
+                    hit.append('pages/' + f)
+    except OSError:
+        pass
+    return hit
+
+
+def sheets_checks(bad):
+    """What was SHOWN is the page documents, and it is the denominator.
+
+    A band's answers are not a sample of the band. They are the crops somebody
+    chose to click on a sheet where every other tile could be scrolled past,
+    and the one worth stopping on is the one that already looks like the
+    answer -- so a band's share is a ceiling until its sheets are answered in
+    full, and the answer rate has to travel beside it for that to be readable
+    at all.
+
+    Driven against a store built for it. The live one is open in the dashboard
+    while this runs, and a session that redirected one path and not another
+    put seventeen invented verdicts into it, so the last thing here is that
+    nothing this check invented reached either real store.
+    """
+    import fn_audit as fa
+    import tempfile as _tf
+    mark = 'zzguard_'
+    real_paths = fa.paths
+    tmp = _tf.mkdtemp()
+    lay = dict(real_paths('gate'))
+    lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
+               verdicts=os.path.join(tmp, 'v.jsonl'),
+               drawn=os.path.join(tmp, 'drawn.jsonl'),
+               full=os.path.join(tmp, 'full'),
+               crops=os.path.join(tmp, 'crops'),
+               dataset=os.path.join(tmp, 'ds'),
+               pool=os.path.join(tmp, 'pool.parquet'))
+    fa.paths = lambda stage='gate': lay
+    try:
+        os.makedirs(lay['pages'])
+        # Bands 2 and 5 were shown and nobody answered them. That is the case
+        # the two side totals have to include: a band with no answer in it is
+        # exactly what the rate beside it must be read against, and summing
+        # over the answered bands only would report a rate off six crops as a
+        # rate off eight.
+        _sheet(lay['pages'], 0, [(0, mark + 'a0'), (0, mark + 'a1'),
+                                 (0, mark + 'a2'), (0, mark + 'a3'),
+                                 (9, mark + 'k0'), (9, mark + 'k1')])
+        _sheet(lay['pages'], 1, [(0, mark + 'a4'), (0, mark + 'a5'),
+                                 (2, mark + 'b0'), (2, mark + 'b1'),
+                                 (5, mark + 'c0'), (5, mark + 'c1'),
+                                 (9, mark + 'k2')])
+        with open(lay['verdicts'], 'w') as fh:
+            for key, band, v in (('a0', 0, 'dog'), ('a1', 0, 'not_dog'),
+                                 ('k0', 9, 'not_dog'),
+                                 # answered before pages/ was kept: a verdict
+                                 # with no sheet to be a share of
+                                 ('x0', 0, 'dog')):
+                fh.write(json.dumps({'key': mark + key, 'band': band,
+                                     'verdict': v}) + '\n')
+        got = {b: sorted(k) for b, k in fa.sheets('gate').items()}
+        want = {0: [mark + k for k in ('a0', 'a1', 'a2', 'a3', 'a4', 'a5')],
+                2: [mark + 'b0', mark + 'b1'],
+                5: [mark + 'c0', mark + 'c1'],
+                9: [mark + 'k0', mark + 'k1', mark + 'k2']}
+        if got != want:
+            bad.append(f'the sheets read back as {got}; the page documents '
+                       f'are the record of what was put in front of a person '
+                       f'and nothing else is')
+        totals = [(lo, hi, 1000 if i == 0 else 500 if i == 9 else 10)
+                  for i, (lo, hi) in enumerate(fa.BANDS)]
+        s = fa.summarise(totals=totals)
+        b = s['bands']
+        for i, sh, an in ((0, 6, 2), (2, 2, 0), (5, 2, 0), (9, 3, 1),
+                          (1, 0, 0)):
+            if (b[i]['shown'], b[i]['answered']) != (sh, an):
+                bad.append(f"band {i} was shown {b[i]['shown']} crops and "
+                           f"answered {b[i]['answered']}, not {sh} and {an}")
+        if (s['rejected']['shown'], s['rejected']['answered']) != (8, 2):
+            bad.append(f"below the line the sheets showed "
+                       f"{s['rejected']['shown']} crops and "
+                       f"{s['rejected']['answered']} came back, not 8 and 2 "
+                       f"— a band that was shown and never answered is part "
+                       f"of what the rate beside it is short of")
+        if (s['kept']['shown'], s['kept']['answered']) != (5, 1):
+            bad.append(f"above the line the sheets showed "
+                       f"{s['kept']['shown']} crops and "
+                       f"{s['kept']['answered']} came back, not 5 and 1")
+        if s['sheets'] != {'shown': 13, 'answered': 3, 'unrecorded': 1}:
+            bad.append(f"the overall answer rate reads {s['sheets']}, not "
+                       f"3 of 13 with 1 judged before the sheets were kept — "
+                       f"a verdict with no sheet is not a share of anything, "
+                       f"and dropping it would lose a human answer")
+        # a page still being written is not a sheet
+        with open(os.path.join(lay['pages'], '00002.json.tmp'), 'w') as fh:
+            json.dump({'items': [{'key': mark + 'half', 'band': 3}]}, fh)
+        if 3 in fa.sheets('gate'):
+            bad.append('a half-written page counted as shown — draw_page '
+                       'writes the document beside its final name and moves '
+                       'it, so a glob that matches the temp reads a page '
+                       'nobody has been served')
+        # and a sheet drawn since the last poll is counted
+        _sheet(lay['pages'], 2, [(3, mark + 'd0')])
+        s2 = fa.summarise(totals=totals)
+        if s2['sheets']['shown'] != 14:
+            bad.append(f"a sheet drawn after the last poll is not counted: "
+                       f"{s2['sheets']} — the cache is keyed on something "
+                       f"coarser than the document")
+    finally:
+        fa.paths = real_paths
+    for name in fa.STAGES:
+        hit = _leaked(fa.paths(name), mark)
+        if hit:
+            bad.append(f'this check wrote its own keys into the LIVE {name} '
+                       f'audit ({hit}) — redirecting fa.paths did not take, '
+                       f'and the fixtures went to human data')
+
+
+def legacy_checks(bad):
+    """Answers written in the older words, and they still count.
+
+    'missed' and 'correct' only made sense while the pool was the gate's
+    rejections; the wording changed when it grew to hold what the gate KEPT,
+    and the rows already on disk did not change with it. So every reader goes
+    through verdict_of, and a rename that forgets one of them drops human
+    answers with nothing on screen to say so -- the tile paints from this
+    stage's own two words, and a find written in the old ones matched none of
+    them, so it read as an ordinary answered card.
+    """
+    import fn_audit as fa
+    # The two words that are really on disk, named here rather than read back
+    # out of the table that is supposed to map them -- a table that
+    # reclassified them would agree with itself, and thirty-eight rows would
+    # quietly become an answer nobody gave.
+    for old, new in (('missed', 'dog'), ('correct', 'not_dog')):
+        if fa.verdict_of(old, 'gate') != new:
+            bad.append(f'a gate answer written {old!r} now reads as '
+                       f'{fa.verdict_of(old, "gate")!r}, not {new!r} — every '
+                       f'row on disk in that wording is dropped or recounted')
+    for name, sp in fa.STAGES.items():
+        for old, new in sp['legacy'].items():
+            if new not in sp['answers']:
+                bad.append(f'{name}: {old!r} maps to {new!r}, which is not '
+                           f'something a person can answer here')
+    # and they are counted, not merely readable
+    totals = [(lo, hi, 100) for lo, hi in fa.BANDS]
+    s = fa.summarise([{'key': 'a', 'band': 4, 'verdict': 'missed'},
+                      {'key': 'b', 'band': 4, 'verdict': 'correct'}],
+                     totals, shown={})
+    if (s['bands'][4]['judged'], s['bands'][4]['dogs']) != (2, 1):
+        bad.append(f"the older wording is not counted: band 4 reads "
+                   f"{s['bands'][4]['judged']} judged and "
+                   f"{s['bands'][4]['dogs']} dogs, want 2 and 1")
+    try:
+        import audit
+    except Exception:
+        return
+    # what the server stamps on a tile is a word the tile can paint
+    import tempfile as _tf
+    tmp = _tf.mkdtemp()
+    real_paths = fa.paths
+    try:
+        for name, sp in fa.STAGES.items():
+            if not sp['legacy']:
+                continue
+            lay = dict(real_paths(name))
+            lay['verdicts'] = os.path.join(tmp, name + '.jsonl')
+            fa.paths = lambda stage=name, _l=lay: _l
+            words = sorted(sp['legacy'])
+            with open(lay['verdicts'], 'w') as fh:
+                for i, w in enumerate(words):
+                    fh.write(json.dumps({'key': f'{i}#0',
+                                         'verdict': w}) + '\n')
+            doc = audit.with_verdicts(
+                {'items': [{'key': f'{i}#0'} for i in range(len(words))]},
+                name)
+            got = [it.get('verdict') for it in doc['items']]
+            if [g for g in got if g not in sp['answers']]:
+                bad.append(f'{name}: a page read back carries {got}; the '
+                           f'tiles are painted by comparing against this '
+                           f'stage\'s own two words, so a verdict in any '
+                           f'other lights nothing')
+    finally:
+        fa.paths = real_paths
+    # and every word anybody has ever written into a live ledger still reads
+    for name in fa.STAGES:
+        p = real_paths(name)['verdicts']
+        if not os.path.exists(p):
+            continue
+        lost = {}
+        for v in fa.read_verdicts(p, name):
+            w = v.get('verdict')
+            if w is not None and fa.verdict_of(w, name) is None:
+                lost[w] = lost.get(w, 0) + 1
+        for w, n in sorted(lost.items()):
+            bad.append(f'{n} answers in the live {name} ledger are written '
+                       f'{w!r} and nothing maps that any more — they are '
+                       f'human verdicts and they have stopped counting')
 
 
 def ledger_checks(bad):
@@ -289,6 +516,11 @@ def isolation_checks(bad):
                        "records human answers")
         if 'p_dog' not in cols:
             bad.append('the pool carries no score, so nothing can be banded')
+    except ModuleNotFoundError:
+        # the pool is duckdb's file and only one of this repo's interpreters
+        # has it; reported rather than failed, because a check that cannot run
+        # has not found anything
+        print('SKIP: no duckdb in this interpreter — pool schema not read')
     except Exception as e:                     # noqa: BLE001
         if 'No files found' not in str(e) and 'IO Error' not in str(e):
             bad.append(f'could not read the pool schema: {e}')
@@ -568,6 +800,7 @@ def persistence_checks(bad):
         import audit
     except Exception:
         return
+    import fn_audit as fa
     doc = {'index': 0, 'items': [{'key': 'a#0'}, {'key': 'b#1'}]}
     import tempfile as _tf
     tmp = _tf.mkdtemp()
@@ -579,9 +812,13 @@ def persistence_checks(bad):
         with open(lay['verdicts'], 'w') as fh:
             fh.write(json.dumps({'key': 'a#0', 'verdict': 'missed'}) + '\n')
         got = audit.with_verdicts(json.loads(json.dumps(doc)))
-        if got['items'][0].get('verdict') != 'missed':
-            bad.append('a verdict already on record is not shown when the '
-                       'page is read again')
+        # in this stage's own wording, not the ledger's: the row is one of the
+        # thirty-eight written before the vocabulary changed, and the tile can
+        # only paint the words it was built with
+        if got['items'][0].get('verdict') != fa.STAGES['gate']['positive']:
+            bad.append(f"a verdict already on record comes back as "
+                       f"{got['items'][0].get('verdict')!r} when the page is "
+                       f"read again")
         if 'verdict' in got['items'][1]:
             bad.append('an unjudged box came back with a verdict')
     finally:
@@ -633,6 +870,91 @@ def selection_checks(bad):
         if max(quota) - min(quota) > 1:
             bad.append(f'a page of {n} gives one band {max(quota)} crops and '
                        f'another {min(quota)}')
+
+
+def prefetch_checks(bad):
+    """The page after the last one is the page already being cut.
+
+    Handing a page over queues the next, so "next" always asks for an index
+    the count does not have yet -- and clamping it back onto the page already
+    on screen meant the client drew instead. That pays the twenty-second cut
+    the prefetch exists to avoid AND retires the queued page unseen: its boxes
+    and sequences are reserved the moment they are chosen and never come round
+    again, which is how nineteen of the gate store's thirty pages ended up
+    carrying no verdict at all.
+    """
+    import threading
+    import time as _t
+    try:
+        import audit
+    except Exception:
+        return
+    st = {'pages': 5, 'drew': 0, 'queued': 0}
+
+    def drew(n=25, band=None, stage='gate'):
+        st['drew'] += 1
+        st['pages'] += 1
+        return {'index': st['pages'] - 1, 'items': [{'key': 'new#0'}]}
+
+    real = (audit.page_count, audit.get_page, audit.draw_page, audit.prefetch,
+            audit.with_verdicts)
+    audit.page_count = lambda stage='gate': st['pages']
+    audit.get_page = lambda i, stage='gate': {'index': i,
+                                              'items': [{'key': f'p{i}#0'}]}
+    audit.draw_page = drew
+    audit.prefetch = (lambda band=None, n=25, stage='gate':
+                      st.update(queued=st['queued'] + 1))
+    audit.with_verdicts = lambda doc, stage='gate': doc
+    held = audit._PREFETCH.get('gate')
+    try:
+        # a prefetch mid-flight, which is exactly the state a reader is in one
+        # click after a page was handed to them
+        t = threading.Thread(target=lambda: (_t.sleep(0.4),
+                                             st.update(pages=st['pages'] + 1)),
+                             daemon=True)
+        t.start()
+        audit._PREFETCH['gate'] = t
+        a = _t.time()
+        r = audit.api_page(5)
+        waited = _t.time() - a
+        if r.get('index') != 5 or r.get('total') != 6:
+            bad.append(f"asking for the page after the last one gave page "
+                       f"{r.get('index')} of {r.get('total')} — the "
+                       f"prefetched page cannot be reached, so every Next "
+                       f"draws over it and its crops are never shown")
+        if st['drew']:
+            bad.append(f"{st['drew']} page(s) were cut beside the one already "
+                       f"being prefetched")
+        if waited < 0.3:
+            bad.append(f'the request came back in {waited:.2f}s without '
+                       f'waiting for the page being cut, so it cannot have '
+                       f'served it')
+        t.join(timeout=5)
+        # nothing queued: cut it now, and line up the one after it
+        audit._PREFETCH.pop('gate', None)
+        st['queued'] = 0
+        r = audit.api_page(6)
+        if st['drew'] != 1 or r.get('index') != 6:
+            bad.append(f"with nothing queued, the next page drew "
+                       f"{st['drew']} page(s) and came back as "
+                       f"{r.get('index')}")
+        if st['queued'] != 1:
+            bad.append('a freshly cut page did not queue the one after it, so '
+                       'the next Next pays the cut again')
+        # and a hand-typed index still cannot spend sample
+        st['drew'] = 0
+        r = audit.api_page(9999)
+        if r.get('index') != st['pages'] - 1 or st['drew']:
+            bad.append(f"i=9999 drew {st['drew']} page(s) and came back as "
+                       f"{r.get('index')}; anything past the queued page is a "
+                       f"typo, not a request to cut crops")
+    finally:
+        (audit.page_count, audit.get_page, audit.draw_page, audit.prefetch,
+         audit.with_verdicts) = real
+        if held is None:
+            audit._PREFETCH.pop('gate', None)
+        else:
+            audit._PREFETCH['gate'] = held
 
 
 def page_checks(bad):
@@ -715,6 +1037,45 @@ chk(/2 shards/.test(String(els.poolwarn.textContent)),
 STATS.pool_info = {unknown:false, stale:false, shards:9, shards_now:9};
 paintStats(STATS);
 chk(els.poolwarn.hidden === true, 'an up-to-date pool still warns');
+// The denominator every rate on this page was missing. The sheets record what
+// was put in front of you and the ledger records what came back -- 120 of
+// 1,575 on the gate's own store -- so a band's share is the share among crops
+// somebody chose to click, and until a sheet is answered in full it is a
+// bound rather than an estimate.
+STATS.sheets = {shown:1575, answered:120, unrecorded:62};
+STATS.rejected.shown = 1080; STATS.rejected.answered = 70;
+STATS.rejected.judged = 40;
+STATS.bands[0].shown = 216; STATS.bands[0].answered = 9;
+paintStats(STATS);
+chk(/7\.6%/.test(els.ansrate.textContent),
+  'the answer rate reads ' + els.ansrate.textContent + ', not 7.6%');
+chk(/1,575/.test(els.answ.textContent) && /62/.test(els.answ.textContent),
+  'the answer rate does not say what it is a share of, nor how many answers '
+  + 'predate the sheets: ' + els.answ.textContent);
+chk(/at most/.test(els.rate.innerHTML),
+  'a headline read off sheets nobody finished is presented as an estimate: '
+  + els.rate.innerHTML);
+chk(/ceiling/.test(els.ci.textContent) &&
+    /70 of the 1,080/.test(els.ci.textContent),
+  'nothing under the headline says why it is a bound: ' + els.ci.textContent);
+chk(!/somewhere between/.test(els.ci.textContent),
+  'a sheet nobody finished still extrapolates to a range over the whole '
+  + 'store: ' + els.ci.textContent);
+chk(/<b>9<\/b>\/216/.test(els.bands.innerHTML),
+  'the band table has no answered column, and that rate ran 1.7% to 10.2% '
+  + 'across these ten rows');
+// answered in full, and the estimate is a measurement again
+STATS.rejected.answered = 1080;
+paintStats(STATS);
+chk(!/at most/.test(els.rate.innerHTML),
+  'a side whose sheets are answered in full still reads as a ceiling');
+chk(/somewhere between/.test(els.ci.textContent),
+  'a sheet answered in full does not get its interval back: ' +
+  els.ci.textContent);
+delete STATS.sheets; delete STATS.rejected.shown;
+delete STATS.rejected.answered; STATS.rejected.judged = 12;
+delete STATS.bands[0].shown; delete STATS.bands[0].answered;
+paintStats(STATS);
 chk(/page 1 of 1/.test(els.pos.textContent), 'position reads ' + els.pos.textContent);
 chk(els.grid.innerHTML.length > 100, 'the grid rendered nothing');
 // a page of a hundred crops ends a long way from the toolbar
@@ -844,9 +1205,81 @@ chk(FETCHES.some(function (u) { return /audit\/frame/.test(u) }),
 chk(!FETCHES.some(function (u) { return /verdict/.test(u) }),
   'opening the editor recorded a verdict');
 chk(cur === 0, 'opening the editor did not select the tile it was opened on');
+// The editor is armed by a load event on the lightbox <img>, and edStop puts
+// the CROP back into that same <img> -- which fires load again. With the
+// handler still attached, cancel, close and Escape all re-opened the editor
+// holding the FRAME's off_x/off_y and scale, and one press of save then wrote
+// a box for a different picture under this crop's key.
+chk(typeof lbimg.onload === 'function',
+  'opening the editor armed no load handler, so nothing below proves anything');
+// guarded, because an unarmed editor is a finding and not a crash: calling it
+// anyway reported a TypeError from the page instead of the sentence above
+if (typeof lbimg.onload === 'function') lbimg.onload();
+chk(EDIT.on === true && !!EDIT.meta,
+  'the frame arrived and the editor did not open');
+edStop();
+chk(!EDIT.meta && !EDIT.box,
+  'edStop kept the frame\'s geometry: ' + JSON.stringify(EDIT.meta));
+chk(!lbimg.onload,
+  'edStop left its load handler on the picture it is about to swap');
+if (lbimg.onload) lbimg.onload();      // the crop going back in fires load
+chk(EDIT.on === false,
+  'cancelling re-opened the editor over the crop, in the frame\'s scale');
+chk(!EDIT.meta,
+  'a cancelled editor still holds another picture\'s offsets: ' +
+  JSON.stringify(EDIT.meta));
 // put the page back: the editor left the lightbox open, and every keyboard
 // check below returns early while it is
 edStop(); els.lb.hidden = true; cur = -1;
+// The other door into the same room. Cutting the window on a frame takes
+// seconds off a cold drive, and a reader who closes the lightbox or moves to
+// another crop in the meantime must not have the editor opened over it.
+cur = 0; EDIT.meta = null; lbimg.onload = null;
+edStart();
+chk(!EDIT.meta && EDIT.on === false && !lbimg.onload,
+  'a frame that landed after the lightbox was closed armed the editor anyway');
+cur = -1; lbimg.onload = null;
+
+// What the tile says about the answer on record, in THIS stage's words. The
+// three comparisons were the gate's 'dog' and 'not_dog' written out, so on the
+// leash page every answer painted the same grey card with no button lit, and
+// the review view -- whose whole job is showing what you recorded -- could not
+// say which answer that was.
+function acts(i){ return grid.children[i].querySelectorAll('.act') }
+function watchActs(i){
+  acts(i).forEach(function (b) {
+    b.lit = false;
+    b.classList = {add:function(){}, remove:function(){},
+      toggle:function(c, on){ if (c === 'on') b.lit = !!on }};
+  });
+}
+function lits(i){ return acts(i).map(function (b) { return b.lit }).join(',') }
+page.items.forEach(function (it) { delete it.verdict; delete it.corrected });
+render(); watchActs(0);
+page.items[0].verdict = POS;
+paintCard(0);
+chk(/ miss\b/.test(grid.children[0].className),
+  'a "' + POS + '" find paints as "' + grid.children[0].className + '"');
+chk(acts(0)[0].lit && !acts(0)[1].lit,
+  'a "' + POS + '" verdict lit ' + lits(0) + ' — the answer on record is not '
+  + 'shown on the button that gave it');
+page.items[0].verdict = NEG;
+paintCard(0);
+chk(/ done\b/.test(grid.children[0].className) &&
+    / ok\b/.test(grid.children[0].className),
+  'a "' + NEG + '" answer paints as "' + grid.children[0].className + '"');
+chk(acts(0)[1].lit && !acts(0)[0].lit,
+  'a "' + NEG + '" verdict lit ' + lits(0));
+// and the third button is the crop mark, so it says whether the box was
+// redrawn -- it was still being lit for the 'unsure' verdict it replaced
+page.items[0].verdict = 'unsure';
+paintCard(0);
+chk(!acts(0)[2].lit, 'the crop mark lights for an "unsure" verdict');
+page.items[0].corrected = true;
+paintCard(0);
+chk(acts(0)[2].lit, 'a redrawn box is not marked on its tile');
+page.items.forEach(function (it) { delete it.verdict; delete it.corrected });
+render();
 
 // at rest a tile is a photograph: the buttons ride over it, they are not
 // permanent furniture below it
@@ -952,6 +1385,27 @@ dirty = false; total = 5; idx = 0; FETCHES.length = 0;
 listeners.next.click();
 chk(FETCHES.some(function(u){return /audit\/page/.test(u)}),
   'with the selection unchanged, next did not page forward');
+// The LAST page is where the prefetched one lives: it was queued when this
+// page was handed over, so the `total` on this side was counted before it
+// existed. Deciding here from that count drew a fresh page over the queued
+// one every time -- twenty seconds, and twenty-five boxes and sequences
+// retired without anyone seeing them. Only the server knows whether a page
+// is already being cut.
+dirty = false; total = 3; idx = 2; FETCHES.length = 0;
+listeners.next.click();
+chk(FETCHES.some(function(u){return /audit\/page\?[^"]*[?&]i=3(&|$)/.test(u)}),
+  'at the last page, next did not ask for the page after it: ' +
+  JSON.stringify(FETCHES));
+chk(!FETCHES.some(function(u){return /audit\/draw/.test(u)}),
+  'at the last page, next cut a new page beside the one already queued');
+// and N is the same door, not a second copy of the rule
+dirty = false; total = 3; idx = 2; FETCHES.length = 0;
+listeners.doc.keydown({key:'n', target:{tagName:'DIV'},
+  preventDefault:function(){}});
+chk(FETCHES.some(function(u){return /audit\/page/.test(u)}) &&
+    !FETCHES.some(function(u){return /audit\/draw/.test(u)}),
+  'the N key keeps its own copy of the paging rule and drew over the page '
+  + 'already queued: ' + JSON.stringify(FETCHES));
 chk(/none seen/.test(els.bands.innerHTML),
   'a band nobody judged does not say so');
 chk(/0%/.test(els.bands.innerHTML),
@@ -1069,10 +1523,12 @@ def stage_checks(bad):
 def main():
     bad = []
     stage_checks(bad)
-    for fn in (band_checks, wilson_checks, weighting_checks, ledger_checks,
+    for fn in (band_checks, wilson_checks, weighting_checks, sheets_checks,
+               legacy_checks, ledger_checks,
                serving_checks, isolation_checks, correction_checks,
                concurrency_checks,
-               persistence_checks, selection_checks, page_checks):
+               persistence_checks, selection_checks, prefetch_checks,
+               page_checks):
         try:
             fn(bad)
         except Exception as e:                 # noqa: BLE001 - report, not die
