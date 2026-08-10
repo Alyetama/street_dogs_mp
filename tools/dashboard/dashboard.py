@@ -7045,7 +7045,14 @@ def render_training():
                + ''.join(f'<option value="{esc_html(p)}">{esc_html(p)}'
                          f'</option>' for p in
                          sorted({r['project'] for r in shown}))
-               + '</select><span class="tnote">Numbers here are each run\'s '
+               + '</select>'
+                 # The table below says how each run scored; the one thing it
+                 # cannot say is what the run was scored ON. That is a
+                 # directory, and this is the way to it.
+                 '<a href="/datasets" class="rbtn nav" title="open the '
+                 'datasets these runs trained on and look inside">'
+                 '&#9638; Datasets</a>'
+               + '<span class="tnote">Numbers here are each run\'s '
                  'own validation split &mdash; the split that drove its early '
                  'stopping. What a model is <em>accepted</em> on is the '
                  'reserved set, in Best models above.</span></div>')
@@ -9510,6 +9517,29 @@ def _audit():
     return _AUDIT['mod']
 
 
+_DATASETS = {'mod': None, 'tried': False}
+
+
+def _datasets():
+    """The datasets module, imported once and only when asked for.
+
+    It reaches back into this one -- what turns a directory into a dataset is
+    the run list, and that is training_runs() -- so an import at module scope
+    here is a cycle that breaks the dashboard at boot. On the first request
+    this module is already built and the cycle closes harmlessly. Missing, it
+    is a page naming the two files rather than a 500.
+    """
+    if not _DATASETS['tried']:
+        _DATASETS['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import datasets as _d
+            _DATASETS['mod'] = _d
+        except Exception:
+            _DATASETS['mod'] = None
+    return _DATASETS['mod']
+
+
 def gate_planning():
     """True while a planner is building a work list."""
     return bool(_script_pids('gate_store.py', 'plan'))
@@ -9811,6 +9841,82 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return True
         return False
 
+    def _datasets_get(self):
+        """The datasets page, its three listings and its two pictures.
+
+        `key` and `rel` go through verbatim. They are resolved in there,
+        against a realpathed root that refuses anything landing outside it,
+        and a second opinion formed here would only be somewhere for the two
+        to disagree -- which is how a traversal gets through.
+        """
+        path = self.path.split('?', 1)[0]
+        d = _datasets()
+        if path == '/datasets':
+            if d is None:
+                self._html(b'<!doctype html><meta charset=utf-8>'
+                           b'<body style="background:#13151a;color:#98a2ad;'
+                           b'font:14px system-ui;padding:40px">'
+                           b'The datasets module would not load. Check '
+                           b'<code>tools/dashboard/datasets.py</code> and '
+                           b'<code>tools/detect/dataset_index.py</code>.'
+                           b'</body>')
+                return True
+            self._html(d.page_html().encode('utf-8'))
+            return True
+        if d is None:
+            return False       # the page above already said which file is out
+        q = parse_qs(urlparse(self.path).query)
+        if path == '/api/datasets':
+            # refresh is the page's rescan button, and only that: it forces a
+            # live re-walk of every root, which is seconds on a cold cache.
+            self._json(d.api_list(q.get('refresh', ['0'])[0]
+                                  in ('1', 'true')))
+            return True
+        if path == '/api/datasets/tree':
+            self._json(d.api_tree(q.get('key', [''])[0]))
+            return True
+        if path == '/api/datasets/files':
+            try:
+                pg = int(q.get('page', ['0'])[0])
+            except ValueError:
+                pg = 0
+            self._json(d.api_files(q.get('key', [''])[0],
+                                   q.get('rel', [''])[0], pg,
+                                   d.page_size(q.get('n', [None])[0])))
+            return True
+        if path == '/datasets/thumb':
+            body, ctype = d.thumb(q.get('key', [''])[0],
+                                  q.get('rel', [''])[0])
+            if not body:
+                # a refused path and a file deleted mid-walk answer the same
+                # thing, and the client draws the same broken tile for both
+                self.send_error(404)
+                return True
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body)))
+            # Same day the review page's crops get. `v` on the URL is the
+            # source file's mtime and it is aimed at THIS cache: a picture
+            # replaced at the same path is a new URL, so nothing here has to
+            # read the parameter -- or trust it.
+            self.send_header('Cache-Control', 'private, max-age=86400')
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        if path == '/datasets/image':
+            body, ctype = d.full(q.get('key', [''])[0], q.get('rel', [''])[0])
+            if not body:
+                self.send_error(404)
+                return True
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'private, max-age=300')
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        return False
+
     def do_GET(self):
         # split('?') so cache-busting query strings still match (§7.2 —
         # /api/board's == match 404s on ?t=1 and that bit us before). The two
@@ -9856,6 +9962,12 @@ class BoardHandler(SimpleHTTPRequestHandler):
         _p = self.path.split('?', 1)[0]
         if _p.startswith('/audit') or _p.startswith('/api/audit'):
             if self._audit_get():
+                return
+        # The /datasets prefix carries its two picture routes as well, and all
+        # of it has to be claimed before the static handler below, which is
+        # what turned /audit/leash into a 404 the day it was added.
+        if _p.startswith('/datasets') or _p.startswith('/api/datasets'):
+            if self._datasets_get():
                 return
         if self.path.split('?', 1)[0] == '/review':
             body = REVIEW_HTML.encode('utf-8')
@@ -11669,6 +11781,14 @@ outline-offset:2px}
        title="Judge detections one by one — dog or not a dog">
       <span class="rvf">&#9873;</span>
       <span class="rvn"><b id="revN">&mdash;</b><em id="revL">to review</em>
+      </span></a>
+    <!-- Quiet by design: this is somewhere to go, not something to do, and
+         one solid-filled control on the page is the whole rule. It sits in
+         the header rather than in the training section because a dataset
+         outlives the runs that used it, and the section can be collapsed. -->
+    <a class="revbtn quiet" href="/datasets" title="Every dataset the logged runs trained on — open one and look inside">
+      <span class="rvf">&#9638;</span>
+      <span class="rvn"><b>Datasets</b><em>what runs trained on</em>
       </span></a>
     <div class="upd"><span class="dot"></span>updated __NOW__ · auto-refreshes hourly<button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
   </div>
