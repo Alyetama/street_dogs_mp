@@ -22,6 +22,15 @@ back, not silently drop the tile), undo restoring position, a fetch that
 fails, the empty queue, quote/tag injection in image_id, and every keyboard
 binding. A ReferenceError, a TypeError or any other throw fails the test.
 
+Both of the page's modes are driven, and the audit one is not an afterthought:
+flag() has a whole second branch for it, and while that branch went undriven an
+undefined toast() sat in it throwing into the chain's own .catch, and markSeen
+banked the crop whose annotation had just been removed. A throw inside a .then
+is invisible from outside -- the page swallows it and the chain resolves -- so
+watchThrows() below makes one visible without changing what the page does with
+it.
+
+
 Requires node on PATH; skips (exit 0, loud message) if absent.
 """
 
@@ -418,6 +427,33 @@ function ck(cond, msg) { if (!cond) failures.push(msg); }
 // queue deep enough that their fetch chains have settled
 async function flush(n) { for (let i = 0; i < (n || 12); i++) await Promise.resolve(); }
 function toastUp() { return root.children.some(c => c.id === 'tbox'); }
+// What the page's one notice surface is currently saying. Both halves are
+// needed: showUndo builds the box with innerHTML, where the text is in the
+// markup, while leashNote appends a span it set textContent on, which the
+// stub's own textContent getter cannot see from the parent.
+function noticed() {
+  const t = root.children.filter(c => c.id === 'tbox')[0];
+  if (!t) return '';
+  return (String(t.textContent || '') + ' ' +
+          descendants(t).map(e => String(e._text || '')).join(' ')).trim();
+}
+// A throw inside one of the page's .then handlers never reaches this harness:
+// every fetch chain here ends in its own .catch, which absorbs it and resolves
+// as though the work had finished. That is how a free identifier in the audit
+// branch stayed hidden through a green suite. Wrapping .then for the length of
+// one drive records the throw on its way past without altering it.
+async function watchThrows(fn) {
+  const seen = [];
+  const realThen = Promise.prototype.then;
+  Promise.prototype.then = function (ok, bad) {
+    return realThen.call(this, typeof ok === 'function' ? function (v) {
+      try { return ok(v) } catch (e) { seen.push(e); throw e }
+    } : ok, bad);
+  };
+  try { await fn(); } finally { Promise.prototype.then = realThen; }
+  return seen;
+}
+function why(e) { return String((e && (e.message || e.name)) || e); }
 
 // Cross the sentinel the way a scroll does. IO_CB is the page's own callback,
 // captured when it constructed the observer.
@@ -1586,8 +1622,207 @@ async function t33() {
   API.closeLb();
 }
 
+// ── 34. auditing a verdict: changing it, taking it back, being told ─────
+// flag() has a second branch for "Check my annotations" and nothing drove it.
+// It is not a variation on the queue path: the crop keeps its place instead of
+// being consumed, re-clicking the verdict a crop already has REMOVES the
+// annotation, and the only thing that says any of that happened is a notice
+// the branch puts on screen. An undefined identifier there throws into the
+// chain's own .catch, so the ledger is rewritten and the reviewer is told
+// nothing -- with every other case still green.
+async function t34() {
+  const posts = [];
+  const ann = () => ({ items: JSON.parse(JSON.stringify(CROPS.annotated)),
+      page: 0, pages: 1, total: 4, pool_unfiltered: 4,
+      n_false_positive: 2, n_true_positive: 2 });
+  RESP = { '/api/review/annotated': ann,
+           '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
+           '/api/detect/flag': (u, o) => { posts.push(JSON.parse(o.body));
+             return { ok: true, flagged_total: 41, positive_total: 12 } } };
+  byId['mode'].value = 'audit';
+  byId['mode'].onchange.call(byId['mode']);
+  await flush(); await flush();
+  ck(document.querySelectorAll('.card').length === 4,
+     't34: the audit view rendered ' + document.querySelectorAll('.card').length +
+     ' tiles, want 4');
+  const name = API.st().items[0].name;
+  const card = document.querySelector('.card[data-name="' + name + '"]');
+  ck(card && card.querySelector('.fbtn.yes').classList.contains('on'),
+     't34: the tile does not restate the verdict already on record');
+  // An undo staged by an earlier case would post under this case's stub and
+  // read as an audit action. Let the 5 s window expire the way it does on the
+  // page rather than reaching in, so this starts from a state the page can be
+  // in on its own.
+  runTimers();
+  ck(API.st().lastUndo === null,
+     't34: an earlier case left an undo staged; this case cannot tell them apart');
+
+  // change it
+  API.hideToast();
+  let threw = await watchThrows(async () => {
+    await API.flag(0, false, 'false_positive'); await flush();
+  });
+  ck(!threw.length, 't34: changing a verdict in audit mode threw ' + why(threw[0]));
+  ck(posts.length === 1 && posts[0].name === name &&
+     posts[0].label === 'false_positive' && posts[0].undo === false,
+     't34: wrong POST for a verdict change: ' + JSON.stringify(posts));
+  ck(API.st().items.length === 4,
+     't34: auditing consumed the crop -- the list must not resequence under the reader');
+  ck(API.st().items[0].label === 'false_positive',
+     't34: the crop still carries the old verdict: ' + API.st().items[0].label);
+  ck(card.querySelector('.fbtn.no').classList.contains('on') &&
+     !card.querySelector('.fbtn.yes').classList.contains('on'),
+     't34: the buttons do not restate the new verdict');
+  ck(card.classList.contains('changed'),
+     't34: nothing marks the tile as differing from what the ledger held');
+  ck(noticed().length > 0, 't34: changing a verdict said nothing on screen');
+
+  // take it back: clicking the verdict a crop already has removes it
+  API.hideToast();
+  posts.length = 0;
+  threw = await watchThrows(async () => {
+    await API.flag(0, false, 'false_positive'); await flush();
+  });
+  ck(!threw.length, 't34: removing an annotation threw ' + why(threw[0]));
+  ck(posts.length === 1 && posts[0].undo === true,
+     't34: re-clicking the verdict on record did not take it back: ' +
+     JSON.stringify(posts));
+  ck(API.st().items[0].label === null,
+     't34: the crop still carries the annotation that was removed: ' +
+     API.st().items[0].label);
+  ck(!card.querySelector('.fbtn.no').classList.contains('on') &&
+     !card.querySelector('.fbtn.yes').classList.contains('on'),
+     't34: a removed annotation is still lit on the tile');
+  ck(card.classList.contains('unjudged'),
+     't34: nothing marks the crop as carrying no verdict any more');
+  ck(noticed().length > 0,
+     't34: removing an annotation said nothing on screen -- the sentence that ' +
+     'promises it is back in the queue is the only thing that says so');
+
+  // Auditing stages no undo toast: the crop never left, and re-clicking is how
+  // it is taken back. So U must do nothing -- a staged undo here would post a
+  // verdict against a crop that no longer has one.
+  ck(API.st().lastUndo === null, 't34: an audit verdict staged an undo toast');
+  posts.length = 0;
+  await API.undo(); await flush();
+  key('u'); await flush();
+  ck(posts.length === 0,
+     't34: U posted a verdict in audit mode: ' + JSON.stringify(posts));
+}
+
+// ── 35. auditing banks nothing as "reviewed and kept" ───────────────────
+// markSeen() records "I looked at these and kept them", and the server retires
+// those image_ids from the queue for good. An audit screen is not a review: the
+// reviewer may have just REMOVED an annotation, which the button promises puts
+// the crop back in the queue, and banking it retires the very crop that was
+// handed back. Reload and the pagehide beacon are the two callers with no view
+// of their own, which is why they were the two that were missed.
+async function t35() {
+  const banked = [];
+  const ann = () => ({ items: JSON.parse(JSON.stringify(CROPS.annotated)),
+      page: 0, pages: 1, total: 4, pool_unfiltered: 4,
+      n_false_positive: 2, n_true_positive: 2 });
+  RESP = { '/api/review/annotated': ann,
+           '/api/review': () => payload(CROPS.normal.slice(0, 4), []),
+           '/api/review/seen': (u, o) => { banked.push(JSON.parse(o.body));
+             return { ok: true, seen_total: 77 } },
+           '/api/detect/flag': () => ({ ok: true }) };
+  byId['mode'].value = 'audit';
+  byId['mode'].onchange.call(byId['mode']);
+  await flush(); await flush();
+  const name = API.st().items[0].name;
+  await API.flag(0, false, API.st().items[0].label); await flush();
+  ck(API.st().items[0].label === null,
+     't35: the annotation was not removed, so nothing here is at risk');
+
+  banked.length = 0; CALLS.length = 0;
+  byId['reload'].onclick(); await flush(); await flush();
+  ck(banked.length === 0,
+     't35: Reload banked the audit screen as reviewed and kept, including ' +
+     name + ': ' + JSON.stringify(banked));
+  ck(CALLS.some(c => /annotated/.test(String(c.url))),
+     't35: Reload did not reload the annotations either');
+  await API.markSeen(); await flush();
+  ck(banked.length === 0,
+     't35: markSeen banked an audit screen when called directly: ' +
+     JSON.stringify(banked));
+  beacons.length = 0;
+  for (const f of (winL['pagehide'] || [])) f({});
+  ck(!beacons.some(u => /seen/.test(String(u))),
+     't35: closing the tab banked the audit screen: ' + beacons.join(','));
+
+  // ...and all three still bank in the queue, where paging away IS the
+  // decision. Without this half the case passes just as well against a
+  // markSeen that banks nothing anywhere.
+  byId['mode'].value = 'queue';
+  byId['mode'].onchange.call(byId['mode']);
+  await flush(); await flush();
+  banked.length = 0;
+  byId['reload'].onclick(); await flush(); await flush();
+  ck(banked.length === 1 && banked[0].names && banked[0].names.length === 4,
+     't35: Reload no longer banks the screen in the queue: ' +
+     JSON.stringify(banked));
+  beacons.length = 0;
+  for (const f of (winL['pagehide'] || [])) f({});
+  ck(beacons.some(u => /seen/.test(String(u))),
+     't35: closing the tab no longer banks the queue screen');
+}
+
+// ── 36. undo after a leash-held "Is a dog" ──────────────────────────────
+// With the leash store on, "Is a dog" does NOT consume the crop: the tile is
+// held on screen because a leash call has just become askable on it. undo()
+// was written for the consuming path and re-inserts unconditionally, so taking
+// that verdict back put the crop on the grid twice, both tiles lit "Is a dog",
+// for a kept record that had just been deleted -- a tile asserting an
+// annotation that is not on disk, over a crop that is in fact unjudged.
+async function t36() {
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6),
+             CROPS.normal.slice(6, 9),
+             { leash_totals: { leashed: 8, unleashed: 5 }, leash: {} }),
+           '/api/detect/flag': () => ({ ok: true }),
+           '/api/review/seen': () => ({ ok: true, seen_total: 1 }) };
+  await API.load(); await flush();
+  const name = API.st().items[2].name;
+  const n0 = API.st().items.length, r0 = API.st().reserve.length;
+  await API.flag(2, false, 'true_positive'); await flush();
+  const held = document.querySelector('.card[data-name="' + name + '"]');
+  ck(!!held && held.classList.contains('awaitleash'),
+     't36: the crop was not held for a leash call, so this case tests nothing');
+  ck(API.st().items.length === n0 && API.st().reserve.length === r0,
+     't36: a held flag consumed the crop after all');
+
+  await API.undo(); await flush();
+  const names = API.st().items.map(c => c.name);
+  const dom = document.querySelectorAll('.card').map(e => e.dataset.name);
+  ck(names.filter(x => x === name).length === 1,
+     't36: undo left ' + names.filter(x => x === name).length +
+     ' copies of the crop in items');
+  ck(dom.filter(x => x === name).length === 1,
+     't36: undo left ' + dom.filter(x => x === name).length +
+     ' tiles on the grid for one crop');
+  ck(names.length === n0,
+     't36: the page grew ' + n0 + ' -> ' + names.length + ' over one flag/undo');
+  ck(JSON.stringify(dom) === JSON.stringify(names),
+     't36: DOM order diverged from items order');
+  const it = API.st().items.filter(c => c.name === name)[0];
+  ck(it && !it.label,
+     't36: the crop still carries the verdict the undo deleted: ' +
+     (it && it.label));
+  const lit = document.querySelectorAll('.card[data-name="' + name + '"]')
+    .filter(e => { const y = e.querySelector('.fbtn.yes');
+                   return y && y.classList.contains('on') });
+  ck(lit.length === 0, 't36: ' + lit.length + ' tile(s) still lit "Is a dog" ' +
+     'for a record the undo deleted');
+  const asking = document.querySelectorAll('.card[data-name="' + name + '"]')
+    .filter(e => e.classList.contains('awaitleash'));
+  ck(asking.length === 0,
+     't36: the tile still asks for a leash call on a verdict that was undone');
+  ck(API.st().reserve.length === r0,
+     't36: reserve drifted to ' + API.st().reserve.length + ', want ' + r0);
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33,t34,t35,t36];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
@@ -1631,6 +1866,13 @@ def main():
         'normal': [crop(i, conf=round(0.95 - i * 0.05, 2)) for i in range(9)],
         'mixed': [crop(0, full=False), crop(1, full=True), crop(2, full=False),
                   crop(3, full=True), crop(4, full=True)],
+        # crops that already carry a verdict, for "Check my annotations".
+        # Both verdicts are present because the audit branch decides what a
+        # click means by comparing it with the one on record.
+        'annotated': [dict(crop(i, conf=round(0.9 - i * 0.05, 2)),
+                           label='true_positive' if i in (0, 3)
+                                 else 'false_positive')
+                      for i in range(4)],
         'hostile': [{
             'name': '1700000000000_x_090.jpg',
             'image_id': '"><script>alert(1)</script>',

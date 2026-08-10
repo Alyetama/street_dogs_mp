@@ -21,6 +21,21 @@ A ReferenceError (helper defined in another scope), a TypeError
 (null.toFixed) or any other throw fails the test. Also asserts the on/off
 panels toggle correctly and that innerHTML actually gets populated.
 
+Three panels model a binary where there are three cases, and each one has
+asserted the wrong half at some point, so each third state is now driven on
+its own: a gate stage that has written every planned shard is not one stopped
+at shard 82; an /api/detect that did not answer is not an idle sweep; and a
+run still training has not won on cost against one that finished. The rule
+that lets an element be hidden at all is derived here rather than listed for
+the same reason -- an author ``display:`` outranks the UA's ``[hidden]``, and
+``.swctl`` and ``.wrkeyi`` were each found by a person noticing.
+
+What a caller sees after nvidia-smi exits is driven too. It was not: this
+file called its own reset(), which sets the process to None, and then
+asserted the process was None, without ever calling _gpu() again. A check
+that passes against the broken code as readily as the fixed one certifies
+safety it never looked at, and that one sat over a live defect for months.
+
 Requires node on PATH; skips (exit 0, loud message) if absent.
 """
 
@@ -174,6 +189,101 @@ def check_whole_script(html):
         raise SystemExit('BUILT PAGE SCRIPT DOES NOT PARSE — every handler on '
                          'the dashboard is dead:\n' + p.stderr.strip()[:900])
     print('ok   whole inline script parses (%d chars)' % len(script))
+
+
+def check_no_shadowing(html):
+    """One name, one function: the inline script is a single scope.
+
+    Two `function copyText(t)` declarations 300 lines apart is legal
+    JavaScript. The later one silently wins everywhere, including inside the
+    earlier one's callers, and there is no error and no warning -- the page
+    carried exactly that pair, and the three icon-only copy buttons said
+    nothing on success and nothing on failure for as long as it lasted. The
+    substitution that builds this page pastes shared helpers (COPY_JS, LB_JS)
+    into a scope that already has its own, which is how it happens.
+    """
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    seen = {}
+    for m in re.finditer(r'^function ([A-Za-z_$][\w$]*)\s*\(', script, re.M):
+        seen.setdefault(m.group(1), []).append(script.count('\n', 0, m.start())
+                                               + 1)
+    dup = [f'{n}() declared {len(at)} times, at script lines {at} — the last '
+           f'one wins for every caller, including the earlier one\'s'
+           for n, at in sorted(seen.items()) if len(at) > 1]
+    if dup:
+        raise SystemExit('SHADOWED HELPERS: ' + ' | '.join(dup))
+    print(f'ok   {len(seen)} top-level helpers, each declared once')
+
+
+def check_copy_say(html):
+    """The icon-only copy buttons say whether the copy landed, either way.
+
+    All three are a glyph, so copyOnto() -- which writes "Copied" over the
+    button's own label -- is not available to them and the toast is the only
+    place they can speak. Driven with isSecureContext false, because that is
+    how this dashboard is served: navigator.clipboard does not exist on a
+    plain http origin, so the execCommand fallback is the only path anyone
+    using this page ever takes, and it is the one that can quietly fail.
+    """
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    fns = []
+    for name in ('copyText', 'copySay'):
+        m = re.search(r'^function %s\(' % name, script, re.M)
+        if not m:
+            raise SystemExit(f'{name}() is not a top-level helper of the '
+                             f'built script — the copy buttons have nothing '
+                             f'to call')
+        fns.append(_take_fn(script, m.start()))
+    drive = r'''
+'use strict';
+let said = [], left = 0, works = true;
+global.window = {isSecureContext: false};
+// node ships a real navigator, and it is a getter — defineProperty is the
+// only way to put the clipboard-less one of a plain http origin in its place
+Object.defineProperty(global, 'navigator', {value: {}, configurable: true});
+global.document = {
+  createElement: () => ({style: {}, setAttribute(){}, select(){},
+                         setSelectionRange(){}}),
+  body: {appendChild(){ left++ }, removeChild(){ left-- }},
+  execCommand: () => works,
+};
+function toast(t){ said.push(String(t)) }
+__FNS__
+const settle = () => new Promise(r => setImmediate(r));
+(async () => {
+  const bad = [];
+  copySay('Africa_west', 'Africa_west');
+  await settle(); await settle();
+  if (said.length !== 1)
+    bad.push('a copy that worked produced ' + said.length + ' messages: '
+      + JSON.stringify(said));
+  else if (!said[0].includes('Africa_west'))
+    bad.push('the button did not say what it copied: ' + JSON.stringify(said[0]));
+  const good = said[0];
+  said = []; works = false;
+  copySay('Africa_west', 'Africa_west');
+  await settle(); await settle();
+  if (said.length !== 1)
+    bad.push('a copy that FAILED produced ' + said.length + ' messages: '
+      + JSON.stringify(said) + ' — silence is indistinguishable from a '
+      + 'button that did nothing');
+  else if (said[0] === good)
+    bad.push('a failed copy says the same thing as one that worked: '
+      + JSON.stringify(said[0]));
+  if (left !== 0)
+    bad.push(left + ' off-screen textarea(s) left in the body');
+  if (bad.length) { bad.forEach(b => console.log('FAIL ' + b)); process.exit(1) }
+  console.log('ok   copy buttons speak on success and on failure');
+})();
+'''.replace('__FNS__', '\n'.join(fns))
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'copy.js')
+        with open(js, 'w', encoding='utf-8') as f:
+            f.write(drive)
+        r = subprocess.run(['node', js], capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    return r.returncode
 
 
 def check_markup(html):
@@ -497,15 +607,24 @@ require(process.argv[3]);          // helpers + IIFE; IIFE may call tick()
 const fs = require('fs');
 let src = fs.readFileSync(process.argv[3], 'utf8');
 src = src.replace(/\(function\(\)\{/, '').replace(/\}\)\(\);?\s*$/, '');
-let render;
-try {
-  render = new Function(src + '\nreturn render;')();
-} catch (e) {
-  console.log('FAIL: could not evaluate detect IIFE body: ' + e);
-  process.exit(1);
+// A fresh copy, because the panel's memory (lastJ, the remembered roster it
+// reads from localStorage at construction) is what several of these cases are
+// about, and a panel that has already seen a frame cannot show what the first
+// poll of the day looks like.
+function freshRender() {
+  try {
+    return new Function(src + '\nreturn render;')();
+  } catch (e) {
+    console.log('FAIL: could not evaluate detect IIFE body: ' + e);
+    process.exit(1);
+  }
 }
+const render = freshRender();
 
 for (const [name, p] of Object.entries(payloads)) {
+  // "the server did not answer" is neither running nor idle; it is driven
+  // below, where the frame BEFORE it is what the assertion is about
+  if (p === null || p.ever === false) continue;
   for (const id of ['detDrives', 'detRegions', 'detHealth', 'detErrs', 'detMeta'])
     els[id] && (els[id]._innerHTML = '');
   for (const id of ['dhPct', 'dhDone', 'dhEta', 'dhNow', 'dhSus', 'dhCount', 'dhRun'])
@@ -618,6 +737,24 @@ for (const [name, p] of Object.entries(payloads)) {
       }
       if (Object.keys(p.drives || {}).length && !drv.includes(DASH + ' img/s'))
         failures.push(name + ': per-drive img/s must dash when idle: ' + drv);
+      // Cumulative, both of these: an error tally and a classifier share are
+      // facts about work already done, and the moment you want them is the
+      // postmortem — a run killed mid-sweep left 64 decode errors with no
+      // state of the page in which they could be read.
+      const er = els['detErrs']._innerHTML,
+            errN = Object.values(p.errors || {}).reduce((a, b) => a + b, 0);
+      if (errN && !er.includes(errN + ' error'))
+        failures.push(name + ': ' + errN + ' errors on a stopped run render as '
+          + JSON.stringify(er) + ' — they count frames that already failed');
+      if (!errN && !/0 errors/.test(er))
+        failures.push(name + ': a stopped run with no errors does not say so: '
+          + JSON.stringify(er));
+      if (!(p.crops_classified || 0)
+          && !els['detHealth']._innerHTML.includes('classifier not wired'))
+        failures.push(name + ': the classifier line reads '
+          + JSON.stringify(els['detHealth']._innerHTML) + ' on a stopped run '
+          + '— what share of crops were classified outlives the run that '
+          + 'classified them');
     } else {
       if (off.style.display !== '')
         failures.push(name + ': idle status line not shown');
@@ -653,6 +790,77 @@ for (const [name, p] of Object.entries(payloads)) {
     console.log('FAIL ' + name + ' — ' + e);
   }
 }
+// ── unknown is not idle ───────────────────────────────────────────────────
+// A fetch that failed and a status document that is not there both say
+// NOTHING about the sweep, and painting either as "idle" redrew a finished
+// 32.5M-image harvest as "sweep idle · 0 of 17 complete": the remembered
+// region roster with every bar at zero and a header counting them as not
+// started. Via a missing status.json it does not self-correct on the next
+// poll — it is what the panel says from then on.
+(function () {
+  const R17 = ['Africa_west', 'Africa_east', 'Africa_south', 'Africa_north',
+    'Europe', 'Europe_east', 'South_Asia', 'Southeast_Asia', 'East_Asia',
+    'Central_Asia', 'Middle_East', 'North_America', 'Central_America',
+    'South_America', 'Oceania', 'Caribbean', 'Arctic'];
+  const snap = () => JSON.stringify(Object.keys(els).sort().map(k =>
+    [k, String(els[k].textContent), String(els[k]._innerHTML),
+     JSON.stringify(els[k].style)]));
+  for (const [tag, ans] of [['fetch failed', null],
+                            ['no status.json', {ever: false}],
+                            ['the route threw', {ever: false, error: 'boom'}]]) {
+    const R = freshRender();
+    R(payloads.finished_idle);
+    const held = snap(), reg = String(els['detRegHead'].textContent);
+    R(ans);
+    if (snap() !== held)
+      failures.push('unknown/' + tag + ': the panel repainted from an answer '
+        + 'that says nothing about the sweep. It has to hold the last good '
+        + 'frame, the way the machine and gate panels beside it do — region '
+        + 'header was ' + JSON.stringify(reg) + ', now '
+        + JSON.stringify(String(els['detRegHead'].textContent)));
+  }
+  // The first poll of the day: nothing to hold, and a roster remembered from
+  // the last visit. It may say it does not know; it may not read that roster
+  // as seventeen regions nobody has started.
+  const realGet = localStorage.getItem;
+  localStorage.getItem = () =>
+    JSON.stringify({ drives: ['lynx', 'bobcat'], regions: R17 });
+  const blank = () => Object.keys(els).forEach(k => {
+    els[k].textContent = ''; els[k]._innerHTML = '';
+  });
+  try {
+    blank();
+    const R = freshRender();
+    R(null);
+    const said = String(els['detOff'].textContent);
+    if (!said)
+      failures.push('unknown/first poll: the status line says nothing at all');
+    if (/idle/.test(said))
+      failures.push('unknown/first poll: "' + said + '" — no answer is not a '
+        + 'report that nothing is running');
+    if (/\d+ of \d+/.test(String(els['detRegHead'].textContent)))
+      failures.push('unknown/first poll: region header reads '
+        + JSON.stringify(els['detRegHead'].textContent)
+        + ' from a remembered roster and no answer');
+    // ...and the same roster under an idle document that carries no regions:
+    // the rows are drawn (dashed) so the panel does not jump, but a roster is
+    // not an answer about how much of it is done
+    blank();
+    const R2 = freshRender();
+    R2({ running: false, finished: true, state: 'stopped', age_s: 4269,
+         imgs_done: 32542334, imgs_total: 32542334, regions: {}, drives: {},
+         errors: {} });
+    if (/\d+ of \d+ complete/.test(String(els['detRegHead'].textContent)))
+      failures.push('idle/no regions: region header reads '
+        + JSON.stringify(els['detRegHead'].textContent) + ' — the count is a '
+        + 'count of what the payload said, and this one said nothing');
+  } finally {
+    localStorage.getItem = realGet;
+  }
+  console.log('ok   unknown holds the last good frame, and a remembered '
+    + 'roster is not a report');
+})();
+
 // ── the "Live detections" grid + lightbox: a second, independent IIFE ──
 let csrc = fs.readFileSync(process.argv[5], 'utf8');
 csrc = csrc.replace(/\(function\(\)\{/, '').replace(/\}\)\(\);?\s*$/, '');
@@ -1280,6 +1488,40 @@ def check_gate_panel(html, snips):
             'eta_s': 47798.5, 'model': 'dog-bin gate', 'images': 3292062,
             'images_done': 1045505, 'img_s': 45.6,
             'created': '2026-08-07 22:28:52', 'upstream': None},
+        # Every planned shard is on disk. That is a third state beside running
+        # and stopped-part-way, and the panel did not have it: a gate that had
+        # judged all 4,688,510 of its detections said "paused", offered
+        # "Resume", and put "3,292,062 frames to open" under a full bar
+        # reading 100.0%.
+        'gate_done': {
+            'ever': True, 'stage': 'gate', 'planned': True, 'running': False,
+            'can_run': True, 'done': True, 'rows': 4688510, 'total': 4688510,
+            'shards': 165, 'shards_total': 165, 'pct': 1.0,
+            'dog_share': 0.184, 'dogs': 862687, 'dogs_of': 4688510,
+            'rate': 0, 'sustained': 66.2, 'eta_s': None,
+            'model': 'dog-bin gate', 'images': 3292062, 'images_done': None,
+            'img_s': None, 'created': '2026-08-07 22:28:52', 'upstream': None},
+        # stopped at shard 82, which is what paused actually means
+        'gate_paused': {
+            'ever': True, 'stage': 'gate', 'planned': True, 'running': False,
+            'can_run': True, 'done': False, 'rows': 2330000, 'total': 4688510,
+            'shards': 82, 'shards_total': 165, 'pct': 0.4969,
+            'dog_share': 0.184, 'dogs': 428720, 'dogs_of': 2330000,
+            'rate': 0, 'sustained': 66.2, 'eta_s': None,
+            'model': 'dog-bin gate', 'images': 3292062, 'images_done': None,
+            'img_s': None, 'created': '2026-08-07 22:28:52', 'upstream': None},
+        # rows reaching the total is NOT the finish line, and deriving `done`
+        # from it here would put the finished state on a run with five shards
+        # still to write: `total` is the plan's estimate, and the runner's own
+        # test is the shards, which is why the server ships `done` at all.
+        'gate_rows_full_not_done': {
+            'ever': True, 'stage': 'gate', 'planned': True, 'running': False,
+            'can_run': True, 'done': False, 'rows': 4688510, 'total': 4688510,
+            'shards': 160, 'shards_total': 165, 'pct': 1.0,
+            'dog_share': 0.184, 'dogs': 862687, 'dogs_of': 4688510,
+            'rate': 0, 'sustained': 66.2, 'eta_s': None,
+            'model': 'dog-bin gate', 'images': 3292062, 'images_done': None,
+            'img_s': None, 'created': '2026-08-07 22:28:52', 'upstream': None},
         'null_response': None,
         # what the route returns when gate_progress throws: not a progress
         # document, so nothing on the cards may be read as a measurement
@@ -1367,9 +1609,56 @@ if (!els.gateBtn.disabled
 if (String(els.gateState.textContent) !== 'planning')
   bad.push('pill during planning reads '
     + JSON.stringify(els.gateState.textContent));
+// ── the finished stage, and the two states it must stay distinct from ──
+function fresh(p){
+  for (var k in els) { els[k].textContent=''; els[k].title='';
+                       els[k].disabled=false }
+  window.__stage = p.stage; paint(p);
+}
+fresh(P.gate_done);
+if (String(els.gateState.textContent) !== 'complete')
+  bad.push('a stage with every planned shard on disk reads '
+    + JSON.stringify(els.gateState.textContent) + ', not "complete"');
+if (!els.gateBtn.disabled || /Resume/.test(String(els.gateBtn.textContent)))
+  bad.push('a finished stage offers '
+    + JSON.stringify(els.gateBtn.textContent) + ' (disabled='
+    + els.gateBtn.disabled + ') — the runner skips every shard already '
+    + 'written, so the click starts a job that exits having done nothing, '
+    + 'and "Resume" names work that does not exist');
+if (!/nothing left to resume/.test(String(els.gateBtn.title)))
+  bad.push('the unavailable button does not say why: '
+    + JSON.stringify(els.gateBtn.title));
+if (String(els.gEta.textContent) !== 'complete')
+  bad.push('a finished stage reports an ETA of '
+    + JSON.stringify(els.gEta.textContent) + ', not "complete"');
+if (/frames to open/.test(String(els.gRun.textContent)))
+  bad.push('a finished stage still has frames to open: '
+    + JSON.stringify(els.gRun.textContent));
+if (!/frames opened/.test(String(els.gRun.textContent)))
+  bad.push('a finished stage does not say what it opened: '
+    + JSON.stringify(els.gRun.textContent));
+// stopped at shard 82 — every one of those readings has to flip back
+['gate_paused', 'gate_rows_full_not_done'].forEach(function (name) {
+  fresh(P[name]);
+  if (String(els.gateState.textContent) !== 'paused')
+    bad.push(name + ': an unfinished stage reads '
+      + JSON.stringify(els.gateState.textContent) + ', not "paused" — '
+      + 'shards ' + P[name].shards + ' of ' + P[name].shards_total
+      + ' are written');
+  if (els.gateBtn.disabled || !/Resume/.test(String(els.gateBtn.textContent)))
+    bad.push(name + ': there is work left and the button says '
+      + JSON.stringify(els.gateBtn.textContent) + ' (disabled='
+      + els.gateBtn.disabled + ')');
+  if (String(els.gEta.textContent) === 'complete')
+    bad.push(name + ': an unfinished stage reports "complete"');
+  if (!/frames to open/.test(String(els.gRun.textContent)))
+    bad.push(name + ': an unfinished stage says '
+      + JSON.stringify(els.gRun.textContent));
+});
 if (bad.length) { bad.forEach(function(b){ console.log('FAIL ' + b) });
   process.exit(1) }
-console.log('ok   gate panel: two stages, and an unplanned one says so');
+console.log('ok   gate panel: two stages, an unplanned one says so, and a '
+  + 'finished one is not a paused one');
 ''')
         r = subprocess.run(['node', js, json.dumps(payloads)],
                            capture_output=True, text=True)
@@ -1432,12 +1721,155 @@ def check_run_diff():
                     bad.append(f"{r['name']}: recall has no value at the best "
                                f"epoch, so the diff would fall back to a peak "
                                f"belonging to a different checkpoint")
+        # Every metric also reports the ceiling it reached. Only recall carried
+        # one, so a run whose precision touched 0.8431 was compared on the
+        # 0.7855 its promoted checkpoint happened to hold and read as further
+        # behind than it was.
+        for want in ('best recall at any epoch', 'best precision at any epoch',
+                     'best mAP50 at any epoch'):
+            if want not in html:
+                bad.append(f'the comparison omits "{want}" — the run is '
+                           f'reported below the best it ever scored')
+        # a ceiling without its epoch reads as one model's scorecard, and these
+        # peaks land on different epochs: no shipped checkpoint holds them all
+        cells = _diff_peak_cells(html)
+        for label, txt in cells.items():
+            if 'epoch' not in txt:
+                bad.append(f'"{label}" states a peak with no epoch beside it, '
+                           f'so it reads as a score some checkpoint held')
     if bad:
         for b in bad:
             print(f'FAIL {b}')
         return 1
     print('ok   run comparison: subtracts A from B, and shows what the model '
           'is shipped on')
+    return 0
+
+
+def _diff_peak_cells(html):
+    """{row label: both value cells} for every "best ... at any epoch" row."""
+    out = {}
+    for tr in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.S):
+        m = re.match(r'\s*<th>(.*?)</th>(.*)', tr, re.S)
+        if not m:
+            continue
+        label = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+        if not (label.startswith('best ')
+                and (label.endswith('at any epoch') or label == 'best mAP50-95')):
+            continue
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', m.group(2), re.S)
+        if len(cells) == 3:
+            out[label] = cells[0] + ' ' + cells[1]
+    return out
+
+
+def _diff_change_cells(html):
+    """{row label: the change cell} for a rendered comparison table."""
+    out = {}
+    for tr in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.S):
+        m = re.match(r'\s*<th>(.*?)</th>(.*)', tr, re.S)
+        if not m:
+            continue
+        cells = re.findall(r'<td[^>]*>.*?</td>', m.group(2), re.S)
+        if len(cells) == 3:
+            out[re.sub(r'<[^>]+>', '', m.group(1)).strip()] = cells[2]
+    return out
+
+
+def check_run_diff_live():
+    """A run that has not finished has not won on cost.
+
+    Its epoch count, the position of its peak and its wall clock are partial
+    totals, and against a finished run every one of them comes out smaller and
+    therefore green -- three of ten rows in the improvement colour on the one
+    screen a promotion is decided from. Every value is correct; only the
+    colour lies, which is why nothing downstream catches it.
+
+    Driven on runs made up here rather than whatever is on disk: the defect
+    needs one live run and one finished one, and which of those exist is a
+    fact about what the GPU happens to be doing.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+    try:
+        import dashboard as d
+    except ImportError as e:
+        print(f'SKIP: cannot import the dashboard ({e})')
+        return 0
+    bad = []
+    # the retrain, part way: behind on every metric, ahead on every cost
+    # simply because it has not paid all of it yet
+    live = {'project': 'dogdetection', 'name': 'dogdet_v3_002',
+            'dir': os.path.join(REPO, 'no', 'such', 'run'), 'task': 'detect',
+            'status': 'running', 'headline_key': 'mAP50-95',
+            'headline_label': 'mAP50-95', 'best_headline': 0.3699,
+            'epochs_done': 48, 'best_epoch': 41, 'secs_per_epoch': 1900.0,
+            'wall_clock_s': 91200.0, 'latest_val_loss': 1.20, 'curve': [],
+            'latest': [{'key': 'recall', 'at_best': 0.5500, 'peak': 0.5900},
+                       {'key': 'precision', 'at_best': 0.7100, 'peak': 0.74},
+                       {'key': 'mAP50', 'at_best': 0.6000, 'peak': 0.62}]}
+    done = dict(live, name='dogdet_v2_001', status='finished',
+                best_headline=0.4968, epochs_done=300, best_epoch=262,
+                secs_per_epoch=2100.0, wall_clock_s=630000.0,
+                latest_val_loss=1.05,
+                latest=[{'key': 'recall', 'at_best': 0.6800, 'peak': 0.7000},
+                        {'key': 'precision', 'at_best': 0.7600, 'peak': 0.78},
+                        {'key': 'mAP50', 'at_best': 0.7300, 'peak': 0.75}])
+    COST = ('epochs run', 'best epoch', 'wall clock')
+    keep = d.training_runs
+    try:
+        d.training_runs = lambda: [live, done]
+        rows = _diff_change_cells(
+            d.render_run_diff('dogdetection/dogdet_v3_002',
+                              'dogdetection/dogdet_v2_001'))
+        for label in COST:
+            cell = rows.get(label)
+            if cell is None:
+                bad.append(f'the comparison has no "{label}" row at all')
+            elif 'dup' in cell or 'ddn' in cell:
+                bad.append(f'"{label}" is painted {cell} against a run that '
+                           f'is still training — 48 epochs is not fewer than '
+                           f'300, it is 252 not yet run')
+        # ...but only the cost rows. A rate is comparable at any point, and a
+        # metric that went the wrong way still went the wrong way.
+        if 'dup' not in (rows.get('seconds per epoch') or ''):
+            bad.append(f'"seconds per epoch" lost its colour: '
+                       f'{rows.get("seconds per epoch")!r} — it is a rate, '
+                       f'and a rate is true of a run at any point in it')
+        if 'ddn' not in (rows.get('recall at best epoch') or ''):
+            bad.append(f'"recall at best epoch" lost its colour: '
+                       f'{rows.get("recall at best epoch")!r} — the retrain '
+                       f'really is behind on recall and the screen has to '
+                       f'say so')
+        html = d.render_run_diff('dogdetection/dogdet_v3_002',
+                                 'dogdetection/dogdet_v2_001')
+        if 'dwarn' not in html or 'dogdet_v3_002' not in html.split(
+                '<table')[0]:
+            bad.append('no note above the table naming the run that is still '
+                       'training, so the blank change cells look like missing '
+                       'data')
+        # and two finished runs are untouched: a guard that blanked every
+        # comparison would pass everything above and cost the table its point
+        d.training_runs = lambda: [dict(live, status='finished'), done]
+        rows = _diff_change_cells(
+            d.render_run_diff('dogdetection/dogdet_v3_002',
+                              'dogdetection/dogdet_v2_001'))
+        for label in COST:
+            cell = rows.get(label) or ''
+            if 'dup' not in cell and 'ddn' not in cell:
+                bad.append(f'two finished runs: "{label}" renders {cell!r} — '
+                           f'both totals are final and the comparison is the '
+                           f'whole point of the screen')
+        if 'dwarn' in d.render_run_diff('dogdetection/dogdet_v3_002',
+                                        'dogdetection/dogdet_v2_001'):
+            bad.append('two finished runs still carry the still-training note')
+    finally:
+        d.training_runs = keep
+    if bad:
+        for b in bad:
+            print(f'FAIL {b}')
+        return 1
+    print('ok   run comparison: a live run does not win on cost, and two '
+          'finished ones still compare')
     return 0
 
 
@@ -1542,24 +1974,51 @@ def check_machine_stats():
     def reset():
         d._GPU.update(proc=None, samples=None, meta={}, retry_at=0.0)
 
+    holds = []
+
     class FakeSmi:
-        """One nvidia-smi -l 1, as a finite stream of rows."""
+        """One nvidia-smi -l 1, as a stream of rows.
 
-        def __init__(self, rows):
-            self.stdout = iter(rows)
+        Given a `hold` the pipe stays open after the last row, which is what
+        the real one does -- it prints a line a second until something stops
+        it. Without one the stream ends, which is what a driver reset, an
+        unplugged eGPU or a killed nvidia-smi looks like from in here.
+        """
 
-    def feed(rows):
+        def __init__(self, rows, hold):
+            self.drained = threading.Event()
+            self.stdout = self._lines(rows, hold)
+
+        def _lines(self, rows, hold):
+            for r in rows:
+                yield r
+            # set after the reader has appended the last row, so a caller
+            # waiting on it is not racing the thread for the window
+            self.drained.set()
+            if hold is not None:
+                hold.wait(10)
+
+    def feed(rows, hold=None):
         reset()
-        d.subprocess.Popen = lambda *a, **k: FakeSmi(rows)
+        made = []
+        d.subprocess.Popen = lambda *a, **k: made.append(
+            FakeSmi(rows, hold)) or made[-1]
         try:
             d._gpu()                            # spawns and drains the reader
-            for _ in range(100):                # the reader is a thread
-                if d._GPU['samples'] and len(d._GPU['samples']) >= len(rows):
-                    break
-                time.sleep(0.01)
+            if made:
+                made[-1].drained.wait(5)
+                for _ in range(500):            # ...and, with no hold, exits
+                    if hold is not None or d._GPU['proc'] is None:
+                        break
+                    time.sleep(0.01)
             return d._gpu()
         finally:
             d.subprocess.Popen = real
+
+    def held():
+        """A pipe that stays open until this function is done with it."""
+        holds.append(threading.Event())
+        return holds[-1]
 
     # A single reading is not a measurement of a bursty workload. Measured on
     # a real run: forty zeroes and four bursts in twenty-two seconds, so a
@@ -1567,7 +2026,7 @@ def check_machine_stats():
     # card reads 0% forever. The headline has to be the window.
     burst = ['NVIDIA X, 0, 4103, 16303, 33, 40, 360'] * 9 + \
             ['NVIDIA X, 63, 4103, 16303, 35, 190, 360']
-    g = feed(burst) or {}
+    g = feed(burst, held()) or {}
     if g.get('util') is None or abs(g['util'] - 6.3) > 0.01:
         bad.append(f'gpu utilisation is {g.get("util")}, expected the 6.3% '
                    f'mean of the window — a point sample of this workload is '
@@ -1598,22 +2057,51 @@ def check_machine_stats():
     reset()
 
     # Rows that are not measurements: short, empty, or "[N/A]" throughout.
-    g = feed(['n/a, [N/A], , not supported', 'garbage', '', 'a,b'])
+    g = feed(['n/a, [N/A], , not supported', 'garbage', '', 'a,b'], held())
     if g and g.get('util') is not None:
         bad.append(f'"[N/A]" read as a measurement: {g}')
     # One field the driver will not answer for (power on a laptop card, temp
     # in a container) must cost that field, not the whole readout.
-    g = feed(['Card X, 74, 4103, 16303, 51, [N/A], [N/A]']) or {}
+    g = feed(['Card X, 74, 4103, 16303, 51, [N/A], [N/A]'], held()) or {}
     if g.get('util') != 74 or g.get('mem_total') != 16303:
         bad.append(f'an unsupported power reading took the whole card down '
                    f'with it: {g}')
     if g.get('power') is not None:
         bad.append(f'"[N/A]" power read as a number: {g.get("power")}')
-    # A card that goes away mid-run (driver reset, eGPU unplugged) closes the
-    # pipe; the panel must notice rather than serve the last frame forever.
-    reset()
+
+    # A card that goes away mid-run (driver reset, eGPU unplugged, nvidia-smi
+    # killed) closes the pipe. What a CALLER SEES after that is the whole
+    # point, and for a long time this asked the wrong question: it called its
+    # own reset(), which sets proc to None, and then asserted proc is None,
+    # without ever calling _gpu() again. A tautology passes against the broken
+    # code and the fixed code alike, and while it did, a dead reader's last
+    # frame was served as the live card for the whole 60 s back-off -- 90% and
+    # "gpu bound" in the header from a process that had already exited.
+    gone = feed(['NVIDIA X, 90, 4103, 16303, 61, 300, 360'] * 5)
+    if gone is not None:
+        bad.append(f'nvidia-smi exited and the panel still reports '
+                   f'{gone.get("util")}% from the window it left behind — a '
+                   f'reading has to belong to a reader that is still there')
     if d._GPU['proc'] is not None:
         bad.append('a closed nvidia-smi stream left a live process behind')
+    if d._GPU['retry_at'] <= time.time():
+        bad.append('a closed stream left no back-off — every request would '
+                   'fork a fresh nvidia-smi')
+    # The same claim by the route the back-off cannot reach: an nvidia-smi
+    # that wedges with its pipe open leaves `proc` set, so nothing respawns
+    # and nothing else would ever age its last window out.
+    stuck = feed(['NVIDIA X, 88, 4103, 16303, 60, 300, 360'] * 4, held()) or {}
+    if stuck.get('util') != 88:
+        bad.append(f'a live reader\'s own window was not reported: {stuck}')
+    d._GPU['samples'] = [(t - d.GPU_WINDOW - 5, u)
+                         for t, u in d._GPU['samples']]
+    if d._gpu() is not None:
+        bad.append(f'readings older than the {d.GPU_WINDOW} s window are still '
+                   f'served as "the card now" — they are the last half minute '
+                   f'the reader managed before it stopped answering')
+    for h in holds:
+        h.set()
+    reset()
     d.subprocess.Popen = real
 
     s = d.sys_stats()
@@ -1632,51 +2120,157 @@ def check_machine_stats():
     return 0
 
 
-def hidden_that_still_shows(html):
-    """[(selector, element)] the page hides in markup but styles into view.
+# Every start tag, and the two ways an element is named to CSS.
+_TAG = re.compile(r'<[a-z][a-z0-9]*\b[^<>]*>')
+# The attribute, not `aria-hidden` and not `overflow: hidden` in a style="".
+_HIDDEN_ATTR = re.compile(r'(?<![-\w:])hidden(?:=|[\s/>])')
+# document.getElementById('x'), el.querySelector('.y'), $('x') — every way
+# this page reaches an element it is going to toggle.
+_LOOKUP = (r"(?:[\w$.\[\]]*\.)?(?P<how>getElementById|querySelectorAll"
+           r"|querySelector)\(\s*'(?P<arg>[^']*)'\s*\)"
+           r"|(?P<dollar>\$)\(\s*'(?P<darg>[^']*)'\s*\)")
+
+
+def _el_tokens(tag):
+    """The #ids and .classes one start tag answers to."""
+    out = ['#' + m for m in re.findall(r'\bid="([^"]+)"', tag)]
+    return out + ['.' + c for a in re.findall(r'\bclass="([^"]+)"', tag)
+                  for c in a.split()]
+
+
+def _sel_tokens(sel):
+    """The tokens the ELEMENT itself must match: ".a .b" selects .b, not .a."""
+    return re.findall(r'[.#][A-Za-z0-9_-]+',
+                      re.split(r'[\s>+~,]+', sel.strip())[-1])
+
+
+def _lookup_tokens(m):
+    if m.group('dollar'):
+        return ['#' + m.group('darg')]
+    if m.group('how') == 'getElementById':
+        return ['#' + m.group('arg')]
+    return _sel_tokens(m.group('arg'))
+
+
+def hidden_that_still_shows(html, src=''):
+    """[(selector, why)] the page can hide but styles into view anyway.
 
     The UA's ``[hidden]{display:none}`` is the weakest rule there is: any
     author rule that names a display wins, so ``.swctl{display:flex}`` made
     ``<span class="swctl" hidden>`` fully visible. That put four buttons in
     the section header -- Resume sweep AND Run gate -- when only one stage was
-    on screen. This file already carries a dozen hand-written
-    ``.x[hidden]{display:none}`` rules for exactly that, which is the tell: it
-    is a rule everyone must remember, so nobody does. Checked, not remembered.
+    on screen. The page carries eighteen hand-written ``.x[hidden]{display:
+    none}`` rules for exactly that, which is the tell: it is a rule everyone
+    must remember, so nobody does.
+
+    They were found one at a time all the same -- ``.swctl`` by somebody
+    looking at the header, ``.wrkeyi`` by a review a year later -- because
+    this only ever asked about elements carrying a literal ``hidden`` in the
+    BUILT page. Two whole populations sat outside it. The first is markup the
+    server renders into the page rather than baking into it: the mistakes
+    panel's key line lives in a dashboard.py f-string and never appears in
+    index.html, which is why ``.wrkeyi`` was invisible here. The second is
+    every element the script toggles with ``el.hidden = ...`` and no attribute
+    in the markup at all -- ``.mapgate`` and ``.wrtile`` among them. So
+    "can be hidden" is derived now, from three sources, rather than listed:
+
+      * a ``hidden`` attribute on a tag, in the built body or in the source's
+        own fragments,
+      * ``NAME.hidden =`` / ``NAME.setAttribute('hidden'`` in the inline
+        script, with NAME resolved to the nearest lookup that named it (a
+        page-wide map would be wrong -- ``b`` is four different elements in
+        four different IIFEs),
+      * a callback parameter over a collection that was looked up the same
+        way, which is how the wrong-tile pager hides a page of them.
+
+    A hit is reported per ELEMENT, not per class: ``<button class="rbtn
+    maplock" hidden>`` is safe because ``.maplock[hidden]`` outranks
+    ``.rbtn{display:inline-flex}``, and demanding a guard on ``.rbtn`` itself
+    would be demanding it on every button on the page.
+
+    ``src`` is dashboard.py. The /review page's template is cut out of it --
+    that document has its own stylesheet and its own guard, and ``.chips`` is
+    a class on both pages with a display rule on only one.
     """
-    import re as _re
-    css = '\n'.join(_re.findall(r'<style[^>]*>(.*?)</style>', html, _re.S))
-    css = _re.sub(r'/\*.*?\*/', ' ', css, flags=_re.S)
-    shows, hides = set(), set()
-    for sel, decls in _re.findall(r'([^{}]+)\{([^{}]*)\}', css):
-        disp = _re.search(r'(?:^|;)\s*display\s*:\s*([a-z-]+)', decls)
-        for one in sel.split(','):
-            one = one.strip()
-            if not one:
-                continue
-            # the last simple-selector sequence is what the element itself
-            # must match; ".a .b" styles .b, not .a
-            leaf = _re.split(r'[\s>+~]+', one)[-1]
-            for tok in _re.findall(r'[.#][A-Za-z0-9_-]+', leaf):
-                if '[hidden]' in leaf and (disp and disp.group(1) == 'none'):
-                    hides.add(tok)
-                elif disp and disp.group(1) != 'none':
-                    shows.add(tok)
-    if _re.search(r'(?:^|[,}])\s*\[hidden\]\s*\{[^{}]*display\s*:\s*none',
-                  css):
+    css = '\n'.join(re.findall(r'<style[^>]*>(.*?)</style>', html, re.S))
+    css = re.sub(r'/\*.*?\*/', ' ', css, flags=re.S)
+    if re.search(r'(?:^|[,}])\s*\[hidden\]\s*\{[^{}]*display\s*:\s*none', css):
         return []                       # a global rule covers everything
-    body = html[html.index('</style>'):]
-    out = []
-    for tag in _re.findall(r'<[a-z][^>]*\shidden(?:=[^>]*)?>', body):
-        toks = ['#' + m for m in _re.findall(r'\bid="([^"]+)"', tag)]
-        toks += ['.' + c for a in _re.findall(r'\bclass="([^"]+)"', tag)
-                 for c in a.split()]
-        if any(t in hides for t in toks):
+    shows, hides = {}, set()
+    for sel, decls in re.findall(r'([^{}]+)\{([^{}]*)\}', css):
+        disp = re.search(r'(?:^|;)\s*display\s*:\s*([a-z-]+)', decls)
+        if not disp:
             continue
-        for t in toks:
-            if t in shows:
-                out.append((t, tag[:70]))
+        for one in sel.split(','):
+            if not one.strip():
+                continue
+            leaf = re.split(r'[\s>+~]+', one.strip())[-1]
+            for tok in re.findall(r'[.#][A-Za-z0-9_-]+', leaf):
+                if '[hidden]' in leaf and disp.group(1) == 'none':
+                    hides.add(tok)
+                elif disp.group(1) != 'none':
+                    shows.setdefault(tok, one.strip())
+
+    if 'REVIEW_HTML = r"""' in src:
+        i = src.index('REVIEW_HTML = r"""')
+        src = src[:i] + src[src.index('"""', i + 18) + 3:]
+    body = html[html.index('</style>'):]
+    els = [(_el_tokens(t), t) for t in _TAG.findall(body + '\n' + src)]
+    els = [e for e in els if e[0]]
+    hideable = [(tk, 'hidden in the markup: ' + tag.strip()[:70])
+                for tk, tag in els if _HIDDEN_ATTR.search(tag)]
+
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    named = {}
+    for m in re.finditer(r'(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*[^;,\n]*?(?:'
+                         + _LOOKUP + ')', script):
+        named.setdefault(m.group(1), []).append((m.start(), _lookup_tokens(m)))
+
+    def nearest(name, at):
+        """What NAME held where it was used. Nearest declaration above it, or
+        the first below when the use is inside a hoisted function."""
+        seen = named.get(name) or []
+        above = [tk for pos, tk in seen if pos < at]
+        return above[-1] if above else (seen[0][1] if seen else [])
+
+    for pat in (r'([A-Za-z_$][\w$]*)\.(?:forEach|map|filter)'
+                r'\(\s*function\s*\(\s*([A-Za-z_$][\w$]*)',
+                r'\[\]\.(?:forEach|map|filter)\.call\(\s*([A-Za-z_$][\w$]*)'
+                r'\s*,\s*function\s*\(\s*([A-Za-z_$][\w$]*)'):
+        for m in re.finditer(pat, script):
+            tk = nearest(m.group(1), m.start())
+            if tk:
+                named.setdefault(m.group(2), []).append((m.start(), tk))
+    for v in named.values():
+        v.sort()
+
+    unresolved = []
+    for m in re.finditer(r'(?<![\w$.])((?:[\w$.\[\]]*\.)?(?:getElementById|'
+                         r"querySelector)\(\s*'[^']*'\s*\)|\$\(\s*'[^']*'\s*\)"
+                         r"|[A-Za-z_$][\w$]*)\s*\."
+                         r"(?:hidden\s*=[^=]|setAttribute\(\s*'hidden')",
+                         script):
+        one = re.fullmatch(_LOOKUP, m.group(1))
+        got = _lookup_tokens(one) if one else nearest(m.group(1), m.start())
+        if not got:
+            unresolved.append(m.group(1))
+            continue
+        why = ('hidden by the script: '
+               + ' '.join(script[m.start():m.start() + 48].split()))
+        for tok in got:
+            for tk in [t for t, _ in els if tok in t] or [[tok]]:
+                hideable.append((tk, why))
+
+    out, seen = [], set()
+    for tk, why in hideable:
+        if any(t in hides for t in tk):
+            continue                    # one guarded class covers the element
+        for t in tk:
+            if t in shows and t not in seen:
+                seen.add(t)
+                out.append((t, f'{shows[t]} names a display; {why}'))
                 break
-    return out
+    return out, sorted(set(unresolved))
 
 
 def main():
@@ -1707,22 +2301,34 @@ def main():
             'so this run would grade the previous build. Rebuild first:\n'
             '  python tools/dashboard/dashboard.py build --no-refresh')
     html = open(INDEX, encoding='utf-8').read()
-    showing = hidden_that_still_shows(html)
+    showing, opaque = hidden_that_still_shows(
+        html, open(src, encoding='utf-8').read() if os.path.exists(src) else '')
     if showing:
-        for sel, tag in showing[:8]:
-            print(f'FAIL {sel} names a display, so [hidden] does not hide it: '
-                  f'{tag}\n     add {sel}[hidden]{{display:none}}')
+        for sel, why in showing[:8]:
+            print(f'FAIL {sel} stays on screen when the page hides it — '
+                  f'{why}\n     add {sel}[hidden]{{display:none}} beside the '
+                  f'rule that shows it')
         return 1
-    print('ok   every hidden element is actually hidden')
+    # Said out loud rather than swallowed: these are receivers the resolver
+    # could not follow back to a class, and every one of them is a hole in
+    # the check above.
+    print('ok   every element the page can hide is actually hidden'
+          + (f' ({len(opaque)} unresolved toggle(s): '
+             f'{", ".join(opaque)})' if opaque else ''))
     if check_machine_stats():
         return 1
     if check_progress_ramp():
         return 1
     if check_run_diff():
         return 1
+    if check_run_diff_live():
+        return 1
     if check_gate_panel(html, extract_snippets(html)):
         return 1
     check_whole_script(html)
+    check_no_shadowing(html)
+    if check_copy_say(html):
+        return 1
     check_markup(html)
     check_key_metrics()
     check_training_tracker()
@@ -1767,7 +2373,8 @@ def main():
                             'South_Asia': 0.0},
                 'positives': 1_200_000, 'positive_rate': 9.2,
                 'boxes_total': 1_500_000, 'crops_classified': 0,
-                'class_split': {}, 'errors': {},
+                'class_split': {}, 'errors': {'decode': 64},
+                'last_error': 'decode: 1049220049202801.jpg',
                 'started_at': '2026-08-05 11:00:00'},
             'degenerate_min': {'running': True, 'state': 'running'},
             # imgs_done is GLOBAL (all-time); run_imgs_done is this process

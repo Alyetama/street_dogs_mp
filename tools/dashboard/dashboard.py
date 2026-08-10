@@ -27,6 +27,7 @@ tools/detect/tests/adv_no_hardcoded_paths.py fails the build if that changes.
 """
 
 import argparse
+import atexit
 import collections
 import functools
 import glob
@@ -38,7 +39,6 @@ import shutil
 import subprocess
 import sys
 import signal
-import subprocess
 import threading
 import time
 from datetime import datetime
@@ -1113,15 +1113,15 @@ _detect_memo = {'t': 0.0, 'body': None}
 
 def detect_payload():
     """Sweep status for /api/detect, memoized 2 s under a lock so N open
-    tabs collapse to <=0.5 file reads/s (§7.2). Absent / stale (>120 s) /
-    unparsable all degrade to {'running': False} — the client's single
-    "sweep not running" state."""
+    tabs collapse to <=0.5 file reads/s (§7.2). Absent / unparsable degrade
+    to {'running': False, 'ever': False} — nothing is known, which is not the
+    same answer as an idle sweep and must not render as one."""
     with _detect_lock:
         now = time.monotonic()
         if _detect_memo['body'] is not None and now - _detect_memo['t'] < 2.0:
             return _detect_memo['body']
         if _read_detect_status is None:
-            body = {'running': False}
+            body = {'running': False, 'ever': False}
         else:
             try:
                 # Read the doc WHOLE, then decide what is still true. The
@@ -1132,6 +1132,13 @@ def detect_payload():
                 # Only the instantaneous fields go, because those would be
                 # lies about a process that is not running.
                 body = dict(_read_detect_status(stale_after=1e12) or {})
+                # A missing or unparsable status.json collapses to the same
+                # {'running': False} a genuinely idle sweep gets, and the
+                # panel drew that as "sweep idle -- 0 of 17 complete" over a
+                # finished 32.5M-image harvest: a claim it had no document to
+                # make. Only a real document carries an age, so that is what
+                # says one was read.
+                body['ever'] = 'age_s' in body
                 fresh = float(body.get('age_s') or 0) <= 120.0
                 live = fresh and str(body.get('state')) == 'running'
                 body['running'] = live
@@ -1139,8 +1146,13 @@ def detect_payload():
                     done = float(body.get('imgs_done') or 0)
                     total = float(body.get('imgs_total') or 0)
                     body['finished'] = bool(total and done >= total)
-                    # An ETA is a claim about a process, so it goes.
+                    # An ETA is a claim about a process, so it goes. So does
+                    # the GPU sample: it is one instantaneous reading taken at
+                    # the run's last publish, and left in it put "GPU 27%" on
+                    # the panel two days after that run stopped, against the
+                    # machine panel's live 86% three sections down the page.
                     body.pop('eta_s', None)
+                    body.pop('gpu', None)
                     # Per drive, done/total is work that HAPPENED and stays --
                     # dropping the whole block took the bars with it. The rate,
                     # the queue depth and the stall flag all describe a reader
@@ -1151,7 +1163,7 @@ def detect_payload():
                         if isinstance(v, dict)
                     }
             except Exception:
-                body = {'running': False}
+                body = {'running': False, 'ever': False}
         _detect_memo.update(t=now, body=body)
         return body
 
@@ -1432,11 +1444,14 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None):
                         except OSError:
                             pass
             # the two copies are independent: the full frame can survive the
-            # prune a beat longer than the crop, or vice versa
+            # prune a beat longer than the crop, or vice versa. And the source
+            # is the crop's own directory -- reading recent_crops alone left
+            # 368 harvested crops filed with copied:false and no picture.
+            src = crop_dir(name)
             got_crop = moved_crop or _copy_out(
-                os.path.join(CROPS, name), os.path.join(st['crops'], name))
+                os.path.join(src, name), os.path.join(st['crops'], name))
             got_full = moved_full or _copy_out(
-                os.path.join(CROPS, 'full', name),
+                os.path.join(src, 'full', name),
                 os.path.join(st['full'], name))
             rec = {'image_id': m.group(2),
                    'conf': round(int(m.group(3)) / 100.0, 2),
@@ -1723,6 +1738,10 @@ font-family:inherit;font-size:13px;line-height:1;padding:2px 5px;border-radius:9
 border-top:1px solid var(--bd)}
 .npanel[hidden]{display:none}
 .ngrp{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+/* trimGroups() hides a group whose every control is hidden, and it can only
+   do that if the attribute wins: a bare display:flex outranks the UA's
+   [hidden]{display:none}, so the heading over nothing stayed on screen */
+.ngrp[hidden]{display:none}
 .nlab{flex:none;width:118px;font-size:10.5px;letter-spacing:.055em;
 text-transform:uppercase;color:var(--dim)}
 .nrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;min-width:220px}
@@ -1947,6 +1966,9 @@ overflow:hidden;text-overflow:ellipsis}
 aspect-ratio:.78;animation:bre 1.5s ease-in-out infinite}
 @keyframes bre{0%,100%{opacity:.5}50%{opacity:.85}}
 .foot{display:flex;justify-content:center;align-items:center;gap:10px;padding:22px 0 0}
+/* one page, or none, hides the pager with the attribute -- and display:flex
+   beat it, so a queue with nothing left in it still offered Next */
+.foot[hidden]{display:none}
 
 /* ── undo: shows WHAT you discarded, and how long you have ──
    Anchored bottom-RIGHT, not bottom-centre: the pager is centred, and a
@@ -3019,8 +3041,11 @@ function flag(i,viaKey,label){
         if(j.flagged_total!=null)flaggedN=j.flagged_total;
         if(j.positive_total!=null)posN=j.positive_total;
         score();
-        toast(undo?'annotation removed \u2014 back in the queue':
-              'changed to '+(label==='true_positive'?'a dog':'not a dog'));
+        /* leashNote, not toast: this page has no toast(). The audit branch is
+           the only caller that reached for one, so every verdict changed here
+           threw a ReferenceError into an empty catch and confirmed nothing. */
+        leashNote(undo?'annotation removed \u2014 back in the queue':
+                  'changed to '+(label==='true_positive'?'a dog':'not a dog'));
      }).catch(function(){delete busy[c.name]});
   }
   /* "Is a dog" is the point at which a leash call becomes askable, so the
@@ -3053,7 +3078,7 @@ function flag(i,viaKey,label){
           card.classList.add('awaitleash');
         }
         if(!viaKey)sel=-1; else mark();
-        showUndo(c,i,false,label);
+        showUndo(c,i,false,label,true);
         return;
       }
       /* Surgical removal + backfill: the rest of the grid does not re-render,
@@ -3070,11 +3095,18 @@ function flag(i,viaKey,label){
 }
 
 /* ── undo ───────────────────────────────────────────────────────────────── */
-function showUndo(c,at,pulled,label){
+function showUndo(c,at,pulled,label,held){
   /* `pulled` records whether the flag consumed a crop from `reserve` to keep
      the grid full; undo has to hand that one back or the page grows on every
-     flag/undo cycle */
-  lastUndo={crop:c,at:at,pulled:pulled,label:label||'false_positive'};
+     flag/undo cycle.
+
+     `held` records the other shape: the leash hold deliberately leaves the
+     crop on the grid, so there is nothing to give back and nothing to
+     re-insert. Undo assumed every verdict had removed its tile, so undoing a
+     held one put a second copy in `items` and a second tile on the grid, both
+     lit for a record the server had just deleted. */
+  lastUndo={crop:c,at:at,pulled:pulled,label:label||'false_positive',
+            held:!!held};
   var t=$('tbox');
   if(!t){t=document.createElement('div');t.className='toast';t.id='tbox';
     document.body.appendChild(t)}
@@ -3109,11 +3141,25 @@ function undo(){
         var lastEl=g.children[g.children.length-1];
         if(lastEl)g.removeChild(lastEl);
       }
-      /* back where it was, not at the front: the eye is still on that spot */
-      var at=Math.min(u.at,items.length);
-      if(!items.length)$('state').innerHTML='';
-      items.splice(at,0,u.crop);
-      g.insertBefore(tile(u.crop),g.children[at]||null);
+      var at;
+      if(u.held){
+        /* the tile never left: take the verdict back off the one already
+           there rather than adding another */
+        u.crop.label=null;
+        at=idx(u.crop.name);
+        var hel=cardAt(at);
+        if(hel){
+          hel.classList.remove('awaitleash');
+          var hy=hel.querySelector('.fbtn.yes');
+          if(hy)hy.classList.remove('on');
+        }
+      }else{
+        /* back where it was, not at the front: the eye is still on that spot */
+        at=Math.min(u.at,items.length);
+        if(!items.length)$('state').innerHTML='';
+        items.splice(at,0,u.crop);
+        g.insertBefore(tile(u.crop),g.children[at]||null);
+      }
       session=Math.max(0,session-1);
       if(sel>=0)sel=at;   /* don't invent a selection for a mouse user */
       todoN++;
@@ -3519,6 +3565,11 @@ document.addEventListener('keydown',function(e){
    when you leave was looked at and kept. Recorded by image_id, so a cell twin
    of the same photo cannot reappear later either. */
 function markSeen(){
+  /* auditing pages through a fixed list -- there is nothing to bank, the same
+     reason go(d) has. And banking it is not merely useless: a crop whose
+     annotation was just removed is back in the queue by the promise the
+     button makes, and this would retire it unjudged and unreachable. */
+  if(mode==='audit')return Promise.resolve();
   var names=items.map(function(c){return c.name});
   if(!names.length)return Promise.resolve();
   return fetch('/api/review/seen',{method:'POST',
@@ -3530,7 +3581,7 @@ function markSeen(){
 }
 /* leaving the tab counts too -- sendBeacon survives unload where fetch does not */
 window.addEventListener('pagehide',function(){
-  if(!items.length||!navigator.sendBeacon)return;
+  if(mode==='audit'||!items.length||!navigator.sendBeacon)return;
   try{
     navigator.sendBeacon('/api/review/seen',
       new Blob([JSON.stringify({names:items.map(function(c){return c.name})})],
@@ -5181,21 +5232,40 @@ def render_run_diff(a_key, b_key):
         return '<div class="mnone">Pick two different runs to compare.</div>'
 
     rows = []
+    # A run that is still training has not won on cost. Its epoch count, the
+    # position of its peak and its wall clock are partial totals, and against a
+    # finished run every one of them comes out smaller and therefore green --
+    # three of ten rows in the improvement colour on the screen a promotion is
+    # decided from. The values are true and stay; the comparison does not.
+    live = [r for r in (a, b) if r.get('status') == 'running']
 
     def line(label, av, bv, fmt=None, digits=4, higher_better=True,
-             hint=''):
-        def cell(v):
+             hint='', partial=False, notes=(None, None)):
+        def cell(v, note=None):
             if v is None:
                 return '<td class="dnum dmid">&mdash;</td>'
-            return f'<td class="dnum">{fmt(v) if fmt else v}</td>'
-        rows.append(f'<tr{_t(hint)}><th>{label}</th>{cell(av)}{cell(bv)}'
-                    f'{_delta(av, bv, digits, higher_better, fmt)}</tr>')
+            # a peak belongs to an epoch, and two runs peak at different ones;
+            # without the epoch beside it the row reads as one model's score
+            tag = f'<em>{esc_html(str(note))}</em>' if note else ''
+            return f'<td class="dnum">{fmt(v) if fmt else v}{tag}</td>'
+        chg = ('<td class="dnum dmid">&mdash;</td>' if partial and live
+               else _delta(av, bv, digits, higher_better, fmt))
+        rows.append(f'<tr{_t(hint)}><th>{label}</th>'
+                    f'{cell(av, notes[0])}{cell(bv, notes[1])}{chg}</tr>')
 
+    am = {m['key']: m for m in (a.get('latest') or [])}
+    bm = {m['key']: m for m in (b.get('latest') or [])}
     same_metric = a.get('headline_key') == b.get('headline_key')
     mlabel = a.get('headline_label') or 'headline metric'
+    # by label, not by headline_key: the key is the raw csv column
+    # ('metrics/mAP50-95(B)') and the metric table is keyed by the short name
+    ah = am.get(a.get('headline_label')) or {}
+    bh = bm.get(b.get('headline_label')) or {}
     line(f'best {esc_html(mlabel)}' if same_metric else 'best (differing metric)',
          a.get('best_headline'), b.get('best_headline'),
          fmt=lambda v: f'{v:.4f}', digits=4,
+         notes=(f'epoch {ah["peak_epoch"]}' if ah.get('peak_epoch') else None,
+                f'epoch {bh["peak_epoch"]}' if bh.get('peak_epoch') else None),
          hint='The peak the run reached, not where it finished.')
     # Every metric the run recorded, not just the one that picks the
     # checkpoint. A detector is promoted on mAP but SHIPPED on recall -- a
@@ -5204,8 +5274,6 @@ def render_run_diff(a_key, b_key):
     # retrain was for. Reported at each run's BEST-FITNESS epoch, because
     # that is the checkpoint that would be promoted; the peak of a metric at
     # some other epoch belongs to a model nobody would ship.
-    am = {m['key']: m for m in (a.get('latest') or [])}
-    bm = {m['key']: m for m in (b.get('latest') or [])}
     for key in [k for k in ('recall', 'precision', 'mAP50')
                 if k in am or k in bm]:
         hint = {'recall': 'Of the dogs really there, the share it found. The '
@@ -5218,27 +5286,50 @@ def render_run_diff(a_key, b_key):
              (am.get(key) or {}).get('at_best'),
              (bm.get(key) or {}).get('at_best'),
              fmt=lambda v: f'{v:.4f}', digits=4, hint=hint)
-    # and the ceiling each run reached, which is what a longer or better-timed
-    # run could have been promoted on
-    for key in [k for k in ('recall',) if k in am or k in bm]:
+    # and the ceiling each run reached. Only recall carried one of these, which
+    # read as a run scoring worse than it ever had: a run whose precision
+    # touched 0.8393 at epoch 64 was reported at the 0.7855 its promoted
+    # checkpoint happened to hold, and nothing on the screen said otherwise.
+    # Every metric gets its ceiling, and every ceiling names its epoch --
+    # because these four peaks land on four different epochs and no single
+    # checkpoint holds them all. The at-best-epoch rows above are the model
+    # that would actually ship; these are the ceilings it was drawn from.
+    for key in [k for k in ('recall', 'precision', 'mAP50')
+                if k in am or k in bm]:
+        ap, bp = am.get(key) or {}, bm.get(key) or {}
+        if ap.get('peak') is None and bp.get('peak') is None:
+            continue
         line(f'best {key} at any epoch',
-             (am.get(key) or {}).get('peak'), (bm.get(key) or {}).get('peak'),
+             ap.get('peak'), bp.get('peak'),
              fmt=lambda v: f'{v:.4f}', digits=4,
-             hint='The highest this metric ever reached, which may be a '
-                  'different epoch from the promoted one.')
+             notes=(f'epoch {ap["peak_epoch"]}' if ap.get('peak_epoch') else None,
+                    f'epoch {bp["peak_epoch"]}' if bp.get('peak_epoch') else None),
+             hint='The highest this metric ever reached, and when. A different '
+                  'epoch from the promoted one means no shipped checkpoint '
+                  'ever held this number.')
     line('epochs run', a.get('epochs_done'), b.get('epochs_done'),
-         digits=0, higher_better=False,
+         digits=0, higher_better=False, partial=True,
          hint='More epochs is not better; it is what the run cost.')
     line('best epoch', a.get('best_epoch'), b.get('best_epoch'), digits=0,
-         higher_better=False,
+         higher_better=False, partial=True,
          hint='How early the peak arrived. Earlier is cheaper.')
     line('seconds per epoch', a.get('secs_per_epoch'), b.get('secs_per_epoch'),
          fmt=lambda v: _hms(v), digits=1, higher_better=False)
     line('wall clock', a.get('wall_clock_s'), b.get('wall_clock_s'),
-         fmt=lambda v: _hms(v), digits=0, higher_better=False)
+         fmt=lambda v: _hms(v), digits=0, higher_better=False, partial=True)
     line('final validation loss', a.get('latest_val_loss'),
          b.get('latest_val_loss'), fmt=lambda v: f'{v:.4f}', digits=4,
          higher_better=False)
+
+    live_note = ''
+    if live:
+        live_note = ('<div class="dwarn">'
+                     + esc_html(' and '.join(r['name'] for r in live))
+                     + (' is' if len(live) == 1 else ' are')
+                     + ' still training. Every figure below is true as of '
+                       'now, but the cost rows are a snapshot rather than a '
+                       'total, so their change is left blank rather than '
+                       'reported as a saving.</div>')
 
     metric_note = ''
     if not same_metric:
@@ -5289,7 +5380,7 @@ def render_run_diff(a_key, b_key):
             f'<b>{esc_html(a_key)} &nbsp;vs&nbsp; {esc_html(b_key)}</b>'
             f'<button type="button" class="rbtn quiet tback" id="trkBack">'
             f'&larr; back to the live run</button></div>'
-            f'{metric_note}'
+            f'{live_note}{metric_note}'
             f'<table class="dtab"><thead><tr><th></th>'
             f'<th class="dnum">{esc_html(a["name"])}</th>'
             f'<th class="dnum">{esc_html(b["name"])}</th>'
@@ -5335,6 +5426,9 @@ def flagged_now():
 # two of CPU, and a run that fails to score should not be retried on every
 # render of its own panel.
 MISS_RETRY_S = 900
+# key -> (when it was last tried, the process, or None if none ever started).
+# The process is kept because "in flight" and "fell over" are different things
+# to say, and holding only the timestamp made them the same one.
 _MISS_TRIED = {}
 
 
@@ -5414,23 +5508,37 @@ def mistakes_topup(r):
     if not py or not os.path.exists(script):
         return False
     now = time.time()
-    if now - _MISS_TRIED.get(key, 0) < MISS_RETRY_S:
+    if now - _MISS_TRIED.get(key, (0.0, None))[0] < MISS_RETRY_S:
         return False
-    _MISS_TRIED[key] = now
+    # stamped BEFORE the spawn, so a Popen that raises is still a try and the
+    # panel does not fork one per render
+    _MISS_TRIED[key] = (now, None)
     try:
         log = open(os.path.join(REPO, 'data', 'mistakes_run.log'), 'a')
-        _SPAWNED.append(subprocess.Popen(
+        proc = subprocess.Popen(
             [py, script, '--run', key, '--root', training_root()],
             cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-            start_new_session=True))
+            start_new_session=True)
+        _SPAWNED.append(proc)
+        _MISS_TRIED[key] = (now, proc)
         return True
     except Exception:
         return False
 
 
 def mistakes_pending(key):
-    """Is a scoring run for this key still in flight?"""
-    return (time.time() - _MISS_TRIED.get(key, 0)) < MISS_RETRY_S
+    """Is a scoring run for this key still in flight?
+
+    A scorer that exited non-zero -- an interpreter without ultralytics dies on
+    the import in under a second -- is not in flight, it is finished and it
+    failed. Answering yes for the whole retry window made those two states the
+    same sentence, so the panel said 'scoring it now, reload in a minute'
+    forever and the line naming the command to run by hand was unreachable.
+    """
+    at, proc = _MISS_TRIED.get(key, (0.0, None))
+    if not at or proc is None:
+        return False
+    return proc.poll() in (None, 0) and (time.time() - at) < MISS_RETRY_S
 
 
 def _mistake_path(key):
@@ -6051,19 +6159,52 @@ def _gate_shards(stage='gate'):
     seen = rows
     times = sorted(v[0] for v in files.values())
     total = int(plan.get('rows') or 0)
+    images = int(plan.get('images') or 0)
+    # The runner shards by IMAGE and skips any shard index whose file is
+    # already there, so "every planned shard exists" is the same test it uses
+    # to decide there is nothing left to do. Rows are not that test: a frame it
+    # could not decode, or a drive that dropped mid-run, leaves a shard a few
+    # rows short that no rerun can ever top up -- and two missing rows out of
+    # 4.7M then blocked the leash stage forever while the panel read 100.0%.
+    # The size is whatever the job pinned on its first run; the plan's value is
+    # the fallback for a job written before that pin existed.
+    try:
+        with open(os.path.join(d, 'shard_size')) as fh:
+            per_shard = int(fh.read().strip())
+    except (OSError, ValueError):
+        per_shard = int(plan.get('shard_rows') or 0)
+    shards_total = -(-images // per_shard) if images and per_shard else 0
     # rate from the shard timestamps: the run writes one every few minutes,
     # so the last handful is a real recent throughput and not a lifetime mean
     rate = sus = 0.0
     per = (rows / len(files)) if files else 0
     if len(times) >= 2:
-        sus = per * (len(times) - 1) / max(1e-9, times[-1] - times[0])
+        # Measured over the gaps BETWEEN shards, not first-to-last mtime.
+        # Stop/Resume is an ordinary workflow here -- the gate shares the GPU
+        # with training, so an overnight stop is the usual reason to press it
+        # -- and spanning the whole run counted those hours as working time:
+        # after a 12 h pause the ETA card read 22 h for work with 10 h left.
+        # A gap far longer than the usual one is a pause, so it and the shard
+        # that closed it are dropped rather than averaged in.
+        gaps = sorted(b - a for a, b in zip(times, times[1:]))
+        typical = gaps[len(gaps) // 2]
+        kept = [g for g in gaps if 0 < g <= 5 * typical]
+        if kept:
+            sus = per * len(kept) / sum(kept)
         k = min(len(times) - 1, 5)
-        rate = per * k / max(1e-9, times[-1] - times[-1 - k])
+        span = times[-1] - times[-1 - k]
+        if span > 0:
+            rate = per * k / span
     doc = {'rows': rows, 'total': total, 'shards': len(files),
+           'shards_total': shards_total,
+           # a plan too old to say how many shards it wants falls back to the
+           # row test, which is what this was before
+           'done': (len(files) >= shards_total if shards_total
+                    else bool(total) and rows >= total),
            'dogs': dogs, 'seen': seen, 'last': times[-1] if times else 0.0,
            'rate': rate, 'sustained': sus,
            'model': plan.get('model') or 'dog-bin gate',
-           'images': int(plan.get('images') or 0),
+           'images': images,
            'created': plan.get('created') or ''}
     memo.update(at=now, doc=doc)
     return doc
@@ -6108,10 +6249,12 @@ def gate_upstream(stage):
     s = _gate_shards(up)
     if s is None:
         return {'stage': up, 'title': GATE_STAGES[up]['title'],
-                'rows': 0, 'total': 0, 'ready': False}
+                'rows': 0, 'total': 0, 'shards': 0, 'shards_total': 0,
+                'ready': False}
     return {'stage': up, 'title': GATE_STAGES[up]['title'],
             'rows': s['rows'], 'total': s['total'],
-            'ready': bool(s['total']) and s['rows'] >= s['total']}
+            'shards': s['shards'], 'shards_total': s['shards_total'],
+            'ready': s['done']}
 
 
 def gate_progress(stage='gate'):
@@ -6151,7 +6294,12 @@ def gate_progress(stage='gate'):
     return {'ever': bool(shards['shards']) or total > 0,
             'stage': stage, 'planned': True, 'upstream': up,
             'running': bool(beat) or warm,
+            # every planned shard is on disk: the stage is finished, which is
+            # not the same as one stopped at shard 82 even though both have
+            # no process behind them
+            'done': shards['done'],
             'rows': rows, 'total': total, 'shards': shards['shards'],
+            'shards_total': shards['shards_total'],
             'pct': (rows / total) if total else 0,
             'dog_share': (dogs / seen) if seen else None,
             # the two numbers the share is made of: a percentage alone cannot
@@ -6440,13 +6588,23 @@ def _gpu_reader(proc):
                             'power_max': _num_or(f[6], None)}
             u = _num_or(f[1], None)
             if u is not None and _GPU['samples'] is not None:
-                _GPU['samples'].append(u)
+                # stamped, because "the last thirty readings" is only the last
+                # half minute while they keep arriving -- an nvidia-smi that
+                # wedges with its pipe open leaves `proc` set, so nothing here
+                # respawns and nothing else could age the window out
+                _GPU['samples'].append((time.time(), u))
     except Exception:
         pass
     finally:
         with _GPU['lock']:
             if _GPU['proc'] is proc:
                 _GPU['proc'] = None
+                # the window goes with the process it was read from. Left
+                # behind, a dead reader's last frame was served as the live
+                # card for the whole back-off -- 90% util and "gpu bound" in
+                # the header from an nvidia-smi that had already exited
+                _GPU['samples'] = None
+                _GPU['meta'] = {}
                 _GPU['retry_at'] = time.time() + GPU_RETRY_S
 
 
@@ -6549,7 +6707,10 @@ def _gpu():
     """The card over the last half minute. None when there is no card or no
     driver -- a machine without one is not a broken dashboard."""
     _gpu_start()
-    s = list(_GPU['samples'] or ())
+    now = time.time()
+    # readings older than the window are not "the last half minute", they are
+    # the last half minute the reader managed before it stopped answering
+    s = [u for t, u in list(_GPU['samples'] or ()) if now - t <= GPU_WINDOW]
     if not _GPU['meta'] or not s:
         return None
     doc = dict(_GPU['meta'])
@@ -7263,6 +7424,12 @@ def hq_crop(name):
         if abs(b['conf'] - want) <= 0.006:
             box = b
             break
+    # one temp name per writer: the browser prefetches four at a time over the
+    # same names warm_hq is cutting, and on a shared '<name>.part' the second
+    # os.replace hit a file the first had already moved -- hq_crop returned
+    # None, the handler 404'd, and the tile was judged at the 160px preview for
+    # the rest of the page's life
+    tmp = '%s.%d.%d.part' % (out, os.getpid(), threading.get_ident())
     try:
         from PIL import Image
         im = Image.open(info['path'])
@@ -7276,17 +7443,42 @@ def hq_crop(name):
         if max(r.size) > HQ_MAX:
             r.thumbnail((HQ_MAX, HQ_MAX), Image.LANCZOS)
         os.makedirs(HQ_DIR, exist_ok=True)
-        tmp = out + '.part'
         r.save(tmp, 'JPEG', quality=92, optimize=True)
         os.replace(tmp, out)
         return out
     except Exception as e:
+        # the prune below leaves .part names alone now, so a half-written temp
+        # would sit in the cache dir forever if nobody dropped it here
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         sys.stderr.write('hq_crop(%s): %s\n' % (name, e))
         return None
 
 
 _hq_lock = threading.Lock()
 _hq_busy = False
+# The warmer outlives the request that started it, which is the point -- but it
+# must not outlive the interpreter. A daemon thread holding a half-read parquet
+# when the process exits takes duckdb's static teardown down with it: every
+# check passes, the summary prints, and then the run dies of SIGABRT on
+# `TProtocolException: Invalid data`, so the exit code says failure about work
+# that succeeded. Rare on a server that never exits; near-certain in a script
+# that imports this module, builds one review page and returns.
+_hq_stop = threading.Event()
+_hq_thread = None
+
+
+def _hq_shutdown():
+    """Ask the warmer to stop, and give it a moment to notice."""
+    _hq_stop.set()
+    t = _hq_thread
+    if t is not None and t.is_alive():
+        t.join(timeout=2.0)
+
+
+atexit.register(_hq_shutdown)
 
 
 def warm_hq(names):
@@ -7312,26 +7504,44 @@ def warm_hq(names):
         global _hq_busy
         try:
             for n in todo:
+                if _hq_stop.is_set():
+                    return
                 try:
                     hq_crop(n)
                 except Exception:
                     pass
+            if _hq_stop.is_set():
+                return
             # drop cached cuts whose crop has aged out of the rolling pool --
-            # the preview writer prunes recent_crops, nothing pruned this
+            # the preview writer prunes recent_crops, nothing pruned this.
+            # every directory the queue serves counts as "still live": pruning
+            # against recent_crops alone deleted each harvested crop's cut in
+            # the same pass that made it, so 37% of the queue was permanently
+            # cold and re-decoded a 12 MP original on every page turn
+            pool = set()
+            for d in (CROPS, review_extra_dir()):
+                try:
+                    pool |= set(os.listdir(d))
+                except OSError:
+                    pass
             try:
-                pool = set(os.listdir(CROPS))
-                for f in os.listdir(HQ_DIR):
-                    if f not in pool:
-                        try:
-                            os.remove(os.path.join(HQ_DIR, f))
-                        except OSError:
-                            pass
+                cached = os.listdir(HQ_DIR) if pool else []
             except OSError:
-                pass
+                cached = []
+            for f in cached:
+                # an in-flight '<name>.jpg.<pid>.<tid>.part' is a writer's
+                # temp, never a pool name -- removing it 404'd the tile
+                if f not in pool and not f.endswith('.part'):
+                    try:
+                        os.remove(os.path.join(HQ_DIR, f))
+                    except OSError:
+                        pass
         finally:
             _hq_busy = False
 
-    threading.Thread(target=work, daemon=True).start()
+    global _hq_thread
+    _hq_thread = threading.Thread(target=work, daemon=True)
+    _hq_thread.start()
 
 
 def _saved_box(name):
@@ -7737,6 +7947,22 @@ def review_pool_names():
     return out
 
 
+def crop_dir(name):
+    """Which of the queue's directories a crop file is actually in.
+
+    Everything that copies a crop out at verdict time has to ask. Naming
+    recent_crops alone was right for the rolling pool and wrong for every
+    harvested crop, which is not a race but a certainty: the copy simply never
+    happened, and the verdict was recorded anyway with no image beside it.
+
+    Falls back to the pool, which is where a crop that has just aged out was.
+    """
+    for d in (CROPS, review_extra_dir()):
+        if d and os.path.exists(os.path.join(d, name)):
+            return d
+    return CROPS
+
+
 # ── crops too small for anyone to judge ─────────────────────────────────────
 # /hq cuts each tile from the ORIGINAL at native box resolution, so what the
 # reviewer sees is the box's true pixel size. A 17x15 box in a 1920x1080 frame
@@ -7746,8 +7972,8 @@ def review_pool_names():
 # detector NEGATIVE, teaching it to miss a dog it did find.
 #
 # Off by default (0). A fresh clone behaves exactly as before.
-_SZ = {'at': 0.0, 'by_key': {}}
-SZ_TTL = 240          # the pool turns over every ~4 minutes
+_SZ = {'by_key': {}, 'lock': threading.Lock()}
+SZ_MAX = 50000        # ten times the live queue; a refill needs only the pool
 
 
 def min_review_px():
@@ -7762,31 +7988,41 @@ def box_short_sides(keys):
     detection everywhere else in this file -- an image with a big box and a
     tiny one must not have the tiny crop judged by the big box's size.
     """
-    now = time.time()
-    if now - _SZ['at'] > SZ_TTL:
-        _SZ['by_key'].clear()
-        _SZ['at'] = now
-    want = [k for k in keys if k not in _SZ['by_key']]
-    if want:
-        ids = sorted({i for i, _ in want if _ID_RE.match(i)})
-        if ids:
-            try:
-                _, det = _detect_sql()
-                lst = ','.join("'" + i + "'" for i in ids)
-                con = duckdb.connect()
-                rows = con.execute(
-                    f"SELECT CAST(image_id AS VARCHAR), "
-                    f"CAST(round(conf * 100) AS INT), "
-                    f"min(least(x2 - x1, y2 - y1)) "
-                    f"FROM {det} WHERE CAST(image_id AS VARCHAR) IN ({lst}) "
-                    f"GROUP BY 1, 2").fetchall()
-                con.close()
-                for iid, c2, side in rows:
-                    _SZ['by_key'][(iid, int(c2))] = float(side)
-            except Exception:
-                # the store is the source; if it cannot be read the floor
-                # simply does not apply. Never drop a crop on a failed lookup.
-                pass
+    # A box's short side is a fact about a frame that was decoded once: it
+    # cannot go stale, so the cache is bounded by size rather than by age. The
+    # wall-clock wipe was pure loss -- `at` was refreshed only when it fired,
+    # so a header polling the queue depth every 30 s paid a full scan of the
+    # detection store every fourth minute for the life of the server.
+    #
+    # One scan at a time, too: this is seconds of multi-core duckdb against the
+    # drives the sweep is already reading, and concurrent callers were each
+    # paying it in full for the same answer. The second one waits and then
+    # finds the cache filled.
+    with _SZ['lock']:
+        if len(_SZ['by_key']) > SZ_MAX:
+            _SZ['by_key'].clear()
+        want = [k for k in keys if k not in _SZ['by_key']]
+        if want:
+            ids = sorted({i for i, _ in want if _ID_RE.match(i)})
+            if ids:
+                try:
+                    _, det = _detect_sql()
+                    lst = ','.join("'" + i + "'" for i in ids)
+                    con = duckdb.connect()
+                    rows = con.execute(
+                        f"SELECT CAST(image_id AS VARCHAR), "
+                        f"CAST(round(conf * 100) AS INT), "
+                        f"min(least(x2 - x1, y2 - y1)) "
+                        f"FROM {det} WHERE CAST(image_id AS VARCHAR) "
+                        f"IN ({lst}) GROUP BY 1, 2").fetchall()
+                    con.close()
+                    for iid, c2, side in rows:
+                        _SZ['by_key'][(iid, int(c2))] = float(side)
+                except Exception:
+                    # the store is the source; if it cannot be read the floor
+                    # simply does not apply. Never drop a crop on a failed
+                    # lookup.
+                    pass
     return _SZ['by_key']
 
 
@@ -7859,11 +8095,12 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
 
     items.sort(key=ANNOT_SORTS[sort])
     # Counted before the filter narrows them, so the option can say how many
-    # it would show -- "dogs I have not called the leash on" is the number this
-    # whole axis is worked from, and it should be visible without selecting it.
+    # it would show -- and counted over the SAME list the filter is applied to.
+    # Taken over the dogs alone, "needs a leash call" advertised 112 and handed
+    # back 2,765, because the filter also ran over every crop judged not a dog
+    # and all of them satisfy "no leash verdict".
     want_leash = leash if leash in LEASH_FILTERS else 'all'
-    dogs = [it for it in items if it['label'] == POS_LABEL]
-    leash_offer = {k: len(_leash_keep(dogs, k)) for k in LEASH_FILTERS}
+    leash_offer = {k: len(_leash_keep(items, k)) for k in LEASH_FILTERS}
     if want_leash != 'all':
         items = _leash_keep(items, want_leash)
     total = len(items)
@@ -8303,10 +8540,28 @@ TERM_FILE = os.path.join(OUT, 'search_terms.npz')
 _VEC = {'at': None, 'names': None, 'vecs': None, 'model': ''}
 _TERM = {'at': None, 'terms': {}, 'model': ''}
 SEARCH_RETRY_S = 120
+SEARCH_TERM_MAX = 48
 _TERM_TRIED = {}
 # The single in-flight encoder: 'sent' is the batch it carries, 'want' the
 # words queued behind it, 'bad' the ones whose last attempt exited non-zero.
 _TERM_JOB = {'proc': None, 'want': set(), 'sent': set(), 'bad': set()}
+
+
+def search_term_ok(term):
+    """Whether a word is one this dashboard will hand to the encoder.
+
+    Anything accepted is permanent: crop_search.py has --add and no --remove,
+    and the whole store comes back as the review page's suggestion list. A
+    plain GET reaches this -- a typo'd URL, a bookmark, an <img src> on any
+    page the operator visits -- so an unvalidated term meant a stranger could
+    put a sentence in front of the next reviewer. '../../etc/passwd' is in the
+    live store because a route probe asked for it once.
+
+    A search phrase, then: words, spaces, and the punctuation that occurs
+    inside words. Nothing shaped like a path, a flag or a shell.
+    """
+    return (2 <= len(term) <= SEARCH_TERM_MAX
+            and all(c.isalnum() or c in " '-" for c in term))
 
 
 def _npz(path, state, load):
@@ -8426,7 +8681,12 @@ def search_learn(term):
     py = TRIAGE_PYTHON if CONFIGURED_TRIAGE else (mistakes_python() or
                                                   TRIAGE_PYTHON)
     script = os.path.join(REPO, 'tools', 'detect', 'crop_search.py')
-    if not term or not py or not os.path.exists(script):
+    # A term that will not be stored is answered exactly like one nobody has
+    # encoded, which is what it is and always will be -- there is no path from
+    # here that ends with it in the store.
+    if not term or not search_term_ok(term):
+        return 'unknown'
+    if not py or not os.path.exists(script):
         return 'unknown'
     now = time.time()
     with _SPAWN_LOCK:
@@ -8559,7 +8819,13 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     ``reserve`` is the next slice after the page. The client consumes it to
     backfill a tile it just flagged, so the grid keeps a constant length
     without a round trip and without renumbering everything on screen.
+
+    ``size=0`` is the header's queue-depth poll: the total, and no crops. It
+    used to land on REVIEW_PAGE one line down, so a poll every 30 s built the
+    full page AND its reserve and warmed a hundred HQ cuts for a page nobody
+    was looking at.
     """
+    count_only = int(size) == 0
     size = 100 if int(size) >= 100 else REVIEW_PAGE
     page = max(0, int(page))
     sort = sort if sort in REVIEW_SORTS else REVIEW_SORT_DEFAULT
@@ -8842,8 +9108,11 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
     pages = max(1, -(-total // size))
     page = min(page, pages - 1)
     lo = page * size
-    warm_hq([c['name'] for c in items[lo:lo + 2 * size]])
-    return {'items': items[lo:lo + size], 'reserve': items[lo + size:lo + 2 * size],
+    shown = [] if count_only else items[lo:lo + size]
+    ahead = [] if count_only else items[lo + size:lo + 2 * size]
+    if not count_only:
+        warm_hq([c['name'] for c in items[lo:lo + 2 * size]])
+    return {'items': shown, 'reserve': ahead,
             'page': page, 'size': size, 'sort': sort, 'total_unflagged': total,
             # images judged, not crop FILES judged -- so it is the same unit as
             # total_unflagged and the two sum to a meaningful denominator
@@ -8881,7 +9150,7 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             # leash verdicts for the crops on THIS page, so a button can show
             # what was already decided. Its own axis and its own store: a crop
             # can be a dog and unjudged for leash, or the reverse.
-            'leash': _leash_for([c['name'] for c in items[lo:lo + 2 * size]]),
+            'leash': _leash_for([c['name'] for c in shown + ahead]),
             'leash_totals': _leash_counts(),
             'leash_filter': want_leash, 'leash_counts': leash_offer,
             'find': want_find, 'find_state': find_state,
@@ -9233,8 +9502,12 @@ def _audit():
             _AUDIT['mod'] = _a
         except Exception:
             _AUDIT['mod'] = None
-    m = _AUDIT['mod']
-    return m if (m is not None and m.pool_ready()) else None
+    # Readiness is per stage and belongs to the caller. Answering None unless
+    # the GATE pool existed made data/fn_audit/pool.parquet a hard dependency
+    # of the leash routes too: with only the leash pool built, /audit/leash
+    # fell through to the static handler as a 404 and its endpoints reported
+    # judged:0 rather than naming the pool that was actually missing.
+    return _AUDIT['mod']
 
 
 def gate_planning():
@@ -9437,9 +9710,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._html(b'<!doctype html><meta charset=utf-8>'
                            b'<body style="background:#13151a;color:#98a2ad;'
                            b'font:14px system-ui;padding:40px">'
-                           b'The audit pool has not been built yet. Run '
-                           b'<code>python tools/detect/fn_audit.py build</code>'
-                           b' once, then reload.</body>')
+                           b'The audit module would not load. Check '
+                           b'<code>tools/dashboard/audit.py</code> and '
+                           b'<code>tools/detect/fn_audit.py</code>.</body>')
                 return True
             stage = self._audit_stage()
             if not a.pool_ready(stage):
@@ -9539,22 +9812,25 @@ class BoardHandler(SimpleHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        if self.path == '/api/board':
+        # split('?') so cache-busting query strings still match (§7.2 —
+        # /api/board's == match 404s on ?t=1 and that bit us before). The two
+        # routes the comment is ABOUT were the two it was never applied to.
+        if self.path.split('?', 1)[0] == '/api/board':
             try:
                 self._json(board_payload())
             except Exception as e:
                 self._json({'error': str(e)}, 500)
             return
-        if self.path == '/api/refresh':
+        if self.path.split('?', 1)[0] == '/api/refresh':
             self._json(_refresh)
             return
-        # split('?') so cache-busting query strings still match (§7.2 —
-        # /api/board's == match 404s on ?t=1 and that bit us before)
         if self.path.split('?', 1)[0] == '/api/detect':
             try:
                 self._json(detect_payload())
             except Exception:
-                self._json({'running': False})  # 404-safe by construction
+                # 404-safe by construction, and honest about it: this says
+                # nothing is known, not that the sweep is idle
+                self._json({'running': False, 'ever': False})
             return
         if self.path.split('?', 1)[0] == '/api/review':
             try:
@@ -9831,7 +10107,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 stage = self._audit_stage(parse_qs(urlparse(self.path).query))
                 self._json(a.save_correction(
                     data.get('key'), data.get('box') or [], stage)
-                    if a else {'ok': False, 'msg': 'pool not built'})
+                    if a and a.pool_ready(stage)
+                    else {'ok': False, 'msg': 'pool not built'})
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)})
             return
@@ -9841,18 +10118,21 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 n = int(self.headers.get('Content-Length', 0) or 0)
                 data = json.loads(self.rfile.read(n) or b'{}')
                 a = _audit()
+                stage = (self._audit_stage(parse_qs(urlparse(self.path).query))
+                         if a else None)
                 if a is None:
-                    self._json({'error': 'the audit pool is not built — run '
-                                         'tools/detect/fn_audit.py build'})
+                    self._json({'error': 'the audit module would not load'})
+                elif not a.pool_ready(stage):
+                    # which pool, so a leash annotator is not sent to build
+                    # the gate's
+                    self._json({'error': f'the {stage} audit pool is not '
+                                         f'built — run tools/detect/'
+                                         f'fn_audit.py build --stage {stage}'})
                 elif self.path.startswith('/api/audit/draw'):
-                    stage = self._audit_stage(
-                        parse_qs(urlparse(self.path).query))
                     self._json(a.api_draw(
                         n=a.page_size(data.get('n')),
                         band=a.band_arg(data.get('band')), stage=stage))
                 else:
-                    stage = self._audit_stage(
-                        parse_qs(urlparse(self.path).query))
                     v = data.get('verdict')
                     self._json(a.record(
                         data.get('key'),
@@ -9862,7 +10142,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
             return
-        if self.path == '/api/board':
+        if self.path.split('?', 1)[0] == '/api/board':
             try:
                 n = int(self.headers.get('Content-Length', 0) or 0)
                 data = json.loads(self.rfile.read(n) or b'{}')
@@ -9969,10 +10249,15 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 if data.get('remove'):
                     body, code = mod.remove(name)
                 else:
+                    # the crop's OWN directory: the queue serves the harvested
+                    # set too, and those never pass through recent_crops, so
+                    # the store's "a label whose image has aged out is not
+                    # trainable" copy found nothing every single time
+                    src = crop_dir(name)
                     body, code = mod.record(
                         name, str(data.get('label') or ''),
-                        copy_from={'crop': CROPS,
-                                   'full': os.path.join(CROPS, 'full')})
+                        copy_from={'crop': src,
+                                   'full': os.path.join(src, 'full')})
                 self._json(body, code)
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
@@ -10012,7 +10297,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 body, code = {'ok': False, 'error': str(e)}, 200
             self._json(body, code)
             return
-        if self.path == '/api/refresh':
+        if self.path.split('?', 1)[0] == '/api/refresh':
             started = trigger_refresh(self.db)
             self._json({'started': started, 'running': _refresh['running']})
             return
@@ -11047,6 +11332,7 @@ border-bottom:1px solid var(--bd)}
 text-transform:lowercase;letter-spacing:.04em}
 .dtab tbody th{color:var(--mut);font-weight:500}
 .dtab .dnum{text-align:right;font-variant-numeric:tabular-nums;color:var(--tx)}
+.dtab .dnum em{font-style:normal;font-size:10px;color:var(--dim);margin-left:6px}
 .dtab thead .dnum{color:var(--dim)}
 .dtab .dmid{color:var(--dim)}
 /* direction, not sentiment: green means the second run moved the number the
@@ -11135,6 +11421,10 @@ font-weight:600}
 margin-top:11px;padding-top:10px;border-top:1px solid var(--bd);
 font:400 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .wrkeyi{display:flex;align-items:baseline;gap:5px;color:var(--dim)}
+/* saytally() hides the flag count with the attribute, and a bare display:flex
+   outranks the UA's [hidden]{display:none} -- the empty span kept its 18px of
+   the key row */
+.wrkeyi[hidden]{display:none}
 .wrfoot{margin-top:11px;font-size:11px;color:var(--dim);max-width:640px;
 line-height:1.5}
 /* the matrix's own off-diagonal cells jump here */
@@ -11682,8 +11972,15 @@ function mkSpark(el,color,cap){
 var SPARK_ACC='rgba(232,166,69,',SPARK_OK='rgba(67,181,129,',
     SPARK_COOL='rgba(91,143,214,',SPARK_HOT='rgba(216,116,58,';
 var COPY_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-function execCopy(t){var ta=document.createElement('textarea');ta.value=t;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.top='-1000px';ta.style.opacity='0';document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,t.length);var ok=false;try{ok=document.execCommand('copy')}catch(e){}document.body.removeChild(ta);return ok;}
-function copyText(t){var done=function(){toast('copied '+t)},fail=function(){toast('copy failed')};if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,function(){execCopy(t)?done():fail()});}else{execCopy(t)?done():fail();}}
+/* Says what happened, in the toast. This page's three copy buttons are all
+   icon-only, so copyOnto() -- which writes "Copied" onto the button and puts
+   its label back -- would eat the glyph; the toast is where they can speak.
+   They used to have a copyText() of their own that toasted, declared in the
+   same scope as the one in COPY_JS below and shadowed by it, which left all
+   three silent on success AND on failure. */
+function copySay(t,what){
+  copyText(t).then(function(ok){toast(ok?'copied '+what:'copy failed')});
+}
 var boardEl=document.getElementById('board'),toastEl=document.getElementById('toast'),dragKey=null,toastT;
 function toast(t){toastEl.textContent=t;toastEl.classList.add('show');clearTimeout(toastT);toastT=setTimeout(function(){toastEl.classList.remove('show')},1700)}
 function bcard(r){
@@ -11691,7 +11988,7 @@ function bcard(r){
   d.innerHTML='<div class="rn"><span class="nm">'+r.name+'</span><button type="button" class="cp" title="Copy &quot;'+r.key+'&quot;" aria-label="Copy region name">'+COPY_SVG+'</button></div><div class="rs"><span>'+fmt(r.downloaded)+' / '+fmt(r.dogs)+'</span><span class="rpc">'+r.pct+'%</span></div><div class="mini"><i style="width:'+Math.min(r.pct,100)+'%;background:'+pctColor(r.pct)+'"></i></div>';
   var cp=d.querySelector('.cp');cp.draggable=false;
   cp.addEventListener('mousedown',function(e){e.stopPropagation()});
-  cp.addEventListener('click',function(e){e.stopPropagation();e.preventDefault();copyText(r.key)});
+  cp.addEventListener('click',function(e){e.stopPropagation();e.preventDefault();copySay(r.key,r.key)});
   d.addEventListener('dragstart',function(e){dragKey=r.key;d.classList.add('drag');e.dataTransfer.effectAllowed='move';try{e.dataTransfer.setData('text/plain',r.key)}catch(_){}});
   d.addEventListener('dragend',function(){d.classList.remove('drag')});
   return d;
@@ -11739,7 +12036,7 @@ if(rbtn)rbtn.addEventListener('click',refreshNow);
 (function(){
   var b=document.getElementById('storeCp'),p=document.getElementById('storePath');
   if(b&&p) b.addEventListener('click',function(e){
-    e.preventDefault(); copyText(p.textContent.trim());
+    e.preventDefault(); copySay(p.textContent.trim(),'the database path');
   });
 })();
 /* ── command generator ── */
@@ -12166,7 +12463,7 @@ function genCommands(){
     cmdOut.innerHTML=j.commands.map(function(c,i){
       return '<div class="cmdblock"><div class="cmdhead"><span>'+labels[i]+'</span><button type="button" class="cp" data-i="'+i+'" title="Copy command">'+COPY_SVG+'</button></div><pre>'+esc(c)+'</pre></div>';
     }).join('');
-    cmdOut.querySelectorAll('.cp').forEach(function(b){b.addEventListener('click',function(e){e.preventDefault();copyText(j.commands[+b.dataset.i])})});
+    cmdOut.querySelectorAll('.cp').forEach(function(b){b.addEventListener('click',function(e){e.preventDefault();copySay(j.commands[+b.dataset.i],'the command')})});
   }).catch(function(){cmdOut.innerHTML='<div style="color:var(--red);padding:8px 2px">failed to generate</div>'});
 }
 if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListener('keydown',function(e){if(e.key==='Enter')genCommands()});}
@@ -13195,12 +13492,22 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
        "0 of 0 detections judged" under the error message. Absent is unknown,
        and unknown is a dash. */
     var DASH='\u2014',known=j.planned===true;
+    /* A stage with every planned shard on disk is FINISHED, which is a third
+       thing next to running and stopped-part-way -- and the server is the one
+       that knows it, because "done" is the shard test the runner itself uses
+       and not rows>=total. Without it a gate that had judged all 4,688,510 of
+       its detections said "paused", offered "Resume", and put "3,292,062
+       frames to open" under a full bar reading 100.0%. */
+    var done=known&&j.done===true;
     function K(v,f){return (!known||v==null||v!==v)?DASH:f(v)}
     var pct=(j.pct||0)*100;
     document.getElementById('gPct').textContent=
       (known&&j.total)?pct.toFixed(1)+'%':DASH;
     document.getElementById('gDone').textContent=K(j.rows,fmt);
-    document.getElementById('gEta').textContent=j.running?dur(j.eta_s):DASH;
+    /* a finished stage has no ETA and does not need one -- it says so, the
+       same word the detector's card uses for the same state */
+    document.getElementById('gEta').textContent=
+      j.running?dur(j.eta_s):(done?'complete':DASH);
     document.getElementById('gDog').textContent=
       j.dog_share==null?'—':(j.dog_share*100).toFixed(1)+'%';
     /* Hover gives the counts in full. fmt() abbreviates past a thousand
@@ -13228,7 +13535,8 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         ? fmt(j.images_done)+' of '+fmt(j.images)+' frames opened'+
           (j.img_s?' · '+j.img_s.toFixed(0)+' frames/s':'')+
           ' · '+(j.model||'')
-        : (j.images?fmt(j.images)+' frames to open · '+(j.model||'')+
+        : (j.images?fmt(j.images)+(done?' frames opened · ':' frames to open · ')+
+            (j.model||'')+
             (j.created?' · planned '+j.created:''):'—');
     /* Three things this line has to be able to say, and only one of them is
        an error: a stage waiting on the one upstream, a stage that has never
@@ -13253,6 +13561,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     if(pill){
       pill.textContent=j.running?'running'
         :j.planning?'planning'
+        :done?'complete'
         :waiting?'waiting':(j.rows?'paused':'not started');
       pill.className='swpill'+(j.running?' on':'');
     }
@@ -13262,23 +13571,31 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
          that is a different button doing a different thing -- saying Run and
          quietly planning instead would be a lie about what the click does. */
       var needsPlan=known===false&&!waiting;
-      btn.disabled=!j.can_run||j.planning;
+      /* Nothing to press on a finished stage: the runner skips every shard
+         already on disk, so a click would start a job that exits having done
+         nothing -- and "Resume" said it would pick up work that does not
+         exist. Unavailable with a sentence saying why, the way `waiting` is. */
+      var over=done&&!j.running;
+      btn.disabled=!j.can_run||j.planning||over;
       btn.textContent=j.planning?'Planning\u2026'
         :j.running?'Stop'
         :needsPlan?'Plan '+what
-        :(j.rows?'Resume':'Run '+what);
+        :(j.rows&&!over?'Resume':'Run '+what);
       btn.title=waiting
         ? 'the '+up.title+' has to finish first \u2014 this stage judges its dogs'
         : j.planning
           ? 'building the work list \u2014 a few minutes over the whole store'
           : needsPlan
             ? 'build the work list for this stage, then run it'
-            : j.can_run
-              ? (j.running?'stop after the shard in flight \u2014 finished shards are kept'
-                          :(what==='leash'
-                            ?'judge every box the gate called a dog; resumes where it left off'
-                            :'judge every detection the sweep committed; resumes where it left off'))
-              : 'no interpreter configured for the '+what;
+            : over
+              ? 'every planned shard is written \u2014 this stage has judged '+
+                'all of it, and there is nothing left to resume'
+              : j.can_run
+                ? (j.running?'stop after the shard in flight \u2014 finished shards are kept'
+                            :(what==='leash'
+                              ?'judge every box the gate called a dog; resumes where it left off'
+                              :'judge every detection the sweep committed; resumes where it left off'))
+                : 'no interpreter configured for the '+what;
     }
   }
   var gen=0;
@@ -13417,13 +13734,27 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         areaStyle:{color:'rgba(232,166,69,.10)'}}]});
   }
   function render(j){
+    /* Three states, not two. A fetch that failed and a status document that
+       is not there both say NOTHING about the sweep, and painting either as
+       "idle" redrew a finished 32.5M-image harvest as "0 of 17 complete":
+       the remembered roster with every bar at zero and a header counting
+       them as not started. Unknown holds the last good numbers instead, the
+       way the machine and the gate panels beside it do with `if(!j)return`.
+       Only the very first poll has nothing to hold, and that says so. */
+    if(!j||j.ever===false){
+      if(!lastJ){
+        off.textContent='no sweep status yet';
+        dEl.innerHTML='<div class="dnone">no drives reported</div>';
+        rEl.innerHTML='<div class="dnone">no per-region data</div>';
+      }
+      return;
+    }
     lastJ=j;
-    live=!!(j&&j.running);
+    live=!!j.running;
     /* idle is a STATUS LINE now — the cards below stay put and go to dashes */
     off.style.display=live?'none':'';
-    if(!live)off.textContent='sweep idle'+(j&&j.age_s!=null?' \\u2014 last run '+agoTxt(j.age_s):'')+
-      (j&&j.state==='failed'?' (failed)':'');
-    j=j||{};
+    if(!live)off.textContent='sweep idle'+(j.age_s!=null?' \\u2014 last run '+agoTxt(j.age_s):'')+
+      (j.state==='failed'?' (failed)':'');
     /* headline: % complete, human ETA, now/sustained throughput. imgs_done is
        GLOBAL (all-time, across restarts) — the %, the bar and the ETA are all
        against imgs_total, never against the per-process run_imgs_done. */
@@ -13500,7 +13831,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
       });
     var prog=all.filter(function(r){return r.p>0&&r.p<100});
     var doneN=all.filter(function(r){return r.p!=null&&r.p>=100}).length;
-    rHead.textContent=!all.length?'Per region'
+    /* the count is only a count of what this payload said. A remembered
+       roster has no percentages in it at all, and counting those as "0 of 17
+       complete" reports work not done from the absence of an answer. */
+    rHead.textContent=(!all.length||!rk.length)?'Per region'
       : live?('Per region \\u2014 '+prog.length+' of '+all.length+' in progress')
       : ('Per region \\u2014 '+doneN+' of '+all.length+' complete');
     rEl.innerHTML=all.map(function(r){
@@ -13510,11 +13844,11 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
            it survives the sweep stopping, so it is not gated on live */
         '<span class="dv">'+p(r.p,function(v){return v.toFixed(1)+'%'})+'</span></div>';
     }).join('')||'<div class="dnone">no per-region data</div>';
-    /* classifier: gauge only once crops actually flow (A.5) */
-    if(!live){
-      hEl.innerHTML='<div class="drow"><span class="dn">not_a_dog</span>'+
-        '<div class="dband"></div><span class="dv">'+DASH+'</span></div>';
-    }else if((j.crops_classified||0)>0){
+    /* classifier: gauge only once crops actually flow (A.5). What it measured
+       is a share of crops already classified, so it outlives the run that
+       measured it -- the gate on `live` said "unknown" about a number the
+       panel was holding, which is the same mistake as the error line below. */
+    if((j.crops_classified||0)>0){
       var band=j.not_a_dog_band||{lo:7,hi:16},nd=j.not_a_dog_rate,SCALE=30;
       var bad=band.in_band===false;
       hEl.innerHTML='<div class="drow" title="share of detected crops that aren\\u2019t dogs \\u2014 expected '+band.lo+'\\u2013'+band.hi+'% from labelled data">'+
@@ -13526,9 +13860,13 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     }else{
       hEl.innerHTML='<div class="dnone">classifier not wired in yet</div>';
     }
-    /* errors: one muted line; details expand on click; green zero state */
+    /* errors: one muted line; details expand on click; green zero state.
+       Cumulative, like the positives above, and so NOT gated on live: these
+       count frames the sweep already failed on, and the moment you want them
+       is the postmortem -- a run killed mid-sweep left 64 decode errors with
+       no state of the page in which they could be read. */
     var errN=errSum(j),errs=j.errors||{};
-    if(!live){
+    if(!j.errors){
       eEl.innerHTML='<div class="derr">'+DASH+' errors</div>';
     }else if(!errN){
       eEl.innerHTML='<div class="derr ok">0 errors</div>';
