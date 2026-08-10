@@ -15,16 +15,43 @@ of the following becomes true:
   t2  the triage writer opens a ledger or a dataset directory for writing
   t3  the review page's flag path lets a suggestion reach the ledger record
   t4  a triage record is missing its unverified marks
-  t5  the ledgers contain a record that came from the triage file
+  t5  any store a human decision lands in holds something the model wrote --
+      the flag ledgers, the looked-at-and-kept ledger, the hand-drawn
+      geometry, both audit ledgers and what they export, the leash verdicts
+      and the label flags; or a store grows that is in none of those lists
   t6  the dashboard's suggestion fields are not separate from the verdict one
   t7  the bucket mapping silently disagrees with the ImageNet class order
 
+WHICH ASSERTION t5d MAKES ABOUT A BOX, AND WHY IT IS NOT THE OTHER ONE.
+A correction whose four numbers equal the detector's box at the ledger's own
+precision is nobody's geometry: it is Reset box putting the model's box back.
+The tempting rule is "no such record may be written", and it is wrong. The
+ledger is append-only and last write wins, so writing the detector's box IS
+how a reviewer withdraws a box they drew earlier -- refusing the write would
+leave the withdrawn box in force, and only the reviewer knows which they
+meant. Four such records are on disk across three boxes, and every one of the
+three has a history holding real corrections too. So the rule is the other
+one: such a record must stay tellable from a real correction, and the only
+thing that can tell them apart is the geometry itself. t5c keeps the fields
+that make that comparison possible and t5d makes it, failing when a box is on
+record in the corrections store by the detector's geometry ALONE -- no human
+framing anywhere in its history. That is the one state a consumer cannot read
+as anything but "a person framed this".
+
 Run: python tools/detect/tests/adv_triage_isolation.py
+
+t5d needs duckdb to read the predictions store, so run it under the env the
+dashboard runs on; it says so and skips loudly elsewhere. Everything else
+runs anywhere. Point ISOLATION_STORES at a repo root holding COPIES of the
+stores to scan them somewhere else -- which is the only safe way to prove
+these checks bite, since proving it means writing a poisoned verdict and a
+probe session has already left fake ones in the live audit ledger.
 """
 
 import json
 import os
 import re
+import sqlite3
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -65,12 +92,52 @@ ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py',
 NO_LEDGER = ('crop_search.py', 'adv_review_render.py',
              'adv_triage_backends.py')
 LEDGER_WORDS = ('hard_negatives', 'hard_positives', 'labels.jsonl',
-                'label_flags', 'leash.db', 'flag_crop')
-LEDGERS = (os.path.join(REPO, 'data', 'hard_negatives', 'labels.jsonl'),
-           os.path.join(REPO, 'data', 'hard_positives', 'labels.jsonl'))
-TRIAGE_FILE = os.path.join(REPO, 'data', 'dashboard', 'triage.jsonl')
+                'label_flags', 'leash.db', 'flag_crop',
+                # the five that grew after this list was written, and that t5
+                # went blind to for the same reason
+                'box_corrections', 'boxes.jsonl', 'reviewed.jsonl',
+                'verdicts.jsonl', 'audit_finds')
+
+# The stores are read from here rather than from REPO so that a poisoned COPY
+# can be scanned instead of the real thing. Proving any of t5 bites means
+# writing a record that must never exist, and a probe session has already put
+# fake verdicts into the live audit ledger by doing that in place; there is no
+# command to take one back out.
+STORES = os.environ.get('ISOLATION_STORES') or REPO
+DATA = os.path.join(STORES, 'data')
+
+# EVERY file a human verdict or a hand-drawn box reaches, and the model's own
+# file it must stay out of. t5 used to name two of these -- the two
+# labels.jsonl -- while ten more grew up beside them, so the check that was
+# supposed to catch a model's opinion reaching the training data was reading
+# two of the twelve places one can land, and the geometry store was not among
+# them. t5g walks data/ and fails on any store that is in neither list, so the
+# next one cannot go quiet the same way: classifying it is the review the rule
+# actually needs.
+HUMAN_STORES = ('hard_negatives/labels.jsonl',      # flag verdicts
+                'hard_positives/labels.jsonl',
+                'hard_negatives/reviewed.jsonl',    # looked at and kept
+                'box_corrections/boxes.jsonl',      # hand-drawn geometry
+                'fn_audit/verdicts.jsonl',          # audit answers
+                'leash_audit/verdicts.jsonl',
+                # not answers, but the denominator of every rate the audit
+                # reports -- a model writing here inflates what it was asked
+                'fn_audit/drawn.jsonl',
+                'leash_audit/drawn.jsonl',
+                'audit_finds/manifest.jsonl',       # the exported dataset
+                'audit_finds_leash/manifest.jsonl')
+LEASH_DB = 'leash_labels/leash.db'
+FLAGS_DB = 'label_flags/label_flags.db'
+MODEL_OWN = ('dashboard/triage.jsonl',)
+BOXES = 'box_corrections/boxes.jsonl'
+# The surfaces a person can answer from. leash_store stamps every row with the
+# one it was written through, which is the whole point of the column: a batch
+# import of the leash model's own parquet predictions arrives naming itself.
+HUMAN_SOURCES = ('review_page',)
+TRIAGE_FILE = os.path.join(DATA, 'dashboard', 'triage.jsonl')
 
 fails = []
+skipped = []
 
 
 def check(name, ok, detail=''):
@@ -86,6 +153,56 @@ def read(p):
             return fh.read()
     except OSError:
         return None
+
+
+def records(rel):
+    """[(line number, record)] from one jsonl store. Missing reads as empty.
+
+    A fresh clone has none of these and a store nobody has written to yet is
+    an empty file, so absence is not a failure anywhere below -- what would be
+    a failure is a store that exists and is never opened, which is what t5g
+    is for.
+    """
+    out = []
+    try:
+        with open(os.path.join(DATA, rel), encoding='utf-8') as fh:
+            for i, ln in enumerate(fh, 1):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    out.append((i, r))
+    except OSError:
+        pass
+    return out
+
+
+def rows(rel, sql):
+    """Query one sqlite store read-only, or None if it is not there."""
+    p = os.path.join(DATA, rel)
+    if not os.path.exists(p):
+        return None
+    con = sqlite3.connect('file:%s?mode=ro' % p, uri=True)
+    try:
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+
+def wrote_it(r):
+    """True if the model wrote this record, whatever file it turned up in.
+
+    The triage writer's own stamps, so a record that travelled from
+    triage.jsonl into a ledger is recognisable there by the marks t4 makes it
+    carry -- which is the point of making it carry them.
+    """
+    return (r.get('source') == 'model_suggestion'
+            or r.get('unverified') is True
+            or 'bucket' in r or 'sg' in r)
 
 
 # ── t1 nothing but the writer and the filter knows this file exists ────────
@@ -174,26 +291,179 @@ if recs:
 else:
     print('ok   t4 no predictions written yet (nothing to verify)')
 
-# ── t5 no ledger record came from the triage file ───────────────────────────
-led_bad = []
-for p in LEDGERS:
-    try:
-        with open(p) as fh:
-            for i, ln in enumerate(fh, 1):
-                try:
-                    r = json.loads(ln)
-                except ValueError:
-                    continue
-                if not isinstance(r, dict):
-                    continue
-                if (r.get('source') == 'model_suggestion'
-                        or r.get('unverified') is True
-                        or 'bucket' in r or 'sg' in r):
-                    led_bad.append(f'{os.path.basename(os.path.dirname(p))}:{i}')
-    except OSError:
-        pass
-check('t5 no ledger record carries a model suggestion', not led_bad,
+# ── t5 nothing the model wrote is in a store a human decision lands in ─────
+led_bad, n_recs = [], 0
+for _rel in HUMAN_STORES:
+    for _i, _r in records(_rel):
+        n_recs += 1
+        if wrote_it(_r):
+            led_bad.append(f'{_rel}:{_i}')
+check(f't5 none of the {n_recs:,} records in the {len(HUMAN_STORES)} human '
+      f'stores carries a model suggestion', not led_bad,
       'suspect records: ' + ', '.join(led_bad[:5]))
+
+# ── t5b the two sqlite stores hold human answers only ──────────────────────
+db_bad = []
+_leash = rows(LEASH_DB, 'SELECT crop, source FROM leash')
+for _crop, _source in _leash or ():
+    if _source not in HUMAN_SOURCES:
+        db_bad.append(f'leash.db {_crop}: source {_source!r}')
+# A flag whose should_be is the class the file is already filed under records
+# no human decision at all -- it is the dataset's own label handed back as a
+# correction, the same shape as the detector's box in the corrections ledger,
+# and the training page counts it as a person disagreeing with the model.
+_flags = rows(FLAGS_DB, 'SELECT file, class_was, should_be FROM flags')
+for _file, _was, _be in _flags or ():
+    if not _be or _be == _was:
+        db_bad.append(f'label_flags.db {_file}: should_be {_be!r}')
+check(f't5b the {len(_leash or ())} leash verdicts and {len(_flags or ())} '
+      f'label flags on record are human answers', not db_bad,
+      '; '.join(db_bad[:5]))
+
+# ── t5c the corrections ledger still says which box, and where ─────────────
+# The only thing that separates a hand-drawn box from the detector's own is
+# the geometry, and comparing them needs the key to look the prediction up
+# under. Drop det_idx, or start writing normalised coordinates, and t5d has
+# nothing to compare -- it would pass on every record forever without ever
+# reading one.
+_boxes = records(BOXES)
+_shape = [f'{BOXES}:{i}' for i, r in _boxes
+          if not (str(r.get('image_id') or '').isdigit()
+                  and isinstance(r.get('det_idx'), int)
+                  and all(isinstance(r.get(k), (int, float))
+                          for k in ('x1', 'y1', 'x2', 'y2')))]
+check(f't5c all {len(_boxes):,} corrections carry the key and the four '
+      f'numbers a comparison needs', not _shape, '; '.join(_shape[:5]))
+
+# ── t5d a box on record by the detector's own geometry alone ───────────────
+_hist = {}
+for _i, _r in _boxes:
+    if f'{BOXES}:{_i}' not in _shape:
+        _hist.setdefault((str(_r['image_id']), int(_r['det_idx'])),
+                         []).append((_r['x1'], _r['y1'], _r['x2'], _r['y2']))
+
+
+def detector_boxes(keys):
+    """{(image_id, det_idx): (x1, y1, x2, y2)} from the predictions store.
+
+    Rounded the way save_box() rounds, because two decimals is the precision
+    the corrections ledger speaks. Comparing at full float precision instead
+    calls a byte-for-byte revert 'different' and finds two of the four
+    reverts on disk rather than all four.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import duckdb
+    import store as st
+    det = st._sql_src(st._store_globs(st.get_detect_root(STORES), 'det'))
+    ids = sorted({k[0] for k in keys})
+    con = duckdb.connect()
+    try:
+        got = con.execute(
+            'SELECT CAST(image_id AS VARCHAR), det_idx, x1, y1, x2, y2 FROM '
+            + det + ' WHERE CAST(image_id AS VARCHAR) IN ('
+            + ','.join('?' * len(ids)) + ')', ids).fetchall()
+    finally:
+        con.close()
+    return {(a, int(b)): tuple(round(float(v), 2) for v in (c, d, e, f))
+            for a, b, c, d, e, f in got}
+
+
+_model, _why = {}, ''
+if _hist:
+    try:
+        _model = detector_boxes(_hist)
+    except Exception as _e:
+        _why = str(_e)
+if _why:
+    # loud, and named as a skip -- a silent abort here is indistinguishable
+    # from a pass, which is the failure mode two of this suite's guards were
+    # already shipping
+    skipped.append('t5d')
+    print('SKIP t5d could not read the predictions store, so no correction '
+          'was compared against the box it corrects: ' + _why)
+else:
+    _lone = sorted(k for k, v in _hist.items()
+                   if k in _model and all(b == _model[k] for b in v))
+    check('t5d no box is in the corrections store on the detector\'s own '
+          'geometry alone', not _lone,
+          'model geometry wearing a correction\'s clothes: '
+          + ', '.join('%s#%d' % k for k in _lone[:5]))
+    # Without this the whole check goes quiet the day the predictions store
+    # moves: every key stops resolving, nothing is compared, and t5d prints
+    # ok because it found no counterexample among the zero it looked at.
+    _seen = [k for k in _hist if k in _model]
+    check(f't5d-b the comparison read the detector back for {len(_seen):,} of '
+          f'the {len(_hist):,} corrected boxes', bool(_seen) or not _hist,
+          'not one correction resolved a prediction -- nothing was compared')
+
+# ── t5e the review page banks no verdict a person did not make ────────────
+# Paging away IS the positive verdict on everything still on screen, and that
+# is the right rule for the queue. In audit mode the page walks a FIXED list
+# of crops already judged, so the same code retires crops nobody answered for
+# -- including one whose annotation was just removed, which the button
+# promises puts it back in the queue. Both banking paths have to refuse.
+if dash is not None:
+    # empty when the name is gone, which fails rather than going blind on a
+    # rename -- an extraction that quietly matches nothing is the shape of
+    # guard this repo has been bitten by
+    _ms = (dash.split('function markSeen(){', 1)[-1].split('\n}', 1)[0]
+           if 'function markSeen(){' in dash else '')
+    _beacon = "addEventListener('pagehide'"
+    _pg = (dash.split(_beacon, 1)[-1].split('\n});', 1)[0]
+           if _beacon in dash else '')
+    _unguarded = [n for n, b in (('markSeen()', _ms),
+                                 ('the pagehide beacon', _pg))
+                  if "mode==='audit'" not in b]
+    check('t5e neither banking path records a verdict in audit mode',
+          not _unguarded, ' and '.join(_unguarded) + ' banks unjudged crops')
+
+# ── t5f the audit ledgers hold answers a person could click ────────────────
+sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+import fn_audit as fa                                          # noqa: E402
+vd_bad, ex_bad, n_vd = [], [], 0
+for _stage in sorted(fa.STAGES):
+    _sp = fa.STAGES[_stage]
+    _rel = _sp['audit_dir'] + '/verdicts.jsonl'
+    for _i, _r in records(_rel):
+        n_vd += 1
+        # a null verdict is read as a withdrawal, not as a third answer
+        if _r.get('verdict') is not None and fa.verdict_of(
+                _r.get('verdict'), _stage) is None:
+            vd_bad.append(f'{_rel}:{_i} {_r.get("verdict")!r}')
+    # The exported dataset carries the model's score and band beside every
+    # row, as provenance. The label must still be the person's answer and
+    # nothing else -- a label taken from p_dog would train the next model on
+    # the current one's opinion, which is the whole thing this file is about.
+    for _i, _r in records(_sp['dataset'] + '/manifest.jsonl'):
+        if _r.get('label') != fa.verdict_of(_r.get('verdict'), _stage):
+            ex_bad.append(f'{_sp["dataset"]}:{_i} labelled '
+                          f'{_r.get("label")!r} on verdict '
+                          f'{_r.get("verdict")!r}')
+check(f't5f all {n_vd:,} audit verdicts are answers the page offers',
+      not vd_bad, '; '.join(vd_bad[:5]))
+check('t5f-b every exported label is its own verdict', not ex_bad,
+      '; '.join(ex_bad[:5]))
+
+# ── t5g every store on disk is one this file has classified ────────────────
+# Two levels only: below that are the crops and the full frames, tens of
+# thousands of jpgs and no ledger among them.
+_on_disk = []
+for _d in sorted(os.listdir(DATA) if os.path.isdir(DATA) else ()):
+    _p = os.path.join(DATA, _d)
+    if os.path.isfile(_p):
+        if _d.endswith(('.jsonl', '.db')):
+            _on_disk.append(_d)
+        continue
+    try:
+        _kids = sorted(os.listdir(_p))
+    except OSError:
+        continue
+    _on_disk += [_d + '/' + f for f in _kids if f.endswith(('.jsonl', '.db'))]
+_known = HUMAN_STORES + MODEL_OWN + (LEASH_DB, FLAGS_DB)
+_unclassified = [s for s in _on_disk if s not in _known]
+check(f't5g all {len(_on_disk)} stores under data/ are classified',
+      not _unclassified, 'nobody has said whether these hold human '
+      'decisions: ' + ', '.join(_unclassified[:5]))
 
 # ── t7 the bucket edges still match the ImageNet class order ────────────────
 if src:
@@ -266,4 +536,8 @@ print()
 if fails:
     raise SystemExit(f'{len(fails)} isolation check(s) FAILED: '
                      + ', '.join(fails))
+if skipped:
+    # said again at the bottom because the one line in the middle of thirty is
+    # exactly where a check that never ran gets read as one that passed
+    print('NOT CHECKED: ' + ', '.join(skipped))
 print('model suggestions are structurally separated from the training data')
