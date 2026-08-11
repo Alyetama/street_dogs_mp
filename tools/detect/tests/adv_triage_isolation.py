@@ -18,7 +18,8 @@ of the following becomes true:
   t5  any store a human decision lands in holds something the model wrote --
       the flag ledgers, the looked-at-and-kept ledger, the hand-drawn
       geometry, both audit ledgers and what they export, the leash verdicts
-      and the label flags; or a store grows that is in none of those lists
+      and the label flags; or a store grows that is in none of those lists;
+      or a flag ledger holds a row the review page could not have written
   t6  the dashboard's suggestion fields are not separate from the verdict one
   t7  the bucket mapping silently disagrees with the ImageNet class order
 
@@ -86,7 +87,16 @@ ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py',
            'adv_review_render.py',
            # It exists to prove one guesser's run is never credited to the
            # other, which cannot be written without naming the status file.
-           'adv_triage_backends.py'}
+           'adv_triage_backends.py',
+           # The guard on the LLM tier. It names this file, because its own
+           # allowlist has to say which modules are permitted to know the LLM
+           # store exists and this is one of them; and it names the model's
+           # predictions store, because part of what it asserts is that an
+           # LLM answer can reach neither that nor a human ledger. It cannot
+           # go in NO_LEDGER for the same reason -- it names every ledger on
+           # purpose, to prove each one is refused. t1d below is what pays
+           # for the exemption instead.
+           'adv_llm_tier.py'}
 # The allowlisted modules that have no business writing a verdict. dashboard.py
 # is not here: it owns the ledgers. triage_crops.py is covered by t2.
 NO_LEDGER = ('crop_search.py', 'adv_review_render.py',
@@ -111,9 +121,9 @@ DATA = os.path.join(STORES, 'data')
 # labels.jsonl -- while ten more grew up beside them, so the check that was
 # supposed to catch a model's opinion reaching the training data was reading
 # two of the twelve places one can land, and the geometry store was not among
-# them. t5g walks data/ and fails on any store that is in neither list, so the
-# next one cannot go quiet the same way: classifying it is the review the rule
-# actually needs.
+# them. t5g walks data/ and fails on any store that is in none of the lists,
+# so the next one cannot go quiet the same way: classifying it is the review
+# the rule actually needs.
 HUMAN_STORES = ('hard_negatives/labels.jsonl',      # flag verdicts
                 'hard_positives/labels.jsonl',
                 'hard_negatives/reviewed.jsonl',    # looked at and kept
@@ -129,6 +139,30 @@ HUMAN_STORES = ('hard_negatives/labels.jsonl',      # flag verdicts
 LEASH_DB = 'leash_labels/leash.db'
 FLAGS_DB = 'label_flags/label_flags.db'
 MODEL_OWN = ('dashboard/triage.jsonl',)
+# A THIRD KIND OF STORE, and it is neither of the other two. An LLM was asked
+# whether a crop holds a dog and its answers are kept in llm_annotations/ --
+# below a human verdict, and beside rather than under a model's own score,
+# because nobody here trained it and nobody here has measured it. It is named
+# so t5g stops failing on it and goes back to failing on the NEXT store nobody
+# has classified, which is the whole point of that check; the list is separate
+# from the two above so that "classified" never reads as "human". What holds
+# this one apart from the human stores is tools/detect/tests/adv_llm_tier.py.
+LLM_OWN = ('llm_annotations/llm_guesses.jsonl',)
+# The two ledgers the review page's flag button writes, which is the pair a
+# promotion would aim at.
+FLAG_LEDGERS = (('hard_positives/labels.jsonl', 'true_positive'),
+                ('hard_negatives/labels.jsonl', 'false_positive'))
+# The crop name the review page mints, and every field it writes with it. Both
+# come from flag_crop() in dashboard.py.
+CROP_NAME = re.compile(r'^(\d+)_(\d+)_(\d{2,3})\.jpg$')
+FLAG_FIELDS = ('image_id', 'conf', 'ts', 'crop', 'label', 'copied',
+               'flagged_at')
+# What a record from the LLM store looks like wherever it turns up. Its own
+# words are all prefixed, so a value check catches a record whose fields were
+# renamed on the way in.
+LLM_KEYS = ('llm_says', 'prompt_version', 'tier', 'reply')
+LLM_WORDS = ('llm_yes', 'llm_no', 'llm_unparsed', 'llm_error',
+             'llm_experimental', 'human_says_dog', 'human_says_no_dog')
 BOXES = 'box_corrections/boxes.jsonl'
 # The surfaces a person can answer from. leash_store stamps every row with the
 # one it was written through, which is the whole point of the column: a batch
@@ -193,6 +227,41 @@ def rows(rel, sql):
         con.close()
 
 
+def write_opens(text):
+    """[(first argument, mode)] for every open() in a write mode.
+
+    Read off the parse tree rather than out of a regex, and that is not
+    fastidiousness -- two simpler versions were tried and both were blind. A
+    pattern ending at the first comma reads straight past a path built by
+    joining: the comma inside the join ends the first group, the mode is not
+    where the pattern then looks, and the check reports nothing wrong.
+    Matching parentheses over the raw text fixed that and found the same call
+    written out in a docstring, which is prose and not a write at all.
+    """
+    import ast
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.id if isinstance(fn, ast.Name) else getattr(fn, 'attr', '')
+        # os.fdopen takes a descriptor, and the question about a descriptor is
+        # what opened it, which is asked where that happens.
+        if name != 'open' or len(node.args) < 2:
+            continue
+        mode = node.args[1]
+        if not (isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and mode.value[:1] in ('w', 'a', 'x')):
+            continue
+        out.append((ast.unparse(node.args[0]), mode.value))
+    return out
+
+
 def wrote_it(r):
     """True if the model wrote this record, whatever file it turned up in.
 
@@ -233,14 +302,35 @@ check('t1c allowlisted search modules touch no ledger', not _ledger_guilty,
 check('t1b the allowlist names files that exist', all(
     any(f in fs for _, _, fs in os.walk(TOOLS)) for f in ALLOWED),
     'an allowed name matches no file -- the list has rotted')
+# The LLM guard is allowlisted above and names every ledger there is, so the
+# usual counter-check cannot hold it. This one can: it asserts against stores
+# it has REDIRECTED into a temp directory, so every write in it goes to a path
+# built from that redirect and never to a name under data/. A guard whose
+# paths pointed at the live gate audit once left seventeen invented verdicts
+# in it, which is the accident this refuses to let happen again.
+_tier = None
+for _base, _, _fs in os.walk(TOOLS):
+    if 'adv_llm_tier.py' in _fs:
+        _tier = read(os.path.join(_base, 'adv_llm_tier.py')) or ''
+_tier_bad = []
+if _tier is None:
+    _tier_bad.append('adv_llm_tier.py is missing')
+else:
+    for _t, _mode in write_opens(_tier):
+        if not re.search(r"lay\[|self\.dir|\btmp\b", _t):
+            _tier_bad.append(f'writes to {_t}')
+check('t1d the LLM guard writes only into stores it redirected',
+      not _tier_bad, '; '.join(_tier_bad))
 
 # ── t2 the writer never opens a ledger or dataset for writing ───────────────
 src = read(TRIAGE)
 if src is None:
     check('t2 triage_crops.py exists', False, TRIAGE)
 else:
-    # every open() with a write mode in that file
-    writes = re.findall(r"open\(\s*([^)]*?),\s*['\"]([wa][^'\"]*)['\"]", src)
+    # every open() with a write mode in that file, read with the parenthesis
+    # matcher rather than a regex -- see write_opens() for the call shape the
+    # regex version read straight past
+    writes = write_opens(src)
     # Two files, both its own: the predictions, and the progress the dashboard
     # reads. Everything else is a leak. This list is the deliberate review --
     # adding the status file made this check fail until it was named here,
@@ -301,6 +391,65 @@ for _rel in HUMAN_STORES:
 check(f't5 none of the {n_recs:,} records in the {len(HUMAN_STORES)} human '
       f'stores carries a model suggestion', not led_bad,
       'suspect records: ' + ', '.join(led_bad[:5]))
+
+# ── t5-llm the LLM's words are in none of them either ──────────────────────
+# wrote_it() above knows the triage writer's marks. This knows the LLM
+# annotator's, which are different marks on a different tier: an answer from
+# a general-purpose model is below a human verdict AND below a score from a
+# model trained here, and llm_annotations/ is where it lives. A record copied
+# out of that store carries `unverified` and is caught by t5 already; this
+# catches one whose fields were renamed on the way, because the store's
+# vocabulary is prefixed for exactly that reason -- `grep llm_` separates
+# every answer it has ever written from every verdict in the repo.
+llm_bad = []
+for _rel in HUMAN_STORES:
+    for _i, _r in records(_rel):
+        _hit = [k for k in LLM_KEYS if k in _r]
+        _hit += [f'{k}={v!r}' for k, v in _r.items()
+                 if isinstance(v, str) and v in LLM_WORDS]
+        if _hit:
+            llm_bad.append(f'{_rel}:{_i} ({", ".join(sorted(set(_hit))[:3])})')
+check(f't5-llm none of the {n_recs:,} human records carries the LLM tier\'s '
+      f'vocabulary', not llm_bad, 'suspect records: ' + ', '.join(llm_bad[:5]))
+
+# ── t5h every flag row is one the review page could have written ───────────
+# THE CHECK THAT DOES NOT DEPEND ON A MARK. Everything above recognises a
+# record by something it carries, so a promotion that READS the LLM ledger and
+# writes a normally-shaped flag row -- llm_says 'llm_yes' becoming label
+# 'true_positive' -- passes all of them: verified on a copied store, where the
+# translated row was invisible to t5 while the verbatim one failed it at
+# hard_positives/labels.jsonl:126. This is the other side of that: a row must
+# look like one flag_crop() wrote. The crop name is the one the review page
+# mints, the image_id and the confidence are read back OUT of that name, and
+# all seven fields are present. It is a floor rather than a proof -- a
+# determined promoter can synthesise all of it -- and it is the shape check
+# that catches the row somebody writes in a hurry.
+shape_bad, n_flags = [], 0
+for _rel, _label in FLAG_LEDGERS:
+    for _i, _r in records(_rel):
+        n_flags += 1
+        _m = CROP_NAME.match(str(_r.get('crop') or ''))
+        _why = ''
+        if not all(k in _r for k in FLAG_FIELDS):
+            _why = 'missing ' + ', '.join(k for k in FLAG_FIELDS
+                                          if k not in _r)
+        elif not _m:
+            _why = f'crop {_r.get("crop")!r} is not a review-page crop name'
+        elif str(_r.get('image_id')) != _m.group(2):
+            _why = (f'image_id {_r.get("image_id")!r} is not the one in the '
+                    f'crop name')
+        elif abs(round(int(_m.group(3)) / 100.0, 2)
+                 - float(_r.get('conf') or -1)) > 1e-9:
+            _why = f'conf {_r.get("conf")!r} is not the crop name\'s score'
+        elif _r.get('label') != _label:
+            _why = f'label {_r.get("label")!r} in the {_label} store'
+        elif not isinstance(_r.get('copied'), bool):
+            _why = f'copied {_r.get("copied")!r} is not the flag writer\'s'
+        if _why:
+            shape_bad.append(f'{_rel}:{_i} {_why}')
+check(f't5h all {n_flags:,} flag rows have the shape the review page writes',
+      not shape_bad, 'rows nothing on the review page could have written: '
+      + '; '.join(shape_bad[:5]))
 
 # ── t5b the two sqlite stores hold human answers only ──────────────────────
 db_bad = []
@@ -459,7 +608,7 @@ for _d in sorted(os.listdir(DATA) if os.path.isdir(DATA) else ()):
     except OSError:
         continue
     _on_disk += [_d + '/' + f for f in _kids if f.endswith(('.jsonl', '.db'))]
-_known = HUMAN_STORES + MODEL_OWN + (LEASH_DB, FLAGS_DB)
+_known = HUMAN_STORES + MODEL_OWN + LLM_OWN + (LEASH_DB, FLAGS_DB)
 _unclassified = [s for s in _on_disk if s not in _known]
 check(f't5g all {len(_on_disk)} stores under data/ are classified',
       not _unclassified, 'nobody has said whether these hold human '

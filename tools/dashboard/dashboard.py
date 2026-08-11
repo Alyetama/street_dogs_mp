@@ -9540,6 +9540,29 @@ def _datasets():
     return _DATASETS['mod']
 
 
+_LLM = {'mod': None, 'tried': False}
+
+
+def _llm():
+    """The experimental LLM annotator page, imported once and only when asked.
+
+    It pulls in tools/detect/llm_annotate.py at its own module scope, and that
+    module owns a store nothing else in this dashboard reads or should read.
+    Lazy for the same reason the two above are: a checkout missing either file
+    is a page naming both rather than a dashboard that will not boot, and
+    nobody who never opens /llm pays for the import.
+    """
+    if not _LLM['tried']:
+        _LLM['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import llm_page as _l
+            _LLM['mod'] = _l
+        except Exception:
+            _LLM['mod'] = None
+    return _LLM['mod']
+
+
 def gate_planning():
     """True while a planner is building a work list."""
     return bool(_script_pids('gate_store.py', 'plan'))
@@ -9917,6 +9940,120 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return True
         return False
 
+    def _llm_get(self):
+        """The experimental LLM annotator page, its four reads and its crops.
+
+        Everything is answered by llm_page, including the words: what the model
+        said is spelled with the store's own tokens and this handler never
+        translates one into 'dog' or into a verdict. It is a third tier below a
+        person's answer and below a model's score, and a route here that
+        rephrased it would be the first place the three got mixed up.
+
+        `source` and `key` go through verbatim. The source is checked against
+        llm_annotate.SOURCES over there and the key is LOOKED UP in that pool's
+        dictionary, so nothing a client sends is joined onto a directory --
+        and a second opinion formed here would only be somewhere for the two to
+        disagree, which is how a traversal gets through.
+        """
+        path = self.path.split('?', 1)[0]
+        lp = _llm()
+        if path == '/llm':
+            if lp is None:
+                self._html(b'<!doctype html><meta charset=utf-8>'
+                           b'<body style="background:#13151a;color:#98a2ad;'
+                           b'font:14px system-ui;padding:40px">'
+                           b'The LLM annotator module would not load. Check '
+                           b'<code>tools/dashboard/llm_page.py</code> and '
+                           b'<code>tools/detect/llm_annotate.py</code>.'
+                           b'</body>')
+                return True
+            self._html(lp.page_html().encode('utf-8'))
+            return True
+        if lp is None:
+            return False       # the page above already said which file is out
+        q = parse_qs(urlparse(self.path).query)
+        if path == '/api/llm':
+            self._json(lp.api_overview())
+            return True
+        if path == '/api/llm/status':
+            self._json(lp.api_status())
+            return True
+        if path == '/api/llm/disagreements':
+            # An absent limit is passed on as it arrives: the module answers
+            # its own ceiling to anything that is not a number, and a default
+            # spelled again here is the copy that drifts from GRID_MAX.
+            self._json(lp.api_disagreements(
+                q.get('source', [''])[0] or None,
+                q.get('direction', [''])[0] or None,
+                q.get('limit', [None])[0]))
+            return True
+        if path == '/api/llm/unparsed':
+            self._json(lp.api_unparsed(q.get('source', [''])[0] or None,
+                                       q.get('limit', [None])[0]))
+            return True
+        if path == '/llm/crop':
+            body, ctype = lp.crop(q.get('source', [''])[0],
+                                  q.get('key', [''])[0])
+            if not body:
+                # a refused pool, a key that has left it and a crop
+                # deduplicated off the disk are one answer here, and the tile
+                # draws the same missing picture for all three
+                self.send_error(404)
+                return True
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body)))
+            # Private, like the review and datasets pictures: these are crops
+            # off someone's harvest, not something a proxy should hold.
+            self.send_header('Cache-Control', 'private, max-age=86400')
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        return False
+
+    def _llm_post(self):
+        """Start and stop a batch, and nothing else.
+
+        These are the only two routes on this page that are not a read, and
+        neither writes an annotation: they signal llm_annotate, which appends
+        to its own ledger and refuses any path outside its own store. There is
+        no route here that promotes a verdict into a dataset, not even a
+        refused one -- that decision is a person's, by hand, later.
+        """
+        path = self.path.split('?', 1)[0]
+        if path not in ('/api/llm/run', '/api/llm/stop'):
+            return False
+        lp = _llm()
+        if lp is None:
+            self._json({'ok': False,
+                        'msg': 'the LLM annotator module would not load — '
+                               'check tools/dashboard/llm_page.py and '
+                               'tools/detect/llm_annotate.py'})
+            return True
+        if path == '/api/llm/stop':
+            self._json(lp.api_stop())
+            return True
+        try:
+            n = int(self.headers.get('Content-Length', 0) or 0)
+            data = json.loads(self.rfile.read(n) or b'{}')
+            if not isinstance(data, dict):
+                raise ValueError('body is not an object')
+            # Nothing in the body reaches a path, a prompt or a command line.
+            # The pool is one of four names, matched over there; the size is
+            # clamped to one the interface offers, here, the way the audit and
+            # datasets pages clamp a page size at this boundary.
+            args = {'n': lp.run_size(data.get('n'))}
+            # A body that never named a pool gets the module's default rather
+            # than the empty string, which api_run answers as "unknown pool
+            # ''" -- a message about a bug in the page, for a request that
+            # simply left the choice open.
+            if data.get('source'):
+                args['source'] = str(data['source'])
+            self._json(lp.api_run(**args))
+        except Exception as e:
+            self._json({'ok': False, 'msg': str(e)})
+        return True
+
     def do_GET(self):
         # split('?') so cache-busting query strings still match (§7.2 —
         # /api/board's == match 404s on ?t=1 and that bit us before). The two
@@ -9968,6 +10105,13 @@ class BoardHandler(SimpleHTTPRequestHandler):
         # what turned /audit/leash into a 404 the day it was added.
         if _p.startswith('/datasets') or _p.startswith('/api/datasets'):
             if self._datasets_get():
+                return
+        # /llm carries its crop route under the same prefix, so both are
+        # claimed here rather than beside the other JSON endpoints below --
+        # anything left to the static handler is a 404 that looks like a
+        # missing page instead of an unclaimed route.
+        if _p.startswith('/llm') or _p.startswith('/api/llm'):
+            if self._llm_get():
                 return
         if self.path.split('?', 1)[0] == '/review':
             body = REVIEW_HTML.encode('utf-8')
@@ -10211,6 +10355,12 @@ class BoardHandler(SimpleHTTPRequestHandler):
         return True
 
     def do_POST(self):
+        # The same prefix guard do_GET uses, so both verbs claim /llm the same
+        # way and neither can end up owning half of it.
+        _p = self.path.split('?', 1)[0]
+        if _p.startswith('/llm') or _p.startswith('/api/llm'):
+            if self._llm_post():
+                return
         if self.path.split('?', 1)[0] == '/api/audit/box':
             try:
                 n = int(self.headers.get('Content-Length', 0) or 0)
@@ -11844,6 +11994,17 @@ outline-offset:2px}
     <a class="revbtn quiet" href="/datasets" title="Every dataset the logged runs trained on — open one and look inside">
       <span class="rvf">&#9638;</span>
       <span class="rvn"><b>Datasets</b><em>what runs trained on</em>
+      </span></a>
+    <!-- Quiet like the one above, and the caption is doing a second job. The
+         two beside it are a queue somebody judges and the datasets those
+         judgements build; an LLM's answers are neither, and saying so here,
+         before the click, costs one line. A reader who arrives at /llm
+         expecting annotations has already formed the idea that whole store
+         exists to prevent. The violet is that page's and stays there -- one
+         experiment does not get a colour in the header of everything else. -->
+    <a class="revbtn quiet" href="/llm" title="What an LLM said about crops — experimental, kept in a store of its own, and never an annotation">
+      <span class="rvf">&#9708;</span>
+      <span class="rvn"><b>LLM annotator</b><em>experimental &mdash; not annotations</em>
       </span></a>
     <!-- The sentence is wrapped because a bare text node has nothing to
          style, and the scrolled header sheds the sentence while keeping the
