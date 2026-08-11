@@ -23,9 +23,12 @@ train images -- 10.5%, at the top of ultralytics' recommended 0-10%. Adding all
 842 would make it 37% and buy precision with recall. --target-frac decides how
 far past the current ratio to go; the default 0.20 adds roughly 235.
 
-VAL IS NOT TOUCHED. Backgrounds go to train only, so mAP and recall stay
-directly comparable to train-30 rather than being measured against a moved
-goalpost.
+VAL IS NOT TOUCHED, AND NOT LEAKED INTO. Backgrounds go to train only, so mAP
+and recall stay directly comparable to train-30 rather than being measured
+against a moved goalpost. "Not in val" is decided by SEQUENCE, not by
+image_id: frames a second apart are near-duplicates, and a background drawn
+from a val frame's own pass both teaches "no dog on this street" and hands
+the model the val scene in advance.
 
     python tools/detect/build_detector_negatives.py \\
         --src <detector dataset> --out <new dataset> --execute
@@ -80,7 +83,20 @@ def flagged_ids(ledger):
 
 
 def detections_per_image(ids, repo):
-    """{image_id: n detections} from the predictions store."""
+    """{image_id: n detections} from the predictions store.
+
+    count(DISTINCT det_idx), not count(*). The store keys on
+    (image_id, det_idx, cell, drive) and a frame the harvest wrote into two
+    cells carries every one of its detections twice -- so count(*) reads a
+    single-detection frame as a two-detection one and the caller excludes it
+    as "2+ detections with the others unverified", about a sibling that does
+    not exist. Measured over the flagged ids on the live store: 2,062 have
+    exactly one real detection, 1,977 have exactly one ROW; the row test
+    silently loses 85 of the highest-value negatives there are.
+
+    Not store.unique_src() either -- that keeps one row per IMAGE, which
+    would report 1 for every frame and make this test meaningless.
+    """
     sys.path.insert(0, os.path.join(repo, 'tools', 'detect'))
     import duckdb
     import store as _store
@@ -90,8 +106,9 @@ def detections_per_image(ids, repo):
     try:
         lst = "','".join(sorted(ids))
         rows = con.execute(
-            f"SELECT CAST(image_id AS VARCHAR), count(*) FROM {src} "
-            f"WHERE CAST(image_id AS VARCHAR) IN ('{lst}') GROUP BY 1"
+            f"SELECT CAST(image_id AS VARCHAR), count(DISTINCT det_idx) "
+            f"FROM {src} WHERE CAST(image_id AS VARCHAR) IN ('{lst}') "
+            f"GROUP BY 1"
         ).fetchall()
     finally:
         con.close()
@@ -193,10 +210,28 @@ def main():
     print(f'  {len(safe) - len(have)} could not be resolved to an original '
           f'jpg -> {len(have)} usable')
 
-    # 4. one long pass past one goat must not dominate
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from rebuild_crop_dataset import resolve_sequences
+
+    # 3b. nothing from a sequence val already grades on
+    #
+    # Step 1 excluded val by IMAGE_ID, which is the split rule this project
+    # measured at 63-71% leakage and abandoned: Mapillary frames a second
+    # apart are near-duplicates, so frame N as a background in train and
+    # frame N+2 as a labelled dog in val means val is scoring a scene the
+    # model has partly memorised -- and has been told contains nothing.
+    # build_dogdet_v3.py already refuses this; the rule is the same here.
+    val_ids = ids_in(os.path.join(args.src, 'images', 'val'))
+    val_seqs = {s for s in resolve_sequences(
+        val_ids, REPO, args.duckdb_python).values() if s}
     seq = resolve_sequences(set(have), REPO, args.duckdb_python)
+    leaked = {i for i in have if seq.get(i) in val_seqs}
+    for i in leaked:
+        have.pop(i, None)
+    print(f'  {len(leaked)} share a sequence with a val frame -> '
+          f'{len(have)} left ({len(val_seqs)} val sequences on record)')
+
+    # 4. one long pass past one goat must not dominate
     by_seq = collections.defaultdict(list)
     for i in sorted(have):
         by_seq[seq.get(i) or f'noseq:{i}'].append(i)
@@ -255,7 +290,8 @@ def main():
         'flagged_in_ledger': len(flags),
         'already_in_src': len(flags) - len(cand),
         'multi_detection_skipped': len(cand) - len(safe),
-        'unresolved_to_original': len(safe) - len(have),
+        'unresolved_to_original': len(safe) - len(have) - len(leaked),
+        'val_sequence_skipped': len(leaked),
         'over_sequence_cap': dropped_cap,
         'added_backgrounds': len(chosen),
         'target_frac': args.target_frac,

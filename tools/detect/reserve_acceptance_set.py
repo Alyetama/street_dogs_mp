@@ -36,6 +36,7 @@ import os
 import random
 import re
 import sys
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_OUT = os.path.join(REPO, 'data', 'dogbin_acceptance_set.json')
@@ -152,7 +153,14 @@ def main():
         held_ids.update(groups[gi])
 
     out = {
-        'created': '2026-08-03',
+        # WHEN THIS DRAW HAPPENED, not when the code was written. It was a
+        # string literal, so every reservation this tool has ever produced
+        # claims 2026-08-03 -- including the date the --force refusal above
+        # prints back at whoever is deciding whether a reservation predates
+        # the model it is about to accept. That is the one question this file
+        # exists to let a human answer, and a constant cannot answer it.
+        'created': time.strftime('%Y-%m-%d'),
+        'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'purpose': 'Permanent acceptance set for the dog-bin gate. These '
                    'image_ids must NEVER enter any training or validation '
                    'split. rebuild_crop_dataset.py --exclude-ids reads this '

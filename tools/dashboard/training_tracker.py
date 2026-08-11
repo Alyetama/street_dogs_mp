@@ -232,7 +232,11 @@ def latest_metrics(rows, task, best_index=None):
         at_best = None
         if best_index is not None and 0 <= best_index < len(series):
             at_best = series[best_index]
-        out.append({'key': key, 'latest': v, 'peak': pk,
+        # `col` travels with `key`: the csv column is what identifies a metric
+        # across tables, and HEADLINE and LATEST label the same classify
+        # metric two different ways ('top-1 accuracy' vs 'accuracy_top1'), so
+        # a consumer matching on the label finds nothing for a classifier.
+        out.append({'key': key, 'col': col, 'latest': v, 'peak': pk,
                     'peak_epoch': int(e) if e is not None else pi + 1,
                     'peak_index': pi, 'at_best': at_best, 'series': series})
     return out

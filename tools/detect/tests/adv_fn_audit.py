@@ -1018,9 +1018,15 @@ function chk(c, m){ if(!c) console.log('FAIL ' + m) }
 chk(/^\d/.test(els.rate.textContent), 'headline rate is ' +
   JSON.stringify(els.rate.textContent));
 chk(els.judged.textContent === '12', 'judged reads ' + els.judged.textContent);
-// the axis runs 0-100% and says where the gate's own line falls
-chk(/100%/.test(els.bands.innerHTML) && /where the gate/.test(els.bands.innerHTML),
-  'the band axis does not state its range or the threshold');
+// The axis runs 0-100% and says where THIS stage's line falls. Asserted
+// against TITLE rather than the word "gate": the literal used to be the gate's
+// and read "where the gate draws its line" on /audit/leash, which is the
+// per-stage-vocabulary bug this file exists to catch -- so a guard spelling the
+// gate's own word was holding the defect in place.
+chk(/100%/.test(els.bands.innerHTML)
+    && els.bands.innerHTML.indexOf('where the ' + TITLE + ' draws its line') >= 0,
+  'the band axis does not state its range, or names a model other than ' +
+  TITLE + ': ' + els.bands.innerHTML.slice(-160));
 // bands above the threshold must exist now
 chk(/0\.9–1\.0/.test(els.bands.innerHTML),
   'the bands stop before 1.0 — what the model accepted is unauditable');

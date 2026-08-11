@@ -2663,7 +2663,7 @@ function load(){
     if(j.leash)LEASH=j.leash;
     if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
     if(j.leash_counts)paintLeashOptions(j.leash_counts);
-    paintCountries(j.countries,j.country);
+    paintCountries(j.countries,j.country,j.country_coverage);
     paintSuggest(j);
     paintGate(j);
     paintChips();
@@ -3699,8 +3699,20 @@ $('size').onchange=function(){var v=parseInt(this.value,10)||50;
    only when the option set actually CHANGED -- rewriting the <select> on each
    page turn would drop the open dropdown and reset the caret mid-click. */
 var countrySig='';
-function paintCountries(list,cur){
+function paintCountries(list,cur,cov){
   if(!list)return;
+  /* What share of the queue the index can place, ON the control it limits.
+     Picking a country drops every crop with no country -- there is no
+     unknown-country escape -- so a coverage of 0.74 means a quarter of the
+     queue is unreachable with any country selected, and the option counts
+     cannot say so: they are tallied over crops that HAVE a country, so each
+     one promises exactly what it delivers. The server has computed this
+     number all along and nothing displayed it, which is how an entire crop
+     directory sat unindexed without a symptom. */
+  var csel=$('country');
+  if(csel)csel.title='only review crops from one country'+
+    (cov==null?'':' — the index can place '+Math.round(cov*100)+
+     '% of this queue; the rest are only reachable with the filter off');
   var sig=list.map(function(c){return c.iso+':'+c.n}).join(',');
   countryName='';
   for(var q=0;q<list.length;q++)if(list[q].iso===cur)countryName=list[q].name;
@@ -5257,10 +5269,26 @@ def render_run_diff(a_key, b_key):
     bm = {m['key']: m for m in (b.get('latest') or [])}
     same_metric = a.get('headline_key') == b.get('headline_key')
     mlabel = a.get('headline_label') or 'headline metric'
-    # by label, not by headline_key: the key is the raw csv column
-    # ('metrics/mAP50-95(B)') and the metric table is keyed by the short name
-    ah = am.get(a.get('headline_label')) or {}
-    bh = bm.get(b.get('headline_label')) or {}
+
+    # On the csv column, which is the metric's one identity. This used to look
+    # up by headline_label against a table keyed by the SHORT name, and the
+    # two vocabularies only agree for detect: HEADLINE['classify'] labels it
+    # 'top-1 accuracy' and LATEST['classify'] calls it 'accuracy_top1', so
+    # every classifier comparison -- dogbin_008 vs dogbin_007, leash_v2_003 vs
+    # leash_v2_002 -- missed, and both epoch notes came out None. The row then
+    # read exactly the way the comment in line() says it must not: two peaks
+    # from two different epochs of two different-length runs, printed side by
+    # side with nothing saying so. The label fallback stays for a run payload
+    # cached before `col` existed.
+    def headline_metric(r, table):
+        hk = r.get('headline_key')
+        for m in (r.get('latest') or []):
+            if hk and m.get('col') == hk:
+                return m
+        return table.get(r.get('headline_label')) or {}
+
+    ah = headline_metric(a, am)
+    bh = headline_metric(b, bm)
     line(f'best {esc_html(mlabel)}' if same_metric else 'best (differing metric)',
          a.get('best_headline'), b.get('best_headline'),
          fmt=lambda v: f'{v:.4f}', digits=4,
@@ -7903,7 +7931,11 @@ def refresh_countries():
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import country_index as ci
-        ci.build(REPO, COUNTRY_INDEX)
+        # the directories THIS server serves crops from, not the index's own
+        # guess at them: whatever review_pool_names() walks is what the
+        # country filter has to be able to place.
+        ci.build(REPO, COUNTRY_INDEX,
+                 extra_dirs=[d for d in (review_extra_dir(),) if d])
     except Exception as e:                       # geopandas missing, lock, ...
         sys.stderr.write(f'country index refresh failed: {e}\n')
 
@@ -9180,7 +9212,10 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             'countries_generated': cdoc.get('generated'),
             # how much of the queue the index can currently place. The pool
             # turns over every ~4 minutes at sweep rate, so this is the number
-            # that says whether the filter is usable at all.
+            # that says whether the filter is usable at all -- shown on the
+            # country <select>'s own tooltip, because for a long time it was
+            # computed here and rendered nowhere, and a crop directory the
+            # index never walked cost the filter 1,593 crops in silence.
             'country_coverage': coverage}
 
 

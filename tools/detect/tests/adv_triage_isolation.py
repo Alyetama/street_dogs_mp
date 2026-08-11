@@ -52,6 +52,7 @@ probe session has already left fake ones in the live audit ledger.
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 
@@ -304,23 +305,147 @@ check('t1b the allowlist names files that exist', all(
     'an allowed name matches no file -- the list has rotted')
 # The LLM guard is allowlisted above and names every ledger there is, so the
 # usual counter-check cannot hold it. This one can: it asserts against stores
-# it has REDIRECTED into a temp directory, so every write in it goes to a path
-# built from that redirect and never to a name under data/. A guard whose
-# paths pointed at the live gate audit once left seventeen invented verdicts
-# in it, which is the accident this refuses to let happen again.
-_tier = None
+# it has REDIRECTED into a temp directory, so no write in it may land under
+# data/. A guard whose paths pointed at the live gate audit once left
+# seventeen invented verdicts in it, which is the accident this refuses to let
+# happen again.
+#
+# BY RUNNING IT, not by reading it. This check used to be a regex over the
+# source text of each write target -- `lay[|self.dir|\btmp\b` -- and asked
+# whether the write was SPELLED like a redirect, which is a different question
+# from whether the redirect took. The accident it exists to prevent is
+# literally spelled `lay['verdicts']`: `lay = dict(fa.paths('gate'))` starts as
+# the LIVE layout and .update() overwrites only some of its eleven keys, so
+# every key the update forgets is a live path wearing an approved name. The
+# old check called that ok. It also short-circuited to the literal True if
+# `def judged_names` ... (see t2b) and saw only open() with a literal mode,
+# missing os.replace, shutil.copy*, Path.write_text and sqlite3.connect
+# entirely.
+#
+# So: run adv_llm_tier.py in a subprocess with every write API refused inside
+# data/, and fail on any attempt. Refused, not observed -- a check that
+# noticed the write after it happened would be the seventeen verdicts again.
+_WRITE_GUARD = r'''
+import builtins, io, json, os, pathlib, runpy, shutil, sqlite3, sys
+GUARDED, REPORT, TARGET = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3]
+hits = []
+def _under(p):
+    try:
+        rp = os.path.realpath(os.fspath(p))
+    except (TypeError, ValueError):
+        return False
+    return rp == GUARDED or rp.startswith(GUARDED + os.sep)
+def _trip(api, p):
+    hits.append('%s -> %s' % (api, os.fspath(p)))
+    raise PermissionError('write-guard: %s(%s) inside %s' % (api, p, GUARDED))
+def _wrap_path(mod, name, argi=0):
+    fn = getattr(mod, name, None)
+    if fn is None:
+        return
+    label = getattr(mod, '__name__', '?') + '.' + name
+    def w(*a, **kw):
+        if len(a) > argi and _under(a[argi]):
+            _trip(label, a[argi])
+        return fn(*a, **kw)
+    setattr(mod, name, w)
+def _wrap_open(mod, name):
+    fn = getattr(mod, name)
+    label = getattr(mod, '__name__', 'builtins') + '.' + name
+    def w(file, mode='r', *a, **kw):
+        m = kw.get('mode', mode)
+        if isinstance(m, str) and (m[:1] in ('w', 'a', 'x') or '+' in m):
+            if _under(file):
+                _trip(label, file)
+        return fn(file, mode, *a, **kw)
+    setattr(mod, name, w)
+_wrap_open(builtins, 'open')
+_wrap_open(io, 'open')
+_osopen = os.open
+def _os_open(path, flags, *a, **kw):
+    if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC):
+        if _under(path):
+            _trip('os.open', path)
+    return _osopen(path, flags, *a, **kw)
+os.open = _os_open
+for _n in ('remove', 'unlink', 'rmdir', 'mkdir', 'makedirs', 'truncate'):
+    _wrap_path(os, _n)
+for _n in ('replace', 'rename', 'renames', 'link', 'symlink'):
+    _wrap_path(os, _n, 1)
+    _wrap_path(os, _n, 0)
+for _n in ('copy', 'copy2', 'copyfile', 'copytree', 'move'):
+    _wrap_path(shutil, _n, 1)
+_wrap_path(shutil, 'rmtree', 0)
+def _mk(f, n):
+    def w(self, *a, **kw):
+        if _under(self):
+            _trip('Path.' + n, self)
+        return f(self, *a, **kw)
+    return w
+for _n in ('write_text', 'write_bytes', 'touch', 'mkdir', 'unlink', 'rmdir'):
+    _f = getattr(pathlib.Path, _n, None)
+    if _f is not None:
+        setattr(pathlib.Path, _n, _mk(_f, _n))
+_pathopen = pathlib.Path.open
+def _p_open(self, mode='r', *a, **kw):
+    if isinstance(mode, str) and (mode[:1] in ('w', 'a', 'x') or '+' in mode):
+        if _under(self):
+            _trip('Path.open', self)
+    return _pathopen(self, mode, *a, **kw)
+pathlib.Path.open = _p_open
+_conn = sqlite3.connect
+def _sq(database, *a, **kw):
+    s = str(database)
+    if not (s.startswith('file:') and 'mode=ro' in s):
+        if _under(s.split('?')[0].replace('file:', '')):
+            _trip('sqlite3.connect', s)
+    return _conn(database, *a, **kw)
+sqlite3.connect = _sq
+rc, err = 0, ''
+try:
+    sys.argv = [TARGET]
+    runpy.run_path(TARGET, run_name='__main__')
+except SystemExit as e:
+    rc = e.code if isinstance(e.code, int) else 1
+except BaseException as e:
+    rc, err = 99, '%s: %s' % (type(e).__name__, e)
+with open(REPORT, 'w') as fh:
+    json.dump({'done': True, 'hits': hits, 'rc': rc, 'err': err}, fh)
+'''
+
+_tier_path = None
 for _base, _, _fs in os.walk(TOOLS):
     if 'adv_llm_tier.py' in _fs:
-        _tier = read(os.path.join(_base, 'adv_llm_tier.py')) or ''
-_tier_bad = []
-if _tier is None:
-    _tier_bad.append('adv_llm_tier.py is missing')
+        _tier_path = os.path.join(_base, 'adv_llm_tier.py')
+_tier_bad, _tier_skip = [], ''
+if _tier_path is None:
+    _tier_bad.append('adv_llm_tier.py is missing -- nothing was run')
 else:
-    for _t, _mode in write_opens(_tier):
-        if not re.search(r"lay\[|self\.dir|\btmp\b", _t):
-            _tier_bad.append(f'writes to {_t}')
-check('t1d the LLM guard writes only into stores it redirected',
-      not _tier_bad, '; '.join(_tier_bad))
+    import subprocess                                           # noqa: E402
+    import tempfile                                             # noqa: E402
+    _wd = tempfile.mkdtemp(prefix='wguard_')
+    _wg, _rep = os.path.join(_wd, 'wg.py'), os.path.join(_wd, 'report.json')
+    with open(_wg, 'w', encoding='utf-8') as _fh:
+        _fh.write(_WRITE_GUARD)
+    subprocess.run([sys.executable, _wg, os.path.join(REPO, 'data'), _rep,
+                    _tier_path], capture_output=True, text=True)
+    try:
+        with open(_rep, encoding='utf-8') as _fh:
+            _doc = json.load(_fh)
+    except (OSError, ValueError):
+        _doc = None
+    if not _doc or not _doc.get('done'):
+        # The trap this suite keeps meeting: an abort prints nothing and looks
+        # like a pass. It is not one.
+        _tier_bad.append('the write-guarded run did not complete -- nothing '
+                         'was proved')
+    elif _doc['hits']:
+        _tier_bad += _doc['hits']
+    elif _doc.get('rc') == 99:
+        _tier_bad.append(f'adv_llm_tier.py died before it finished '
+                         f'({_doc["err"]}), so most of it never ran')
+    shutil.rmtree(_wd, ignore_errors=True)
+check('t1d the LLM guard attempts no write under data/, run and watched',
+      not _tier_bad, '; '.join(_tier_bad[:5]))
 
 # ── t2 the writer never opens a ledger or dataset for writing ───────────────
 src = read(TRIAGE)
@@ -340,10 +465,64 @@ else:
     bad = [t for t, _ in writes if not any(o in t for o in OWN)]
     check('t2 the writer only ever writes its own files', not bad,
           'other write targets: ' + '; '.join(bad))
-    check('t2b the writer names no ledger path', 'labels.jsonl' not in
-          src.split('def judged_names')[1].split('def ')[0].replace(
-              "'labels.jsonl'", '') if 'def judged_names' in src else True,
-          'labels.jsonl referenced outside the read-only helper')
+    # t2b THE WHOLE FILE, not one function's body.
+    #
+    # This used to read `'labels.jsonl' not in src.split('def judged_names')[1]
+    # .split('def ')[0].replace("'labels.jsonl'", '')` -- a window one function
+    # wide, reported under a name ("the writer names no ledger path") and a
+    # failure detail ("referenced outside the read-only helper") that both
+    # claim the whole file. A module-level `LEDGER = 'data/hard_negatives/
+    # labels.jsonl'` two hundred lines away was invisible to it, and t2 could
+    # not cover the gap either: t2 reads write_opens(), which only sees
+    # open(path, <literal mode>). Worse, the whole expression was `... if 'def
+    # judged_names' in src else True`, so renaming the helper made the check
+    # the literal True and it passed having read nothing.
+    #
+    # Now: every string constant in the file that names a store, from the parse
+    # tree so a path built by joining is seen piece by piece, and only two
+    # places may hold one -- the read-only helper's body, and the module
+    # docstring, which states the rule in prose. A missing helper is a
+    # failure, not a pass.
+    import ast                                                   # noqa: E402
+    _t2b_bad, _helper = [], None
+    try:
+        _tree = ast.parse(src)
+    except SyntaxError as _exc:
+        _tree = None
+        _t2b_bad.append(f'triage_crops.py does not parse: {_exc}')
+    if _tree is not None:
+        # the NODE, not get_docstring()'s cleaned text -- those differ by
+        # indentation and comparing them would exempt nothing
+        _doc = None
+        if (_tree.body and isinstance(_tree.body[0], ast.Expr)
+                and isinstance(_tree.body[0].value, ast.Constant)
+                and isinstance(_tree.body[0].value.value, str)):
+            _doc = _tree.body[0].value
+        for _n in ast.walk(_tree):
+            if isinstance(_n, ast.FunctionDef) and _n.name == 'judged_names':
+                _helper = _n
+        _ok_lines = (range(_helper.lineno, (_helper.end_lineno or
+                                            _helper.lineno) + 1)
+                     if _helper else ())
+        if _helper is None:
+            _t2b_bad.append('judged_names() is gone -- the one place a ledger '
+                            'name is allowed no longer exists, so nothing '
+                            'here was scanned')
+        for _n in ast.walk(_tree):
+            if not (isinstance(_n, ast.Constant)
+                    and isinstance(_n.value, str)):
+                continue
+            _w = [w for w in LEDGER_WORDS if w in _n.value]
+            if not _w:
+                continue
+            if _n is _doc:
+                continue        # the module docstring says what the rule is
+            if _n.lineno in _ok_lines:
+                continue
+            _t2b_bad.append(f'line {_n.lineno} names {_w[0]}: '
+                            f'{_n.value[:48]!r}')
+    check('t2b the writer names a store only inside its read-only helper',
+          not _t2b_bad, '; '.join(_t2b_bad[:5]))
 
 # ── t3 a suggestion cannot ride into a ledger record ────────────────────────
 dash = read(DASH)
@@ -596,23 +775,92 @@ check('t5f-b every exported label is its own verdict', not ex_bad,
 # ── t5g every store on disk is one this file has classified ────────────────
 # Two levels only: below that are the crops and the full frames, tens of
 # thousands of jpgs and no ledger among them.
-_on_disk = []
+#
+# NOT ON EXTENSION ANY MORE. It used to enumerate `*.jsonl` and `*.db` and
+# then print "all N stores under data/ are classified" -- a claim about data/
+# made from two suffixes. A verdict store written as .parquet, .sqlite3 or
+# .csv was never enumerated and so never had to be classified, which is the
+# state that let ten stores grow up unnoticed beside the two labels.jsonl this
+# check exists to remember.
+#
+# Classified at two grains, because the two costs are different. A DIRECTORY
+# of bulk model output (165 gate shards, 30 leash shards, the coverage
+# parquets, the shapefiles) is named once; nothing inside it is enumerated,
+# and a directory nobody has named fails. Everywhere else -- every directory a
+# human decision does land in, and the top level -- every file is enumerated
+# whatever its suffix, so the next verdicts.parquet or answers.sqlite3 has to
+# be classified before this passes.
+BULK_DIRS = ('gate',            # the gate's own shards, one model verdict each
+             'leash',           # the same for the leash stage
+             'detect',          # the parquet predictions store + its status
+             'engines',         # tensorrt engines and their sums
+             'geo',             # natural-earth shapefiles
+             'grids',           # the cell grids the harvest was planned on
+             'harvest',         # harvested crops
+             'manifests',       # coverage csv exports
+             'mistakes',        # per-run mistake dumps from run_mistakes.py
+             'missing_worklist', 'missing_worklist_after',
+             'missing_unrecoverable')
+# Files that are not anybody's verdict but sit where the ledgers do. Named one
+# by one on purpose: a NEW one still has to be reviewed before this passes.
+MODEL_WORKING = (
+    'fn_audit/pool.parquet', 'fn_audit/pool.json', 'fn_audit/status.json',
+    'leash_audit/pool.parquet', 'leash_audit/pool.json',
+    'leash_audit/status.json', 'llm_annotations/status.json',
+    'dashboard/board_stats.json', 'dashboard/countries.json',
+    'dashboard/dataset_sizes.json', 'dashboard/distinct_counts.json',
+    'dashboard/drive_smart.json', 'dashboard/map_points.json',
+    'dashboard/map_points_fine.json', 'dashboard/regions_status.json',
+    'dashboard/sequence_cache.json', 'dashboard/triage_status.json',
+    'dashboard/world.json', 'dashboard/history.duckdb',
+    'dashboard/search_terms.npz', 'dashboard/triage_vecs.npz',
+    'best_models.json', 'confusion.json', 'dogbin_acceptance_set.json',
+    'leash_acceptance_set.json', 'dogbin_v4_clusters.json',
+    'leash_v2_clusters.json', 'leash_label_conflicts.json',
+    'catalog.parquet', 'catalog.duckdb', 'dead_manifest_rows.parquet',
+)
+# Suffixes that are never a store wherever they turn up: page assets, logs,
+# plain-text config, sqlite journals, and the .bak/.tmp a rotation leaves.
+NOT_A_STORE = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.txt', '.log',
+               '.md', '.html', '.css', '.js', '.npz.lock', '.db-shm',
+               '.db-wal', '.bak', '.tmp', '.lock')
+_on_disk, _skipped, _bulk_seen = [], 0, set()
+_unknown_dirs = []
 for _d in sorted(os.listdir(DATA) if os.path.isdir(DATA) else ()):
     _p = os.path.join(DATA, _d)
-    if os.path.isfile(_p):
-        if _d.endswith(('.jsonl', '.db')):
-            _on_disk.append(_d)
-        continue
-    try:
-        _kids = sorted(os.listdir(_p))
-    except OSError:
-        continue
-    _on_disk += [_d + '/' + f for f in _kids if f.endswith(('.jsonl', '.db'))]
-_known = HUMAN_STORES + MODEL_OWN + LLM_OWN + (LEASH_DB, FLAGS_DB)
+    if os.path.isdir(_p):
+        if _d in BULK_DIRS:
+            _bulk_seen.add(_d)
+            continue
+        try:
+            _names = [(_d + '/' + f, os.path.join(_p, f))
+                      for f in sorted(os.listdir(_p))]
+        except OSError:
+            continue
+    else:
+        _names = [(_d, _p)]
+    for _rel, _abs in _names:
+        if not os.path.isfile(_abs):
+            continue                      # crops and full frames live below
+        if _rel.endswith(NOT_A_STORE) or '.jsonl.' in _rel:
+            _skipped += 1                 # a rotated ledger keeps its suffix
+            continue
+        _on_disk.append(_rel)
+_known = (HUMAN_STORES + MODEL_OWN + LLM_OWN + MODEL_WORKING
+          + (LEASH_DB, FLAGS_DB))
 _unclassified = [s for s in _on_disk if s not in _known]
-check(f't5g all {len(_on_disk)} stores under data/ are classified',
+check(f't5g all {len(_on_disk)} files under data/ that could be a store are '
+      f'classified, whatever their suffix ({len(_bulk_seen)} bulk directories '
+      f'named whole, {_skipped} assets/logs skipped)',
       not _unclassified, 'nobody has said whether these hold human '
       'decisions: ' + ', '.join(_unclassified[:5]))
+# A name in BULK_DIRS that matches nothing is the ALLOWED list's old failure:
+# an exemption for a directory that is not there, quietly covering nothing.
+check('t5g-b every bulk directory named here exists',
+      set(BULK_DIRS) <= _bulk_seen | {d for d in BULK_DIRS
+                                      if not os.path.isdir(DATA)},
+      'named but not on disk: ' + ', '.join(sorted(set(BULK_DIRS)
+                                                   - _bulk_seen)))
 
 # ── t7 the bucket edges still match the ImageNet class order ────────────────
 if src:

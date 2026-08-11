@@ -1032,7 +1032,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 
 <script>
 var BANDS=__BANDS__,STAGE=__STAGE__,POS=__POS__,NEG=__NEG__,
-    YES=__YES__,NO=__NO__,BELOW=__BELOW__,ABOVE=__ABOVE__,
+    YES=__YES__,NO=__NO__,BELOW=__BELOW__,ABOVE=__ABOVE__,TITLE=__TITLE__,
     DEFAULT_BAND=__DEFBAND__,THRESH=__THRESH__;
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
@@ -1454,14 +1454,27 @@ function paintStats(s){
   function ansTxt(b){return b.shown
     ? '<b>'+fmtn(b.answered)+'</b>/'+fmtn(b.shown)
     : '—'}
+  /* THE SAME FIX AS THE ci SENTENCE ABOVE, WHICH REACHED ONE CALL SITE.
+     Every word in this table used to be the gate's: "score the gate gave",
+     "share that really are dogs", "threw away", "where the gate draws its
+     line" -- all four rendered unchanged on /audit/leash, where the scores
+     belong to the leash model, the share is of dogs called LEASHED, and
+     nothing is thrown away at all (the 273,969 boxes below its threshold are
+     dogs it called loose, and every one of them stays in the store). The
+     stage's own words are three variables away, so they are used.
+     `answered YES` rather than "really are X": it is what the number IS -- k
+     verdicts out of n on crops somebody chose to click -- and it needs no
+     plural, which POS ('dog', 'leashed') cannot supply for both stages. */
   document.getElementById('bands').innerHTML=
-    '<div class="bhead"><span>score the gate gave</span>'+
+    '<div class="bhead"><span>score the '+TITLE+' gave</span>'+
     '<span>in the store</span>'+
-    '<span>share that really are dogs, with its 95% interval</span>'+
+    '<span>share you answered '+YES+', with its 95% interval</span>'+
     '<span class="ax">flagged</span>'+
     '<span class="ax">answered</span></div>'+
     (s.bands||[]).map(function(b){
-      var side=b.kept?' kept':' threw away';
+      /* "below the line", not "threw away" -- the one description of this
+         side that is true of both models. Same wording as the ci sentence. */
+      var side=b.kept?' above the line':' below the line';
       if(!b.judged)return '<div class="brow nil"><span class="bname">'+
         b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
         '<span class="bwhat">'+fmtn(b.boxes)+side+'</span>'+
@@ -1475,8 +1488,8 @@ function paintStats(s){
         '<span class="bname">'+b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
         '<span class="bwhat">'+fmtn(b.boxes)+side+'</span>'+
         '<div class="btrack'+(b.kept?' kept':'')+'" title="'+b.dogs+' of '+
-          b.judged+' were dogs — the bar is the 95% interval, the tick is the '+
-          'estimate'+(b.shown?', off '+b.answered+' of the '+b.shown+
+          b.judged+' answered '+YES+' — the bar is the 95% interval, the tick '+
+          'is the estimate'+(b.shown?', off '+b.answered+' of the '+b.shown+
             ' crops this band put on a sheet':'')+'">'+
           '<div class="bci" style="left:'+l.toFixed(2)+'%;width:'+
             Math.max(0.6,h-l).toFixed(2)+'%"></div>'+
@@ -1485,7 +1498,7 @@ function paintStats(s){
         '<span class="bans">'+ansTxt(b)+'</span></div>';
     }).join('')+
     '<div class="bfoot"><span class="axis"><span>0%</span>'+
-    '<span>50% — where the gate draws its line</span>'+
+    '<span>50% — where the '+TITLE+' draws its line</span>'+
     '<span>100%</span></span></div>';
 }
 /* clicks */
@@ -1869,6 +1882,9 @@ def page_html(stage=DEFAULT_STAGE):
                  ('__NO__', json.dumps(sp['no'])),
                  ('__BELOW__', json.dumps(sp['below'])),
                  ('__ABOVE__', json.dumps(sp['above'])),
+                 # which model this page is about, for the band table's
+                 # column head and axis label
+                 ('__TITLE__', json.dumps(sp['title'])),
                  # asymmetric models get walked from the side where the
                  # unrecoverable error lives; symmetric ones from both
                  ('__DEFBAND__',

@@ -2753,6 +2753,21 @@ def main():
     # broken: that is exactly what happened when an apostrophe escaped as
     # \\' in the non-raw template emitted a bare quote, killed every handler
     # on the page, and this test -- run before the rebuild -- said ok.
+    #
+    # FIRST, before any check reads the page. It used to sit ten lines below
+    # css_collisions(), so a stale run graded the old build's CSS and could
+    # report FAIL against a collision the source no longer has -- sending the
+    # reader to hunt a defect that is not there -- or print "ok every section
+    # keeps to its own class prefix" about a build nobody is testing and only
+    # then abort. It needs nothing but two mtimes; nothing may precede it.
+    src = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
+    if os.path.exists(src) and os.path.getmtime(src) > os.path.getmtime(INDEX):
+        raise SystemExit(
+            'STALE PAGE: tools/dashboard/dashboard.py is newer than\n'
+            f'  {INDEX}\n'
+            'so this run would grade the previous build. Rebuild first:\n'
+            '  python tools/dashboard/dashboard.py build --no-refresh')
+
     stray = css_collisions(INDEX)
     if stray:
         for c, sid in stray[:8]:
@@ -2762,13 +2777,6 @@ def main():
         return 1
     print('ok   every section keeps to its own class prefix')
 
-    src = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
-    if os.path.exists(src) and os.path.getmtime(src) > os.path.getmtime(INDEX):
-        raise SystemExit(
-            'STALE PAGE: tools/dashboard/dashboard.py is newer than\n'
-            f'  {INDEX}\n'
-            'so this run would grade the previous build. Rebuild first:\n'
-            '  python tools/dashboard/dashboard.py build --no-refresh')
     html = open(INDEX, encoding='utf-8').read()
     showing, opaque = hidden_that_still_shows(
         html, open(src, encoding='utf-8').read() if os.path.exists(src) else '')

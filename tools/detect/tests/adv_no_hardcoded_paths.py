@@ -34,7 +34,15 @@ EXTRA = (
     'tools/dashboard/street-dogs-dashboard.service.example',
 )
 
-SKIP_EXT = ('.js', '.min.js', '.png', '.jpg', '.svg', '.ico', '.parquet',
+# '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
+# files out of the scan -- four of them hand-written project source
+# (tools/detect/tests/audit_page_stub.js and the three docs/*.config.js),
+# sitting in the same directories as everything else this checks, while the
+# success line went on claiming a verdict over "committed files". A home
+# directory pasted into any of them shipped clean. '.min.js' stays: a
+# vendored minified bundle is upstream's text, not ours, and is the only
+# javascript here nobody wrote by hand.
+SKIP_EXT = ('.min.js', '.png', '.jpg', '.svg', '.ico', '.parquet',
             '.duckdb', '.engine', '.pt', '.zst', '.gz')
 
 # Machine-generated dependency manifests. They are full of upstream build
@@ -98,14 +106,21 @@ ALLOW = re.compile(r'<user>|<drive>|<path-to|<home>|<mounts>|<datasets>'
 
 
 def files():
+    """(scanned, skipped) -- both, because the verdict has to name its sample.
+
+    A count of what was read means nothing next to "no machine-specific
+    paths" unless what was NOT read is on the same line. This check reported
+    "189 committed files: clean" while never opening ten of the 199.
+    """
     out = subprocess.run(['git', '-C', REPO, 'ls-files'],
                          capture_output=True, text=True, check=True).stdout
     seen = [p for p in out.splitlines() if p]
     for p in EXTRA:
         if p not in seen and os.path.exists(os.path.join(REPO, p)):
             seen.append(p)
-    return [p for p in seen
+    keep = [p for p in seen
             if not p.endswith(SKIP_EXT) and not SKIP_FILES.search(p)]
+    return keep, [p for p in seen if p not in set(keep)]
 
 
 # Local-only files. .gitignore names them, but the repo's blanket '*/' rule
@@ -136,7 +151,8 @@ def main():
         return 1
 
     hits = []
-    for rel in files():
+    scanned, skipped = files()
+    for rel in scanned:
         path = os.path.join(REPO, rel)
         try:
             with open(path, encoding='utf-8', errors='replace') as fh:
@@ -159,8 +175,10 @@ def main():
                                  'identifies a physical disk'))
 
     if not hits:
-        print(f'{len(files())} committed files: no machine-specific paths, '
+        print(f'{len(scanned)} committed files: no machine-specific paths, '
               'addresses or serials')
+        if skipped:
+            print(f'  not opened ({len(skipped)}): ' + ', '.join(skipped))
         return 0
     print(f'{len(hits)} machine-specific literal(s) in files that get '
           'committed:\n')

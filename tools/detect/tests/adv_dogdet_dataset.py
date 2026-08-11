@@ -9,6 +9,15 @@ dogdet_v3 build is on disk and fail if the split has rotted.
 Nothing here trusts the builder's summary alone: splits, labels and files are
 re-read from the dataset itself; the manifest supplies only the sequence map,
 and any frame it cannot vouch for must be sitting in train.
+
+INTERPRETER. Set $TRAINING_ROOT and this runs anywhere. Without it the
+training repo is resolved by importing tools/dashboard/dashboard.py, which is
+a 3.12+ file -- so under an older interpreter (mp is 3.11, and it is the env
+MEMORY.md names for most tools/detect scripts) the import raises and there is
+no other way to find the dataset. That case now exits 1 and says so; it used
+to be swallowed into 'SKIP: no dogdet_v3 on disk' beside a dogdet_v3 that was
+on disk, which is this suite's only check on the sequence split reporting
+success without reading a single file.
 """
 
 import json
@@ -18,26 +27,46 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 def _training_root():
-    """The training repo. Env first, then the dashboard's own config -- the
-    same answer gate_control resolves the promoted weights against -- so this
-    works in a bare shell and in the sweep of guards alike."""
+    """(root, where it came from) -- env first, then the dashboard's config.
+
+    NO FALLBACK. There used to be one: dirname(dirname(REPO)), the mount the
+    repo sits on, which is not a training repo on any machine and cannot
+    become one. Its only effect was to turn "I could not work out where the
+    datasets are" into "there are no datasets", and main() reported that as a
+    clean skip with exit 0. An unresolvable root is a broken invocation and
+    has to read as one -- an answer this file cannot give is not a pass.
+    """
     got = os.environ.get('TRAINING_ROOT')
     if got:
-        return got
+        return got, '$TRAINING_ROOT'
     try:
         sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
         import dashboard as dash
         got = dash.training_root()
-    except Exception:
-        got = ''
-    return got or os.path.dirname(os.path.dirname(REPO))
+    except Exception as exc:
+        return '', (f'importing tools/dashboard/dashboard.py raised '
+                    f'{type(exc).__name__}: {exc}')
+    if not got:
+        return '', 'the dashboard config names no training_root'
+    return got, 'the dashboard config'
 
-V3 = os.path.join(_training_root(), 'dogdet_v3')
+
+TRAINING_ROOT, ROOT_FROM = _training_root()
+V3 = os.path.join(TRAINING_ROOT, 'dogdet_v3') if TRAINING_ROOT else ''
 
 
 def main():
+    if not TRAINING_ROOT:
+        print(f'SKIP-AS-FAILURE: could not resolve the training root — '
+              f'{ROOT_FROM}')
+        print('  Nothing was checked, and the sequence split is the one thing '
+              'this file exists to check.')
+        print('  Set TRAINING_ROOT=<training repo>, or run it under the '
+              'interpreter the dashboard runs on (dashboard.py is 3.12+).')
+        return 1
     if not os.path.isdir(V3):
-        print('SKIP: no dogdet_v3 on disk — nothing to check yet')
+        print(f'SKIP: no dogdet_v3 under {TRAINING_ROOT} ({ROOT_FROM}) — '
+              f'nothing to check yet')
         return 0
     bad = []
     man = json.load(open(os.path.join(V3, 'manifest.json')))

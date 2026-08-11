@@ -6,7 +6,8 @@ Spec: DETECTION_RUN_STRATEGY.md section 6 (+4.6 config, 5.2 layout).
     sweep.py run    --gen 1 [--max-images N] [--drives d1 d2] [--rate-cap x]
     sweep.py status
     sweep.py unit                # print a systemd user unit
-    sweep.py verify | invariants | compact --gen N
+    sweep.py verify | invariants          # whole store, no arguments
+    sweep.py compact --gen N --cell C [--execute]
 
 Run under the yolo env. Single instance enforced with fcntl locks (released
 by the kernel on SIGKILL, section 6.7). Ctrl+C = graceful: readers stop,
@@ -108,6 +109,73 @@ def lane_plan(detect_root, gen):
         if shards:
             lanes[pr['drive']].append((pr, ids, shards))
     return lanes, dict(corpus), dict(region_corpus)
+
+
+def cell_complete(detect_root, gen, cell):
+    """(complete, why) -- does every shard of every drive of `cell` tile?
+
+    store.compact() DELETES the parts it merges, and its docstring hands this
+    check to sweep.py by name: "the caller (sweep.py) is responsible for the
+    cell-is-done check against the frozen worklist". Compacting a cell the
+    sweep has not finished would merge the committed prefix and delete the
+    parts, and the shard-relative resume the next run does over that pair
+    would then find nothing and redo ranges that are already in the merged
+    file -- so the rule is post-run only, and this is where it is enforced.
+
+    Read-only: tiling_resume is called with repair=False, so nothing on disk
+    is touched by asking.
+    """
+    gd = os.path.join(detect_root, 'worklist', 'gen=%04d' % gen)
+    dirs = json.load(open(os.path.join(gd, '_dirs.json')))
+    # sidx is GLOBAL across every pair in _dirs.json order, exactly as
+    # lane_plan numbers it; a per-cell counter would ask about the wrong shard
+    sidx, seen, unfinished = 0, False, []
+    for pr in dirs:
+        ids = np.load(os.path.join(gd, pr['cell'], pr['drive'] + '.ids.npy'),
+                      mmap_mode='r')
+        n = len(ids)
+        for st in range(0, n, SHARD):
+            en = min(st + SHARD, n)
+            if pr['cell'] == cell:
+                seen = True
+                sd = store.pair_dir(detect_root, gen, pr['region'],
+                                    pr['cell'], pr['drive'])
+                done = False
+                if os.path.isdir(sd):
+                    _, done = store.tiling_resume(sd, en - st,
+                                                  shard_idx=sidx,
+                                                  repair=False)
+                if not done:
+                    unfinished.append((pr['drive'], sidx, st, en))
+            sidx += 1
+    if not seen:
+        return False, f'cell {cell} is not in the gen {gen} worklist'
+    if unfinished:
+        d, i, a, b = unfinished[0]
+        return False, (f'{len(unfinished)} shard(s) of cell {cell} are not '
+                       f'finished, e.g. drive {d} shard {i} [{a},{b})')
+    return True, ''
+
+
+def cmd_compact(args):
+    """Rewrite one finished cell into a single img+det pair (store.compact)."""
+    detect_root = store.get_detect_root()
+    ok, why = cell_complete(detect_root, args.gen, args.cell)
+    if not ok:
+        print(f'refusing to compact: {why}', file=sys.stderr)
+        return 2
+    if not args.execute:
+        print(f'cell {args.cell} (gen {args.gen}) is complete.\n'
+              'Compaction rewrites it as one img+det pair and DELETES the '
+              'part files once the merged pair verifies.\nre-run with '
+              '--execute')
+        return 0
+    out = store.compact(args.gen, args.cell, detect_root)
+    if not out:
+        print(f'cell {args.cell} has no parts -- already compacted')
+        return 0
+    print('compacted -> %s\n            %s' % out)
+    return 0
 
 
 class ShardCollector:
@@ -643,6 +711,20 @@ def main():
         gen=a.gen,
         repo=REPO,
         py=os.environ.get('SWEEP_PYTHON') or sys.executable)))
+    # store.compact() is the documented post-run step and had no entry point
+    # at all: `sweep.py compact` answered "invalid choice". It stayed
+    # reachable only by importing store by hand, which is exactly the move
+    # this repo has been burned by.
+    cp = sub.add_parser('compact',
+                        help='rewrite one FINISHED cell as a single img+det '
+                             'pair (deletes the parts once it verifies)')
+    cp.add_argument('--gen', type=int, default=1)
+    cp.add_argument('--cell', required=True)
+    cp.add_argument('--execute', action='store_true')
+    cp.set_defaults(func=cmd_compact)
+    # These two take no arguments -- they read the whole store, not one
+    # generation. The usage block used to advertise --gen on them and argparse
+    # answered "unrecognized arguments".
     for name, fn in (('verify', store.verify), ('invariants',
                                                 store.invariants)):
         c = sub.add_parser(name)

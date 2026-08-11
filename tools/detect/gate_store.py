@@ -387,6 +387,74 @@ def shard_name(i):
     return f"{spec()['dir']}-{i:05d}.parquet"
 
 
+def stop_after(shards, skip, limit):
+    """Shard index a --limit run stops at, or None for the whole job.
+
+    In WHOLE SHARDS, counted over the boxes this run would actually do. A
+    shard is the smallest thing that can be written and its index is its
+    identity, so "do exactly `limit` boxes" is not a thing a run can honour --
+    the honest reading is "stop once that many boxes of NEW work are covered".
+    Counted past `skip` so a trial run on a resumed job does some work instead
+    of stopping before the first undone shard.
+
+    Args:
+        shards: [[job, ...], ...] -- jobs, in shard order, over the WHOLE job.
+        skip: indices already on disk.
+        limit: boxes, or 0/None for no limit.
+    """
+    if not limit:
+        return None
+    spent = 0
+    for si, shard in enumerate(shards):
+        if si in skip:
+            continue
+        spent += sum(len(j[3]) for j in shard)
+        if spent >= limit:
+            return si + 1
+    return len(shards)
+
+
+def check_job_count(n_jobs, plan_images):
+    """'' or the message refusing a job list that is not the whole plan.
+
+    The anchor the shard arithmetic cannot supply for itself. If the work rows
+    are truncated before they are grouped -- which is exactly what `--limit`
+    used to do -- then `jobs`, `shards` and "the last shard" are all short
+    together and agree with each other perfectly; refuse_short_shard() sees a
+    short shard that IS the last one it knows about and waves it through. Only
+    a number recorded before any of that can tell: plan() counted the images
+    when it wrote work.parquet, so a run whose grouping disagrees with it is
+    working from a smaller job and must not write a shard at all.
+    """
+    if plan_images is None or n_jobs == plan_images:
+        return ''
+    return (f'the work list grouped into {n_jobs:,} images but the plan '
+            f'records {plan_images:,}. Shards are cut over this list and a '
+            f'shard index is permanent: a run over part of it writes short '
+            f'shards under full indices, and done_shards() then skips them '
+            f'forever. --limit is a stopping point, never a smaller job.')
+
+
+def refuse_short_shard(si, n_jobs, n_shards, size):
+    """Message refusing to commit a short shard under a full index, or ''.
+
+    A shard's index IS its identity: once <stage>-000NN.parquet is on disk,
+    done_shards() skips NN forever. So a shard cut over a truncated job list
+    -- which is what `--limit` used to do, because the limit was applied to
+    the work rows before the shards were cut -- is written short under the
+    index a full run gives 20,000 images, and the rest of it is never judged
+    by anything, ever, with nothing reporting a gap. Only the job's true last
+    shard may be short.
+    """
+    if n_jobs == size or si == n_shards - 1:
+        return ''
+    return (f'refusing to write {shard_name(si)}: it holds {n_jobs:,} images '
+            f'where shard {si} of this job is {size:,}. Committing it would '
+            f'mark the index done and {size - n_jobs:,} images would never be '
+            f'judged. The job was cut over a truncated work list -- rerun '
+            f'`plan`, or delete data/{spec()["dir"]}/ and start over.')
+
+
 def done_shards():
     pre = spec()['dir'] + '-'
     try:
@@ -448,8 +516,6 @@ def run(args):
         raise SystemExit('no plan yet -- run `gate_store.py plan` first')
     work = pq.read_table(os.path.join(OUT_DIR, 'work.parquet')).to_pydict()
     n = len(work['image_id'])
-    if args.limit:
-        n = min(n, args.limit)
 
     sp = spec()
     weights, run_name = gate_weights()
@@ -465,6 +531,15 @@ def run(args):
     other = next(c for c in sp['classes'] if c != pos)
 
     # group into images, keeping the plan's order
+    #
+    # Over the WHOLE work table, always -- never over --limit. `jobs` is what
+    # the shard boundaries are cut on, so grouping a truncated row list makes
+    # the last shard of a limited run short, and it is still written under the
+    # index a full run would give a 20,000-image shard. done_shards() then
+    # skips that index forever and the rest of it is never judged: a single
+    # `run --limit 5000` would have buried 16,593 images (~23,600 boxes) with
+    # nothing anywhere reporting a gap. The limit is a stopping point below;
+    # it must not be allowed to renumber anything.
     jobs, cur, cur_key = [], [], None
     for i in range(n):
         key = (work['image_id'][i], work['cell'][i], work['drive'][i])
@@ -483,16 +558,22 @@ def run(args):
     # would number them differently and "already done" would skip work that
     # was never done. The size is pinned in the plan the first time it is
     # used, and a run that disagrees is refused rather than silently wrong.
+    plan_images = None
+    try:
+        plan_images = json.load(open(PLAN_FILE))['images']
+    except (OSError, ValueError, KeyError):
+        print('WARNING: no image count in the plan file -- the job list '
+              'cannot be checked against what was planned')
+    _no = check_job_count(len(jobs), plan_images)
+    if _no:
+        raise SystemExit(_no)
     size = _shard_size(args.shard)
     shards = [jobs[i:i + size] for i in range(0, len(jobs), size)]
-    stop = None
-    if args.limit:
-        # limit is a stopping point, not a different job
-        stop = min(len(shards), max(1, -(-args.limit // size)))
     skip = done_shards()
+    stop = stop_after(shards, skip, args.limit)
     print(f'{len(jobs):,} images in {len(shards)} shards of {size}; '
           f'{len(skip)} already done'
-          + (f'; stopping after {stop}' if stop else ''))
+          + (f'; stopping after shard {stop - 1}' if stop is not None else ''))
 
     roots = _roots()
     t0, seen, bad = time.time(), 0, 0
@@ -557,6 +638,9 @@ def run(args):
                     beat(si, len(rows['label']))
                     last_beat = time.time()
             flush()
+            _no = refuse_short_shard(si, len(shard), len(shards), size)
+            if _no:
+                raise SystemExit(_no)
             tmp = os.path.join(OUT_DIR, f'.{shard_name(si)}.tmp')
             pq.write_table(pa.table({
                 'image_id': pa.array(rows['image_id'], pa.string()),

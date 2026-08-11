@@ -108,13 +108,31 @@ def read_flags(path, want='false_positive'):
 
 
 def boxes_for(image_ids, detect_root, python_bin=None):
-    """{image_id: [(det_idx, x1, y1, x2, y2, conf)]} from the parquet store."""
+    """{image_id: [(det_idx, x1, y1, x2, y2, conf)]} from the parquet store.
+
+    ONE ROW PER DETECTION, not per stored row. The store keys on
+    (image_id, det_idx, cell, drive): a frame the harvest wrote into several
+    cells has its detections repeated once per placement, identical det_idx,
+    identical geometry, identical conf (store.unique_src() documents why the
+    twins exist and why any one copy is as good as another). Left in, the
+    conf-matching below sees the SAME box 2-16 times, len(hit) > 1, and files
+    a perfectly unambiguous flag under `ambiguous` -- 117 of 136 rejections
+    on the live ledgers were one detection counted several times, and each
+    one is a human verdict dropped out of every dataset built afterwards.
+
+    NOT store.unique_src(): that collapses to one row per IMAGE, which would
+    keep a single detection per frame and throw the rest away. The partition
+    here has to be (image_id, det_idx), the same one gate_store.plan() uses.
+    """
     if not image_ids:
         return {}
     ids = ','.join("'%s'" % i for i in image_ids)
     det = store._sql_src(store._store_globs(detect_root, 'det'))
     sql = (f"SELECT CAST(image_id AS VARCHAR), det_idx, x1, y1, x2, y2, conf "
-           f"FROM {det} WHERE CAST(image_id AS VARCHAR) IN ({ids})")
+           f"FROM {det} WHERE CAST(image_id AS VARCHAR) IN ({ids}) "
+           # deterministic survivor, so two runs cut the same crop
+           f"QUALIFY row_number() OVER (PARTITION BY image_id, det_idx "
+           f"ORDER BY cell, drive) = 1")
     rows = store._run_queries({'q': sql})['q']
     out = {}
     for iid, di, x1, y1, x2, y2, conf in rows:

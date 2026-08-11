@@ -26,8 +26,13 @@ What it adds over reading the parquet directly:
                    model was MEASURED or merely attested.
 
 Incremental by part file: a refresh reads only parts it has not seen, keyed on
-(path, size, mtime). Parts are immutable once committed -- a continuation gets
-its own name -- so that key is sound.
+(path, size, mtime), and every row records the part it came from in `src`.
+A part's CONTENT is immutable once committed, but its existence is not --
+store.compact() deletes a cell's parts once the merged pair verifies, and
+store.tiling_resume(repair=True) deletes a torn or overlapping part for the
+run to redo. So a refresh deletes by `src` before it re-reads a changed path,
+and drops the rows of any part that is no longer on disk. Without that the
+same images are folded in twice and `verify` reports the store has lost rows.
 
     python tools/detect/build_sqldb.py build      # create or refresh
     python tools/detect/build_sqldb.py verify     # counts vs the parquet store
@@ -47,7 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BATCH = 400          # part files per INSERT; keeps the SQL text sane
 
 
@@ -87,6 +92,15 @@ def _hive(path, root):
 # hive read. The name is the more useful of the two and it is what every
 # existing reader of this store already sees, so this mirrors that rather than
 # giving one name two meanings.
+#
+# `src` IS NOT DECORATION. It is the part file each row came from, and it is
+# the only thing that makes a refresh reversible: without it nothing can undo
+# a load, so a part that is reloaded (same path, new bytes) or that vanishes
+# (compaction, or tiling_resume dropping a torn range for the run to redo)
+# leaves its old rows behind forever and the table double-counts. It is filled
+# from duckdb's read_parquet(filename=1) and never from the row data.
+SRC_COL = ('src', 'VARCHAR')
+
 IMG_COLS = (('image_id', 'UBIGINT'), ('gen', 'VARCHAR'), ('region', 'VARCHAR'),
             ('cell', 'VARCHAR'), ('drive', 'VARCHAR'),
             ('run_id', 'USMALLINT'), ('model_sha8', 'VARCHAR'),
@@ -94,7 +108,7 @@ IMG_COLS = (('image_id', 'UBIGINT'), ('gen', 'VARCHAR'), ('region', 'VARCHAR'),
             ('max_conf', 'FLOAT'), ('orig_w', 'USMALLINT'),
             ('orig_h', 'USMALLINT'), ('reduce', 'UTINYINT'),
             ('guards', 'USMALLINT'), ('ts_off', 'UINTEGER'),
-            ('shard_idx', 'UINTEGER'))
+            ('shard_idx', 'UINTEGER'), SRC_COL)
 
 DET_COLS = (('image_id', 'UBIGINT'), ('det_idx', 'UTINYINT'),
             ('gen', 'VARCHAR'), ('region', 'VARCHAR'), ('cell', 'VARCHAR'),
@@ -102,7 +116,7 @@ DET_COLS = (('image_id', 'UBIGINT'), ('det_idx', 'UTINYINT'),
             ('model_sha8', 'VARCHAR'), ('conf', 'FLOAT'), ('x1', 'FLOAT'),
             ('y1', 'FLOAT'), ('x2', 'FLOAT'), ('y2', 'FLOAT'),
             ('leash_class', 'UTINYINT'), ('leash_conf', 'FLOAT'),
-            ('shard_idx', 'UINTEGER'))
+            ('shard_idx', 'UINTEGER'), SRC_COL)
 
 
 def ddl(con):
@@ -229,15 +243,16 @@ def build(args):
                              'authoritative; this file is a materialised copy '
                              'and is stale as soon as the sweep writes again')
 
-    seen = {r[0]: (r[1], r[2]) for r in
-            con.execute('SELECT path, size, mtime FROM _files').fetchall()}
+    _f = con.execute('SELECT path, kind, size, mtime FROM _files').fetchall()
+    seen = {r[0]: (r[2], r[3]) for r in _f}
+    seen_kind = {r[0]: r[1] for r in _f}
     # ONE snapshot of the directory for both kinds. Listing img, ingesting it,
     # then listing det let the running sweep commit in between -- det ran three
     # files ahead of img and the database ended up with 2,541 detections whose
     # image row did not exist. A shard's img and det parts are committed
     # together, so a single listing is internally consistent.
     listing = {k: part_files(root, k) for k in ('img', 'det')}
-    total_new = 0
+    total_new = total_gone = 0
     for kind, cols in (('img', IMG_COLS), ('det', DET_COLS)):
         table = 'images' if kind == 'img' else 'detections'
         todo = []
@@ -250,6 +265,28 @@ def build(args):
             if was and was[0] == st.st_size and abs(was[1] - st.st_mtime) < 1e-6:
                 continue
             todo.append((p, st.st_size, st.st_mtime))
+
+        # PARTS THAT ARE GONE. "Immutable once committed" is true of a part's
+        # CONTENT and not of its existence: store.compact() deletes a whole
+        # cell's parts once the merged pair verifies, and store.tiling_resume
+        # (repair=True, which sweep.lane_plan uses on every start) deletes a
+        # torn, overlapping or out-of-range part for the run to redo. Their
+        # rows are still in here, and the redone range or the compacted file
+        # arrives as new work above -- so without this the same images are
+        # counted twice and `verify` reports the store has LOST rows.
+        on_disk = set(listing[kind])
+        gone = [p for p in sorted(seen)
+                if seen_kind.get(p) == kind and p not in on_disk]
+        if gone:
+            print(f'{kind}: {len(gone):,} part file(s) no longer on disk '
+                  f'(compacted or redone) -- dropping their rows')
+            for j in range(0, len(gone), BATCH):
+                lst = ', '.join("'" + p.replace("'", "''") + "'"
+                                for p in gone[j:j + BATCH])
+                con.execute(f'DELETE FROM {table} WHERE src IN ({lst})')
+                con.execute(f'DELETE FROM _files WHERE path IN ({lst})')
+            total_gone += len(gone)
+
         if not todo:
             print(f'{kind}: nothing new')
             continue
@@ -258,12 +295,25 @@ def build(args):
             chunk = todo[i:i + BATCH]
             paths = ', '.join("'" + p.replace("'", "''") + "'"
                               for p, _, _ in chunk)
-            # A part that WAS loaded and then changed must not double-count.
+            # A part that WAS loaded and then changed must not double-count,
+            # and this is where that is enforced: every row this database
+            # already holds from one of these paths is deleted before the
+            # path is read again. The comment used to say this and nothing
+            # implemented it -- the INSERT simply ran a second time.
+            again = [p for p, _, _ in chunk if p in seen]
+            if again:
+                lst = ', '.join("'" + p.replace("'", "''") + "'" for p in again)
+                con.execute(f'DELETE FROM {table} WHERE src IN ({lst})')
             have = {c[0] for c in con.execute(
                 f'DESCRIBE SELECT * FROM read_parquet([{paths}], '
                 f'hive_partitioning=1, union_by_name=1)').fetchall()}
             sel = []
             for name, typ in cols:
+                if name == SRC_COL[0]:
+                    # duckdb's own per-row source path, not anything in the
+                    # data: the point is that it cannot be wrong.
+                    sel.append(f'filename AS {name}')
+                    continue
                 # model_sha8 exists in the SCHEMA but not in files written
                 # before it was added; union_by_name can only union what is
                 # there, so ask rather than assume.
@@ -272,7 +322,7 @@ def build(args):
             con.execute(
                 f'INSERT INTO {table} SELECT {", ".join(sel)} '
                 f'FROM read_parquet([{paths}], hive_partitioning=1, '
-                f'union_by_name=1)')
+                f'union_by_name=1, filename=1)')
             now = time.strftime('%Y-%m-%d %H:%M:%S')
             for p, sz, mt in chunk:
                 con.execute(
@@ -306,7 +356,9 @@ def build(args):
     meta_set(con, 'detections_at_build', nd)
     con.close()
     print(f'\n{ni:,} images / {nd:,} detections in {db}')
-    print(f'{total_new:,} part file(s) folded in this run')
+    print(f'{total_new:,} part file(s) folded in this run'
+          + (f'; {total_gone:,} vanished part file(s) dropped'
+             if total_gone else ''))
     print('\nThis file is DERIVED. The parquet store is authoritative; run '
           '`verify` to see how far behind this copy has fallen.')
     return 0

@@ -18,8 +18,8 @@ Writes {"generated": ts, "by_image": {image_id: ISO3}, "counts": {ISO3: n},
 
 Runs on a schedule (dashboard --interval), so it is incremental: image_ids
 already resolved in the previous index are reused and only new crops are
-looked up. A full cold build over the flag ledger plus the rolling pool is a
-few seconds; the incremental path is sub-second.
+looked up. A full cold build over the flag ledgers, the rolling pool and the
+harvested review set is a few seconds; the incremental path is sub-second.
 """
 
 import argparse
@@ -35,19 +35,62 @@ SHAPEFILE = os.path.join(REPO, 'data', 'geo', 'ne_50m_admin_0_countries.shp')
 DEFAULT_OUT = os.path.join(REPO, 'data', 'dashboard', 'countries.json')
 
 
-def crop_image_ids(repo):
+def review_extra_dirs(repo):
+    """The crop directories the review page serves BESIDE the rolling pool.
+
+    dashboard.py's review_extra_dir(), read the same way and by the same
+    precedence: $REVIEW_EXTRA_DIR, else the ``review_extra_dir`` key of
+    tools/dashboard/dashboard.config.json, resolved against the repo.
+
+    Read here as well as there because the incremental build DROPS a resolved
+    id that is no longer in the id set (`by` is rebuilt from `ids`), so a
+    build that cannot see the directory does not merely fail to add its crops
+    -- it removes the ones the server had already placed.
+    """
+    d = os.environ.get('REVIEW_EXTRA_DIR')
+    if not d:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'dashboard.config.json')
+        try:
+            with open(cfg_path) as fh:
+                d = json.load(fh).get('review_extra_dir')
+        except (OSError, ValueError, AttributeError):
+            d = None
+    if not isinstance(d, str) or not d:
+        return []
+    return [d if os.path.isabs(d) else os.path.join(repo, d)]
+
+
+def crop_image_ids(repo, extra_dirs=None):
     """Every image_id that can appear in the review UI: the rolling preview
-    pool plus both flag ledgers (a flagged crop still needs a country when the
-    reviewer filters, and the ledgers outlive the pool)."""
+    pool, the harvested review set, and both flag ledgers (a flagged crop
+    still needs a country when the reviewer filters, and the ledgers outlive
+    the pool).
+
+    THE HARVESTED SET IS NOT OPTIONAL. review_extra_dir() is the second crop
+    directory review_pool_names() and crop_dir() both walk, and it is where
+    build_review_set.py puts the crops chosen to spread over cells and
+    confidence bands -- exactly the population a country filter exists to
+    reach. Indexing only recent_crops left 1,593 of its 1,961 ids with no
+    country, and the filter has no unknown-country escape (`c['country'] ==
+    want`), so every country selection silently dropped the whole harvested
+    set. Nothing on screen said so: the option counts are tallied over crops
+    that HAVE a country, so each option's number still matched what it
+    delivered.
+    """
     ids = set()
-    pool = os.path.join(repo, 'data', 'dashboard', 'recent_crops')
-    try:
-        for n in os.listdir(pool):
+    dirs = [os.path.join(repo, 'data', 'dashboard', 'recent_crops')]
+    dirs += (review_extra_dirs(repo) if extra_dirs is None
+             else [d for d in extra_dirs if d])
+    for pool in dirs:
+        try:
+            names = os.listdir(pool)
+        except OSError:
+            continue          # absent or unreadable is not an error here
+        for n in names:
             m = CROP_RE.match(n)
             if m:
                 ids.add(m.group(2))
-    except OSError:
-        pass
     for sub in ('hard_negatives', 'hard_positives'):
         p = os.path.join(repo, 'data', sub, 'labels.jsonl')
         try:
@@ -131,7 +174,7 @@ def countries_for(pts):
     return by, names
 
 
-def build(repo, out_path, force=False):
+def build(repo, out_path, force=False, extra_dirs=None):
     import duckdb
     prev = {}
     if not force:
@@ -151,7 +194,7 @@ def build(repo, out_path, force=False):
                 misses = set(json.load(fh).get('no_country') or [])
         except (OSError, ValueError):
             misses = set()
-    ids = crop_image_ids(repo)
+    ids = crop_image_ids(repo, extra_dirs)
     todo = {i for i in ids if i not in prev and i not in misses}
     print(f'{len(ids):,} review image_ids; {len(todo):,} need a lookup '
           f'({len(ids) - len(todo):,} reused, {len(misses):,} known-unresolvable)',
@@ -202,8 +245,13 @@ def main():
     ap.add_argument('--out', default=DEFAULT_OUT)
     ap.add_argument('--force', action='store_true',
                     help='re-resolve every id instead of reusing the index')
+    ap.add_argument('--extra-dir', action='append', default=None,
+                    metavar='DIR',
+                    help='another crop directory the review page serves. '
+                    'Defaults to $REVIEW_EXTRA_DIR / the dashboard config, '
+                    'which is what the server itself uses.')
     a = ap.parse_args()
-    doc = build(a.repo, a.out, a.force)
+    doc = build(a.repo, a.out, a.force, a.extra_dir)
     top = sorted(doc['counts'].items(), key=lambda kv: -kv[1])[:12]
     for iso, n in top:
         print(f'  {iso}  {doc["names"].get(iso, iso)[:28]:<30}{n:>6}')

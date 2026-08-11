@@ -68,6 +68,34 @@ def image_id_of(fname):
     return m.group(1) if m else None
 
 
+def straddling_sequences(plan, seq_of):
+    """(train seqs, val seqs, both) read back off the PLAN that gets written.
+
+    The leak this whole tool exists to prevent, asserted rather than asserted
+    in prose. Both sides come from the emitted rows and each row's sequence is
+    re-derived from the filename about to be written, so an edit that assigns
+    a split per CROP rather than per sequence -- or a seq_of() that answers
+    differently here than it did where the per-sequence cap was applied --
+    puts one sequence on both sides and this returns it.
+
+    What it replaces was `tr = {s for s in seq_items if s not in val_seqs}`
+    intersected with val_seqs: the complement of a set, met with the set. That
+    is empty for every possible input. It printed "shared 0" under every
+    dataset it ever built and could not have printed anything else -- a green
+    check beside a property nobody had measured.
+
+    Args:
+        plan: [(split, cls, path, fname)] -- exactly what main() writes.
+        seq_of: fname -> sequence key, the same callable the cap used.
+    """
+    side = collections.defaultdict(set)
+    for split, _cls, _path, fname in plan:
+        side[seq_of(fname)].add(split)
+    tr = {s for s, v in side.items() if 'train' in v}
+    va = {s for s, v in side.items() if 'val' in v}
+    return tr, va, tr & va
+
+
 def list_crops(root):
     """{split: {cls: [filenames]}} for an existing train/val dataset."""
     out = {}
@@ -446,12 +474,14 @@ def main():
     va = sum(v for k, v in counts.items() if k.startswith('val/'))
     print(f'  val fraction {va / max(tr + va, 1):.3f} (target {args.val_frac})')
     # assert rather than assert-in-prose: the whole point of the tool
-    tr_seqs = {s for s in seq_items if s not in val_seqs}
-    shared = tr_seqs & val_seqs
+    tr_seqs, va_seqs, shared = straddling_sequences(plan, seq_of)
     print(f'  train sequences {len(tr_seqs):,} | val sequences '
-          f'{len(val_seqs):,} | shared {len(shared)}')
+          f'{len(va_seqs):,} | shared {len(shared)}')
     if shared:
-        raise SystemExit(f'BUG: {len(shared)} sequences straddle the split')
+        raise SystemExit(
+            f'BUG: {len(shared)} sequences straddle the split, e.g. '
+            f'{sorted(shared)[:3]} -- every recall number off this val set '
+            f'would be part memorisation')
 
     # Two SOURCE files can map to one OUTPUT name: a src crop that is already
     # flag_-prefixed collides with a re-harvested extra that gets the same
