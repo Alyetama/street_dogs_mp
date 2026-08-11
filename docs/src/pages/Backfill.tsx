@@ -3,7 +3,7 @@ import ReferencePage from '../sections/ReferencePage'
 const options = [
   { option: '--inscope', default: 'coverage_missing_inscope', description: 'Datefilter output directory from the audit stage (or a single parquet).' },
   { option: '--region', default: 'all', description: 'Parent region to backfill; accepts the sanitized name.' },
-  { option: '--out-dir', default: 'grid_runs', description: 'Where backfill parquets are written.' },
+  { option: '--out-dir', default: 'required', description: 'Where backfill parquets are written. No default — it decides which drive fills up.' },
   { option: '--image-dir', default: '= out-dir', description: 'Separate drive/root for the downloaded jpgs.' },
   { option: '--no-download', default: 'False', description: 'Write parquets only; download the images later.' },
   { option: '--download-only', default: 'False', description: 'Skip metadata; only download jpgs from existing ground_animals_* backfill parquets.' },

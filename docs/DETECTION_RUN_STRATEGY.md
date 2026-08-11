@@ -522,14 +522,14 @@ Readers acquire byte budget for a whole burst and read back-to-back, so idle gap
 
 ### 6.6 systemd
 
-`~/.config/systemd/user/dogdetect.service`, rendered from a tracked `.in` template with `@REPO@`/`@PYTHON@`/`@CFG@` placeholders (the rendered unit is gitignored). Every enabling fact verified: `Linger=yes` already set, systemd 255.4-1ubuntu8.16, `user@1000.service` has `Delegate=yes` with `DelegateControllers=cpu memory pids` and `memory` in `user-1000.slice/cgroup.subtree_control`, `/var/log/journal` exists, all five `media-biodiv-*.mount` units active `[M]`.
+`~/.config/systemd/user/dogdetect.service`, rendered from a tracked `.in` template with `@REPO@`/`@PYTHON@`/`@CFG@` placeholders (the rendered unit is gitignored). Every enabling fact verified: `Linger=yes` already set, systemd 255.4-1ubuntu8.16, `user@1000.service` has `Delegate=yes` with `DelegateControllers=cpu memory pids` and `memory` in `user-1000.slice/cgroup.subtree_control`, `/var/log/journal` exists, all five `media-<user>-*.mount` units active `[M]`.
 
 ```ini
 [Unit]
 Description=Street-dogs mass inference sweep (yolo26x train-30, imgsz 1280, conf 0.05)
 RequiresMountsFor=@OUT_MOUNT@
-Wants=media-biodiv-lynx.mount media-biodiv-bobcat.mount media-biodiv-capybara.mount media-biodiv-jackal.mount
-After=media-biodiv-lynx.mount media-biodiv-bobcat.mount media-biodiv-capybara.mount media-biodiv-jackal.mount
+Wants=media-<user>-lynx.mount media-<user>-bobcat.mount media-<user>-capybara.mount media-<user>-jackal.mount
+After=media-<user>-lynx.mount media-<user>-bobcat.mount media-<user>-capybara.mount media-<user>-jackal.mount
 StartLimitIntervalSec=0
 OnFailure=dogdetect-failed.service
 
@@ -552,7 +552,7 @@ StandardError=journal
 SyslogIdentifier=dogdetect
 ```
 
-**`RequiresMountsFor` covers the OUTPUT drive only.** `RequiresMountsFor` adds `Requires=` + `After=`, and `Requires=` propagates *stop*: `systemctl show media-biodiv-jackal.mount -p StopPropagatedFrom` returns `dev-sdn1.device` `[M]`, so a USB re-enumeration of `/dev/sdn1` stops the mount, which stops the service — and because systemd treats that as a *clean* stop, `Restart=on-failure` does **not** restart it and nothing re-triggers when the mount returns. One line in a unit file would bypass the entire per-lane quarantine design. Image drives get `Wants=` + `After=` (boot ordering, no stop propagation); the sentinel probe is the sole authority on image-drive health. Automatic recovery on drive return is a separate `.path` unit calling `sweep.py retry --drive <name>`.
+**`RequiresMountsFor` covers the OUTPUT drive only.** `RequiresMountsFor` adds `Requires=` + `After=`, and `Requires=` propagates *stop*: `systemctl show media-<user>-jackal.mount -p StopPropagatedFrom` returns `dev-sdn1.device` `[M]`, so a USB re-enumeration of `/dev/sdn1` stops the mount, which stops the service — and because systemd treats that as a *clean* stop, `Restart=on-failure` does **not** restart it and nothing re-triggers when the mount returns. One line in a unit file would bypass the entire per-lane quarantine design. Image drives get `Wants=` + `After=` (boot ordering, no stop propagation); the sentinel probe is the sole authority on image-drive health. Automatic recovery on drive return is a separate `.path` unit calling `sweep.py retry --drive <name>`.
 
 `IOSchedulingClass`/`IOSchedulingPriority` are **deleted** — all four drives use `mq-deadline` `[M]`, which ignores `ioprio` entirely (only BFQ honours it). They would be decoration that misleads anyone assuming the sweep is deprioritised.
 

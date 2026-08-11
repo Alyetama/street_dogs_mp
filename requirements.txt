@@ -15,3 +15,11 @@ duckdb
 rich
 geopandas
 shapely
+# imported at module level by coverage_audit.py and tools/detect/store.py.
+# polars, pandas, duckdb and geopandas all declare pyarrow under an EXTRA
+# only ('pyarrow>=7.0.0; extra == "pyarrow"'), so it never arrived
+# transitively and Stage 2 died at import in a clean environment.
+pyarrow
+# browse.py. It exits with "Flask is required" without this, while the README
+# said it was already here.
+flask

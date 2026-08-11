@@ -55,15 +55,16 @@ The repo root holds only the three pipeline scripts (`batch_chunks_mp_api.py`, `
 | `tools/grid/` | Grid prep & visualization: `split_regions.py`, `generate_countries.py`, `visualize_region_tiles.py`. |
 | `tools/progress/` | Run monitoring & lookup: `progress_tracker.py`, `find_location_folder.py`, `scan_regions.py`. |
 | `tools/maintenance/` | Run integrity & ledgers: `audit_markers.py`, `audit_silent_skips.py`, `generate_rerun_commands.py`, `check_zst_health.py`, `generate_ledger.py`. |
-| `tools/coverage/` | Completeness-audit helpers: `convert_missing_csv_to_parquet.py`, `split_missing_from_csv.py`, `validate_missing_sample.py`, `check_grid_data.py`. |
-| `tools/repair/` | Image-gap / manifest repair: `diagnose_images.py`, `fetch_missing_images.py`, `rebuild_manifest_from_images.py`, `drop_dead_from_manifest.py`, `cleanup_offending_regions.py`, `deduplicate_parquets.py`. |
+| `tools/coverage/` | Completeness-audit helpers: `validate_missing_sample.py`. |
+| `tools/repair/` | Image-gap / manifest repair: `diagnose_images.py`, `fetch_missing_images.py`, `rebuild_manifest_from_images.py`, `drop_dead_from_manifest.py`, `deduplicate_parquets.py`. |
 | `tools/catalog/` | DuckDB inventory of every Parquet (and downloaded image) across all drives: `catalog.py`. |
-| `runners/` | Convenience shell scripts: `monitor_and_verify.sh`, `pull_all.sh`. |
-| `data/` | Working artifacts; `data/manifests/` (missing/orphan/dead manifest CSVs) and `data/grids/` (per-region input grid CSVs). |
-| `logs/` | Run logs from helper scripts. |
-| `archived/` | Superseded scripts kept for reference. |
+| `tools/detect/` | Everything downstream of the harvest: the YOLO detection sweep (`sweep.py`, `engine.py`, `store.py`), the two classifier gates and their stores (`gate_store.py`, `leash_store.py`), dataset builders (`build_dogdet_v3.py`, `build_review_set.py`, `rebuild_crop_dataset.py`), the false-negative audit (`fn_audit.py`), the LLM annotator (`llm_annotate.py`), and `tests/` — including `adv_no_hardcoded_paths.py`, the leak check run before every push. |
+| `tools/dashboard/` | The self-hosted dashboard (`dashboard.py`) and the human annotation pages it serves: `/review`, `/audit` (`audit.py`), `/datasets` (`datasets.py`), `/llm` (`llm_page.py`), plus `training_tracker.py` and `country_index.py`. |
+| `data/` | Working artifacts; `data/manifests/` (missing/orphan/dead manifest CSVs) and `data/grids/` (per-region input grid CSVs). Mostly generated, so most of it is gitignored. |
 
 </details>
+
+`logs/`, `archived/`, `runners/` and the data directories are working directories on the operating machine, not part of the repository — nothing in them is tracked. In particular `runners/` holds shell wrappers whose paths are specific to one host, which is exactly why they stay out of a public repo.
 
 ---
 
@@ -202,14 +203,21 @@ Subcommands run in sequence, or all at once via `audit`:
 | `diff GRID.csv --dirs …` | `missing = coverage_ids − all_data_ids` → per-region Parquet shards. |
 | `datefilter` | Keep rows captured on/before `--cutoff` → `coverage_missing_inscope/<Parent>.parquet`. |
 
+**`--data-dir` is required by every subcommand except `datefilter`** — there is
+no default. It says where the per-region checkpoints, the meta sidecars and the
+token-budget file live, which is a choice about which drive holds them, so the
+tool asks rather than guessing. `.` puts them in the working directory.
+
 ```bash
 # Full audit of one region, reading data spread across drives:
 python coverage_audit.py audit original_global_grid_5deg.csv \
-    --dirs grid_runs /mnt/hdd/grid_runs --region Europe
+    --data-dir . --dirs grid_runs /mnt/hdd/grid_runs --region Europe
 
 # Individual stages:
-python coverage_audit.py enumerate original_global_grid_5deg.csv --region Europe -w 64
-python coverage_audit.py diff original_global_grid_5deg.csv --dirs grid_runs --region Europe
+python coverage_audit.py enumerate original_global_grid_5deg.csv --data-dir . --region Europe -w 64
+python coverage_audit.py check --data-dir . --region Europe
+python coverage_audit.py retry --data-dir . --region Europe
+python coverage_audit.py diff original_global_grid_5deg.csv --data-dir . --dirs grid_runs --region Europe
 python coverage_audit.py datefilter --cutoff 2026-05-31
 ```
 
@@ -219,7 +227,7 @@ python coverage_audit.py datefilter --cutoff 2026-05-31
 | Option | Default | Purpose |
 | --- | ---: | --- |
 | `--region` | all | One parent region; accepts the original or sanitized name (`"Middle East"` or `Middle_East`). |
-| `--data-dir` | `.` | Where coverage checkpoints/meta and the budget sidecar live (the data drive). |
+| `--data-dir` | **required** | Where coverage checkpoints/meta and the budget sidecar live (the data drive). Every subcommand but `datefilter` takes it, and none of them has a default. |
 | `--dirs` | — | Base dirs holding `all_data_*.parquet` (for `diff`). |
 | `-w` / `--workers` | `64` | Concurrent tile fetches. |
 | `--proxies` | unset | Rotating proxy list for tile/API requests (per-IP throttle aware). |
@@ -251,7 +259,7 @@ python backfill_missing.py \
 | --- | ---: | --- |
 | `--inscope` | `coverage_missing_inscope` | Datefilter output dir (or a single parquet). |
 | `--region` | all | Parent region; accepts the sanitized name. |
-| `--out-dir` | `grid_runs` | Where backfill parquets are written. |
+| `--out-dir` | **required** | Where backfill parquets are written. No default — it decides which drive fills up. |
 | `--image-dir` | = `--out-dir` | Separate drive for downloaded jpgs. |
 | `--no-download` | off | Write parquets only; download later. |
 | `--download-only` | off | Skip metadata; only download jpgs from existing `ground_animals_*` parquets. Add `--watch` to keep draining as new parquets appear. |
@@ -275,13 +283,6 @@ Resumable: the in-scope parquet is processed sequentially with a per-parent row 
   python tools/coverage/validate_missing_sample.py --inscope coverage_missing_inscope --region Europe -n 2000
   ```
 
-- **`tools/coverage/convert_missing_csv_to_parquet.py`** / **`split_missing_from_csv.py`** — one-off bridges from the legacy CSV `diff` output to the current Parquet layout (`convert` → per-parent `from_csv.parquet`; `split` → per-cell shards a later `audit` recognizes as done).
-
-  ```bash
-  python tools/coverage/convert_missing_csv_to_parquet.py --csv data/manifests/coverage_missing.csv --out-dir coverage_missing
-  python tools/coverage/split_missing_from_csv.py coverage_missing/Europe/from_csv.parquet
-  ```
-
 ---
 
 ## Browsing results
@@ -292,7 +293,14 @@ Resumable: the in-scope parquet is processed sequentially with a per-parent row 
 python browse.py --dirs grid_runs /mnt/hdd/grid_runs --port 8080 --host 0.0.0.0
 ```
 
-Features: a region sidebar; location search (geocodes a city/country via Nominatim and filters by bounding-box overlap); tabs for *All Data*, *Animal Detections*, and *Downloaded Images*; paginated listings; an image lightbox sortable by name or capture date; map/heatmap visualization of parquet coordinates on Leaflet; per-file download links; and session-based login (`ADMIN_USER` / `ADMIN_PASS` set in the script).
+Features: a region sidebar; location search (geocodes a city/country via Nominatim and filters by bounding-box overlap); tabs for *All Data*, *Animal Detections*, and *Downloaded Images*; paginated listings; an image lightbox sortable by name or capture date; map/heatmap visualization of parquet coordinates on Leaflet; per-file download links; and a session login.
+
+The login credential is **not** in the script — it comes from the environment (or `.env`, which is gitignored), and the server refuses to start without it rather than opening unauthenticated:
+
+```bash
+export BROWSE_ADMIN_PASS='…'          # required; BROWSE_ADMIN_USER defaults to "admin"
+python browse.py --dirs grid_runs
+```
 
 ---
 
@@ -355,7 +363,6 @@ python tools/progress/scan_regions.py South_America --dirs grid_runs /mnt/hdd/gr
 - **`tools/maintenance/generate_rerun_commands.py`** — emit ready-to-run `batch_chunks` commands targeting only the incomplete cells of each region (via `--row-index` / `--sub-indices`).
 - **`tools/maintenance/check_zst_health.py`** — test all `.zst` with `zstd -t`; list/delete corrupt files. `--clear-completed` drops the matching `.completed_` marker so the sub-grid re-runs.
 - **`tools/maintenance/generate_ledger.py`** — build/append an exclude ledger of downloaded image IDs (pass to extract via `--exclude-ledger`).
-- **`tools/coverage/check_grid_data.py`** — report which CSV rows already have Parquet data on disk.
 
 ```bash
 python tools/maintenance/audit_silent_skips.py --dry-run --substring North_America
@@ -375,9 +382,7 @@ These fix `% Images Downloaded` anomalies when on-disk jpgs and `ground_animals_
 - **`tools/repair/fetch_missing_images.py`** — download images that are in a manifest but missing on disk, fetching a fresh signed URL from the Graph API on failure; records permanently-gone IDs. Subcommands: `scan`, `download`, `all`.
 - **`tools/repair/rebuild_manifest_from_images.py`** — treat images as source of truth (the `% > 100` case): re-query detections for orphan jpgs and rebuild the missing `ground_animals_*_recovered_*.parquet` rows.
 - **`tools/repair/drop_dead_from_manifest.py`** — remove permanently-dead IDs (`data/dead_images.txt`) from manifests so they stop inflating the gap; archives removed rows first; idempotent; dry-run by default (`--execute`).
-- **`tools/repair/cleanup_offending_regions.py`** — delete parquet/checkpoint/markers (but keep images + ledger) for a hard-coded list of regions, forcing clean re-extraction; dry-run by default.
 - **`tools/repair/deduplicate_parquets.py`** — multiprocessed pass removing duplicate `image_id` rows; rewrites only files that had duplicates.
-- **`runners/monitor_and_verify.sh`** — wait for a manifest rebuild to finish, then regenerate the progress report.
 
 ```bash
 python tools/repair/diagnose_images.py original_global_grid_5deg.csv --dirs grid_runs --region "South Asia"

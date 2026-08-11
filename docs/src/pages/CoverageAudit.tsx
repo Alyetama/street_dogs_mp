@@ -11,7 +11,7 @@ const subcommands = [
 
 const options = [
   { option: '--region', default: 'all', description: 'Restrict to one parent region. Accepts the original or sanitized name ("Middle East" or Middle_East).' },
-  { option: '--data-dir', default: '.', description: 'Where coverage checkpoints / meta and the budget sidecar live (the data drive, not image dirs).' },
+  { option: '--data-dir', default: 'required', description: 'Where coverage checkpoints / meta and the budget sidecar live (the data drive, not image dirs). Required by every subcommand except datefilter; there is no default.' },
   { option: '--dirs', default: '—', description: 'Base directories holding all_data_*.parquet (used by diff).' },
   { option: '-w / --workers', default: '64', description: 'Concurrent tile fetches.' },
   { option: '--entity-workers', default: '520', description: 'Concurrency for the datefilter API fallback.' },
@@ -29,29 +29,29 @@ const examples = [
   {
     title: 'Full audit of one region, reading data spread across drives',
     code: `python coverage_audit.py audit original_global_grid_5deg.csv \\
-  --dirs grid_runs /mnt/hdd/grid_runs --region Europe`,
+  --data-dir . --dirs grid_runs /mnt/hdd/grid_runs --region Europe`,
   },
   {
     title: 'Enumerate only (write coverage checkpoints)',
-    code: `python coverage_audit.py enumerate original_global_grid_5deg.csv --region Europe -w 64`,
+    code: `python coverage_audit.py enumerate original_global_grid_5deg.csv --data-dir . --region Europe -w 64`,
   },
   {
     title: 'Check status instantly from the meta sidecars',
-    code: `python coverage_audit.py check --region Europe`,
+    code: `python coverage_audit.py check --data-dir . --region Europe`,
   },
   {
     title: 'Retry only the failed tiles',
-    code: `python coverage_audit.py retry --region Europe`,
+    code: `python coverage_audit.py retry --data-dir . --region Europe`,
   },
   {
     title: 'Diff against extracted data, then keep the in-scope set',
-    code: `python coverage_audit.py diff original_global_grid_5deg.csv --dirs grid_runs --region Europe
+    code: `python coverage_audit.py diff original_global_grid_5deg.csv --data-dir . --dirs grid_runs --region Europe
 python coverage_audit.py datefilter --cutoff 2026-05-31`,
   },
   {
     title: 'Multi-day run: wait for the daily budget reset and auto-resume',
     code: `python coverage_audit.py audit original_global_grid_5deg.csv \\
-  --dirs grid_runs --region Europe --wait`,
+  --data-dir . --dirs grid_runs --region Europe --wait`,
   },
 ]
 

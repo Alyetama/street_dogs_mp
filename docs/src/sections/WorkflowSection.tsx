@@ -75,12 +75,20 @@ export default function WorkflowSection() {
     return () => ctx.revert()
   }, [])
 
+  // BASE_URL, not a bare '/'. Vite rewrites root-absolute public-asset URLs
+  // it finds in CSS -- index.css's two @font-face src's come out
+  // '/street_dogs_mp/fonts/...' -- but not ones sitting inside a JS string,
+  // so this background shipped unprefixed and every visitor to the deployed
+  // home page 404'd on https://<user>.github.io/workflow-bg.jpg. The two
+  // siblings being rewritten correctly is why nobody noticed.
+  const bg = `url(${import.meta.env.BASE_URL}workflow-bg.jpg)`
+
   return (
     <section
       id="workflow"
       ref={sectionRef}
       className="bg-[#212529] py-20"
-      style={{ backgroundImage: 'url(/workflow-bg.jpg)', backgroundSize: 'cover', backgroundPosition: 'center', backgroundBlendMode: 'overlay' }}
+      style={{ backgroundImage: bg, backgroundSize: 'cover', backgroundPosition: 'center', backgroundBlendMode: 'overlay' }}
     >
       <div className="mx-auto max-w-[1200px] px-6">
         <h2 className="relative mb-4 text-[clamp(1.8rem,3vw,2.5rem)] font-normal text-[#f8f9fa]">

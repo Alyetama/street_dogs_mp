@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Browse street-dogs pipeline outputs by region and data type.
 
-Usage:
+The login credential is NOT stored in this file: it is read from the
+environment (or .env, which is gitignored). Set BROWSE_ADMIN_PASS before
+starting; the server refuses to run without it, and every route is behind the
+login, so an unset password locks the app rather than opening it.
+
+    export BROWSE_ADMIN_PASS='...'        # or put it in .env
     python browse.py --dirs grid_runs /mnt/hdd/grid_runs
     python browse.py --dirs grid_runs --port 8080
 """
 
 import argparse
+import hmac
 import math
 import os
 import re
@@ -22,14 +28,23 @@ except ImportError:
 
 import functools
 
+try:  # optional: lets the credential live in the (gitignored) .env
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 app = Flask(__name__)
 
 BASE_DIRS: list[str] = []
 REGION_MAP: dict[str,
                  list[dict]] = {}  # parent_region -> [{folder, path}, ...]
 
-ADMIN_USER = 'admin'
-ADMIN_PASS = '#s6V9wjEKN2LT9'
+# Credentials come from the environment only. This file is committed to a
+# PUBLIC repository, so it must never hold the live password.
+ADMIN_USER = os.environ.get('BROWSE_ADMIN_USER', 'admin')
+ADMIN_PASS = os.environ.get('BROWSE_ADMIN_PASS', '')
+CREDENTIAL_ENV = 'BROWSE_ADMIN_PASS'
 
 
 def _check_auth(f):
@@ -188,11 +203,30 @@ def _bboxes_intersect(w1, s1, e1, n1, w2, s2, e2, n2) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _credentials_ok(username, password):
+    """Constant-time credential check.
+
+    An unset ADMIN_PASS never authenticates: without this an empty form field
+    would match an empty configured password and unlock every route.
+    """
+    if not ADMIN_PASS:
+        return False
+    ok_user = hmac.compare_digest((username or '').encode(),
+                                  ADMIN_USER.encode())
+    ok_pass = hmac.compare_digest((password or '').encode(),
+                                  ADMIN_PASS.encode())
+    return ok_user and ok_pass
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    if not ADMIN_PASS:
+        return make_response(
+            _render_login(f'Server misconfigured: {CREDENTIAL_ENV} is not '
+                          f'set, so no login is possible.'), 503)
     if request.method == 'POST':
-        if (request.form.get('username') == ADMIN_USER
-                and request.form.get('password') == ADMIN_PASS):
+        if _credentials_ok(request.form.get('username'),
+                           request.form.get('password')):
             session['logged_in'] = True
             return redirect(request.args.get('next') or '/')
         return make_response(_render_login('Invalid username or password.'))
@@ -1823,6 +1857,19 @@ def main():
                         help='Port to serve on')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
     args = parser.parse_args()
+
+    if not ADMIN_PASS:
+        print(
+            f"{CREDENTIAL_ENV} is not set. Every route here is behind the "
+            f"login, so refusing to start without a password.\n"
+            f"    export {CREDENTIAL_ENV}='...'   (or put it in .env)",
+            file=sys.stderr)
+        sys.exit(2)
+
+    if args.host not in ('127.0.0.1', 'localhost', '::1'):
+        print(f"[!] binding to {args.host}: this browser is reachable from "
+              f"other machines. Only the {CREDENTIAL_ENV} login stands "
+              f"between them and every file under --dirs.")
 
     app.secret_key = os.urandom(24)
 

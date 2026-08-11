@@ -69,7 +69,11 @@ export default function Navigation() {
     >
       <div className="mx-auto flex h-full max-w-[1200px] items-center justify-between px-6">
         {/* Logo */}
-        <a href="/" className="flex items-center gap-3" onClick={handleLogoClick}>
+        {/* BASE_URL, not '/'. handleLogoClick preventDefaults, so a plain
+            click never uses this href -- but a middle-click or "open in new
+            tab" does, and on a project Pages site '/' is the USER root, not
+            this site. Same class of miss as the workflow background. */}
+        <a href={import.meta.env.BASE_URL} className="flex items-center gap-3" onClick={handleLogoClick}>
           <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
             <circle cx="14" cy="14" r="13" stroke="#e8a645" strokeWidth="1.5" fill="rgba(232,166,69,0.1)"/>
             <ellipse cx="14" cy="18" rx="5" ry="4" fill="#e8a645" opacity="0.8"/>

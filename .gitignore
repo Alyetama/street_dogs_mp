@@ -202,6 +202,19 @@ run_missing_*.sh
 !.github/**
 .claude/
 
+# ...but a secret is still a secret inside them. The two blanket re-includes
+# above are the LAST rules to match anything under docs/ or .github/, and the
+# last match wins -- so they quietly cancelled the `.env*` and `proxies.txt`
+# rules for those two trees, and `git check-ignore docs/.env` answered
+# "!docs/**". docs/ is a Vite project, and a Vite project's root is exactly
+# where its documented `.env` goes, so the hole sat directly under the one
+# place someone would put a token. (docs/.gitignore's `*.local` caught
+# docs/.env.local and nothing else, which is what made it easy to miss.)
+# Restated here so they win again.
+.env*
+!.env.example
+proxies.txt
+
 # Data, not source. All of it stays on disk -- this only stops it going to
 # GitHub, where it is large, machine-specific, or both.
 *.parquet
