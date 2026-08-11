@@ -36,8 +36,14 @@ already exists, intact, at the destination:
 4. DIRECTORIES ARE REMOVED ONLY WHEN EMPTY (os.rmdir refuses non-empty dirs).
 5. SPACE PRE-FLIGHT. --execute aborts before touching anything if the
    destination lacks free space for the planned moves (override with --force).
-6. The destination drive's OWN existing data is never scanned or moved (the
-   destination is excluded from the source set by resolved path AND device).
+6. The destination directory itself is never scanned or moved: it is excluded
+   from the source set by RESOLVED PATH -- realpath equality, os.path.samefile,
+   and containment either way. That is a path test, not a device test: a
+   DIFFERENT directory that happens to sit on the destination's own drive is a
+   source like any other, and its files are copied (verified) and then removed
+   just the same. Such a source is called out by name in the header below, and
+   remember the space pre-flight then measures the drive the data is already
+   on.
 
 --keep-source copies instead of moving (nothing on any source is ever deleted;
 needs room for a second copy). Dry-run is the default -- nothing changes until
@@ -426,9 +432,32 @@ def main():
     print(f"region      : {args.region or 'ALL'}"
           f"{f'   (cells {region_pref}*)' if region_pref else ''}")
     print(f"verify      : {'size + SHA-1' if args.checksum else 'size'}")
+    # The exclusion above is by path only, so a source can still live on the
+    # destination's own drive. That is not refused (it may be exactly what the
+    # operator wants), but it is never silent: it needs room for a second copy
+    # on the very drive being measured for free space.
+    same_dev = []
+    try:
+        dest_dev = os.stat(dest if os.path.isdir(dest) else os.path.dirname(
+            dest) or '.').st_dev
+        for d in live:
+            try:
+                if os.stat(d).st_dev == dest_dev:
+                    same_dev.append(d)
+            except OSError:
+                pass
+    except OSError:
+        dest_dev = None
+
     print(f"sources     : {len(live)} drive(s)")
     for d in live:
-        print(f"  - {d}")
+        mark = '   [!] SAME DRIVE AS DESTINATION' if d in same_dev else ''
+        print(f"  - {d}{mark}")
+    if same_dev:
+        print(f"\n  [!] {len(same_dev)} source(s) sit on the destination's own "
+              f"drive. They ARE scanned and moved (copy, verify, delete the "
+              f"source) -- only the destination PATH is excluded, not the "
+              f"device. The copy needs free space on that same drive.")
     print()
 
     # ---- PASS 1: plan (no filesystem changes) ----

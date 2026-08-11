@@ -3,8 +3,10 @@
 Tombstone the images Mapillary no longer serves, then drop their rows from the
 ground-animal manifests.
 
-90,831 image_ids have a ``ground_animals_*.parquet`` row but no jpg on any
-drive, and two independent recovery attempts failed: replaying the stored
+90,544 image_ids have a ``ground_animals_*.parquet`` row but no jpg on any
+drive (90,831 (id, cell) rows -- 287 ids sit on a 5-degree boundary and have a
+row in each of the two cells that share it, and both rows must go), and two
+independent recovery attempts failed: replaying the stored
 ``thumb_original_url`` (99.8% of them are NULL), and re-querying the entity API
 per id for a fresh url (HTTP 200 with full metadata but no thumb url of any
 size). They are gone upstream, so the manifest overstates what can ever exist
@@ -167,8 +169,28 @@ def main():
             c: v
             for c, v in by_cell.items() if c.rsplit('_', 4)[0] == args.region
         }
-    total_ids = sum(len(v) for v in by_cell.values())
-    print(f'{total_ids:,} unrecoverable ids across {len(by_cell)} cells')
+    # An id on a 5-degree boundary has a manifest row in BOTH adjacent cells,
+    # so the (id, cell) pairs are the unit of WORK -- every one of those rows
+    # has to be pruned -- but they are not distinct ids. Report both; never
+    # present the pair count as an id count.
+    n_pairs = sum(len(v) for v in by_cell.values())
+    total_ids = len(set().union(*by_cell.values())) if by_cell else 0
+    dup = n_pairs - total_ids
+    print(f'{total_ids:,} unrecoverable ids across {len(by_cell)} cells '
+          f'({n_pairs:,} (id, cell) rows to prune'
+          f'{f"; {dup:,} ids span two cells" if dup else ""})')
+
+    # Refuse a colliding journal BEFORE anything is written, tombstones
+    # included: journal_flush truncates and rewrites this path with the CURRENT
+    # run's actions, so a second run under the same --stamp (the default is the
+    # literal 'manual') would erase the first run's undo record while its
+    # manifests stay pruned. Same guard as fix_grid_regions.py.
+    jp = os.path.join(args.journal_dir, f'prune_{args.stamp}.json')
+    if args.execute and os.path.exists(jp):
+        print(f'!! journal {jp} exists -- pick a different --stamp '
+              f'(the run it belongs to would lose its --undo)',
+              file=sys.stderr)
+        return 1
 
     # ---- 1. tombstones FIRST -------------------------------------------
     os.makedirs(args.out, exist_ok=True)
@@ -179,22 +201,34 @@ def main():
             tomb[region].append((iid, cell))
     if args.execute:
         for region, rows in sorted(tomb.items()):
-            durable_write(
-                pl.DataFrame({
-                    'image_id': [r[0] for r in rows],
-                    'cell': [r[1] for r in rows],
-                    'region': [region] * len(rows),
-                    'reason': [REASON] * len(rows),
-                    'attempts':
-                    ['stored_url_replay;entity_api_refetch'] * len(rows),
-                }), os.path.join(args.out, f'{region}.parquet'))
+            df = pl.DataFrame({
+                'image_id': [r[0] for r in rows],
+                'cell': [r[1] for r in rows],
+                'region': [region] * len(rows),
+                'reason': [REASON] * len(rows),
+                'attempts':
+                ['stored_url_replay;entity_api_refetch'] * len(rows),
+            })
+            path = os.path.join(args.out, f'{region}.parquet')
+            # MERGE, never replace: a later, narrower run (--region, a shorter
+            # worklist) must not drop the tombstones an earlier run recorded --
+            # they are the only record that those rows ever existed.
+            if os.path.exists(path):
+                try:
+                    df = pl.concat([pl.read_parquet(path), df],
+                                   how='vertical_relaxed')
+                except Exception as e:
+                    print(f'  !! existing tombstones unreadable, refusing to '
+                          f'overwrite {path} ({e})', file=sys.stderr)
+                    return 1
+                df = df.unique(subset=['image_id', 'cell'], keep='first')
+            durable_write(df, path)
         print(f'tombstones written -> {args.out}/<Region>.parquet')
     else:
         print(f'would write tombstones for {len(tomb)} regions -> {args.out}')
 
     # ---- 2/3. prune ground_animals only --------------------------------
     acts = []
-    jp = os.path.join(args.journal_dir, f'prune_{args.stamp}.json')
     if args.execute:
         os.makedirs(args.journal_dir, exist_ok=True)
     n_files = n_removed = n_recovered = 0

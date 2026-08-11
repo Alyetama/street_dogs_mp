@@ -266,6 +266,42 @@ def have_ids(have_dirs, cell):
     return ids
 
 
+def read_download_columns(files):
+    """image_id / thumb_original_url / captured_at from a cell's manifest chunks.
+
+    Read ONE CHUNK AT A TIME. A chunk whose thumb_original_url is entirely NULL
+    is stored with parquet type `null`, and a single multi-file scan fixes its
+    target schema from whichever chunk the directory happens to list first: a
+    null-typed one there raises SchemaError and aborts the region at its very
+    last step, after every sub-grid was already marked .completed_ -- so the
+    re-run skips straight back to the same crash and the cell's images can
+    never be queued. Only Null columns are cast, so every other dtype reaches
+    the caller exactly as it is stored.
+    """
+    want = ['image_id', 'thumb_original_url', 'captured_at']
+    frames = []
+    for f in sorted(files):
+        try:
+            have = [c for c in want if c in pl.read_parquet_schema(f)]
+            if 'image_id' not in have:
+                continue
+            df = pl.read_parquet(f, columns=have)
+        except Exception as e:
+            print(f"    [!] unreadable manifest chunk, skipped: {f} ({e})")
+            continue
+        df = df.with_columns([
+            pl.col(c).cast(pl.Utf8) for c in have if df.schema[c] == pl.Null
+        ])
+        for c in want:
+            if c not in have:
+                df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias(c))
+        frames.append(df.select(want))
+    if not frames:
+        return pl.DataFrame(schema={c: pl.Utf8 for c in want})
+    return pl.concat(frames, how='vertical_relaxed').unique(
+        subset=['image_id'], keep='first')
+
+
 def background_hdd_mover(move_queue):
     """Dedicated background thread to sequentially move files from fast SSD to slow HDD."""
     while True:
@@ -1253,12 +1289,7 @@ def process_region(west,
         if final_anim_files:
             queued_ids = {t[0] for t in download_tasks}
 
-            df_dl = pl.scan_parquet(final_anim_files).select([
-                'image_id', 'thumb_original_url', 'captured_at'
-            ]).unique(subset=['image_id'], keep='first').collect()
-
-            if 'captured_at' not in df_dl.columns:
-                df_dl = df_dl.with_columns(pl.lit(None).alias('captured_at'))
+            df_dl = read_download_columns(final_anim_files)
 
             for row in df_dl.iter_rows(named=True):
                 img_id = row['image_id']

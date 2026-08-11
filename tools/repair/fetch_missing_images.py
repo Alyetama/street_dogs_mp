@@ -135,6 +135,26 @@ def is_valid_jpeg(filepath):
 # --------------------------------------------------------------------------- #
 # Phase 1: SCAN - find image_ids that are in the parquet but not on disk
 # --------------------------------------------------------------------------- #
+def _read_id_url(path):
+    """(image_id, thumb_original_url) of one chunk, both as Utf8.
+
+    Returns None only when the chunk itself cannot be read. A chunk that has
+    no thumb_original_url column at all still yields its ids, with null urls.
+    """
+    try:
+        df = pl.read_parquet(path, columns=['image_id', 'thumb_original_url'])
+    except Exception:
+        try:
+            df = pl.read_parquet(path, columns=['image_id']).with_columns(
+                pl.lit(None).alias('thumb_original_url'))
+        except Exception:
+            return None
+    return df.with_columns([
+        pl.col('image_id').cast(pl.Utf8, strict=False),
+        pl.col('thumb_original_url').cast(pl.Utf8, strict=False),
+    ])
+
+
 def scan_region_row(row, dirs):
     parent_region = row['region']
     unique_region_id = (f"{parent_region}_{row['sw_lon']}_{row['sw_lat']}_"
@@ -167,17 +187,32 @@ def scan_region_row(row, dirs):
     if not animal_files:
         return None
 
-    # Map of image_id -> stored thumb_original_url (last one wins)
+    # Map of image_id -> stored thumb_original_url (last chunk wins).
+    #
+    # Read the chunks ONE AT A TIME and cast to Utf8 before concatenating.
+    # A backfill chunk whose thumb_original_url is entirely NULL is stored with
+    # parquet type `null`, and a multi-file scan fixes its target schema from
+    # whichever file comes first: with a null-typed chunk first the whole read
+    # raises SchemaError. That used to drop the ENTIRE cell from the manifest,
+    # silently and only on some runs (file order came from an unordered set).
     id_to_url = {}
-    try:
-        df = (pl.scan_parquet(list(set(animal_files))).select(
-            ['image_id', 'thumb_original_url']).unique(subset=['image_id'],
-                                                       keep='last').collect())
-        for iid, url in zip(df['image_id'].to_list(),
-                            df['thumb_original_url'].to_list()):
-            id_to_url[str(iid)] = url
-    except Exception:
+    frames = []
+    for pq in sorted(set(animal_files)):
+        df = _read_id_url(pq)
+        if df is None:
+            print(f"[scan] !! unreadable, skipping chunk: {pq}",
+                  file=sys.stderr)
+            continue
+        frames.append(df)
+    if not frames:
+        print(f"[scan] !! no readable ground_animals chunk for "
+              f"{safe_region_id} -- cell NOT scanned", file=sys.stderr)
         return None
+    df = pl.concat(frames, how='vertical_relaxed').unique(subset=['image_id'],
+                                                          keep='last')
+    for iid, url in zip(df['image_id'].to_list(),
+                        df['thumb_original_url'].to_list()):
+        id_to_url[iid] = url
 
     # Image_ids already present on disk (union across all region dirs).
     disk_ids = set()

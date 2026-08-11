@@ -1,3 +1,16 @@
+"""Drop duplicate image_id rows from the ground_animals manifest chunks.
+
+Every rewrite is atomic: the deduplicated copy is written to ``<name>.tmp``,
+fsynced, row-counted, and only then ``os.replace``d over the original. A kill,
+a power cut or a full disk therefore leaves either the untouched original or a
+complete replacement -- never a truncated manifest. (An in-place
+``write_parquet(filepath)`` truncates the target the moment it opens it, so an
+interrupted run used to destroy the whole chunk, unique rows included.)
+
+    python tools/repair/deduplicate_parquets.py --parent-dir grid_runs --dry-run
+    python tools/repair/deduplicate_parquets.py --parent-dir grid_runs
+"""
+
 import argparse
 import glob
 import multiprocessing
@@ -11,8 +24,44 @@ from rich.table import Table
 from tqdm import tqdm
 
 
-def deduplicate_single_parquet(filepath):
-    """Worker function to read, deduplicate, and overwrite a single Parquet file."""
+def durable_replace(df, final):
+    """Write ``df`` beside ``final`` and atomically swap it in.
+
+    The temp name ends in ``.tmp`` so it can never be picked up by a
+    ``ground_animals_*.parquet`` glob, and it is removed if anything fails, so
+    an aborted run leaves no partial file behind either.
+    """
+    tmp = final + '.tmp'
+    try:
+        df.write_parquet(tmp, compression='zstd')
+        fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # Read the footer back: refuse to swap in a file that did not land with
+        # exactly the rows we meant to keep.
+        written = pl.scan_parquet(tmp).select(pl.len()).collect().item()
+        if written != df.height:
+            raise IOError(
+                f'wrote {written} rows, expected {df.height} -- not swapping')
+        os.replace(tmp, final)
+    except BaseException:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
+    dfd = os.open(os.path.dirname(final) or '.', os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def deduplicate_single_parquet(filepath, dry_run=False):
+    """Worker function to read, deduplicate, and rewrite a single Parquet file."""
     try:
         # Extract the region folder name for aggregation logging
         region_name = os.path.basename(os.path.dirname(filepath))
@@ -28,10 +77,10 @@ def deduplicate_single_parquet(filepath):
         new_count = df_unique.height
         duplicates_removed = original_count - new_count
 
-        # Only spend time overwriting the file if duplicates actually existed
-        if duplicates_removed > 0:
-            # Overwrite the file natively with zstd compression matching the main script
-            df_unique.write_parquet(filepath, compression='zstd')
+        # Only spend time rewriting the file if duplicates actually existed
+        if duplicates_removed > 0 and not dry_run:
+            assert new_count + duplicates_removed == original_count, filepath
+            durable_replace(df_unique, filepath)
 
         return region_name, original_count, duplicates_removed
 
@@ -41,7 +90,8 @@ def deduplicate_single_parquet(filepath):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scan and deduplicate ground_animal Parquet files.")
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--parent-dir',
                         type=str,
                         default='grid_runs',
@@ -55,6 +105,10 @@ def main():
                         type=int,
                         default=multiprocessing.cpu_count(),
                         help="Number of CPU cores to use")
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help="Count the duplicates without rewriting a single file")
     args = parser.parse_args()
 
     console = Console()
@@ -97,7 +151,8 @@ def main():
     ):
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(deduplicate_single_parquet, filepath): filepath
+                executor.submit(deduplicate_single_parquet, filepath,
+                                args.dry_run): filepath
                 for filepath in target_files
             }
 
@@ -120,8 +175,8 @@ def main():
                     total_duplicates_purged += duplicates
 
     # --- Print the Final Report ---
-    console.print(
-        "\n[bold green][\u2713] Deduplication Complete![/bold green]")
+    console.print("\n[bold green][\u2713] Deduplication "
+                  f"{'Dry Run' if args.dry_run else 'Complete'}![/bold green]")
 
     if total_duplicates_purged == 0:
         console.print(
@@ -146,9 +201,14 @@ def main():
                           f"{stats['files_touched']} files")
 
     console.print(table)
-    console.print(
-        f"\n[bold red]Grand Total: Purged {total_duplicates_purged:,} duplicate rows from your dataset![/bold red]"
-    )
+    verb = 'Would purge' if args.dry_run else 'Purged'
+    console.print(f"\n[bold red]Grand Total: {verb} "
+                  f"{total_duplicates_purged:,} duplicate rows from your "
+                  f"dataset![/bold red]")
+    if args.dry_run:
+        console.print(
+            "[yellow]DRY RUN: nothing was written. Re-run without --dry-run "
+            "to apply.[/yellow]")
 
 
 if __name__ == "__main__":

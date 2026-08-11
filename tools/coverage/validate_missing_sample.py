@@ -15,6 +15,7 @@ Then extrapolates those fractions to the full set.
 
 import argparse
 import glob
+import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,6 +30,10 @@ from coverage_audit import (KeyRotator, ProxyPool, build_session, load_keys,
                             make_progress)
 
 GROUND = 'animal--ground-animal'
+
+# Above this many rows, count distinct image_ids with HyperLogLog instead of an
+# exact hash table (~7e8 string ids would need tens of GB).
+EXACT_DISTINCT_MAX_ROWS = 50_000_000
 
 
 def resolve_files(inscope, region):
@@ -67,14 +72,28 @@ def main():
         raise SystemExit(f"no inscope parquet found under {args.inscope}")
 
     lf = pl.scan_parquet(files)
-    total = int(lf.select(pl.len()).collect()['len'][0])
-    if total == 0:
+    rows = int(lf.select(pl.len()).collect()['len'][0])
+    if rows == 0:
         raise SystemExit("inscope set is empty")
-    stride = max(1, total // args.sample)
+    # The download volume is a count of IMAGES, and the in-scope parquets hold
+    # duplicate image_id rows (an image on a cell boundary is listed under both
+    # cells). Extrapolating over the ROW count would size the backfill against
+    # ids that do not exist as distinct downloads. Exact while an exact hash
+    # table is affordable; above that HyperLogLog, which is ~0.1% off at this
+    # scale -- far inside the sampling error the whole figure carries anyway.
+    approx = rows > EXACT_DISTINCT_MAX_ROWS
+    expr = (pl.col('image_id').approx_n_unique()
+            if approx else pl.col('image_id').n_unique())
+    total = int(lf.select(expr).collect().item())
+    about = '~' if approx else ''
+    stride = max(1, rows // args.sample)
     ids = (lf.select('image_id').gather_every(stride).limit(
         args.sample).collect()['image_id'].to_list())
+    ids = list(dict.fromkeys(ids))  # probe each image once
     n = len(ids)
-    print(f"total in-scope {total:,} · sampling {n:,} (every {stride:,}th)")
+    print(f"in-scope {rows:,} rows · {about}{total:,} distinct images "
+          f"({rows - total:,} duplicate rows) · sampling {n:,} "
+          f"(every {stride:,}th)")
 
     rot = KeyRotator(load_keys(args.env))
     session = build_session(pool=args.workers + 32)
@@ -129,10 +148,31 @@ def main():
     print(f"  ground-animal  {ga:>7,}  "
           f"({ga / n:6.1%} of sample · "
           f"{(ga / live if live else 0):6.1%} of live)")
-    print(f"\nextrapolated to {total:,} in-scope:")
-    print(f"  ~live           {round(total * live / n):>14,}")
-    print(f"  ~ground-animals {round(total * ga / n):>14,}   "
-          f"<- real backfill download volume")
+
+    # Extrapolate over the probes that RESOLVED. An errored probe is not
+    # evidence that the image is gone or that it is not an animal; counting it
+    # in the denominator quietly pushes both figures down.
+    resolved = live + gone
+    if not resolved:
+        print(f"\nevery one of the {n:,} probes errored -- nothing to "
+              f"extrapolate from. Re-run (fewer workers, or --proxies).")
+        return
+
+    def band(k):
+        """+/- half-width of the 95% interval on k/resolved, scaled to total."""
+        p = k / resolved
+        return 1.96 * math.sqrt(max(p * (1 - p), 0) / resolved) * total
+
+    print(f"\nextrapolated to {about}{total:,} distinct in-scope images, "
+          f"over the {resolved:,} probes that resolved:")
+    print(f"  ~live           {round(total * live / resolved):>14,}"
+          f"  +/- {round(band(live)):,}")
+    print(f"  ~ground-animals {round(total * ga / resolved):>14,}"
+          f"  +/- {round(band(ga)):,}   <- real backfill download volume")
+    if error:
+        print(f"  ({error:,} of {n:,} probes errored and are excluded from "
+              f"both; if those differ systematically from the rest, the "
+              f"figures move with them.)")
 
 
 if __name__ == '__main__':

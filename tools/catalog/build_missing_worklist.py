@@ -20,6 +20,17 @@ reader needs -- ``image_id`` and ``safe_region_id`` (the cell) -- sorted by cell
 so the stream stays cell-contiguous (the backfill buffers per cell and flushes
 on change; unsorted input would shred it into tiny parquets).
 
+One row per (image_id, CELL), NOT per image_id
+----------------------------------------------
+An image on a 5-degree boundary is returned by the bbox query of both adjacent
+cells and therefore has a ground_animals row, and a jpg slot, in each of them.
+Both rows are missing work: the jpg is looked for under ``<cell>/
+ground_animal_images/``, and ``prune_unrecoverable.py`` consumes this same
+worklist per cell to decide which manifest rows to drop. De-duplicating
+globally here would leave the second cell's row unfetched and unprunable
+forever, so the duplication is deliberate. What must never happen is reporting
+the row count as a count of images -- the summary below prints both.
+
 Run it, then hand ``--out`` to the backfill as ``--inscope`` together with
 ``--no-skip-extracted`` (these ids ARE in the region's all_data parquets, so the
 default already-extracted filter would drop every one of them).
@@ -127,7 +138,8 @@ def main():
     print(f'scanning {len(cells):,} cells for images with no jpg on disk...')
 
     per_region = defaultdict(list)
-    stats = defaultdict(lambda: [0, 0])  # region -> [missing, with_url]
+    stats = defaultdict(lambda: [0, 0])  # region -> [rows, with_url]
+    all_ids = set()
     for n, (cell, dirs) in enumerate(sorted(cells.items()), 1):
         have = jpgs_on_disk(args.image_dirs, cell)
         ids, with_url = missing_for_cell(dirs, have)
@@ -137,11 +149,13 @@ def main():
         per_region[region] += [(i, cell) for i in sorted(ids)]
         stats[region][0] += len(ids)
         stats[region][1] += with_url
+        all_ids.update(ids)
         print(f'[{n}/{len(cells)}] {cell:<40} missing {len(ids):>7,}',
               flush=True)
 
     os.makedirs(args.out, exist_ok=True)
     total = 0
+    region_ids = {}
     for region, rows in sorted(per_region.items()):
         rows.sort(key=lambda r: r[1])  # cell-contiguous, as required
         pl.DataFrame({
@@ -149,10 +163,14 @@ def main():
             'safe_region_id': [r[1] for r in rows]
         }).write_parquet(os.path.join(args.out, f'{region}.parquet'))
         total += len(rows)
+        region_ids[region] = len({r[0] for r in rows})
 
     summary = {
         r: {
-            'missing': s[0],
+            # rows == (image_id, cell) pairs; images == distinct image_ids.
+            # A boundary image has a row in each of the two cells it falls in.
+            'rows': s[0],
+            'images': region_ids.get(r, 0),
             'still_has_stored_url': s[1]
         }
         for r, s in stats.items()
@@ -160,10 +178,15 @@ def main():
     with open(os.path.join(args.out, 'summary.json'), 'w') as f:
         json.dump(summary, f, indent=1, sort_keys=True)
 
-    print(f'\n{"region":<32}{"missing":>10}{"has stored url":>16}')
+    print(f'\n{"region":<32}{"rows":>10}{"images":>10}{"has stored url":>16}')
     for r, s in sorted(stats.items(), key=lambda x: -x[1][0]):
-        print(f'{r:<32}{s[0]:>10,}{s[1]:>16,}')
-    print(f'{"TOTAL":<32}{total:>10,}')
+        print(f'{r:<32}{s[0]:>10,}{region_ids.get(r, 0):>10,}{s[1]:>16,}')
+    print(f'{"TOTAL":<32}{total:>10,}{len(all_ids):>10,}')
+    if total != len(all_ids):
+        print(f'\n{total - len(all_ids):,} of the rows are the SECOND cell of '
+              f'an image that straddles a 5-degree boundary. Both rows are '
+              f'real work (a jpg per cell, a manifest row per cell); "images" '
+              f'is the download count, "rows" is the work count.')
     print(f'\nworklists -> {args.out}/<Region>.parquet')
     print('feed to: backfill_missing.py --inscope '
           f'{args.out} --no-skip-extracted ...')

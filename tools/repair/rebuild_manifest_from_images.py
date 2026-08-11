@@ -205,6 +205,37 @@ def find_region_context(safe_id, dirs):
     return parquet_dir, animal_files, all_data_files, image_dirs
 
 
+def durable_write(df, final):
+    """Write a NEW parquet via tmp + fsync + rename.
+
+    The recovered chunks are named ``ground_animals_<cell>_recovered_NNN``, so
+    a half-written one would be picked up by every ``ground_animals_*`` glob in
+    the toolchain and poison it. Writing under ``.tmp`` keeps a killed run
+    invisible to those globs, and the rename is atomic.
+    """
+    tmp = final + '.tmp'
+    try:
+        df.write_parquet(tmp, compression='zstd')
+        fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, final)
+    except BaseException:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
+    dfd = os.open(os.path.dirname(final) or '.', os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def disk_image_ids(image_dirs):
     ids = set()
     for img_dir in image_dirs:
@@ -218,13 +249,21 @@ def disk_image_ids(image_dirs):
 
 
 def parquet_image_ids(files):
-    if not files:
-        return set()
-    try:
-        return set(map(str, pl.scan_parquet(list(set(files)))
-                       .select('image_id').collect()['image_id'].to_list()))
-    except Exception:
-        return set()
+    """Every image_id in ``files``, read one chunk at a time.
+
+    Per-file so that one unreadable chunk costs only its own ids instead of
+    blanking the whole set -- an empty set here makes every image on disk look
+    like an orphan, which would re-fetch and re-write rows that already exist.
+    """
+    ids = set()
+    for f in sorted(set(files)):
+        try:
+            col = pl.read_parquet(f, columns=['image_id'])['image_id']
+        except Exception as e:
+            print(f"  [warn] unreadable, ids not counted: {f} ({e})")
+            continue
+        ids.update(map(str, col.to_list()))
+    return ids
 
 
 # --------------------------------------------------------------------------- #
@@ -436,11 +475,29 @@ def rebuild_region(safe_id, parent, orphan_ids, dirs, key_rotator, args,
 
     frames = []
     if local_ids:
-        local_df = (pl.scan_parquet(list(set(all_files)))
-                    .filter(pl.col('image_id').cast(pl.Utf8).is_in(local_ids))
-                    .collect()
-                    .unique(subset=['image_id'], keep='first'))
-        frames.append(coerce_local(local_df))
+        # One all_data chunk at a time, coerced to the canonical schema before
+        # anything is concatenated. A chunk whose thumb_* columns are entirely
+        # NULL has parquet type `null`; a multi-file scan takes its schema from
+        # whichever file happens to come first and raises SchemaError when that
+        # one is null-typed -- which used to kill the whole run, after the API
+        # gate for the region had already been paid for.
+        local_frames = []
+        for f in sorted(set(all_files)):
+            try:
+                part = (pl.scan_parquet(f)
+                        .filter(pl.col('image_id').cast(pl.Utf8)
+                                .is_in(local_ids))
+                        .collect())
+            except Exception as e:
+                print(f"  [warn] unreadable all_data chunk, rows not "
+                      f"recovered from it: {f} ({e})")
+                continue
+            if part.height:
+                local_frames.append(coerce_local(part))
+        if local_frames:
+            frames.append(
+                pl.concat(local_frames, how='vertical').unique(
+                    subset=['image_id'], keep='first'))
 
     if api_ids:
         records = []
@@ -471,7 +528,7 @@ def rebuild_region(safe_id, parent, orphan_ids, dirs, key_rotator, args,
 
     out_path = next_recovered_path(parquet_dir, safe_id, existing_files)
     if not args.dry_run:
-        recovered.write_parquet(out_path, compression='zstd')
+        durable_write(recovered, out_path)
     stats['recovered'] = recovered.height
     stats['out_path'] = out_path
     return stats
@@ -516,9 +573,21 @@ def cmd_rebuild(args, manifest=None):
 
     region_items = [(sid, ids) for sid, ids in by_region.items()
                     if sid not in done]
+    failed_regions = []
     for sid, ids in tqdm(region_items, desc="Regions"):
-        stats = rebuild_region(sid, region_parent[sid], ids, args.dirs,
-                               key_rotator, args, tls)
+        try:
+            stats = rebuild_region(sid, region_parent[sid], ids, args.dirs,
+                                   key_rotator, args, tls)
+        except Exception as e:
+            # One bad region must not end the run: everything after it in the
+            # loop would go unprocessed, and the resume file would not record
+            # any of it either.
+            failed_regions.append((sid, f'{type(e).__name__}: {e}'))
+            tqdm.write(f"  [X] {sid}: {type(e).__name__}: {e} "
+                       f"-- region skipped, continuing")
+            stats = {'region': sid, 'orphans': len(ids), 'recovered': 0,
+                     'not_animal': 0, 'dead': 0, 'failed': len(ids),
+                     'skipped': 0}
         for k in totals:
             totals[k] += stats.get(k, 0)
         msg = (f"  {sid[:50]:<50} orphans={stats['orphans']:>7,} "
@@ -531,6 +600,13 @@ def cmd_rebuild(args, manifest=None):
                 f.write(sid + '\n')
 
     print("\n[rebuild] done.")
+    if failed_regions:
+        print(f"    [X] {len(failed_regions)} region(s) errored and were "
+              f"skipped (not marked done, safe to re-run):")
+        for sid, why in failed_regions[:20]:
+            print(f"        {sid}: {why}")
+        if len(failed_regions) > 20:
+            print(f"        ... and {len(failed_regions) - 20} more")
     print(f"    recovered rows written : {totals['recovered']:,}")
     print(f"    no longer animal       : {totals['not_animal']:,}")
     print(f"    dead (gone from API)   : {totals['dead']:,}")
