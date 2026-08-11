@@ -9,8 +9,13 @@
 
 [Unit]
 Description=Street Dogs collection-progress dashboard
-After=network-online.target
-Wants=network-online.target
+# If the repo or the data roots sit on a removable or late-mounting disk, name
+# it here: without this the unit can start before the mount arrives, fail to
+# find its working directory, and spend its restart budget before the disk does.
+RequiresMountsFor=<path-to-the-drive-the-repo-is-on>
+# tailscaled only matters if --host is a Tailscale address; drop it otherwise.
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
 
 [Service]
 Type=simple
@@ -19,8 +24,15 @@ WorkingDirectory=<path-to-repo>
 Environment=PYTHONUNBUFFERED=1
 # Machine-specific paths belong in tools/dashboard/dashboard.config.json, not
 # here; add Environment= lines only to override that file for this unit.
-ExecStart=<path-to-python> tools/dashboard/dashboard.py serve --host <private-bind-addr> --port 8050 --interval 3600 --images-every 1
-Restart=on-failure
+# --images-every 1 re-walks every data root on each refresh, which is minutes of
+# I/O against the drives the sweep is already reading. A large number leaves the
+# image count to be rebuilt on demand instead, which is what you want unless the
+# box is idle.
+ExecStart=<path-to-python> tools/dashboard/dashboard.py serve --host <private-bind-addr> --port 8050 --no-initial-refresh --interval 3600 --images-every 999999
+# always, not on-failure: a clean exit is not a failure, so on-failure leaves a
+# dashboard that merely stopped stopped -- which is how one stayed down for
+# nearly seven hours with nobody watching.
+Restart=always
 RestartSec=15
 
 [Install]
