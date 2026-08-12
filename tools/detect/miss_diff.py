@@ -139,16 +139,27 @@ def main():
         return 0
     print(f'\nCan looser NMS recover the {len(lost)} boxes A loses?')
     print(f'  {"nms_iou":>8} {"max_det":>8}   recovered')
+    best = 0
     for v in [float(x) for x in a.recover.split(',')] + [a.nms_iou]:
         for md in (a.max_det, max(a.max_det, 1000)):
             got = 0
             for r in lost:
                 f, _ = hits(A, r['ip'], [r['gt']], a.conf, v, md)
                 got += (0 in f)
+            best = max(best, got)
             tag = '  (baseline)' if v == a.nms_iou and md == a.max_det else ''
             print(f'  {v:>8.2f} {md:>8}   {got:>3}/{len(lost)}{tag}')
-    print('\nA box that comes back under looser NMS was suppressed, not unseen '
-          '-- that is a threshold, not a retrain.')
+    # The verdict has to follow the table. Printing the suppression sentence
+    # unconditionally made a run that recovered NOTHING read as though it had
+    # found the cause, which is the opposite of what the numbers said.
+    if best:
+        print(f'\n{best} of {len(lost)} come back under looser NMS: those were '
+              f'suppressed rather than unseen, which is a threshold to tune '
+              f'and not a retrain.')
+    else:
+        print(f'\nNone of the {len(lost)} come back at any setting tried, so A '
+              f'never proposed them. Nothing about NMS or the detection cap '
+              f'will recover these; the difference is in the model.')
     return 0
 
 
