@@ -58,6 +58,8 @@
   "triage_python": "<path to a python with torch and transformers, for the crop guesser>",
   "triage_model": "<optional: a stronger SigLIP 2, e.g. google/siglip2-so400m-patch14-384>",
   "triage_device": "<cpu or cuda>",
+  "llm_page": false,
+  "_llm_page": "Whether the experimental LLM annotator is part of the dashboard. False, the default, removes it completely: no link in the header and no route claimed, so /llm answers 404. Nothing is deleted -- tools/dashboard/llm_page.py, tools/detect/llm_annotate.py, their guard and every answer already collected under data/llm_annotations stay exactly as they are, and setting this true brings the page back unchanged. The header is baked when the page is built, so restoring it needs a rebuild as well as a restart: set the key, run `dashboard.py build`, then restart the service. Its answers were never annotations and are not one now -- they live in their own tier and nothing that assembles a dataset reads them.",
   "triage_watch": 300,
   "_triage_watch": "Seconds the guesser sleeps between passes when the dashboard starts it. It keeps going rather than exiting: the live pool turns over at ~2 crops/s, so a single pass leaves the queue partly unguessed within the hour. Default 300.",
   "rfdetr_python": "/path/to/envs/rfdetr/bin/python",

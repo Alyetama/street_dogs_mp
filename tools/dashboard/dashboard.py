@@ -142,6 +142,26 @@ def cfg_int(key, default=0, env=None):
         return default
 
 
+def cfg_bool(key, default=False, env=None):
+    """A yes/no config key, from a JSON boolean or a string spelling of one.
+
+    Same reason cfg_int exists: cfg() returns strings only, so a key written
+    the natural way -- true, not "true" -- warned and fell through to the
+    default, which for a switch means the feature silently stayed as it was.
+    """
+    raw = os.environ.get(env or ('DASHBOARD_' + key.upper()))
+    v = raw if raw else load_cfg().get(key)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ('1', 'true', 'yes', 'on'):
+            return True
+        if s in ('0', 'false', 'no', 'off', ''):
+            return False
+    return default
+
+
 def cfg_list(key, env=None):
     """A list-valued config key, from JSON or a comma-separated string."""
     raw = os.environ.get(env or ('DASHBOARD_' + key.upper()))
@@ -161,6 +181,30 @@ def cfg_list(key, env=None):
 # they contributed two permanently-0% cards, two flat bars, two markers on
 # the map and two entries in every region list, and no information.
 HIDE_REGIONS = frozenset(cfg_list('hide_regions') or ('Arctic', 'Antarctica'))
+
+# The LLM annotator is an experiment that is off by default, and off here means
+# absent: no link in the header and no route claimed, so /llm is a 404 rather
+# than a page nobody asked for. Nothing is deleted -- llm_page.py,
+# llm_annotate.py, their guard and the store of answers already collected all
+# stay, and turning this on brings the page back exactly as it was, which is
+# the point of a switch rather than a revert.
+#
+#   tools/dashboard/dashboard.config.json:  "llm_page": true
+#   then rebuild (the header is baked at build time) and restart the service.
+LLM_PAGE = cfg_bool('llm_page', False)
+
+# Kept whole rather than reassembled when the switch flips: the caption is
+# doing a second job -- the two links beside it are a queue somebody judges and
+# the datasets those judgements build, and an LLM's answers are neither. A
+# reader who arrives at /llm expecting annotations has already formed the idea
+# that whole store exists to prevent. The violet stays on that page; one
+# experiment does not get a colour in the header of everything else.
+LLM_NAV = """    <a class="revbtn quiet" href="/llm" title="What an LLM said about \
+crops — experimental, kept in a store of its own, and never an annotation">
+      <span class="rvf">&#9708;</span>
+      <span class="rvn"><b>LLM annotator</b><em>experimental &mdash; not \
+annotations</em>
+      </span></a>"""
 
 REGION_SQL = """
 WITH f AS (
@@ -10145,7 +10189,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
         # claimed here rather than beside the other JSON endpoints below --
         # anything left to the static handler is a 404 that looks like a
         # missing page instead of an unclaimed route.
-        if _p.startswith('/llm') or _p.startswith('/api/llm'):
+        if LLM_PAGE and (_p.startswith('/llm')
+                         or _p.startswith('/api/llm')):
             if self._llm_get():
                 return
         if self.path.split('?', 1)[0] == '/review':
@@ -10393,7 +10438,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
         # The same prefix guard do_GET uses, so both verbs claim /llm the same
         # way and neither can end up owning half of it.
         _p = self.path.split('?', 1)[0]
-        if _p.startswith('/llm') or _p.startswith('/api/llm'):
+        if LLM_PAGE and (_p.startswith('/llm')
+                         or _p.startswith('/api/llm')):
             if self._llm_post():
                 return
         if self.path.split('?', 1)[0] == '/api/audit/box':
@@ -10642,6 +10688,7 @@ def render(ov, per, tr, now, locs=()):
             .replace('__CARDS__', cards)
             .replace('__LOCS__', render_locations(locs))
             .replace('__DATA__', json.dumps(data))
+            .replace('__LLMNAV__', LLM_NAV if LLM_PAGE else '')
             .replace('__NOW__', now.strftime('%Y-%m-%d %H:%M'))
             .replace('__PROG__', f"{ov['pct']:.1f}")
             .replace('__LB_CSS__', LB_CSS)
@@ -12037,10 +12084,7 @@ outline-offset:2px}
          expecting annotations has already formed the idea that whole store
          exists to prevent. The violet is that page's and stays there -- one
          experiment does not get a colour in the header of everything else. -->
-    <a class="revbtn quiet" href="/llm" title="What an LLM said about crops — experimental, kept in a store of its own, and never an annotation">
-      <span class="rvf">&#9708;</span>
-      <span class="rvn"><b>LLM annotator</b><em>experimental &mdash; not annotations</em>
-      </span></a>
+__LLMNAV__
     <!-- The sentence is wrapped because a bare text node has nothing to
          style, and the scrolled header sheds the sentence while keeping the
          button that sits after it and the dot that says the page is live. -->

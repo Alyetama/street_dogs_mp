@@ -797,6 +797,10 @@ BULK_DIRS = ('gate',            # the gate's own shards, one model verdict each
              'geo',             # natural-earth shapefiles
              'grids',           # the cell grids the harvest was planned on
              'harvest',         # harvested crops
+             # the 180 train-30-blind frames two detectors are compared on.
+             # Symlinks into dogdet_v3 plus a dataset.yaml: derived from a
+             # split, holding no decision anybody made.
+             'holdout180',
              'manifests',       # coverage csv exports
              'mistakes',        # per-run mistake dumps from run_mistakes.py
              'missing_worklist', 'missing_worklist_after',
