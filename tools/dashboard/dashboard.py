@@ -1712,7 +1712,8 @@ border-bottom:1px solid var(--bd);transition:padding .16s ease}
    Everything up here is setup, and setup is read once. Once the page has
    scrolled, the header keeps only what a reviewer ACTS on -- the count, the
    chips saying what is narrowing the queue, and the controls that change it
-   -- and sheds the running tally, the two progress rows and the open panel.
+   -- and sheds the running tally and the two progress rows. The filter
+   panel is exempt: open, it is work in progress.
    Those are ambient: worth a glance, not worth a third of the viewport on
    every screen of crops. */
 /* 96px, not 1px. A one-pixel sentinel flipped the header the instant the
@@ -1730,7 +1731,12 @@ transition:max-height .18s ease,opacity .18s ease,padding .18s ease}
 .lines{max-height:64px}
 body.compact .tally,body.compact .lines{max-height:0;opacity:0;padding-top:0;
 padding-bottom:0}
-body.compact .npanel{display:none}
+/* The panel is NOT shed. It used to be -- display:none under body.compact --
+   which read as tidy until somebody scrolled with it open: the filters they
+   were using vanished, and worse, the Filter button went dead for the whole
+   scrolled life of the page, because its toggle flips [hidden] and the shed
+   rule overruled it either way. An open panel is the reviewer's own doing;
+   it stays until they close it, and the header folds back down when they do. */
 @media(prefers-reduced-motion:reduce){.tally,.lines{transition:none}}
 body.compact h1{font-size:14px}
 body.compact .score>b{font-size:19px;letter-spacing:-.3px}

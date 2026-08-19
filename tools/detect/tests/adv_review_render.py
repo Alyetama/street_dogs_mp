@@ -1892,6 +1892,23 @@ def main():
         return 1
     print('ok   whole review script parses (%d chars)' % len(script))
 
+    # The filter panel must survive the header compacting. A body.compact rule
+    # once shed it with display:none, which read as tidy until somebody
+    # scrolled with it open: the filters they were using vanished, and the
+    # Filter button went dead for the scrolled life of the page -- its toggle
+    # flips [hidden], and the shed rule overruled it either way. The check is
+    # on the CSS because that is where the defect lived: any body.compact rule
+    # that touches .npanel is the bug coming back, whatever it sets.
+    css = html[html.index('<style>') + 7:html.index('</style>')]
+    shed = [m for m in re.findall(r'body\.compact[^{}]*\{[^}]*\}', css)
+            if '.npanel' in m.split('{')[0]]
+    if shed:
+        print('FAIL a body.compact rule touches the filter panel again -- an '
+              'open panel vanishes on scroll and the Filter button goes dead '
+              'while scrolled: ' + shed[0][:120])
+        return 1
+    print('ok   compacting the header leaves the open filter panel alone')
+
     fixtures = {
         'normal': [crop(i, conf=round(0.95 - i * 0.05, 2)) for i in range(9)],
         'mixed': [crop(0, full=False), crop(1, full=True), crop(2, full=False),
