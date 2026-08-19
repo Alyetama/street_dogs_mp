@@ -1207,7 +1207,14 @@ function paintCard(i){
 function render(){
   if(!page||!page.items.length){
     grid.innerHTML='';empty.hidden=false;
-    empty.textContent=page&&page.exhausted
+    /* which view is empty decides what the emptiness MEANS: drawing a page
+       adds unjudged crops and cannot produce an annotation, so telling the
+       "my annotations" view to draw one was instructions that do not lead
+       to the thing the view shows */
+    empty.textContent=view!=='sheet'
+      ? 'Nothing judged at this stage yet — verdicts land here as you '+
+        'record them on the sheet.'
+      : page&&page.exhausted
       ? 'No sequences left to draw in this band. Every one has been shown.'
       : 'Nothing here yet. Draw a page.';
     return;
@@ -2115,9 +2122,21 @@ def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):
     doc = get_page(i, stage)
     if doc is None:
         return {'error': f'page {i} is missing'}
-    if i >= total - 1:
-        prefetch(band=band, n=n, stage=stage)   # line up the next one
-    return {'page': with_verdicts(doc, stage), 'index': i, 'total': total}
+    doc = with_verdicts(doc, stage)
+    # Line up the next page -- but only once judging has actually touched this
+    # one. Boxes are retired the moment they are drawn, so queueing on the
+    # bare GET meant every passive load of the audit page spent 25 boxes of
+    # stratified sample: measured live, three page-loads moved the gate store
+    # from 55 to 58 pages with the verdict ledger untouched for a week. A
+    # judged last page is a reviewer working, and the draw buys them an
+    # instant Next; an unjudged one is a visitor looking, and looking is free.
+    # The cost is one synchronous cut at the reviewer's FIRST page turn of a
+    # session (the "nothing was queued" branch above), after which the
+    # prefetch chain runs as before.
+    if i >= total - 1 and any(it.get('verdict')
+                              for it in doc.get('items') or []):
+        prefetch(band=band, n=n, stage=stage)
+    return {'page': doc, 'index': i, 'total': total}
 
 
 def api_draw(n=25, band=None, stage=DEFAULT_STAGE):

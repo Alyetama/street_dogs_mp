@@ -915,6 +915,14 @@ def resolve(key, rel=''):
     than normalised away, since none of them is ever a thing the page asks
     for. Returns None instead of raising: a bad path is an answer, and the
     caller is rendering a page.
+
+    A realpath landing inside ANOTHER indexed dataset is served, not refused.
+    Symlink assembly is how exports and dedup'd builds avoid copying -- a
+    holdout's images/val is a directory of links into the training set it was
+    cut from -- and refusing every off-root link put "would not open" on all
+    sixty tiles of a dataset whose files were fine. The line stays where it
+    was for everything else: a link to /etc, to the dashboard's own working
+    files, or to anywhere no dataset lives is still None.
     """
     row = dataset(key)
     if not row:
@@ -932,6 +940,13 @@ def resolve(key, rel=''):
     except (ValueError, OSError):
         return None
     if full != root and not full.startswith(root + os.sep):
+        # rows are keyed on realpath (see _discover), so each root here is
+        # already resolved and the sep-appended prefix test is the same one
+        # the dataset's own root got
+        for other in _INDEX['rows']:
+            r2 = other['root']
+            if full == r2 or full.startswith(r2 + os.sep):
+                return full
         return None
     return full
 

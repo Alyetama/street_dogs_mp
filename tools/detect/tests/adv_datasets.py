@@ -156,7 +156,34 @@ def build_fixture(base):
                    os.path.join(det, 'images/train/sneaky.jpg'))
     except OSError:
         pass       # a filesystem without links; the traversal checks say so
-    return {'base': base, 'det': det, 'cls': cls, 'flat': flat}
+
+    # A symlink-ASSEMBLED dataset: every image is a link into det_v1, and only
+    # the links are its own. This is how exports and dedup'd builds avoid
+    # copying -- the real pairs on this machine are holdout180 -> dogdet_v3
+    # and leash_src -> leash_3class_v2 -- and refusing the off-root realpath
+    # put "would not open" on every tile of a dataset whose files were fine.
+    linked = os.path.join(base, 'linked_v1')
+    for d in ('images/train', 'images/val', 'labels/train', 'labels/val'):
+        os.makedirs(os.path.join(linked, d))
+    with open(os.path.join(linked, 'dataset.yaml'), 'w') as f:
+        f.write('path: .\ntrain: images/train\nval: images/val\n'
+                'nc: 1\nnames: [target]\n')
+    try:
+        for i in range(3):
+            os.symlink(os.path.join(det, 'images/train', 'f%03d.jpg' % i),
+                       os.path.join(linked, 'images/train', 'l%03d.jpg' % i))
+        os.symlink(os.path.join(det, 'images/val', 'v000.jpg'),
+                   os.path.join(linked, 'images/val', 'l000.jpg'))
+        # the sharpened yaml hazard: a CROSS-dataset link called x.jpg
+        # pointing at the other dataset's descriptor. Containment now lets
+        # the realpath through, so the resolved-extension allow-list is the
+        # only thing standing between this name and a yaml served as JPEG.
+        os.symlink(os.path.join(det, 'dataset.yaml'),
+                   os.path.join(linked, 'images/train', 'sneak2.jpg'))
+    except OSError:
+        pass       # a filesystem without links; the checks say so
+    return {'base': base, 'det': det, 'cls': cls, 'flat': flat,
+            'linked': linked}
 
 
 class _FakeDash:
@@ -364,6 +391,62 @@ def traversal_checks(bad, fx):
                    'the checks above prove nothing')
     if ix.resolve(key, '') != root:
         bad.append('resolve() does not answer the root for an empty rel')
+
+
+def symlink_dataset_checks(bad, fx):
+    """A dataset assembled from links into ANOTHER dataset serves its images.
+
+    holdout180 (180/180 images) and leash_src (every sampled crop) are built
+    exactly this way, and resolve() used to realpath the target and refuse
+    anything outside the dataset's OWN root -- so /api/datasets/files listed
+    every name while /datasets/thumb and /datasets/image answered 404 for all
+    of them, and the default landing grid rendered sixty tiles of "would not
+    open" over a dataset whose files were fine. The line the refusal exists
+    for has not moved: a link that leaves EVERY dataset root is still None,
+    and a cross-dataset link to a .yaml is still not an image.
+    """
+    ix, ds = fx.ix, fx.ds
+    if not os.path.islink(os.path.join(fx.paths['linked'],
+                                       'images/train/l000.jpg')):
+        print('SKIP: no symlinks on this filesystem — the symlink-assembled '
+              'dataset was not exercised')
+        return
+    key = fx.key('linked_v1')
+    if not key:
+        bad.append('the symlink-assembled fixture dataset was not discovered '
+                   'at all — nothing below tested anything')
+        return
+    det_root = os.path.realpath(_row(fx, 'det_v1')['root'])
+    got = ix.resolve(key, 'images/train/l000.jpg')
+    if got is None:
+        bad.append('resolve() refuses a symlink into a sibling indexed '
+                   'dataset — every tile of a symlink-assembled export '
+                   'renders "would not open" while the file listing says '
+                   'the images are there')
+    elif not got.startswith(det_root + os.sep):
+        bad.append(f'the linked image resolved to {got!r}, which is not '
+                   f'inside det_v1 — the realpath went somewhere else')
+    # the listing and the pictures must AGREE: a name the files API hands
+    # out is a name the image route serves
+    listing = ix.listing(key, 'images/train', 0, 10)
+    names = [f['rel'] for f in (listing.get('files') or [])]
+    linked_names = [n for n in names if n.endswith('l000.jpg')]
+    if listing.get('ok') and linked_names:
+        if ds.full(key, linked_names[0])[0] is None:
+            bad.append('/api/datasets/files lists a linked image that '
+                       '/datasets/image then 404s — the listing asserts the '
+                       'dataset is readable and the pictures deny it')
+    # a cross-dataset link to a descriptor is refused on the RESOLVED
+    # extension, exactly like the in-dataset sneaky.jpg
+    if ds.full(key, 'images/train/sneak2.jpg')[0] is not None:
+        bad.append('a linked dataset.yaml was served as an image through a '
+                   'cross-dataset symlink')
+    # and the outside line has not moved: det_v1's escape link points at a
+    # file under the scan root that no dataset owns
+    if ix.resolve(fx.key('det_v1'), 'images/train/escape.jpg') is not None:
+        bad.append('a symlink pointing outside every dataset root resolved — '
+                   'widening containment to sibling datasets opened the '
+                   'whole disk')
 
 
 def allowlist_checks(bad, fx):
@@ -1305,7 +1388,8 @@ def main():
     try:
         with Fixture() as fx:
             fx.rows()
-            for fn in (traversal_checks, allowlist_checks, discovery_checks,
+            for fn in (traversal_checks, symlink_dataset_checks,
+                       allowlist_checks, discovery_checks,
                        count_checks, gone_checks, paging_checks, label_checks,
                        cost_checks, syspath_checks, attribute_checks,
                        route_checks, page_checks):

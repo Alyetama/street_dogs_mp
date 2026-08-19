@@ -1821,8 +1821,38 @@ async function t36() {
      't36: reserve drifted to ' + API.st().reserve.length + ', want ' + r0);
 }
 
+// ── 37. a zero-match FILTER does not claim the pool is judged ───────────
+// With a narrowing filter active the grid can empty while thousands of crops
+// remain unjudged, and the empty state read "Queue is clear -- Every
+// detection in the pool has been judged" directly under a header saying
+// "narrowed from 2,716". Two facts share that empty grid; the page has to
+// say the one that is true.
+async function t37() {
+  const fire = (id, v) => { const e = byId[id]; e.value = v;
+    if (e.onchange) e.onchange.call(e);
+    (e._listeners.change || []).forEach(f => f.call(e)); };
+  RESP = { '/api/review': () => payload([], [], { total_unflagged: 2716,
+             pool_unfiltered: 2716, pages: 1, suggest_ready: true,
+             suggest: 'dog' }) };
+  fire('suggest', 'dog'); await flush(); await flush();
+  ck(/Nothing matches these filters/.test(byId['state'].innerHTML),
+     't37: the filtered empty state says: ' + byId['state'].innerHTML);
+  ck(!/Every detection in the pool has been judged/
+       .test(byId['state'].innerHTML),
+     't37: an empty SLICE still claims the whole pool is judged');
+  // and with every filter cleared, the honest clear-queue sentence returns
+  // (the country select still holds t29's Japan; both have to go)
+  RESP = { '/api/review': () => payload([], [], { total_unflagged: 0,
+             pages: 1 }) };
+  fire('country', ''); await flush(); await flush();
+  fire('suggest', ''); await flush(); await flush();
+  ck(/Queue is clear/.test(byId['state'].innerHTML),
+     't37: the unfiltered empty queue lost its own sentence: ' +
+     byId['state'].innerHTML);
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33,t34,t35,t36];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33,t34,t35,t36,t37];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

@@ -143,22 +143,36 @@ def cfg_int(key, default=0, env=None):
 
 
 def cfg_bool(key, default=False, env=None):
-    """A yes/no config key, from a JSON boolean or a string spelling of one.
+    """A yes/no config key, from a JSON boolean, a number or a spelling of one.
 
     Same reason cfg_int exists: cfg() returns strings only, so a key written
     the natural way -- true, not "true" -- warned and fell through to the
     default, which for a switch means the feature silently stayed as it was.
+    JSON 1 and 0 count as spellings too: they are as natural a way to write a
+    switch as "1"/"0", and refusing the unquoted form while accepting the
+    quoted one is the exact silent fall-through this function was written to
+    remove. Anything else that is present but unreadable WARNS before the
+    default is used -- a written key must never die in silence.
     """
-    raw = os.environ.get(env or ('DASHBOARD_' + key.upper()))
+    envname = env or ('DASHBOARD_' + key.upper())
+    raw = os.environ.get(envname)
     v = raw if raw else load_cfg().get(key)
     if isinstance(v, bool):
         return v
+    if isinstance(v, int):
+        return bool(v)
     if isinstance(v, str):
         s = v.strip().lower()
         if s in ('1', 'true', 'yes', 'on'):
             return True
         if s in ('0', 'false', 'no', 'off', ''):
             return False
+    if v is not None:
+        src = envname if raw else CFG_PATH
+        sys.stderr.write(
+            f'warning: {src}: "{key}" is {v!r}, which does not read as a '
+            f'boolean -- using the default ({default}). Write true/false, '
+            f'1/0, or one of yes/no/on/off.\n')
     return default
 
 
@@ -199,7 +213,19 @@ LLM_PAGE = cfg_bool('llm_page', False)
 # reader who arrives at /llm expecting annotations has already formed the idea
 # that whole store exists to prevent. The violet stays on that page; one
 # experiment does not get a colour in the header of everything else.
-LLM_NAV = """    <a class="revbtn quiet" href="/llm" title="What an LLM said about \
+#
+# The HTML comment explaining the control travels inside the constant for the
+# same reason: baked beside the substitution point it shipped on every page
+# with the switch off, describing a button that was absent and a URL that
+# 404s. Off means absent -- commentary included.
+LLM_NAV = """    <!-- Quiet like the one above, and the caption is doing a second job. The
+         two beside it are a queue somebody judges and the datasets those
+         judgements build; an LLM's answers are neither, and saying so here,
+         before the click, costs one line. A reader who arrives at /llm
+         expecting annotations has already formed the idea that whole store
+         exists to prevent. The violet is that page's and stays there -- one
+         experiment does not get a colour in the header of everything else. -->
+    <a class="revbtn quiet" href="/llm" title="What an LLM said about \
 crops — experimental, kept in a store of its own, and never an annotation">
       <span class="rvf">&#9708;</span>
       <span class="rvn"><b>LLM annotator</b><em>experimental &mdash; not \
@@ -1967,9 +1993,13 @@ font-size:10px;color:var(--green);letter-spacing:.04em;margin-bottom:-2px}
 font-size:10px;color:var(--dim)}
 /* The audit list is fetched with label= and leash= and nothing else, so
    a group that narrows only the queue would be a control that does
-   nothing here. */
+   nothing here. #find is one of them: loadAudit never sends the term, so
+   the search box sat visible and accepted input that changed nothing --
+   while quietly saving the term to prefs, to reorder the queue later as a
+   surprise. Hidden the way the country and gate controls are. */
 body.auditing #ngrpLooks,body.auditing #ngrpWhere,
-body.auditing #country,body.auditing #unkeep{display:none}
+body.auditing #country,body.auditing #unkeep,
+body.auditing #find,body.auditing #findmsg{display:none}
 #verdict{display:none}
 body.auditing #verdict{display:inline-block}
 /* The leash row. In THIS stylesheet for the reason the comment above gives:
@@ -2879,19 +2909,23 @@ function tile(c){
   var d=document.createElement('div');
   d.className='card';d.dataset.name=c.name;
   var pc=Math.round(Math.max(0,Math.min(1,+c.conf||0))*100);
-  /* HQ cut from the ORIGINAL. The preview thumbnails are cut from the 1280
-     letterbox and capped at 160px, which throws away 3.6-5.3x the pixels
-     actually available -- at that size a distant dog and a distant goat are
-     the same picture. Fall back to the preview if the HQ cut 404s (the crop's
-     shard may not be committed yet, or the cache is still warming).
+  /* PREVIEW first, HQ when it lands. The HQ cut (from the ORIGINAL -- the
+     preview thumbnails are cut from the 1280 letterbox and capped at 160px,
+     which throws away 3.6-5.3x the pixels actually available) is cut on
+     demand, and a cold cut opens a 12MP frame plus two duckdb scans: measured
+     on the live audit view, 8 of 50 tiles sat as BLANK cards for 25-30s with
+     nothing to say a load was even happening. So the tile paints the cheap
+     preview immediately and swaps to the HQ crop the moment the server has
+     it; if the preview itself is missing it falls the other way, to /hq.
      Every crop is clickable: has_full only says a burned-in preview frame was
      saved, and the editor reads the original either way. */
+  var hqURL='/hq?name='+encodeURIComponent(c.name);
   d.innerHTML='<img class="thumb zoom" loading="lazy" alt="detection crop" '+
-      'src="/hq?name='+encodeURIComponent(c.name)+'" '+
-      "onerror=\"this.onerror=null;this.src='"+
+      'src="'+
       (c.label?('/flagged?label='+encodeURIComponent(c.label)+'&name='):
        c.harvested?'/review_set/':'/recent_crops/')+
-      encodeURIComponent(c.name)+"'\">"+
+      encodeURIComponent(c.name)+'" '+
+      "onerror=\"this.onerror=null;this.src='"+hqURL+"'\">"+
     '<div class="rail"><i style="width:'+pc+'%"></i></div>'+
     /* One caption line, contact-sheet style: frame slug, the model's guess,
        exposure. The guess used to be a chip pinned over the top-left of the
@@ -2933,6 +2967,17 @@ function tile(c){
     '</div>'):'')+
     '</div>';
   var im=d.querySelector('.thumb');
+  /* The upgrade starts when the PREVIEW has painted, so the lazy loader still
+     decides which tiles cost anything at all, and the HQ requests trickle in
+     at the pace the grid scrolls rather than 50 at once. {once:true}: the
+     swap itself fires 'load' again. Guarded like prefetchNext_ -- the test
+     harness has no Image, and an optimisation must not take down the tile. */
+  if(typeof Image!=='undefined')
+    im.addEventListener('load',function(){
+      var up=new Image();
+      up.onload=function(){if(im.src!==up.src)im.src=up.src};
+      up.src=hqURL;
+    },{once:true});
   im.onclick=function(){openLb(idx(c.name))};
   d.querySelector('.fbtn.no').onclick=function(e){
     e.stopPropagation();flag(idx(c.name),false,'false_positive')};
@@ -2956,6 +3001,19 @@ function tile(c){
 function render(){
   var g=$('grid');g.innerHTML='';
   if(!items.length){
+    /* Two different facts share this empty grid. With a filter set, the POOL
+       is not judged -- only the slice is empty -- and "Every detection has
+       been judged" under a header reading "narrowed from 2,716" was the page
+       disagreeing with itself. Say which one is true. */
+    if(activeFilters().length){
+      $('state').innerHTML='<div class="state"><b>Nothing matches these filters</b>'+
+        (mode==='audit'
+          ?'None of your annotations fit this slice. '
+          :'The queue still holds unjudged crops; this slice of it is empty. ')+
+        'Clear a chip above to widen the view.'+
+        '<div><button class="rbtn" id="rl2">'+ICO_REFRESH+'Check again</button></div></div>';
+      $('rl2').onclick=load;return;
+    }
     $('state').innerHTML='<div class="state"><b>Queue is clear</b>'+
       'Every detection in the pool has been judged. New crops appear here as the '+
       'sweep finds them.<div><button class="rbtn" id="rl2">'+ICO_REFRESH+'Check for more</button></div></div>';
@@ -5667,7 +5725,12 @@ def mistake_item(key, i):
     if not doc:
         return None, None
     try:
-        item = doc['items'][int(i)]
+        i = int(i)
+        if i < 0:
+            # Python would wrap -1 onto the LAST item -- the one index shape
+            # the page never asks for served a crop instead of a 404
+            return None, None
+        item = doc['items'][i]
     except (ValueError, TypeError, IndexError, KeyError):
         return None, None
     root = os.path.realpath(doc.get('dataset') or '')
@@ -7343,6 +7406,18 @@ def render_models():
     return (f'<div class="pipe">{"".join(rows)}</div>'
             f'<div class="mfoot">data/best_models.json &middot; updated {upd} '
             f'&middot; refresh with <code>tools/detect/best_models.py --update</code>'
+            # Two panels on this page put a "best" number on the same run: this
+            # card carries Comet's metrics as logged at promotion, the run
+            # registry below reads the per-epoch results.csv, and the two
+            # bookkeepings can differ in the third decimal (train-30: 0.4973 vs
+            # 0.4968). Saying which ledger each number is from beats a page
+            # that silently disagrees with itself by 0.0005.
+            f' &middot; <span title="The registry table computes its best '
+            f'column from each run\'s per-epoch results.csv; Comet logs its '
+            f'own final validation, and the two can differ in the third '
+            f'decimal.">metrics as logged by Comet &mdash; the run registry '
+            f'reads results.csv, so the same run can read a shade different '
+            f'there</span>'
             f'</div>'
             f'<details class="gloss"><summary>'
             f'<span class="gk">Glossary</span>'
@@ -7794,6 +7869,13 @@ DATASET_CLASSES = ('dog', 'not_dog')
 # The rest of the shortfall is unchanged: a flag is matched to its own box
 # (ambiguous ones dropped), crops under the 64px floor go, and the
 # near-duplicate and per-sequence caps trim what is left.
+#
+# MEASURED ON THE PRE-9f642b92 HARVEST. That commit recovered flags the match
+# stage was mis-filing as ambiguous: re-run read-only over today's ledgers,
+# match-stage survival moves from 2,640/2,778 (95.0%) to 2,757/2,778 (99.2%),
+# so this value now runs ~4-5% conservative -- the panel over-asks slightly,
+# which wastes minutes and never data. Re-measure at the next dogbin build,
+# the first made end-to-end with the fixed pipeline.
 FLAG_YIELD = 0.460
 # Verdicts needed before the observed dog/not-dog mix is used to project how
 # much reviewing is left. Below this the share is noise, and a couple of
@@ -9770,6 +9852,27 @@ def sweep_control(action):
     return {'ok': False, 'msg': 'unknown action'}
 
 
+# The tab icon, served from memory at /favicon.ico. One dog, drawn by the
+# system's emoji font.
+FAVICON_SVG = (b"<svg xmlns='http://www.w3.org/2000/svg' "
+               b"viewBox='0 0 100 100'>"
+               b"<text y='0.9em' font-size='90'>\xf0\x9f\x90\x95</text></svg>")
+
+# What the static fallback may serve out of OUT, which doubles as the server's
+# working directory. Everything the five pages actually fetch by a bare path
+# is named here; serve.log, history.duckdb, triage.jsonl and the rest of the
+# working files are the server's own and stay unreachable.
+STATIC_FILES = frozenset({'/', '/index.html', '/echarts.min.js',
+                          '/world.json', '/map_points.json',
+                          '/map_points_fine.json'})
+STATIC_DIRS = ('/recent_crops/', '/review_set/')
+
+
+def _static_allowed(path):
+    return path in STATIC_FILES or any(
+        path.startswith(d) for d in STATIC_DIRS)
+
+
 class BoardHandler(SimpleHTTPRequestHandler):
     """Serve the static dashboard plus a tiny JSON board API."""
 
@@ -10396,6 +10499,26 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if self.path.split('?', 1)[0] in ('/', '/index.html'):
             if self._serve_index_fresh():
                 return
+        if self.path.split('?', 1)[0] == '/favicon.ico':
+            # No page carried a <link rel="icon">, so every tab load in a real
+            # browser fired a request that 404'd into the log. Served from
+            # memory; browsers take an SVG here.
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/svg+xml')
+            self.send_header('Content-Length', str(len(FAVICON_SVG)))
+            self.send_header('Cache-Control', 'public, max-age=604800')
+            self.end_headers()
+            self.wfile.write(FAVICON_SVG)
+            return
+        if not _static_allowed(self.path.split('?', 1)[0]):
+            # The static fallback's directory is OUT, and OUT doubles as the
+            # server's working directory: serve.log (client IPs), a 2MB
+            # history.duckdb, a 38MB triage.jsonl and the search-term vectors
+            # all sit beside the page, and SimpleHTTPRequestHandler hands out
+            # anything in its directory by name. The pages fetch exactly the
+            # names in the allow-list; everything else here is the server's.
+            self.send_error(404)
+            return
         super().do_GET()
 
     def _serve_index_fresh(self):
@@ -11262,7 +11385,11 @@ color:var(--dim);flex-wrap:wrap}
 .mramp{width:170px;height:7px;border-radius:4px;border:1px solid rgba(130,140,150,.18)}
 .mlmax{font-variant-numeric:tabular-nums;color:var(--mut)}
 .mstats{margin-left:auto;font-variant-numeric:tabular-nums;text-align:right}
-.sect{display:flex;align-items:baseline;gap:10px;font-size:15px;font-weight:620;margin:8px 0 14px}
+/* wrap, because the sweeps header carries a stage switch and a run control:
+   at phone widths their fixed minimums pushed the page to 535px of sideways
+   scroll while the heading collapsed to one word per line. With room, no
+   wrap ever happens. */
+.sect{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;font-size:15px;font-weight:620;margin:8px 0 14px}
 .sect span{font-size:12.5px;font-weight:400;color:var(--dim)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(292px,1fr));gap:13px}
 .rcard{background:linear-gradient(180deg,#1c2128,#181c22);border:1px solid var(--bd);border-radius:14px;padding:15px 17px;transition:border-color .15s,transform .15s}
@@ -12077,13 +12204,6 @@ outline-offset:2px}
       <span class="rvf">&#9638;</span>
       <span class="rvn"><b>Datasets</b><em>what runs trained on</em>
       </span></a>
-    <!-- Quiet like the one above, and the caption is doing a second job. The
-         two beside it are a queue somebody judges and the datasets those
-         judgements build; an LLM's answers are neither, and saying so here,
-         before the click, costs one line. A reader who arrives at /llm
-         expecting annotations has already formed the idea that whole store
-         exists to prevent. The violet is that page's and stays there -- one
-         experiment does not get a colour in the header of everything else. -->
 __LLMNAV__
     <!-- The sentence is wrapped because a bare text node has nothing to
          style, and the scrolled header sheds the sentence while keeping the

@@ -825,6 +825,51 @@ def persistence_checks(bad):
         audit.fa.paths = real_paths
 
 
+def passive_load_checks(bad):
+    """A GET that merely LOOKS at the audit page spends no sample.
+
+    Boxes are retired the moment they are drawn, and api_page used to queue a
+    fresh draw whenever the last page was read -- so every passive load (a
+    health checker, a crawler, a reviewer glancing) permanently retired 25
+    stratified boxes: measured live, three page-loads moved the gate store
+    from 55 to 58 pages while the verdict ledger sat untouched for a week.
+    The contract now: an UNJUDGED last page queues nothing, a judged one
+    queues the next -- that is a reviewer working, and the draw buys their
+    Next click.
+    """
+    try:
+        import audit
+    except Exception:
+        return
+    st = {'queued': 0}
+    real = (audit.prefetch, audit.get_page, audit.page_count,
+            audit.with_verdicts)
+    audit.prefetch = (lambda band=None, n=25, stage='gate':
+                      st.update(queued=st['queued'] + 1))
+    audit.page_count = lambda stage='gate': 3
+    audit.with_verdicts = lambda doc, stage='gate': doc
+    audit.get_page = lambda i, stage='gate': {
+        'index': i, 'items': [{'key': f'p{i}#0'}]}
+    try:
+        # the load every /audit/<stage> page issues: i=-1, nothing judged
+        for _ in range(3):
+            audit.api_page(-1)
+        if st['queued']:
+            bad.append(f"{st['queued']} page draw(s) were queued by bare "
+                       f"page-loads of an unjudged audit — a monitoring GET "
+                       f"is spending stratified sample")
+        # and the moment the page carries one verdict, the next page is cut
+        audit.get_page = lambda i, stage='gate': {
+            'index': i, 'items': [{'key': f'p{i}#0', 'verdict': 'dog'}]}
+        audit.api_page(-1)
+        if st['queued'] != 1:
+            bad.append('a judged last page did not queue the next draw, so '
+                       'every Next now pays the full cut')
+    finally:
+        (audit.prefetch, audit.get_page, audit.page_count,
+         audit.with_verdicts) = real
+
+
 def selection_checks(bad):
     """The band and the size a page was drawn with have to follow it.
 
@@ -841,8 +886,14 @@ def selection_checks(bad):
     audit.prefetch = (lambda band=None, n=25, stage='gate':
                       seen.update(band=band, n=n))
     real_get, real_count = audit.get_page, audit.page_count
-    audit.get_page = lambda i, stage='gate': {'index': i, 'items': [],
-                                              'band': 4, 'n': 50}
+    real_wv = audit.with_verdicts
+    # one verdict on the page: the prefetch follows JUDGING now, so a page
+    # that queues the next one has to be a page somebody has worked on --
+    # see passive_load_checks for the other half of that contract
+    audit.get_page = lambda i, stage='gate': {
+        'index': i, 'band': 4, 'n': 50,
+        'items': [{'key': 'a#0', 'verdict': 'dog'}]}
+    audit.with_verdicts = lambda doc, stage='gate': doc
     audit.page_count = lambda stage='gate': 3
     try:
         audit.api_page(2, n=50, band=4)
@@ -853,6 +904,7 @@ def selection_checks(bad):
     finally:
         audit.prefetch, audit.get_page, audit.page_count = (
             real, real_get, real_count)
+        audit.with_verdicts = real_wv
     for v, want in ((None, 25), (25, 25), (50, 50), (100, 100),
                     ('75', 75), (40, 25), (10 ** 9, 25), ('; DROP', 25)):
         if audit.page_size(v) != want:
@@ -1340,9 +1392,18 @@ page.items.forEach(function (it) {
     predOf(it) + ', not ' + want);
 });
 // the two classes are told apart by weight, not by hue alone: the word is
-// in the tile either way
-chk(/>(dog|not_dog|leashed|unleashed)</.test(els.grid.innerHTML),
-  'the predicted class is not written out, only styled');
+// in the tile either way. Built from the stage's OWN vocabulary -- an
+// alternation spelling the existing stages' four words passed when the
+// OTHER stage's words were on the grid and false-failed any honest third
+// stage, which is the same two-hardcoded-words pathology the band-axis
+// check above was cured of.
+var reWord = function (w) {
+  return String(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+chk(new RegExp('>(' + reWord(POS) + '|' + reWord(NEG) + ')<')
+      .test(els.grid.innerHTML),
+  'the predicted class (' + POS + '/' + NEG + ') is not written out, '
+  + 'only styled');
 chk(els.bands.innerHTML.length > 100, 'the band strip rendered nothing');
 // 1/2/3 are verdicts AND the way a keyboard picks an option in a focused
 // <select>; a page size chosen by keyboard must not record a verdict
@@ -1450,6 +1511,23 @@ page = {index:0, items:[], exhausted:true};
 try { render() } catch(e) { console.log('FAIL render([]) threw ' + e.message) }
 chk(/every one has been shown/i.test(els.empty.textContent),
   'an exhausted band does not explain itself: ' + els.empty.textContent);
+// ...and WHICH view is empty decides what the sentence is. Drawing a page
+// adds unjudged crops and cannot produce an annotation, so the empty
+// "my annotations" view telling the reader to draw one was instructions
+// that do not lead to the thing the view shows.
+page = {index:0, items:[]};
+view = 'judged';
+try { render() } catch(e) { console.log('FAIL render(judged []) threw ' + e.message) }
+chk(!/draw a page/i.test(String(els.empty.textContent)),
+  'the empty "my annotations" view says "' + els.empty.textContent +
+  '" — drawing a page cannot produce an annotation');
+chk(/judged|annotat|verdict/i.test(String(els.empty.textContent)),
+  'the empty "my annotations" view does not say nothing has been judged: '
+  + els.empty.textContent);
+view = 'sheet';
+render();
+chk(/draw a page/i.test(String(els.empty.textContent)),
+  'the empty SHEET lost its own invitation: ' + els.empty.textContent);
 """
 
 
@@ -1556,8 +1634,8 @@ def main():
                legacy_checks, ledger_checks,
                serving_checks, isolation_checks, correction_checks,
                concurrency_checks,
-               persistence_checks, selection_checks, prefetch_checks,
-               page_checks):
+               persistence_checks, selection_checks, passive_load_checks,
+               prefetch_checks, page_checks):
         try:
             fn(bad)
         except Exception as e:                 # noqa: BLE001 - report, not die

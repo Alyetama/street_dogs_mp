@@ -23,8 +23,10 @@ EVERY PATH ON THIS PAGE CAME OFF A QUERY STRING. A key and a relative path
 arrive from the client and turn into a file read, which makes traversal the
 whole security surface. There is exactly one door -- _source() -- and it goes
 through dataset_index.resolve(), which realpaths both sides and refuses
-anything that lands outside the dataset root. A request for a .yaml, a .cache
-or a label file through an image route is a 404 rather than a download.
+anything that lands outside a dataset root -- this dataset's own, or another
+indexed one's, because symlink-assembled exports point their files into the
+set they were cut from. A request for a .yaml, a .cache or a label file
+through an image route is a 404 rather than a download.
 """
 
 import atexit
@@ -96,7 +98,8 @@ def _source(key, rel):
     anything else being downloadable from a directory the client can name
     would be a file server nobody asked for. resolve() then does the traversal
     work: it realpaths both sides, refuses '..', an absolute rel and a symlink
-    that leaves the root, and answers None rather than raising.
+    that leaves every indexed dataset root, and answers None rather than
+    raising.
 
     THE ALLOW-LIST DECIDES ON THE FILE THAT WILL BE OPENED, not on the name it
     was asked for by. resolve() hands back a realpath, and a dataset assembled
@@ -647,9 +650,18 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   padding:1px 5px;font-family:var(--num);font-size:11px;color:var(--mut)}
 :focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 @media(max-width:1180px){
-  .cols{grid-template-columns:1fr}
-  .panes{grid-template-columns:1fr}
+  /* minmax(0,1fr), not 1fr: a bare 1fr track refuses to shrink below its
+     content's min-content, and the sidebar rows' nowrap lines (412px) plus
+     the run table's fixed columns were holding both panes wider than a
+     phone screen -- the page scrolled sideways to 468px at 390px wide. */
+  .cols{grid-template-columns:minmax(0,1fr)}
+  .panes{grid-template-columns:minmax(0,1fr)}
   .dslist{max-height:340px}
+}
+@media(max-width:560px){
+  /* the run rows' three fixed columns (78+130+108px) cannot share 390px
+     with a name; two lines per run beats an ellipsis three glyphs in */
+  .run{grid-template-columns:minmax(0,1fr) auto;row-gap:2px}
 }
 </style></head><body><div class="wrap">
 <header>
