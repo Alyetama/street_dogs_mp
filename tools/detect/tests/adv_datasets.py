@@ -1301,6 +1301,235 @@ def _payload(fx):
     return out
 
 
+# ── the structure band stands still ─────────────────────────────────────────
+
+def _css_rules(html_text):
+    """The page's stylesheet, split at its first @media."""
+    css = html_text[html_text.index('<style>') + 7:html_text.index('</style>')]
+    base, _, narrow = css.partition('@media')
+    return base, narrow
+
+
+def _decls(css, selector):
+    """Every declaration a selector carries in this sheet, later one winning.
+
+    The brace must follow the selector immediately, so '.struct' does not
+    read '.struct .balance' and report the wrong rule's properties.
+    """
+    out = {}
+    for m in re.finditer(re.escape(selector) + r'\{([^}]*)\}', css):
+        for d in m.group(1).split(';'):
+            k, _, v = d.partition(':')
+            if k.strip():
+                out[k.strip().lower()] = re.sub(r'\s+', ' ', v.strip())
+    return out
+
+
+def structure_css_checks(bad, fx):
+    """The structure band's geometry is written down, not negotiated.
+
+    The user watched train and val re-seat themselves with every window size:
+    the balance column was a minmax the viewport answered, and the tree was
+    multicol, which stretches every column to fill the pane and re-balances
+    the nodes across them at every width. The sheet now pins both -- one
+    fixed balance track, fixed-width flex columns packed left -- and this
+    reads the sheet, because the node harness has no layout engine.
+    structure_layout_checks measures the real thing where chromium is here.
+    """
+    base, narrow = _css_rules(fx.ds.page_html())
+    first = (_decls(base, '.struct').get('grid-template-columns')
+             or '').split(' ')[0]
+    if not re.fullmatch(r'\d+(\.\d+)?px', first):
+        bad.append(f'the balance column is {first!r}, not one fixed px width '
+                   f'— a track that answers the viewport (minmax, fr, %) '
+                   f're-seats the train/val bars with every window size')
+    tree = _decls(base, '.tree')
+    multicol = [k for k in ('columns', 'column-width', 'column-count')
+                if k in tree]
+    if multicol:
+        bad.append(f'the tree is multicol again ({", ".join(multicol)}) — '
+                   f'multicol stretches every column to fill the pane and '
+                   f're-balances the nodes across them at every width')
+    if 'flex' not in (tree.get('display') or '') or \
+            (tree.get('flex-flow') or '') != 'column wrap':
+        bad.append('the tree is not a wrapped column flex — nothing else '
+                   'here keeps a node\'s seat independent of the viewport')
+    if (tree.get('align-content') or '') != 'flex-start':
+        bad.append('the tree\'s columns are not packed to the left — the '
+                   'browser then spreads the slack between them, and every '
+                   'column moves as the window does')
+    width = _decls(base, '.tnode').get('width') or 'auto'
+    if not re.fullmatch(r'\d+(\.\d+)?px', width):
+        bad.append(f'a tree node is {width!r} wide, not a fixed px — the '
+                   f'flex columns then size to their content and shift as '
+                   f'folders come and go')
+    # under the breakpoint the stacked layout is still the stacked layout
+    if _decls(narrow, '.struct').get('grid-template-columns') != 'minmax(0,1fr)':
+        bad.append('below the breakpoint the structure band no longer '
+                   'stacks — the phone layout was the one part meant to stay')
+    if _decls(narrow, '.struct .tree').get('display') != 'block':
+        bad.append('below the breakpoint the tree keeps its desktop '
+                   'columns — stacked, it is a plain full-width list')
+    if _decls(narrow, '.tnode').get('width') != '100%':
+        bad.append('below the breakpoint a tree node keeps its fixed '
+                   'desktop width instead of taking the row')
+
+
+def _widened(treejson):
+    """A tree tall enough that the desktop columns must wrap.
+
+    The fixture's real trees fit one column, which would let a broken wrap
+    pass as a stable single column. The extra directories are clones of a
+    real node -- the shape stays the server's own -- renamed so each seat is
+    identifiable.
+    """
+    import copy
+    t = copy.deepcopy(treejson)
+    root = t['tree']
+
+    def re_rel(n, rel):
+        n['rel'] = rel
+        for k in n.get('dirs', []):
+            re_rel(k, rel + '/' + k['name'])
+
+    for i in range(8):
+        c = copy.deepcopy(root['dirs'][0])
+        c['name'] = 'z%02d' % i
+        re_rel(c, c['name'])
+        root['dirs'].append(c)
+    return t
+
+
+_GEOMETRY = r"""
+() => {
+  const r = el => { const b = el.getBoundingClientRect();
+    return {x: +b.x.toFixed(1), y: +b.y.toFixed(1),
+            w: +b.width.toFixed(1), h: +b.height.toFixed(1)}; };
+  const tr = r(document.getElementById('tree'));
+  return {balance: r(document.getElementById('balance')),
+          display: getComputedStyle(document.getElementById('tree')).display,
+          labs: [...document.querySelectorAll('#balance .ballab')].map(e => ({
+            t: e.textContent.trim().slice(0, 12),
+            y: +e.getBoundingClientRect().y.toFixed(1)})),
+          nodes: [...document.querySelectorAll('#tree .tnode')].map(e => {
+            const b = e.getBoundingClientRect();
+            return [e.getAttribute('data-rel'), +(b.x - tr.x).toFixed(1),
+                    +(b.y - tr.y).toFixed(1), +b.width.toFixed(1)]; })};
+}
+"""
+
+
+def structure_layout_checks(bad, fx):
+    """The band measured in a real browser: nothing moves with the width.
+
+    The sheet can hold every promised declaration while some later rule
+    undoes it -- an author display: rule fighting [hidden] shipped twice on
+    this dashboard exactly that way -- so the page is also measured.
+    page_html() and the fixture's own route answers are served through
+    playwright's request interception: no server, no network, no live
+    anything. Above the breakpoint the balance box and every tree node must
+    sit at the same place at 1600, 1440 and 1280 CSS px; below it the tree
+    must still be the plain stacked list.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        print('SKIP: playwright is not in this interpreter — the structure '
+              'band was read off the sheet but never measured in a browser')
+        return
+    from urllib.parse import parse_qs, urlparse
+    payload = _payload(fx)
+    det_key, cls_key = fx.key('det_v1'), fx.key('cls_v1')
+    html = fx.ds.page_html()
+    trees = dict(payload['tree'])
+    trees[cls_key] = _widened(trees[cls_key])
+
+    def serve(route, request):
+        u = urlparse(request.url)
+        q = parse_qs(u.query)
+
+        def one(k):
+            return (q.get(k) or [''])[0]
+
+        if u.path == '/datasets':
+            route.fulfill(content_type='text/html', body=html)
+        elif u.path == '/api/datasets':
+            route.fulfill(json=payload['list'])
+        elif u.path == '/api/datasets/tree':
+            route.fulfill(json=trees.get(one('key'),
+                                         {'ok': False, 'error': 'no such'}))
+        elif u.path == '/api/datasets/files':
+            pages = (payload['files'].get(one('key')) or {}).get(one('rel'))
+            route.fulfill(json=(pages or {}).get(int(one('page') or 0),
+                                                 {'ok': False,
+                                                  'error': 'no such folder'}))
+        else:
+            route.fulfill(status=404, body='')
+
+    got = {}
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            for w in (1600, 1440, 1280, 1100):
+                ctx = browser.new_context(viewport={'width': w, 'height': 950})
+                ctx.add_init_script("localStorage.setItem('sdDataset', %s);"
+                                    % json.dumps(det_key))
+                pg = ctx.new_page()
+                pg.route('**/*', serve)
+                pg.goto('http://datasets.fixture/datasets')
+                pg.wait_for_function("document.querySelectorAll("
+                                     "'#tree .tnode').length > 0",
+                                     timeout=15000)
+                det = pg.evaluate(_GEOMETRY)
+                pg.evaluate('openDs(%s)' % json.dumps(cls_key))
+                pg.wait_for_function("document.getElementById('tree')"
+                                     ".innerHTML.indexOf('z07') >= 0",
+                                     timeout=15000)
+                got[w] = {'det': det, 'cls': pg.evaluate(_GEOMETRY)}
+                ctx.close()
+            browser.close()
+    except Exception as e:
+        print(f'SKIP: playwright would not run a browser here '
+              f'({type(e).__name__}: {str(e).splitlines()[0][:120]}) — the '
+              f'structure band was read off the sheet but never measured')
+        return
+
+    for w, d in got.items():
+        labs = d['det']['labs']
+        # the split name runs straight into its count ('val4 images'), so
+        # startswith, not equality -- and 'train' first keeps 'val' honest
+        if len(labs) < 2 or not labs[0]['t'].startswith('train') \
+                or not labs[1]['t'].startswith('val'):
+            bad.append(f'at {w}px the balance rows read '
+                       f'{[l["t"] for l in labs]} — train has lost its place '
+                       f'above val')
+        elif labs[0]['y'] >= labs[1]['y']:
+            bad.append(f'at {w}px the train bar sits below the val bar')
+    ref = got[1600]
+    for w in (1440, 1280):
+        a, b = ref['det']['balance'], got[w]['det']['balance']
+        if abs(a['x'] - b['x']) > 0.5 or abs(a['w'] - b['w']) > 0.5:
+            bad.append(f'the balance box moved with the window: '
+                       f'x={a["x"]} w={a["w"]} at 1600px but x={b["x"]} '
+                       f'w={b["w"]} at {w}px — its column answers the '
+                       f'viewport again')
+        for n0, n1 in zip(ref['cls']['nodes'], got[w]['cls']['nodes']):
+            if n0[0] != n1[0] or abs(n0[1] - n1[1]) > 0.5 \
+                    or abs(n0[2] - n1[2]) > 0.5 or abs(n0[3] - n1[3]) > 0.5:
+                bad.append(f'the tree re-seated {n0[0]!r} between 1600px '
+                           f'(x={n0[1]}, y={n0[2]}, w={n0[3]}) and {w}px '
+                           f'(x={n1[1]}, y={n1[2]}, w={n1[3]}) — node '
+                           f'placement follows the window size again')
+                break
+    if len({n[1] for n in ref['cls']['nodes']}) < 2:
+        bad.append('a tree too tall for the pane never wrapped into a '
+                   'second column at 1600px — every big dataset is one '
+                   'endless first column')
+    if got[1100]['det']['display'] != 'block':
+        bad.append(f'at 1100px the tree is {got[1100]["det"]["display"]}, '
+                   f'not the plain stacked list the narrow layout keeps')
+
+
 # ── the routes hand the strings straight through ────────────────────────────
 
 def route_checks(bad, fx):
@@ -1392,6 +1621,7 @@ def main():
                        allowlist_checks, discovery_checks,
                        count_checks, gone_checks, paging_checks, label_checks,
                        cost_checks, syspath_checks, attribute_checks,
+                       structure_css_checks, structure_layout_checks,
                        route_checks, page_checks):
                 try:
                     fn(bad, fx)

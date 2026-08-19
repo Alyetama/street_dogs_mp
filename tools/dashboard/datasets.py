@@ -443,7 +443,11 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    top: balance on the left, the folder tree flowing into columns beside it. */
 .panes{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;
   align-items:start;margin-top:14px}
-.struct{display:grid;grid-template-columns:minmax(250px,320px) minmax(0,1fr);
+/* 300px, one number: the balance is a fixed label over a fixed-shape bar, and
+   a track that answers the viewport (the minmax this used to be) re-seated
+   the train/val rows with the window size. The slack all goes to the tree,
+   which absorbs it in whole columns. */
+.struct{display:grid;grid-template-columns:300px minmax(0,1fr);
   grid-template-rows:auto minmax(0,1fr)}
 .struct .chead{grid-column:1/-1}
 .struct .balance{border-bottom:0;border-right:1px solid var(--bd)}
@@ -586,10 +590,15 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    fewer label files than images is usually a build that stopped half way, and
    that is worth saying rather than leaving as two numbers to subtract. */
 .mismatch{color:var(--acc)}
+/* Wrapped flex, not multicol: columns:15em stretched every column to fill
+   the pane and re-balanced the nodes across them, so a window resize marched
+   images/val from under images to the top of its own column and back. Here a
+   column is 240px whatever the viewport does, a node's seat depends on the
+   pane's height alone, and extra width is an empty stripe on the right -- or,
+   short of it, a scroll inside this pane -- never a re-seating. */
 .tree{padding:8px 10px 12px;max-height:236px;overflow:auto;
-  columns:15em;column-gap:4px}
-.tnode{break-inside:avoid}
-.tnode{display:flex;gap:8px;align-items:baseline;width:100%;
+  display:flex;flex-flow:column wrap;align-content:flex-start;gap:0 4px}
+.tnode{display:flex;gap:8px;align-items:baseline;width:240px;flex:none;
   background:transparent;border:0;border-radius:8px;padding:5px 8px;
   cursor:pointer;font-family:inherit;color:var(--mut);font-size:12px;
   text-align:left}
@@ -692,7 +701,10 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   .panes{grid-template-columns:minmax(0,1fr)}
   .struct{grid-template-columns:minmax(0,1fr)}
   .struct .balance{border-right:0;border-bottom:1px solid var(--bd)}
-  .struct .tree{columns:auto;max-height:52vh}
+  /* stacked, the tree is a plain list again: display beats the desktop flex
+     the way columns:auto used to beat the multicol */
+  .struct .tree{display:block;max-height:52vh}
+  .tnode{width:100%}
   .dslist{max-height:340px}
 }
 @media(max-width:560px){

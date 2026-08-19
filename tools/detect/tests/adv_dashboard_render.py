@@ -2742,6 +2742,282 @@ def hidden_that_still_shows(html, src=''):
     return out, sorted(set(unresolved))
 
 
+def check_map_layers(html):
+    """The atlas's model layers: tabs present, payloads sane, captions that
+    say MODEL.
+
+    Three separate failure modes, each seen or nearly shipped:
+
+      - the chip exists but nothing serves its file (STATIC_FILES is an
+        allowlist, so forgetting the entry is a silent 404 on click);
+      - the layer file exists but is stale forever, because nothing in the
+        build path calls map_layers.refresh();
+      - the caption drops the one word that marks the numbers as a model's,
+        and 736K unreviewed classifier calls read as counted dogs.
+
+    Plus the payload itself: the page trusts the file's totals for its
+    caption, so a file whose grids do not sum to its own totals would put a
+    number on screen that the map contradicts on hover.
+    """
+    bad = []
+    src_path = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
+    src = open(src_path, encoding='utf-8').read()
+
+    # ── tab markup ──────────────────────────────────────────────────────
+    chips = re.findall(
+        r'<button[^>]*class="(mchip[^"]*)"[^>]*data-l="([a-z]+)"', html)
+    have = {l for _, l in chips}
+    for want in ('harvest', 'dogs', 'rate', 'gate', 'leash'):
+        if want not in have:
+            bad.append(f'the map card has no "{want}" layer chip — the tab '
+                       f'strip lost a layer')
+    on = [l for cls, l in chips if 'on' in cls.split()]
+    if on != ['harvest']:
+        bad.append(f'the default map layer should be harvest alone, but the '
+                   f'"on" chip(s) at build time are {on or "none"}')
+
+    # ── the page can actually fetch what the chips ask for ──────────────
+    for fn in ('map_layer_dogs.json', 'map_layer_leash.json'):
+        if fn not in html:
+            bad.append(f'the page script never fetches {fn} — the chip is '
+                       f'a control that does nothing')
+        if f"'/{fn}'" not in src.split('STATIC_FILES', 1)[-1][:600]:
+            bad.append(f'/{fn} is not in STATIC_FILES — the allowlist 404s '
+                       f'the fetch the moment the chip is clicked')
+
+    # ── the build path keeps the layers fresh ───────────────────────────
+    if 'def _map_layers():' not in src or 'import map_layers' not in src:
+        bad.append('dashboard.py has no lazy map_layers import — either the '
+                   'layers are never refreshed or a broken map_layers.py '
+                   'breaks the server at boot')
+    m = re.search(r'\ndef build\(args\):.*?\ndef ', src, re.S)
+    body = m.group(0) if m else ''
+    if '_map_layers()' not in body or '.refresh()' not in body:
+        bad.append('build() never calls map_layers refresh — the model '
+                   'layers fossilize while the sweep keeps scoring crops')
+
+    # ── the caption owns the model label ────────────────────────────────
+    if 'model-called dog crops on' not in html:
+        bad.append('the gate layer caption lost its "model-called" label — '
+                   'unreviewed classifier counts would read as counted dogs')
+    if 'model-called leashed' not in html:
+        bad.append('the leash layer caption lost its "model-called" label — '
+                   'the split would read as human verdicts')
+    if html.count(".source||'model'") < 2:
+        bad.append('the legend no longer surfaces the layer files\' source '
+                   'field — nobody can tell WHICH model produced the layer')
+
+    # ── payload self-consistency ────────────────────────────────────────
+    out_dir = os.path.join(REPO, 'data', 'dashboard')
+
+    def grid_ok(levels, name, want_total):
+        for res_key in ('0.5', '0.15', '0.05'):
+            lv = levels.get(res_key)
+            if not lv:
+                bad.append(f'{name} has no "{res_key}" grid — the page '
+                           f'paints an empty layer at that zoom')
+                continue
+            res = lv['res']
+            pts = lv['points']
+            total = sum(p[2] for p in pts)
+            if total != want_total:
+                bad.append(f'{name} @ {res_key}° sums to {total:,} but the '
+                           f'file claims {want_total:,} — the caption and '
+                           f'the map would disagree')
+            if pts and lv['max'] != max(p[2] for p in pts):
+                bad.append(f'{name} @ {res_key}° max field is wrong — the '
+                           f'colour ramp would be scaled to a lie')
+            for p in pts[:200]:
+                f_ = (p[0] - res / 2) / res
+                if abs(f_ - round(f_)) > 0.01:
+                    bad.append(f'{name} @ {res_key}° cell centre {p[0]} is '
+                               f'off the harvest grid — the layers would '
+                               f'not land cell-for-cell on the map')
+                    break
+
+    for fn, kind in (('map_layer_dogs.json', 'dogs'),
+                     ('map_layer_leash.json', 'leash')):
+        path = os.path.join(out_dir, fn)
+        if not os.path.exists(path):
+            bad.append(f'{fn} missing — a build should have written it '
+                       f'(python tools/dashboard/map_layers.py)')
+            continue
+        try:
+            doc = json.load(open(path, encoding='utf-8'))
+        except ValueError as e:
+            bad.append(f'{fn} is not valid JSON ({e})')
+            continue
+        if doc.get('schema') != 1:
+            bad.append(f'{fn} schema is {doc.get("schema")!r}, expected 1')
+        if not str(doc.get('source', '')).startswith('model:'):
+            bad.append(f'{fn} source is {doc.get("source")!r} — the layer '
+                       f'no longer says it is model output (rule 5)')
+        if kind == 'dogs':
+            grid_ok(doc.get('levels', {}), fn, doc.get('total', -1))
+        else:
+            grid_ok(doc.get('leashed_levels', {}), fn + ' (leashed)',
+                    doc.get('leashed_total', -1))
+            grid_ok(doc.get('loose_levels', {}), fn + ' (loose)',
+                    doc.get('loose_total', -1))
+
+    if bad:
+        for b in bad:
+            print('FAIL ' + b)
+        return 1
+    print('ok   map model layers: five chips, files served and refreshed, '
+          'captions say model-called, payloads sum to their own totals')
+    return 0
+
+
+def check_map_tabs_live():
+    """Click the model-layer chips in a real chromium against a served build.
+
+    Static checks prove the markup and the strings exist; this proves the
+    chips DO something -- the legend and caption follow the tab, the tab
+    state follows the click, and the switch does not throw. The failure this
+    exists for is invisible to grep: a lazy-loaded layer whose success path
+    never applies the layer leaves a chip that highlights, fetches, and then
+    shows the harvest forever.
+
+    The page is served over a loopback socket from data/dashboard (never the
+    live server): file:// would kill every fetch the map is built on. Loud
+    SKIP without playwright or chromium, naming what went unchecked.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        print(f'SKIP: no playwright ({e}) — nobody clicked the map layer '
+              f'chips')
+        return 0
+    import functools
+    import http.server
+    import socketserver
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+    out_dir = os.path.join(REPO, 'data', 'dashboard')
+    httpd = socketserver.TCPServer(
+        ('127.0.0.1', 0), functools.partial(Quiet, directory=out_dir))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f'http://127.0.0.1:{httpd.server_address[1]}/index.html'
+    bad, errs = [], []
+    try:
+        pw = sync_playwright().start()
+    except Exception as e:
+        print(f'SKIP: playwright would not start ({e}) — nobody clicked the '
+              f'map layer chips')
+        httpd.shutdown()
+        return 0
+    try:
+        try:
+            br = pw.chromium.launch()
+        except Exception as e:
+            print(f'SKIP: no chromium ({str(e).splitlines()[0]}) — nobody '
+                  f'clicked the map layer chips')
+            return 0
+        pg = br.new_page(viewport={'width': 1440, 'height': 950})
+        # resource 404s are expected (the static server has no /api); a page
+        # error or any other console error is not
+        pg.on('console', lambda m: errs.append('console: ' + m.text)
+              if m.type == 'error'
+              and not m.text.startswith('Failed to load resource') else None)
+        pg.on('pageerror', lambda e: errs.append('pageerror: ' + str(e)))
+        pg.goto(url, wait_until='load')
+        stats = 'document.getElementById("mapStats").textContent'
+
+        def wait(cond, why):
+            try:
+                pg.wait_for_function('()=>' + cond, timeout=20000)
+                return True
+            except Exception:
+                bad.append(why + f' — after 20s the caption still reads: '
+                           + pg.evaluate('()=>' + stats)[:120])
+                return False
+
+        # The outlier toggle acts on the harvest grids and only those: the
+        # model layers count from their own files, which place every crop at
+        # its raw coordinate with no outlier split, so a ticked "exclude GPS
+        # outliers" over one of them claimed an exclusion that was not
+        # happening -- 154 gate crops sit in 89 cells the harvest layer
+        # hides. It has to leave the screen with the layer and come back
+        # with it, so the reader is never offered an inert control.
+        vis = ('(function(){var e=document.getElementById("mapCleanWrap");'
+               'return !!e&&getComputedStyle(e).display!=="none"})()')
+
+        def toggle_shown():
+            return bool(pg.evaluate('()=>' + vis))
+
+        if wait(stats + '.length>0', 'the map never initialised'):
+            # without outlier grids in map_points.json the control is absent
+            # on every layer and there is nothing here to follow
+            outlier_grids = toggle_shown()
+            if not outlier_grids:
+                print('SKIP: this build of map_points.json carries no '
+                      'outlier grids — the GPS-outlier toggle was not '
+                      'followed across the layers')
+            s0 = pg.evaluate('()=>' + stats)
+            if 'model-called' in s0:
+                bad.append(f'the DEFAULT layer caption already says '
+                           f'model-called: "{s0[:90]}" — harvest counts are '
+                           f'not model output')
+            pg.click('.mchip[data-l="gate"]')
+            if wait(stats + '.indexOf("model-called dog crops")>=0',
+                    'clicking the Dogs found chip never switched the layer'):
+                on = pg.eval_on_selector_all(
+                    '.mchip.on', 'es=>es.map(e=>e.dataset.l)')
+                if on != ['gate']:
+                    bad.append(f'after clicking the gate chip the "on" '
+                               f'chip(s) are {on} — the tab state does not '
+                               f'follow the click')
+                lab = pg.eval_on_selector('#mapRampLab', 'e=>e.textContent')
+                if 'model:' not in lab:
+                    bad.append(f'the gate legend names no model ("{lab}") — '
+                               f'the source field is not surfaced')
+                if outlier_grids and toggle_shown():
+                    bad.append('the "exclude GPS outliers" toggle is still '
+                               'on screen over the Dogs found layer — that '
+                               'layer has no outlier split, so a ticked box '
+                               'promises an exclusion nothing performs')
+            pg.click('.mchip[data-l="leash"]')
+            if wait(stats + '.indexOf("model-called leashed")>=0',
+                    'clicking the Leashed vs loose chip never switched'):
+                mn = pg.eval_on_selector('#mapMin', 'e=>e.textContent')
+                mx = pg.eval_on_selector('#mapMax', 'e=>e.textContent')
+                if (mn, mx) != ('all loose', 'all leashed'):
+                    bad.append(f'the leash ramp ends read "{mn}"/"{mx}", '
+                               f'not all loose/all leashed — the two-colour '
+                               f'share axis lost its labels')
+                if outlier_grids and toggle_shown():
+                    bad.append('the "exclude GPS outliers" toggle is still '
+                               'on screen over the Leashed vs loose layer, '
+                               'which is drawn from raw coordinates and '
+                               'excludes nothing')
+            pg.click('.mchip[data-l="harvest"]')
+            if wait(stats + '.indexOf("model-called")<0',
+                    'switching back to Harvest left a model caption up'):
+                # hidden and never restored is the same broken control, one
+                # layer along
+                if outlier_grids and not toggle_shown():
+                    bad.append('the "exclude GPS outliers" toggle did not '
+                               'come back on the Harvest layer — the layer '
+                               'it does apply to lost its control')
+        br.close()
+    finally:
+        pw.stop()
+        httpd.shutdown()
+    for e in errs:
+        bad.append('the console is not clean: ' + e[:200])
+    if bad:
+        for b in bad:
+            print('FAIL ' + b)
+        return 1
+    print('ok   map layer chips switch layer, caption and tab state in '
+          'chromium with a clean console')
+    return 0
+
+
 def main():
     if shutil.which('node') is None:
         print('SKIP: node not on PATH — client render test not run')
@@ -2807,10 +3083,14 @@ def main():
     if check_copy_say(html):
         return 1
     check_markup(html)
+    if check_map_layers(html):
+        return 1
     check_header_compact(html)
     if check_header_fold(html):
         return 1
     if check_header_shrinks():
+        return 1
+    if check_map_tabs_live():
         return 1
     check_key_metrics()
     check_training_tracker()

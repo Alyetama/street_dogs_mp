@@ -814,7 +814,13 @@ MODEL_WORKING = (
     'dashboard/board_stats.json', 'dashboard/countries.json',
     'dashboard/dataset_sizes.json', 'dashboard/distinct_counts.json',
     'dashboard/drive_smart.json', 'dashboard/map_points.json',
-    'dashboard/map_points_fine.json', 'dashboard/regions_status.json',
+    'dashboard/map_points_fine.json',
+    # the two model layers on the atlas, built by map_layers.py from the gate
+    # and leash shards. Every count in them is a classifier's; each payload
+    # names the model that produced it in its 'source' field, which is what
+    # keeps them out of HUMAN_STORES.
+    'dashboard/map_layer_dogs.json', 'dashboard/map_layer_leash.json',
+    'dashboard/regions_status.json',
     'dashboard/sequence_cache.json', 'dashboard/triage_status.json',
     'dashboard/world.json', 'dashboard/history.duckdb',
     'dashboard/search_terms.npz', 'dashboard/triage_vecs.npz',
