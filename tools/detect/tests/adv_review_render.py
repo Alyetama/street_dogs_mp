@@ -42,10 +42,17 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from http.server import ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
+AUDIT = os.path.join(REPO, 'tools', 'dashboard', 'audit.py')
 
 
 def load_dashboard():
@@ -63,6 +70,310 @@ def crop(i, conf=0.5, full=True, iid=None):
             'ts': 1_700_000_000_000 + i,
             'conf': conf,
             'has_full': full}
+
+
+def tab_strip_checks(html):
+    """The shared tab strip, exactly as the contract spells it.
+
+    Three judging surfaces carry one strip, rendered by two owners --
+    audit.py on the two audit pages, dashboard.py here -- and
+    adv_fn_audit.tab_checks pins the audit copies byte for byte. This is the
+    same pin on the review copy, so the two owners cannot drift apart: same
+    single-line markup, 'jtab on' and aria-current on THIS page's tab, and
+    nothing between the strip and the header.
+    """
+    bad = []
+    labels = {'review': 'Review queue', 'gate': 'Dog-bin audit',
+              'leash': 'Leash audit'}
+    order = ('review', 'gate', 'leash')
+    nav = '<nav class="jtabs" aria-label="judging surfaces">'
+    if html.count(nav) != 1:
+        bad.append('the page carries %d shared tab strips, not one'
+                   % html.count(nav))
+        return bad
+    if not re.search(r'</header>\s*<nav class="jtabs"', html):
+        bad.append('the tab strip is not directly under the header — the '
+                   'contract puts it in the same place on every judging page')
+    at = []
+    for k in order:
+        a = (f'<a href="/audit/{k}" class="jtab on" '
+             f'aria-current="page">{labels[k]}</a>' if k == 'review'
+             else f'<a href="/audit/{k}" class="jtab">{labels[k]}</a>')
+        if a not in html:
+            bad.append(f'the strip is missing the exact tab {a!r} — three '
+                       f'agents render this markup and they must render it '
+                       f'identically')
+            at.append(-1)
+        else:
+            at.append(html.index(a))
+    if -1 not in at and at != sorted(at):
+        bad.append('the tabs are out of order — review queue, then the two '
+                   'audits')
+    if html.count('aria-current') != 1:
+        bad.append('aria-current appears %d times; exactly one tab IS the '
+                   'current page' % html.count('aria-current'))
+    # ...and the strip has to LOOK like the audit pages' one: the four rules
+    # are audit.py's pill vocabulary, compared with whitespace folded so a
+    # rewrap is not a difference but a colour or a padding is.
+    try:
+        with open(AUDIT) as fh:
+            audit_src = fh.read()
+    except OSError:
+        return bad          # no audit checkout to compare against
+    for sel in (r'\.jtabs\{', r'\.jtab\{', r'\.jtab:hover\{', r'\.jtab\.on\{'):
+        want = re.search(sel + r'[^}]*\}', audit_src)
+        got = re.search(sel + r'[^}]*\}', html)
+        if not want:
+            continue
+        if not got:
+            bad.append('the review page has no %s rule — the strip is '
+                       'unstyled here' % sel.replace('\\', ''))
+        elif re.sub(r'\s+', '', got.group(0)) != \
+                re.sub(r'\s+', '', want.group(0)):
+            bad.append('the strip is styled differently from the audit '
+                       'pages: %s vs %s' % (got.group(0), want.group(0)))
+    return bad
+
+
+# What the guess feature WAS, by the tokens that carried it. Markup ids,
+# copy, wire parameters and the poll target: any of these coming back is the
+# feature coming back, whatever it is called.
+GONE_MARKUP = ('id="suggest"', 'id="gatef"', 'id="trg"', 'id="trgRun"',
+               'id="trgModel"', 'id="ngrpWho"', 'id="ngrpLooks"',
+               'Run guesses', 'Guesses by', 'Any guess', 'class="sg')
+GONE_SCRIPT = ('/api/triage', "'&suggest=", "'&gate=", "'&backend=",
+               'paintSuggest', 'paintGate', 'BACKEND', 'SG_WORD',
+               'start the guesser')
+
+
+def guess_absence_checks(html, script):
+    """The guesses feature is REMOVED, not hidden.
+
+    The user asked for it gone: the suggest filter, the gate filter, the
+    backend picker, the run strip and the tile badges. Hidden-but-wired is
+    how a phantom filter emptied this queue once before, so the pin is on
+    the bytes: none of the ids, none of the copy, no request parameter and
+    no /api/triage traffic from this page.
+    """
+    bad = []
+    for tok in GONE_MARKUP:
+        if tok in html:
+            bad.append('the guess feature is back in the markup: %r' % tok)
+    for tok in GONE_SCRIPT:
+        if tok in script:
+            bad.append('the guess feature is back in the script: %r' % tok)
+    return bad
+
+
+def route_checks(mod):
+    """/audit/review serves the queue; /review answers with the new address.
+
+    Driven over HTTP against the real handler, because the defect this
+    guards against is a routing-table one: /audit/review has to be claimed
+    before the generic /audit dispatch, and the redirect has to keep the
+    query string a bookmark was made for.
+    """
+    bad = []
+
+    class Quiet(mod.BoardHandler):
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), Quiet)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % srv.server_port
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    opener = urllib.request.build_opener(NoRedirect)
+    try:
+        try:
+            r = opener.open(base + '/review?country=JPN&x=1', timeout=10)
+            bad.append('/review answered %d itself instead of redirecting '
+                       'to /audit/review' % r.status)
+        except urllib.error.HTTPError as e:
+            loc = e.headers.get('Location')
+            if e.code not in (301, 302):
+                bad.append('/review answered %d, not a redirect' % e.code)
+            elif loc != '/audit/review?country=JPN&x=1':
+                bad.append('the redirect dropped or rewrote the query '
+                           'string: Location=%r' % loc)
+        # ── a stale bookmark's guess params change nothing ───────────────
+        # review_payload() still IMPLEMENTS suggest/backend/gate -- the
+        # triage guard calls it that way -- and only the handler withholds
+        # them. So the whole contract lives at one call site, where one
+        # re-added positional argument silently narrows the queue for anyone
+        # whose bookmark predates the removal, with no control on the page
+        # to see or clear the narrowing. Driven over HTTP, because that is
+        # the layer the promise is made at.
+        qs = 'page=0&size=50&sort=low'
+        stale = '&suggest=object&backend=rfdetr&gate=not_dog'
+        try:
+            def api(q):
+                return json.loads(urllib.request.urlopen(
+                    base + '/api/review?' + q, timeout=30).read()
+                    .decode('utf-8'))
+            bare, wired = api(qs), api(qs + stale)
+            if bare.get('error') or wired.get('error'):
+                bad.append('/api/review answered with an error (%r / %r) — '
+                           'the stale-parameter contract could not be '
+                           'tested' % (bare.get('error'), wired.get('error')))
+            elif ([c.get('name') for c in bare.get('items') or []]
+                    != [c.get('name') for c in wired.get('items') or []]
+                    or bare.get('pages') != wired.get('pages')
+                    or bare.get('total_unflagged')
+                    != wired.get('total_unflagged')):
+                bad.append(
+                    'suggest=/backend=/gate= still narrow the queue on the '
+                    'server: %d items over %r pages bare, %d over %r with '
+                    'the removed params — a stale bookmark shows a filtered '
+                    'queue with nothing on the page to clear it'
+                    % (len(bare.get('items') or []), bare.get('pages'),
+                       len(wired.get('items') or []), wired.get('pages')))
+        except (urllib.error.URLError, ValueError) as e:
+            bad.append('/api/review could not be read with the removed '
+                       'guess params set: %s' % e)
+        try:
+            page = urllib.request.urlopen(base + '/audit/review',
+                                          timeout=10).read().decode('utf-8')
+            if '<nav class="jtabs"' not in page:
+                bad.append('/audit/review serves a page without the shared '
+                           'tab strip')
+            if 'class="jtab on" aria-current="page">Review queue' not in page:
+                bad.append('/audit/review does not mark the Review queue '
+                           'tab as current')
+        except urllib.error.HTTPError as e:
+            bad.append('/audit/review answered %d — the generic /audit '
+                       'dispatch swallowed it' % e.code)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    # every link dashboard.py emits has to point at the new address; the old
+    # one only survives as the redirect
+    with open(DASH) as fh:
+        src = fh.read()
+    if 'href="/review"' in src:
+        bad.append('dashboard.py still emits a link to the old /review '
+                   'address')
+    # and the one tracked document that lists the served pages moves with
+    # them: /review survives as a 301, so a reader following the README does
+    # not hit an error, they just never learn the address every judging page
+    # links from
+    readme = os.path.join(REPO, 'README.md')
+    if os.path.exists(readme):
+        with open(readme, encoding='utf-8') as fh:
+            doc = fh.read()
+        if '`/review`' in doc:
+            bad.append('README.md still lists `/review` among the pages the '
+                       'dashboard serves — the queue moved to /audit/review '
+                       'and the old address is only a redirect')
+        elif '`/audit/review`' not in doc:
+            bad.append('README.md names no review address at all — the '
+                       'module table stopped describing a page the '
+                       'dashboard serves')
+    return bad
+
+
+def period_payload_checks(mod):
+    """The annotated-date filter is server-side, truthful, and shared maths.
+
+    The rows carry flagged_at, so annotated_payload narrows by it BEFORE
+    counting and paginating -- a client-side hide would leave total/pages
+    describing rows nobody can see. The cutoffs are the audit pages'
+    (audit.py period_cutoff): same tokens, same server-local midnight.
+    """
+    bad = []
+    noon = time.mktime((2026, 8, 19, 12, 30, 0, 0, 0, -1))
+    if mod.period_cutoff('today', now=noon) != \
+            datetime(2026, 8, 19).timestamp():
+        bad.append("'today' does not start at the server's local midnight")
+    if mod.period_cutoff('7d', now=noon) != noon - 7 * 86400:
+        bad.append("'7d' is not seven days")
+    if mod.period_cutoff('30d', now=noon) != noon - 30 * 86400:
+        bad.append("'30d' is not thirty days")
+    if mod.period_cutoff('yesterweek', now=noon) is not None:
+        bad.append('an unknown period must mean no cutoff, never a surprise')
+
+    keep = {k: getattr(mod, k) for k in
+            ('HN_DIR', 'HN_CROPS', 'HN_FULL', 'HN_LABELS', 'HP_DIR')}
+    kept_cache = mod._flagged
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            hn, hp = os.path.join(tmp, 'hn'), os.path.join(tmp, 'hp')
+            os.makedirs(hn)
+            os.makedirs(hp)
+            now = int(time.time())
+
+            def row(i, at):
+                r = {'crop': '%d_p%03d_%03d.jpg'
+                             % (1_700_000_000_000 + i, i, 50 + i % 40)}
+                if at is not None:
+                    r['flagged_at'] = at
+                return r
+            # two fresh positives, three older negatives, one row that
+            # cannot prove when it was judged, and filler enough that the
+            # unfiltered list takes two pages
+            pos = [row(1, now), row(2, now - 3 * 86400)]
+            neg = ([row(3, now - 10 * 86400), row(4, now - 40 * 86400),
+                    row(5, None)]
+                   + [row(100 + i, now - 40 * 86400) for i in range(55)])
+            # the ledger FILENAMES come from the module, never spelt here:
+            # this file is on adv_triage_isolation's no-ledger allowlist, and
+            # naming a store would read as this guard touching one
+            mod.HN_DIR, mod.HP_DIR = hn, hp
+            mod.HN_CROPS = os.path.join(hn, 'crops')
+            mod.HN_FULL = os.path.join(hn, 'full')
+            mod.HN_LABELS = os.path.join(
+                hn, os.path.basename(keep['HN_LABELS']))
+            mod._flagged = None       # forget any live ledger already cached
+            with open(mod._store_for(mod.POS_LABEL)['labels'], 'w') as fh:
+                fh.write('\n'.join(json.dumps(r) for r in pos) + '\n')
+            with open(mod._store_for(mod.FLAG_LABEL)['labels'], 'w') as fh:
+                fh.write('\n'.join(json.dumps(r) for r in neg) + '\n')
+
+            j_all = mod.annotated_payload(size=50)
+            if j_all['total'] != 60 or j_all['pages'] != 2:
+                bad.append('no period: total/pages %s/%s, want 60/2'
+                           % (j_all['total'], j_all['pages']))
+            j7 = mod.annotated_payload(size=50, period='7d')
+            if j7['total'] != 2 or j7['pages'] != 1:
+                bad.append('period=7d: total/pages %s/%s, want 2/1 — the '
+                           'filter must run before pagination'
+                           % (j7['total'], j7['pages']))
+            if j7.get('period') != '7d':
+                bad.append('the payload does not say which period it '
+                           'applied: %r' % j7.get('period'))
+            if (j7['n_true_positive'], j7['n_false_positive']) != (2, 0):
+                bad.append('period=7d: per-verdict counts %s/%s describe '
+                           'more than the week'
+                           % (j7['n_true_positive'], j7['n_false_positive']))
+            if j7['leash_counts']['all'] != 2:
+                bad.append('period=7d: the leash options were counted over '
+                           'the unfiltered list (%s)'
+                           % j7['leash_counts']['all'])
+            if j7['pool_unfiltered'] != 60:
+                bad.append('period=7d: pool_unfiltered moved with the '
+                           'filter (%s) — the "narrowed from" baseline must '
+                           'not' % j7['pool_unfiltered'])
+            if mod.annotated_payload(size=50, period='today')['total'] != 1:
+                bad.append("period=today counts more than today's row")
+            j30 = mod.annotated_payload(size=50, period='30d')
+            if j30['total'] != 3:
+                bad.append('period=30d: total %s, want 3' % j30['total'])
+            if any(it['name'].startswith('1700000000005_')
+                   for it in j30['items']):
+                bad.append('a row with no flagged_at sits inside a period '
+                           'it cannot prove it belongs to')
+            jx = mod.annotated_payload(size=50, period='yesterweek')
+            if jx['total'] != 60 or jx.get('period'):
+                bad.append('an unknown period must fall back to any time, '
+                           'never to an empty or surprise page (total %s)'
+                           % jx['total'])
+    finally:
+        for k, v in keep.items():
+            setattr(mod, k, v)
+        mod._flagged = kept_cache
+    return bad
 
 
 HARNESS = r"""
@@ -334,25 +645,17 @@ function fetch(url, opts) {
 
 // ── the page's own element graph (built from the real markup ids) ───────────
 for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','next','next2','mode','verdict',
+                  // the audit view's annotated-date filter
+                  'period',
                   'foot','grid','state','sort','size','reload','country','leftlab',
-                  // the model-suggestion filter; without it paintSuggest and
-                  // its onchange bind against null and kill the whole script
-                  'suggest','balNum','balNumU','balLeft',
-                  // crop-suggestion progress strip, moved here from the dashboard
-                  'trg','trgState','trgSub','trgPct','trgFill','trgDot','trgRun','leashN',
+                  'balNum','balNumU','balLeft','leashN',
                   // findmsg is what says the search cannot work; leaving it
                   // out of the stub makes paintFind's guard skip the whole
                   // branch, so every state would 'pass' untested
-                  // the guesser toggle and its caveat line; without them
-                  // paintBackends' guard skips and t24 would pass untested
-                  'leashf','find','findterms','findmsg','trgModel','trgNote',
-                  // the folded legend that explains the dropdown's percentage
-                  'trgNoteSum','trgNoteBasis','trgNoteWhich','trgNoteCaveat',
-                  // the gate's own filter axis
-                  'gatef',
+                  'leashf','find','findterms','findmsg',
                   // the redesigned block: caption, applied-filter chips
                   // and the disclosure holding the controls
-                  'cap','chips','narrow','npanel','ngrpLooks','ngrpWho',
+                  'cap','chips','narrow','npanel','ngrpLeash',
                   // the sentinel the header watches to know it has scrolled
                   'scrollcue']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
@@ -365,6 +668,14 @@ byId['country'].value = '';
 // ── run the page script ─────────────────────────────────────────────────────
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
+// Stale preferences from the build that HAD the guess feature. Seeded before
+// the script runs, because that is when restorePrefs reads them: a stored
+// suggest/backend/gatef must never put a removed filter back into a request.
+global.localStorage = {
+  _o: JSON.stringify({suggest: 'dog', backend: 'rfdetr', gatef: 'dog'}),
+  getItem(k) { return k === 'sdReview' ? this._o : null; },
+  setItem(k, v) { if (k === 'sdReview') this._o = v; },
+};
 let API;
 try {
   API = new Function('document','window','CSS','fetch','getComputedStyle',
@@ -373,12 +684,6 @@ try {
         + 'idx,mark,cols,hideToast,showUndo,'
         + 'markSeen,imgScale,saveBox,paintBox,fitBox,fitImage,zoomBy,'
         + 'flushSave,dirty,'
-        // the guesser strip repaints on a 5s timer, and setInterval is a
-        // no-op here; without a way to drive one poll by hand nothing in
-        // that closure is ever exercised
-        + 'trgPoll:()=>window.__trgPoll&&window.__trgPoll(),'
-        + 'setBackend:(b)=>{const s=document.getElementById("trgModel");'
-        + 's.value=b;(s._listeners.change||[]).forEach(f=>f.call(s));},'
         + 'st:()=>({page,size,sort,items,reserve,pages,sel,todoN,flaggedN,'
         + 'seenN,session,lastUndo,lb})};')(
     document, window, CSS, fetch, getComputedStyle, requestAnimationFrame,
@@ -412,7 +717,6 @@ for (const [gid, ids] of Object.entries(FIX.groups || {})) {
   const row = new El('div'); row.className = 'nrow'; g.appendChild(row);
   for (const id of ids) if (byId[id]) row.appendChild(byId[id]);
 }
-for (const gid of (FIX.owned || [])) if (byId[gid]) byId[gid].dataset.own = '1';
 function payload(items, reserve, extra) {
   return Object.assign({ items, reserve: reserve || [], page: 0, pages: 2,
                          size: 50, sort: 'conf',
@@ -1106,11 +1410,13 @@ async function t22() {
 
 // ── 23. a search that cannot work has to say so ─────────────────────────
 // The vectors belong to crop FILES and the pool rotates hourly, so coverage
-// decays to nothing whenever the guesser is stopped. Measured on the live
+// decays to nothing whenever the embedder is stopped. Measured on the live
 // box: 4,513 vectors, 3,010 crops in the pool, zero in both -- and the page
 // reported the search as working while the queue did not move, which reads
 // as the model returning nonsense. Every state that fails to reorder the
-// queue must put a sentence on screen.
+// queue must put a sentence on screen -- and none of them may point at the
+// guesser controls, which no longer exist on this page: the empty states
+// name the tool (triage_crops.py) instead.
 async function t23() {
   const FIND = {find: 'a cat', find_terms: ['a cat'], find_cover: [0, 3010]};
   for (const [state, want] of [['cold', /embedded/],
@@ -1121,7 +1427,7 @@ async function t23() {
                                ['mismatch', /re-encoding the search words/],
                                ['learning', /moment/], ['unknown', /encoded/],
                                ['failed', /crop_search\.log/],
-                               ['novectors', /guesser/]]) {
+                               ['novectors', /triage_crops\.py/]]) {
     RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
                Object.assign({}, FIND, {find_state: state})) };
     await API.load(); await flush();
@@ -1131,6 +1437,9 @@ async function t23() {
        't23: ' + state + ' message unhelpful: ' + byId['findmsg'].textContent);
     ck(/\bwarn\b/.test(byId['find'].className || ''),
        't23: ' + state + ' left the box looking healthy');
+    ck(!/guesser above|start the guesser/.test(byId['findmsg'].textContent),
+       't23: ' + state + ' points at a control that no longer exists: ' +
+       byId['findmsg'].textContent);
   }
   // and a search that DID order the queue must not nag
   RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
@@ -1142,16 +1451,16 @@ async function t23() {
      't23: a working search kept the warning border');
 
   // 'cold' with most of the pool embedded is a FILTER problem, not a stopped
-  // guesser -- telling the reviewer to start one that is already running and
-  // has covered 4,014 of 5,018 crops sends them after the wrong thing.
+  // embedder -- naming only the pool size sends the reviewer after the wrong
+  // thing when 4,014 of 5,018 crops already carry vectors.
   RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
              Object.assign({}, FIND, {find_state: 'cold',
                                       find_cover: [4014, 5018]})) };
   await API.load(); await flush();
   ck(/4,014/.test(byId['findmsg'].textContent),
      't23: cold ignored how much IS embedded: ' + byId['findmsg'].textContent);
-  ck(!/start the guesser/.test(byId['findmsg'].textContent),
-     't23: cold blamed the guesser with the pool mostly embedded');
+  ck(!/triage_crops\.py/.test(byId['findmsg'].textContent),
+     't23: cold blamed the embedder with the pool mostly embedded');
 
   // the term is written with textContent, so it must not arrive pre-escaped
   RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
@@ -1164,152 +1473,121 @@ async function t23() {
      't23: entities shown literally: ' + byId['findmsg'].textContent);
 }
 
-// ── 24. the guesser toggle names the weaker guesser ─────────────────────
-// Two backends with very different accuracy on this data -- SigLIP calls 98%
-// of confirmed dogs 'dog', RF-DETR 56% -- so a bare "SigLIP / RF-DETR"
-// dropdown is a trap. The number the server measured has to reach the option
-// text, and the caveat has to be on screen, not in a title attribute. The
-// control also must not exist at all when there is only one guesser.
+// ── 24. the guesses feature is gone, and stays gone ─────────────────────
+// "remove the guesses feature from review" -- the suggest filter, the gate
+// filter, the backend toggle and the run strip. Gone means gone from the
+// wire too: the queue request names none of them, nothing on this page
+// talks to /api/triage, and a payload still carrying the old keys (the
+// server keeps serving other callers) must not conjure a control, a chip,
+// or a tile badge out of them.
 async function t24() {
-  const TRG = {ever: true, can_run: true, running: false, pool: 100,
-               guessed: 100, coverage: 1};
-  // the real measured values, so a stale fixture cannot make a stale claim
-  // in the UI look correct
-  const TWO = [{key: 'siglip', label: 'SigLIP 2', recall: 0.977, clears: 0.943,
-                buckets: ['dog', 'animal', 'object'],
-                note: 'leaves behind the vectors the search box needs'},
-               {key: 'rfdetr', label: 'RF-DETR', recall: 0.678, clears: 0.957,
-                buckets: ['dog', 'animal', 'object'],
-                note: 'writes no search vectors'}];
-  const BASIS = '120 crops a reviewer confirmed are dogs, and the share ' +
-                'each guesser files under "dog".';
-  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
-           '/api/triage': () => Object.assign({}, TRG,
-                                              {backend: 'siglip',
-                                               recall_basis: BASIS,
-                                               backends: TWO}) };
-  await API.load(); API.trgPoll(); await flush(); await flush();
-  const sel = byId['trgModel'];
-  const WANT_OPT = Math.round(TWO[0].recall * 100) + '%';
-  ck(!sel.hidden, 't24: two guessers offered but the control stayed hidden');
-  const WANT_OPT2 = Math.round(TWO[1].recall * 100) + '%';
-  ck(sel.innerHTML.includes(WANT_OPT) && sel.innerHTML.includes(WANT_OPT2),
-     't24: accuracy missing from the options: ' + sel.innerHTML);
-  ck(/SigLIP 2/.test(sel.innerHTML) && /RF-DETR/.test(sel.innerHTML),
-     't24: a guesser is missing from the options: ' + sel.innerHTML);
-  ck(!byId['trgNote'].hidden,
-     't24: no legend for the guesser percentages');
-  // "75% of known dogs" is unreadable on its own -- WHICH dogs, and what did
-  // the guesser have to do to count? The summary has to answer that without
-  // being unfolded, and the body has to say what the test set is.
-  const WANT = Math.round(TWO[0].recall * 100) + '%';
-  ck(byId['trgNoteSum'].textContent.includes(WANT) &&
-     /test set/.test(byId['trgNoteSum'].textContent),
-     't24: the legend summary does not say what the number counts: ' +
-     byId['trgNoteSum'].textContent);
-  ck(/confirmed are dogs/.test(byId['trgNoteBasis'].textContent),
-     't24: the legend does not say where the test set comes from: ' +
-     byId['trgNoteBasis'].textContent);
-  ck(/vectors/.test(byId['trgNoteWhich'].textContent),
-     't24: the caveat for the chosen guesser is not on screen: ' +
-     byId['trgNoteWhich'].textContent);
-
-  // one guesser is not a choice
-  RESP['/api/triage'] = () => Object.assign({}, TRG,
-        {backend: 'siglip', backends: [TWO[0]]});
-  API.trgPoll(); await flush(); await flush();
-  ck(byId['trgModel'].hidden,
-     't24: a dropdown with one option was still drawn');
-  ck(byId['trgNote'].hidden, 't24: a caveat with no choice to make');
-
-  // and the queue must be asked for the SELECTED guesser's guesses
-  RESP['/api/triage'] = () => Object.assign({}, TRG,
-        {backend: 'siglip', backends: TWO});
-  API.trgPoll(); await flush(); await flush();
-  API.setBackend('rfdetr'); await flush(); await flush();
+  const before = CALLS.length;
+  RESP = { '/api/review': () => payload(
+             CROPS.normal.slice(0, 3).map(
+               c => Object.assign({}, c, {sg: 'dog', sgl: 'terrier',
+                                          sgp: 0.9})), [],
+             {suggest: 'dog', suggest_ready: true,
+              suggest_counts: {dog: 5, none: 2}, backend: 'siglip',
+              buckets: [{key: 'dog', label: 'Looks like a dog'}],
+              gate: 'dog', gate_ready: true, gate_label: 'Dog-bin gate',
+              gate_counts: {all: 9, dog: 5, not_dog: 3, none: 1},
+              pool_unfiltered: 300}) };
+  await API.load(); await flush(); await flush();
   const asked = CALLS.filter(c => /\/api\/review\?/.test(c.url)).pop();
-  ck(/backend=/.test(asked.url),
-     't24: the queue request does not say whose guesses it wants: ' +
-     asked.url);
+  for (const tok of ['suggest=', 'backend=', 'gate='])
+    ck(asked.url.indexOf(tok) < 0,
+       't24: the queue request still carries the removed filter ' + tok +
+       ': ' + asked.url);
+  ck(!CALLS.slice(before).some(c => /\/api\/triage/.test(c.url)),
+     't24: something on this page still talks to /api/triage');
+  ck(byId['chips'].hidden ||
+     (!/Looks like a dog/.test(byId['chips'].innerHTML) &&
+      !/Gate says/.test(byId['chips'].innerHTML)),
+     't24: a chip appeared for a filter the page no longer offers: ' +
+     byId['chips'].innerHTML);
+  ck(!document.querySelector('.sg'),
+     't24: a tile still wears a guess badge');
+  ck(byId['cap'].textContent.indexOf('narrowed') < 0,
+     't24: the caption claims a narrowing no control applied: ' +
+     byId['cap'].textContent);
 }
 
-// ── 25. one guesser running must not be reported as the other ───────────
-// The two share ONE status file. Before this was fixed, starting RF-DETR and
-// then moving the dropdown to SigLIP showed SigLIP as running, with its
-// progress bar and a Pause button that would have killed the RF-DETR run.
+// ── 25. "Check my annotations" can be narrowed to when I judged ─────────
+// The filter is server-side -- the ledger rows carry flagged_at, and a hide
+// on the client would leave the counts describing rows nobody can see -- so
+// the page's whole job is to send it, show it as a chip, and not pretend an
+// empty week is an empty ledger. The words are the audit pages' own.
 async function t25() {
-  const BASE = {ever: true, can_run: true, pool: 100, guessed: 40,
-                coverage: 0.4,
-                backends: [{key: 'siglip', label: 'SigLIP 2', recall: 0.75},
-                           {key: 'rfdetr', label: 'RF-DETR', recall: 0.56}]};
-  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
-           // asked about SigLIP while RF-DETR holds the card
-           '/api/triage': () => Object.assign({}, BASE, {backend: 'siglip',
-                                running: false, busy_with: 'RF-DETR'}) };
-  // t24 leaves the page on another guesser and a repaint of its own still in
-  // flight; settle both before asserting, or this reads t24's last payload
-  API.setBackend('siglip');
-  await flush(); await flush(); await flush();
-  API.trgPoll(); await flush(); await flush();
-  ck(/RF-DETR/.test(byId['trgState'].textContent + byId['trgSub'].textContent),
-     't25: the strip does not say which guesser is busy: ' +
-     byId['trgState'].textContent);
-  const btn = byId['trgRun'];
-  ck(btn.disabled, 't25: Run was offered while the other guesser had the card');
-  ck(btn.textContent !== 'Pause',
-     't25: offered to Pause a run belonging to the other guesser');
-
-  // once it frees up, the button has to come back -- the disabled flag must
-  // not latch
-  RESP['/api/triage'] = () => Object.assign({}, BASE, {backend: 'siglip',
-                              running: false, busy_with: null});
-  API.trgPoll(); await flush(); await flush();
-  ck(!btn.disabled, 't25: Run stayed disabled after the card freed up');
-  ck(btn.textContent === 'Run guesses',
-     't25: button label stuck: ' + btn.textContent);
+  const fire = (id, v) => { const e = byId[id]; e.value = v;
+    if (e.onchange) e.onchange.call(e);
+    (e._listeners.change || []).forEach(f => f.call(e)); };
+  RESP = {'/api/review': () => payload(CROPS.normal.slice(0, 2), []),
+          '/api/review/annotated': () => ({items: [], page: 0, pages: 1,
+              total: 0, pool_unfiltered: 7,
+              n_false_positive: 0, n_true_positive: 0})};
+  fire('mode', 'audit'); await flush(); await flush();
+  // the queue request never carried it; the audit request always does
+  const q = CALLS.filter(c => /\/api\/review\?/.test(c.url)).pop();
+  ck(q.url.indexOf('period=') < 0,
+     't25: the queue request carries a filter that means nothing there: ' +
+     q.url);
+  fire('period', '7d'); await flush(); await flush();
+  let sent = CALLS.filter(c => /annotated/.test(c.url)).pop().url;
+  ck(/period=7d/.test(sent),
+     't25: the chosen period never reached the request: ' + sent);
+  ck(/last 7 days/.test(byId['chips'].textContent),
+     't25: no chip for the period narrowing the list: ' +
+     byId['chips'].textContent);
+  // an empty week must not read as an empty ledger
+  ck(!/nothing annotated yet/.test(byId['pg'].textContent),
+     't25: an empty period claims the ledger is empty: ' +
+     byId['pg'].textContent);
+  ck(/period/.test(byId['pg'].textContent),
+     't25: the empty state does not name the period: ' +
+     byId['pg'].textContent);
+  // clearing the chip clears the filter on the wire
+  const x = byId['chips'].querySelector('.chipx');
+  ck(!!x, 't25: the period chip cannot be cleared where it is read');
+  (byId['chips']._listeners.click || []).forEach(f =>
+    f.call(byId['chips'], {target: x}));
+  await flush(); await flush();
+  sent = CALLS.filter(c => /annotated/.test(c.url)).pop().url;
+  ck(/period=(&|$)/.test(sent),
+     't25: clearing the chip did not clear the period: ' + sent);
+  fire('mode', 'queue'); await flush(); await flush();
 }
 
-// ── 26. the dog-bin gate is its own axis, not a rival to the guess filter ──
-// It answers the question the reviewer is answering -- is this a dog -- where
-// the guess filter answers what KIND of thing it is. So it gets its own
-// control, usable at the same time, and it must not move when the guesser
-// toggle does.
+// ── 26. the audit view's two filters are two chips, not one ─────────────
+// Verdict and period narrow the same list on different axes, so each gets
+// its own chip and clearing one must leave the other on the wire -- the
+// same rule every queue filter already follows.
 async function t26() {
-  const GATE = {gate_ready: true, gate: 'all', gate_label: 'Dog-bin gate',
-                gate_counts: {all: 2157, dog: 887, not_dog: 796, none: 474}};
-  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
-             Object.assign({backend: 'siglip', suggest_ready: true,
-                            buckets: [{key: 'dog', label: 'Looks like a dog'},
-                                      {key: 'animal', label: 'Other animal'},
-                                      {key: 'object', label: 'Not an animal'}]},
-                           GATE)) };
-  await API.load(); await flush();
-  const g = byId['gatef'];
-  ck(!g.hidden, 't26: the gate has no control of its own');
-  ck(/887/.test(g.innerHTML) && /796/.test(g.innerHTML) &&
-     /474/.test(g.innerHTML),
-     't26: the gate options carry no counts: ' + g.innerHTML);
-  ck(/Gate says dog/.test(g.innerHTML) && /Gate says not a dog/.test(g.innerHTML),
-     't26: the gate verdicts are not offered: ' + g.innerHTML);
-  // both axes at once: the guess filter is still there beside it
-  ck(!byId['suggest'].hidden,
-     't26: the guess filter vanished when the gate appeared');
-
-  // choosing a gate verdict has to reach the server
-  g.value = 'not_dog';
-  (g._listeners.change || []).forEach(f => f.call(g));
-  if (g.onchange) g.onchange.call(g);
+  const fire = (id, v) => { const e = byId[id]; e.value = v;
+    if (e.onchange) e.onchange.call(e);
+    (e._listeners.change || []).forEach(f => f.call(e)); };
+  RESP = {'/api/review': () => payload(CROPS.normal.slice(0, 2), []),
+          '/api/review/annotated': () => ({items: [], page: 0, pages: 1,
+              total: 1, pool_unfiltered: 7,
+              n_false_positive: 1, n_true_positive: 0})};
+  fire('mode', 'audit'); await flush(); await flush();
+  fire('verdict', 'false_positive'); await flush(); await flush();
+  fire('period', '30d'); await flush(); await flush();
+  ck(/not a dog/.test(byId['chips'].textContent) &&
+     /last 30 days/.test(byId['chips'].textContent),
+     't26: the two audit filters do not both show as chips: ' +
+     byId['chips'].textContent);
+  const xs = byId['chips'].querySelectorAll('.chipx')
+    .filter(b => (b.dataset || {}).f === 'period');
+  ck(xs.length === 1, 't26: no chip cross belongs to the period');
+  (byId['chips']._listeners.click || []).forEach(f =>
+    f.call(byId['chips'], {target: xs[0]}));
   await flush(); await flush();
-  const asked = CALLS.filter(c => /\/api\/review\?/.test(c.url)).pop();
-  ck(/gate=not_dog/.test(asked.url),
-     't26: the gate verdict never reached the queue request: ' + asked.url);
-
-  // and it must not be offered before the gate has judged anything
-  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 3), [],
-        {backend: 'siglip', suggest_ready: true, gate_ready: false});
-  await API.load(); await flush();
-  ck(byId['gatef'].hidden,
-     't26: an empty gate filter was still offered');
+  const sent = CALLS.filter(c => /annotated/.test(c.url)).pop().url;
+  ck(/label=false_positive/.test(sent) && /period=(&|$)/.test(sent),
+     't26: clearing the period chip did not leave the verdict alone: ' +
+     sent);
+  fire('verdict', 'all'); await flush(); await flush();
+  fire('mode', 'queue'); await flush(); await flush();
 }
 
 // ── 27. the caption, the chips, and the one disclosure ──────────────────
@@ -1318,10 +1596,10 @@ async function t26() {
 // the filters actually applied, and keeps the rest behind one button. Each of
 // those three claims is checked, because each replaced something visible.
 async function t27() {
+  const fire = (id, v) => { const e = byId[id]; e.value = v;
+    if (e.onchange) e.onchange.call(e);
+    (e._listeners.change || []).forEach(f => f.call(e)); };
   const FULL = {total_unflagged: 2157, pool_unfiltered: 2157,
-                suggest_ready: true, gate_ready: true,
-                gate_label: 'Dog-bin gate', gate: 'all',
-                gate_counts: {all: 2157, dog: 887, not_dog: 796, none: 474},
                 countries: [{iso: 'JPN', name: 'Japan', n: 838}], country: ''};
   RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [], FULL) };
   await API.load(); await flush();
@@ -1336,15 +1614,15 @@ async function t27() {
 
   // apply one: the chip appears, and the caption says what it narrowed from
   RESP['/api/review'] = () => Object.assign({}, FULL,
-        {total_unflagged: 887, gate: 'dog', pool_unfiltered: 2157});
-  byId['gatef'].value = 'dog';
-  await API.load(); await flush();
-  ck(!byId['chips'].hidden && /Gate says dog/.test(byId['chips'].innerHTML),
+        {total_unflagged: 838, country: 'JPN', pool_unfiltered: 2157});
+  fire('country', 'JPN');
+  await flush(); await flush();
+  ck(!byId['chips'].hidden && /Japan/.test(byId['chips'].innerHTML),
      't27: the applied filter is not shown as a chip: ' +
      byId['chips'].innerHTML);
   ck(/narrowed from/.test(byId['cap'].textContent) &&
      /2,157/.test(byId['cap'].textContent) &&
-     /887/.test(byId['cap'].textContent),
+     /838/.test(byId['cap'].textContent),
      't27: the caption does not report the narrowing: ' +
      byId['cap'].textContent);
   ck(/1/.test(byId['narrow'].textContent),
@@ -1352,18 +1630,18 @@ async function t27() {
      byId['narrow'].textContent);
 
   // clearing from the chip resets the control it came from
-  RESP['/api/review'] = () => Object.assign({}, FULL, {gate: 'all'});
+  RESP['/api/review'] = () => Object.assign({}, FULL, {country: ''});
   const x = byId['chips'].querySelector('.chipx');
   ck(!!x, 't27: the chip cannot be cleared where it is read');
   (byId['chips']._listeners.click || []).forEach(f => f.call(byId['chips'],
       {target: x}));
   await flush(); await flush();
   // Asserted on the REQUEST, not on the control's value afterwards: the next
-  // payload echoes `gate` back and paintGate writes it into the select, so a
-  // chip that cleared nothing would still look cleared a moment later. The
-  // URL is the only observable the echo cannot fake.
+  // payload echoes `country` back and paintCountries writes it into the
+  // select, so a chip that cleared nothing would still look cleared a moment
+  // later. The URL is the only observable the echo cannot fake.
   const after = CALLS.filter(c => /\/api\/review\?/.test(c.url)).pop();
-  ck(/gate=all/.test(after.url),
+  ck(/country=(&|$)/.test(after.url),
      't27: clearing the chip did not clear the filter it names: ' + after.url);
   ck(byId['chips'].hidden, 't27: the chip outlived the filter');
 
@@ -1377,40 +1655,13 @@ async function t27() {
   ck(byId['npanel'].hidden, 't27: Filter does not shut the panel again');
 }
 
-// ── 28. every state of the two lines is still a line ────────────────────
-// Both rows set className wholesale to add a state class, and 'line' is what
-// gives them their flex, their gap and their track. Two of those writes
-// predated the redesign and dropped it, so the commonest guesser state --
-// "Not running" -- shipped as run-together text with no bar, while the suite
-// stayed green because no test drove that branch.
+// ── 28. every state of the progress line is still a line ────────────────
+// The row sets className wholesale to add a state class, and 'line' is what
+// gives it its flex, its gap and its track. Writes like that have dropped
+// the layout class before, and the suite stayed green because no test drove
+// the branch.
 async function t28() {
-  const BASE = {ever: true, can_run: true, pool: 5018, guessed: 1633,
-                coverage: 0.325,
-                backends: [{key: 'siglip', label: 'SigLIP 2', recall: 0.977,
-                            clears: 0.943}]};
-  const STATES = [
-    ['not running',  {running: false}],
-    ['guessing',     {running: true, done: 176, total: 2864, rate: 39.2}],
-    ['stalled',      {running: false, stalled: true, age_s: 6840}],
-    ['stopped, why', {running: false, why: 'the GPU was full'}],
-    ['up to date',   {running: false, guessed: 5018, coverage: 1}],
-    ['waiting',      {running: false, busy_with: 'RF-DETR'}],
-  ];
-  for (const [what, extra] of STATES) {
-    RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), []),
-             '/api/triage': () => Object.assign({}, BASE,
-                                    {backend: 'siglip'}, extra) };
-    await API.load(); API.trgPoll(); await flush(); await flush();
-    const cls = (byId['trg'].className || '').split(' ');
-    ck(cls.indexOf('line') >= 0,
-       't28: the guesser row lost its layout class while ' + what +
-       ': class="' + byId['trg'].className + '"');
-    ck(cls.indexOf('trg') >= 0,
-       't28: the guesser row lost its own class while ' + what +
-       ': class="' + byId['trg'].className + '"');
-  }
-
-  // ...and the balance row, whose painter has three exits of its own
+  // the balance row's painter has three exits of its own
   for (const [what, bal] of [
       ['no dataset', {ok: false, error: 'nope'}],
       ['short',      {ok: true, have: 1549, want: 1652, pending: 0,
@@ -1429,16 +1680,16 @@ async function t28() {
 }
 
 // ── 29. the chips describe the request that was actually sent ───────────
-// The two views fetch different things. The audit list is fetched with label=
-// and leash= and nothing else, so a guess or a country left set from the queue
-// narrows nothing there. The chip row advertised both anyway and hid the
-// verdict filter -- the one that does apply -- so it explained an empty list
-// with a cause that was not the cause, and offered no way to undo the real one.
+// The two views fetch different things. The audit list is fetched with
+// label=, leash= and period= and nothing else, so a country left set from
+// the queue narrows nothing there. The chip row advertised it anyway and hid
+// the verdict filter -- the one that does apply -- so it explained an empty
+// list with a cause that was not the cause, and offered no way to undo the
+// real one.
 async function t29() {
   const Q = () => ({items: [], reserve: [], page: 0, size: 50, pages: 1,
-      total_unflagged: 100, pool_unfiltered: 100, suggest_ready: true,
-      countries: [{iso: 'JPN', name: 'Japan', n: 9}], country: 'JPN',
-      suggest: 'dog'});
+      total_unflagged: 100, pool_unfiltered: 100,
+      countries: [{iso: 'JPN', name: 'Japan', n: 9}], country: 'JPN'});
   const A = () => ({items: [], page: 0, pages: 1, total: 5,
       pool_unfiltered: 7, n_false_positive: 5, n_true_positive: 2});
   RESP = {'/api/review': Q, '/api/review/annotated': A};
@@ -1446,13 +1697,13 @@ async function t29() {
     if (e.onchange) e.onchange.call(e);
     (e._listeners.change || []).forEach(f => f.call(e)); };
 
-  fire('suggest', 'dog'); await flush(); await flush();
-  ck(/Looks like a dog/.test(byId['chips'].innerHTML),
+  fire('country', 'JPN'); await flush(); await flush();
+  ck(/Japan/.test(byId['chips'].innerHTML),
      't29: a queue filter produced no chip: ' + byId['chips'].innerHTML);
 
   fire('mode', 'audit'); await flush(); await flush();
   const sent = (CALLS.filter(c => /annotated/.test(c.url)).pop() || {}).url;
-  ck(!/Looks like a dog/.test(byId['chips'].innerHTML),
+  ck(!/Japan/.test(byId['chips'].innerHTML),
      't29: the audit view kept a chip for a filter its request does not ' +
      'carry (' + sent + '): ' + byId['chips'].innerHTML);
 
@@ -1473,79 +1724,42 @@ async function t29() {
      't29: clearing the verdict chip did not clear the verdict: ' + after);
 
   fire('mode', 'queue'); await flush(); await flush();
+  fire('country', ''); await flush(); await flush();
 }
 
-// ── 30. nothing narrows the queue without a way to see and undo it ──────
-// The whole point of the chip row. Hiding a control does not unset it: the
-// page hides the guess filter when the gate's own axis covers it, and the
-// value stayed in the request and kept being honoured — so choosing the gate
-// could empty the queue with no chip, no cross, no control on screen and no
-// "narrowed from". The server decides what it applied and echoes it; the page
-// has to adopt that rather than re-send the dropped value.
+// ── 30. a preference outliving its control must not narrow anything ─────
+// The guess feature's keys -- suggest, backend, gatef -- still sit in
+// localStorage on every box that used the old build (the harness seeds
+// them), and the page's very first request is the one restorePrefs feeds.
+// If any of them reaches the wire, a filter with no control, no chip and no
+// cross is narrowing the queue again -- the exact silence the chip row was
+// built to end.
 async function t30() {
-  let asked = '';
-  RESP = { '/api/review': (url) => {
-    asked = url;
-    // the server drops a filter the page is not offering, and says so
-    const sg = /suggest=(\w*)/.exec(url);
-    const applied = (/backend=dogbin/.test(url)) ? '' : (sg ? sg[1] : '');
-    return payload(CROPS.normal.slice(0, 2), [], {
-      suggest: applied, suggest_ready: true, backend: 'siglip',
-      total_unflagged: applied ? 300 : 2206, pool_unfiltered: 2206});
-  }};
-  const fire = (id, v) => { const e = byId[id]; e.value = v;
-    if (e.onchange) e.onchange.call(e);
-    (e._listeners.change || []).forEach(f => f.call(e)); };
-
-  fire('suggest', 'animal'); await flush(); await flush();
-  ck(/suggest=animal/.test(asked) && /Other animal/.test(byId['chips'].innerHTML),
-     't30: a filter the server applied has no chip: ' + byId['chips'].innerHTML);
-
-  // now the server says it did NOT apply it. The page must stop sending it.
-  RESP['/api/review'] = (url) => { asked = url; return payload(
-      CROPS.normal.slice(0, 2), [], {suggest: '', suggest_ready: true,
-      backend: 'dogbin', gate_ready: true, total_unflagged: 2206,
-      pool_unfiltered: 2206}); };
-  await API.load(); await flush(); await flush();
-  await API.load(); await flush(); await flush();
-  ck(/suggest=(&|$)/.test(asked),
-     't30: the page kept sending a filter the server refused: ' + asked);
-  ck(byId['chips'].hidden || !/Other animal/.test(byId['chips'].innerHTML),
-     't30: a chip for a filter that was not applied: ' + byId['chips'].innerHTML);
+  const first = CALLS.find(c => /\/api\/review\?/.test(c.url));
+  ck(!!first, 't30: no initial queue request was recorded');
+  for (const tok of ['suggest=', 'backend=', 'gate='])
+    ck(!first || first.url.indexOf(tok) < 0,
+       't30: the stale ' + tok.slice(0, -1) +
+       ' preference reached the wire: ' + (first || {}).url);
 }
 
 // ── 31. the panel offers no control that does nothing ───────────────────
-// Two ways it did. A group whose every control is hidden rendered as an
-// uppercase heading over an empty row. And the Run button, which used to be
-// hidden by living inside the progress strip, moved into the panel and stayed
-// on screen on a checkout with no guesser at all — showing the markup's raw
-// placeholder, enabled, and clickable, since it reads its own label to decide
-// what to do.
+// A group whose every control is hidden rendered as an uppercase heading
+// over an empty row. The leash group is the one that can still empty out:
+// its select stays hidden until the server sends leash counts.
 async function t31() {
-  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 2), [],
-             {suggest_ready: false, gate_ready: false}),
-           '/api/triage': () => ({ever: false, can_run: false}) };
-  await API.load(); API.trgPoll(); await flush(); await flush();
-  const looks = document.getElementById('ngrpLooks');
-  ck(looks && looks.hidden,
-     't31: a heading with nothing under it');
-  const who = document.getElementById('ngrpWho');
-  ck(who && who.hidden,
-     't31: the guesser controls are offered with no guesser to run');
+  byId['leashf'].hidden = true;          // as the markup ships it
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 2), []) };
+  await API.load(); await flush();
+  const grp = byId['ngrpLeash'];
+  ck(grp && grp.hidden, 't31: a heading with nothing under it');
 
-  // and they come back when there is one
-  RESP['/api/triage'] = () => ({ever: true, can_run: true, pool: 10,
-      guessed: 10, coverage: 1, running: false,
-      backends: [{key: 'siglip', label: 'SigLIP 2', recall: .977, clears: .943}]});
-  API.trgPoll(); await flush(); await flush();
-  ck(!who.hidden, 't31: the guesser group never came back');
-  ck(byId['trgRun'].textContent !== '—',
-     't31: the Run button is still showing its raw placeholder: ' +
-     byId['trgRun'].textContent);
-
-  // a reload must not undo that: two painters own this group
-  await API.load(); await flush(); await flush();
-  ck(!who.hidden, 't31: a queue reload hid the guesser group again');
+  // and it comes back when the store answers
+  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 2), [],
+      {leash_counts: {all: 2, none: 1, leashed: 1, unleashed: 0},
+       leash_totals: {leashed: 1, unleashed: 0}});
+  await API.load(); await flush();
+  ck(grp && !grp.hidden, 't31: the group never came back with its control');
 }
 
 // ── 32. the header stops taking a third of the screen once you scroll ───
@@ -1832,20 +2046,18 @@ async function t37() {
     if (e.onchange) e.onchange.call(e);
     (e._listeners.change || []).forEach(f => f.call(e)); };
   RESP = { '/api/review': () => payload([], [], { total_unflagged: 2716,
-             pool_unfiltered: 2716, pages: 1, suggest_ready: true,
-             suggest: 'dog' }) };
-  fire('suggest', 'dog'); await flush(); await flush();
+             pool_unfiltered: 2716, pages: 1, country: 'JPN',
+             countries: [{iso: 'JPN', name: 'Japan', n: 9}] }) };
+  fire('country', 'JPN'); await flush(); await flush();
   ck(/Nothing matches these filters/.test(byId['state'].innerHTML),
      't37: the filtered empty state says: ' + byId['state'].innerHTML);
   ck(!/Every detection in the pool has been judged/
        .test(byId['state'].innerHTML),
      't37: an empty SLICE still claims the whole pool is judged');
   // and with every filter cleared, the honest clear-queue sentence returns
-  // (the country select still holds t29's Japan; both have to go)
   RESP = { '/api/review': () => payload([], [], { total_unflagged: 0,
              pages: 1 }) };
   fire('country', ''); await flush(); await flush();
-  fire('suggest', ''); await flush(); await flush();
   ck(/Queue is clear/.test(byId['state'].innerHTML),
      't37: the unfiltered empty queue lost its own sentence: ' +
      byId['state'].innerHTML);
@@ -1909,6 +2121,21 @@ def main():
         return 1
     print('ok   compacting the header leaves the open filter panel alone')
 
+    failed = False
+    for name, bad in (('the shared tab strip', tab_strip_checks(html)),
+                      ('the removed guess feature',
+                       guess_absence_checks(html, script)),
+                      ('the annotated-date filter',
+                       period_payload_checks(mod)),
+                      ('the /audit/review routes', route_checks(mod))):
+        for b in bad:
+            print('FAIL %s: %s' % (name, b))
+            failed = True
+        if not bad:
+            print('ok   ' + name)
+    if failed:
+        return 1
+
     fixtures = {
         'normal': [crop(i, conf=round(0.95 - i * 0.05, 2)) for i in range(9)],
         'mixed': [crop(0, full=False), crop(1, full=True), crop(2, full=False),
@@ -1955,7 +2182,7 @@ def main():
         # balanced divs: the nesting differs per group (one carries a
         # <details>), and a regex that assumed otherwise silently dropped the
         # Run button from its group and made a test fail for the wrong reason.
-        groups, owned = {}, []
+        groups = {}
         panel = html.split('<div class="npanel"', 1)[-1]
         parts = re.split(r'<div class="ngrp"', panel)[1:]
         for part in parts:
@@ -1968,13 +2195,9 @@ def main():
                 continue
             groups[gid.group(1)] = re.findall(
                 r'<(?:select|button|input)[^>]*\bid="(\w+)"', part)
-            # a group that owns its own visibility, so trimGroups leaves it be
-            if re.match(r'[^>]*data-own=', part):
-                owned.append(gid.group(1))
         with open(fx, 'w') as f:
             json.dump({'crops': fixtures, 'hidden': sorted(set(hidden)),
-                       'options': opts, 'groups': groups,
-                       'owned': owned}, f)
+                       'options': opts, 'groups': groups}, f)
         with open(run, 'w') as f:
             f.write(HARNESS)
         p = subprocess.run(['node', run, js, fx],

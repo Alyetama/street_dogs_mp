@@ -1750,6 +1750,17 @@ h1 .fl{color:var(--red)}
 .back{color:var(--mut);text-decoration:none;font-size:12.5px;border:1px solid var(--bd);
 border-radius:8px;padding:4px 10px;transition:color .12s,border-color .12s}
 .back:hover{color:var(--acc);border-color:rgba(232,166,69,.35)}
+/* The shared judging strip. One markup, three pages -- this queue and both
+   audits carry it in the same place with the same classes, so moving between
+   the surfaces reads as one product. The rules are the audit pages' own pill
+   vocabulary, byte for byte: two spellings of one strip is how the surfaces
+   drift apart. */
+.jtabs{display:inline-flex;gap:2px;padding:2px;margin:0 0 14px;
+  border:1px solid var(--bd);border-radius:10px}
+.jtab{font-size:12px;color:var(--dim);text-decoration:none;padding:5px 11px;
+  border-radius:8px}
+.jtab:hover{color:var(--tx)}
+.jtab.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
 /* The headline and the tally are different KINDS of number, so they are set
    as different kinds: one is what is left to do, the rest are what has been
    done. Ranking them by size in one row made six numbers of similar weight
@@ -1832,15 +1843,6 @@ cursor:pointer;font-family:inherit;font-variant-numeric:tabular-nums;transition:
    came out as a thin squiggle riding high above the label. A stroked icon
    takes its weight from stroke-width and its position from the flex row. */
 .bico{width:14px;height:14px;flex:none}
-/* The model's guess. Dashed, lower-case, and in nobody's verdict colour --
-   a reader must never mistake it for something that was decided. */
-.sg{flex:none;max-width:46%;overflow:hidden;text-overflow:ellipsis;
-white-space:nowrap;font-size:10px;line-height:1.6;padding:0 5px;
-border-radius:4px;border:1px dashed rgba(130,140,150,.42);
-color:var(--mut);pointer-events:auto}
-.sg-dog{border-color:rgba(232,166,69,.55);color:#e8b877}
-.sg-animal{border-color:rgba(110,180,150,.5);color:#8fd0b4}
-.sg-object{border-color:rgba(130,140,150,.45);color:var(--dim)}
 .rbtn:hover{background:rgba(232,166,69,.23)}
 .rbtn[disabled]{opacity:.35;cursor:default;background:rgba(130,140,150,.08);
 border-color:var(--bd);color:var(--dim)}
@@ -1881,27 +1883,23 @@ flex-wrap:wrap;gap:6px 14px;align-items:center;max-width:1180px}
 .hint{color:var(--dim);font-size:11.5px;padding-bottom:14px;display:flex;
 flex-wrap:wrap;gap:6px 14px;align-items:center}
 /* ── balance strip: one bar, two lines, no card chrome ── */
-/* ── the two progress lines ───────────────────────────────────────────────
-   Your progress, and the guesser's. They had a full-width strip each, with
-   their own bar, dot, legend and 27px number -- four times the volume for two
-   numbers, in a block that is supposed to recede behind the crops. Each is
-   now one line of the same caption type, with a hairline track sharing the
-   row rather than owning it. */
+/* ── the progress line ────────────────────────────────────────────────────
+   Your progress. It had a full-width strip, with its own bar, dot, legend
+   and 27px number -- four times the volume for one number, in a block that
+   is supposed to recede behind the crops. It is now one line of the caption
+   type, with a hairline track sharing the row rather than owning it. */
 .lines{display:grid;gap:2px;padding:10px 0 0}
-/* A FIXED height. The guesser's sub-line grows and shrinks every five
-   seconds while a pass runs -- "Not running" one poll, "176 of 2,864 this
-   pass · 39.2/s" the next -- and with a row free to wrap, the header changed
-   height under the reader and shoved the grid down the page on a timer. */
+/* A FIXED height. The sub-line's text changes length as verdicts land, and
+   with a row free to wrap, the header changed height under the reader and
+   shoved the grid down the page. */
 .line{display:flex;align-items:center;gap:10px;margin:0;padding:5px 0;
 min-height:22px;
 font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
 .line[hidden]{display:none}
 .line b{color:var(--tx);font-weight:640;flex:none}
-/* shrinkable, and allowed to break: the longest sub this row produces is
-   the "<other guesser> is guessing now · they share the card · N crops have
-   no guess from this one" branch, and at flex:none its base size is its
-   max-content width -- 492px, which pushed the sticky header wider than the
-   viewport and gave the whole page a horizontal scrollbar below ~510px. */
+/* shrinkable, and allowed to break: at flex:none the sub's base size is its
+   max-content width, which pushed the sticky header wider than the viewport
+   and gave the whole page a horizontal scrollbar below ~510px. */
 .line .lsub{color:var(--dim);flex:0 1 auto;min-width:0;
 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .line .lend{flex:none;color:var(--mut)}
@@ -1911,11 +1909,6 @@ background:rgba(130,140,150,.18);overflow:hidden;display:block}
 transition:width .45s ease}
 #bal.ok b{color:var(--green)}
 #bal.ok .track i{background:var(--green)}
-#trg .track i{background:var(--acc)}
-/* the guesser's own line: dimmer still, because it is a colleague's progress
-   rather than yours */
-.line.trg{color:var(--dim)}
-.line.trg b{color:var(--mut);font-weight:600}
 /* the track drops to its own row on a phone; the text still elides
    rather than wrapping, so the row keeps one height everywhere */
 @media(max-width:700px){.line{flex-wrap:wrap}
@@ -1997,17 +1990,17 @@ font-size:10px;color:var(--green);letter-spacing:.04em;margin-bottom:-2px}
 .card.unjudged{opacity:.62}
 .card.unjudged .meta::after{content:'no verdict';margin-left:auto;
 font-size:10px;color:var(--dim)}
-/* The audit list is fetched with label= and leash= and nothing else, so
-   a group that narrows only the queue would be a control that does
+/* The audit list is fetched with label=, leash= and period= and nothing
+   else, so a group that narrows only the queue would be a control that does
    nothing here. #find is one of them: loadAudit never sends the term, so
    the search box sat visible and accepted input that changed nothing --
    while quietly saving the term to prefs, to reorder the queue later as a
-   surprise. Hidden the way the country and gate controls are. */
-body.auditing #ngrpLooks,body.auditing #ngrpWhere,
+   surprise. Hidden the way the country control is. */
+body.auditing #ngrpWhere,
 body.auditing #country,body.auditing #unkeep,
 body.auditing #find,body.auditing #findmsg{display:none}
-#verdict{display:none}
-body.auditing #verdict{display:inline-block}
+#verdict,#period{display:none}
+body.auditing #verdict,body.auditing #period{display:inline-block}
 /* The leash row. In THIS stylesheet for the reason the comment above gives:
    /review is its own document, and these rules in the dashboard's block
    styled nothing -- the buttons rendered as browser defaults. A second axis,
@@ -2117,43 +2110,6 @@ background:rgba(67,181,129,.14)}
 .lbyes:hover{background:rgba(67,181,129,.24)}
 @media(max-width:560px){.score{margin-left:0;width:100%}.grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
-/* crop-suggestion run progress: this filter lives on THIS page, so its
-   progress does too. Was on the main dashboard, which is not where anyone
-   sorting the queue is looking. */
-.trgdot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
-.trg.on .trgdot{background:var(--green);animation:trgpulse 1.6s ease-in-out infinite}
-.trg.warn .trgdot{background:var(--acc)}
-@keyframes trgpulse{0%,100%{opacity:1}50%{opacity:.35}}
-@media(prefers-reduced-motion:reduce){.trg.on .trgdot{animation:none}}
-.trgbtn{flex:none;appearance:none;background:transparent;color:var(--mut);
-border:1px solid var(--bd);border-radius:999px;padding:4px 13px;font-size:11.5px;
-font-family:inherit;cursor:pointer;transition:color .12s,border-color .12s}
-.trgbtn:hover:not(:disabled){color:var(--tx);border-color:var(--dim)}
-.trgbtn:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
-.trgbtn:disabled{opacity:.5;cursor:default}
-.trgerr{flex-basis:100%;font-size:11px;color:var(--red);margin-top:6px}
-#trgModel{flex:none;appearance:none;background:transparent;color:var(--mut);
-border:1px solid var(--bd);border-radius:999px;padding:4px 10px;
-font-size:11.5px;font-family:inherit;cursor:pointer}
-#trgModel:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
-#trgModel[hidden]{display:none}
-/* What the dropdown's percentage means, and what the chosen guesser is for.
-   Under the strip, where it is read before the Run button rather than inside
-   a title attribute nobody hovers. Folded: the summary is the answer, the
-   body is the working. */
-.trgnote{margin:-4px 0 12px;font-size:11px;line-height:1.55;color:var(--dim);
-max-width:74ch}
-.trgnote[hidden]{display:none}
-.trgnote>summary{cursor:pointer;list-style:none;color:var(--mut);
-padding:2px 0;transition:color .12s}
-.trgnote>summary::-webkit-details-marker{display:none}
-.trgnote>summary::before{content:"\203a";display:inline-block;width:12px;
-color:var(--dim);transition:transform .15s}
-.trgnote[open]>summary::before{transform:rotate(90deg)}
-.trgnote>summary:hover{color:var(--tx)}
-.trgnote>summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
-.trgnote p{margin:7px 0 0 12px}
-.trgnote p[hidden]{display:none}
 </style></head><body><div class="wrap">
 
 <!-- Scrolled past this, you are working rather than setting up, and the
@@ -2213,7 +2169,7 @@ color:var(--dim);transition:transform .15s}
          it is reached constantly. -->
     <input id="find" type="search" list="findterms" hidden autocomplete="off"
            placeholder="find crops of&hellip;"
-           title="type what you are looking for and the queue is reordered to bring it to the front — the same model that guesses the buckets, asked a different way">
+           title="type what you are looking for and the queue is reordered to bring it to the front">
     <datalist id="findterms"></datalist>
     <!-- A view switch, not a filter: it changes what the page IS. Set apart
          from the narrowing controls for that reason. -->
@@ -2230,9 +2186,21 @@ color:var(--dim);transition:transform .15s}
       <option value="false_positive">Only &ldquo;not a dog&rdquo;</option>
       <option value="true_positive">Only &ldquo;is a dog&rdquo;</option>
     </select>
+    <!-- WHEN it was judged, the audit view's other filter. The ledger rows
+         carry flagged_at, so this is a filter over the record -- applied in
+         the server's annotated_payload(), because a hide on the client would
+         leave the page counts describing rows nobody can see. The words are
+         the audit pages' own, so the judging surfaces speak one language. -->
+    <select id="period"
+            title="filters by when you judged; &#8216;today&#8217; is the server&#8217;s local day, not your browser&#8217;s">
+      <option value="">any time</option>
+      <option value="today">today</option>
+      <option value="7d">last 7 days</option>
+      <option value="30d">last 30 days</option>
+    </select>
     <button type="button" class="nbtn" id="narrow" aria-expanded="false"
             aria-controls="npanel"
-            title="filters, sorting, and the guesser that fills them">Filter<span class="ncar" aria-hidden="true">&#8250;</span></button>
+            title="filters and sorting">Filter<span class="ncar" aria-hidden="true">&#8250;</span></button>
   </div>
 
   <!-- Says out loud when the search cannot work. A search that quietly
@@ -2245,30 +2213,11 @@ color:var(--dim);transition:transform .15s}
   <div class="chips" id="chips" hidden></div>
 
   <!-- The controls, grouped by the QUESTION each answers rather than by what
-       kind of widget it is. That grouping is the fix: "Any guess" and "50 per
+       kind of widget it is. That grouping is the fix: two filters and "50 per
        page" sat adjacent and identical, and one narrows the work while the
        other is a preference nobody sets twice. -->
   <div class="npanel" id="npanel" hidden>
-    <div class="ngrp" id="ngrpLooks">
-      <span class="nlab">What it looks like</span>
-      <div class="nrow">
-        <!-- A MODEL'S GUESS, and labelled as one. It sorts the queue so a
-             reviewer can work through one kind of mistake at a time; it is
-             never written to a ledger and never becomes a label. -->
-        <select id="suggest" title="narrow by what the selected guesser thinks each crop is — a guess to sort by, never a label" hidden>
-          <option value="">Any guess</option>
-          <option value="dog">Looks like a dog</option>
-          <option value="animal">Other animal</option>
-          <option value="object">Not an animal</option>
-          <option value="none">No guess yet</option>
-        </select>
-        <!-- The dog-bin gate on its own axis: it answers the question the
-             REVIEWER is answering, where the guess filter answers what kind
-             of thing it is. -->
-        <select id="gatef" title="narrow by the trained dog/not-dog gate's verdict — its own axis, and always this model whatever the guesser below is set to" hidden></select>
-      </div>
-    </div>
-    <div class="ngrp">
+    <div class="ngrp" id="ngrpLeash">
       <span class="nlab">On a leash</span>
       <div class="nrow">
         <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
@@ -2305,40 +2254,17 @@ color:var(--dim);transition:transform .15s}
         <button class="rbtn danger" id="unkeep" title="put every crop you already judged a dog back into the queue"><svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Restore kept</button>
       </div>
     </div>
-    <!-- data-own: the guesser strip decides whether this group is worth
-         showing, from whether there is a guesser at all. trimGroups()
-         must not also decide it from whether its controls are visible --
-         the Run button never hides, so the two answers differ. -->
-    <div class="ngrp" id="ngrpWho" data-own="1">
-      <span class="nlab">Guesses by</span>
-      <div class="nrow">
-        <select id="trgModel" hidden title="which model's guesses the filter above shows, and which one Run starts"></select>
-        <button type="button" class="trgbtn" id="trgRun">&mdash;</button>
-      </div>
-      <details class="trgnote" id="trgNote" hidden>
-        <summary id="trgNoteSum"></summary>
-        <p id="trgNoteBasis"></p>
-        <p id="trgNoteCaveat"></p>
-        <p id="trgNoteWhich"></p>
-      </details>
-    </div>
   </div>
 
-  <!-- The page's own progress, and the guesser's, on one quiet line each.
-       Two full-width strips with their own bars, dots and legends said the
-       same two numbers at four times the volume. -->
+  <!-- The page's own progress, one quiet line. A full-width strip with its
+       own bar, dot and legend said the same number at four times the
+       volume. -->
   <div class="lines">
     <p class="line" id="bal" hidden>
       <b id="balNum">&mdash;</b><span id="balNumU">crops left to judge</span>
       <i class="track"><i id="balFill"></i></i>
       <span class="lend" id="balLeft"></span>
       <span class="lsub" id="balMain"></span>
-    </p>
-    <p class="line trg" id="trg" hidden>
-      <span class="trgdot" id="trgDot"></span>
-      <b id="trgState">&mdash;</b><span class="lsub" id="trgSub"></span>
-      <i class="track"><i id="trgFill"></i></i>
-      <span class="lend" id="trgPct"></span>
     </p>
   </div>
 
@@ -2348,6 +2274,13 @@ color:var(--dim);transition:transform .15s}
   </div>
 </header>
 
+<nav class="jtabs" aria-label="judging surfaces"><a href="/audit/review" class="jtab on" aria-current="page">Review queue</a><a href="/audit/gate" class="jtab">Dog-bin audit</a><a href="/audit/leash" class="jtab">Leash audit</a></nav>
+<!-- ^ the shared tab strip, one contract across every judging page:
+     identical markup on this queue and both audits, with 'jtab on' (and the
+     current-page mark) on the page being read, and nothing between it and
+     the header. audit.py renders the same line on the audit pages, and
+     adv_fn_audit's tab_checks pins it byte for byte -- so any change here
+     must land there too, or the surfaces stop matching. -->
 
 <!-- The legend is a lesson, and a lesson stops being one after the first
      day. It kept two full lines of the viewport permanently to teach four
@@ -2384,11 +2317,7 @@ __COPY_JS__
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',suggest='',leashf='all',find='',gatef='all',loading=false,
-    /* Which guesser the guess filter is reading. Page scope, not inside the
-       progress strip's closure: the queue request needs it too, and the two
-       must never disagree about whose opinions are on screen. */
-    BACKEND='siglip',
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',period='',leashf='all',find='',loading=false,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 /* leash verdicts for what is on screen, and whether the store exists at all.
    LEASH_ON stays false on a checkout without the tool, and the two buttons
@@ -2492,16 +2421,19 @@ function paintFind(j){
     : st==='cold'
     /* Both numbers. 'cold' means nothing in THIS view is searchable, which is
        not the same as nothing being embedded at all -- a country or leash
-       filter can select a slice the guesser has not reached. Naming only the
-       pool size told a reviewer to start a guesser that was already running
-       and had covered most of the pool. */
+       filter can select a slice the embedder has not reached. Naming only the
+       pool size sent a reviewer chasing an embedder that was already running
+       and had covered most of the pool. The embedder is named as the tool it
+       is: the control that used to start it from this page is gone. */
     ? (cov[0] ? n(cov[0])+' of '+n(cov[1])+' crops are embedded, but none in '+
-                'this view — clear a filter, or let the guesser catch up'
+                'this view — clear a filter, or wait for the embedder to '+
+                'catch up'
               : 'none of the '+n(cov[1])+' crops in the queue have been '+
-                'embedded yet — start the guesser above and it embeds as it '+
-                'works')
+                'embedded yet — tools/detect/triage_crops.py embeds them as '+
+                'it runs')
     : st==='novectors'
-    ? 'no crops have been embedded yet — start the guesser above'
+    ? 'no crops have been embedded yet — run tools/detect/triage_crops.py '+
+      'to embed them'
     : st==='mismatch'
     ? 'the crops were embedded with a different model — re-encoding the search '+
       'words to match, try again in a moment'
@@ -2527,19 +2459,18 @@ function optText(el,strip){
 }
 /* `where` is which VIEW each filter actually narrows, and it is not
    decoration: the two views send different requests. The audit list is
-   fetched with label= and leash= and nothing else, so a guess or a country
+   fetched with label=, leash= and period= and nothing else, so a country
    left set from the queue narrows nothing there -- and the chip row was
-   advertising both while hiding the verdict filter, the one that does apply.
+   advertising it while hiding the verdict filter, the one that does apply.
    A chip that names a filter the request never carried is worse than no chip:
    it explains an empty list with a cause that is not the cause. */
 var FILTERS=[
-  {id:'suggest', off:'',    where:'queue', strip:1},
-  {id:'gatef',   off:'all', where:'queue', strip:1},
   {id:'country', off:'',    where:'queue', strip:1},
   {id:'leashf',  off:'all', where:'both', strip:1},
   /* shown and hidden by CSS on body.auditing rather than by the hidden
-     attribute, so its availability is the view, not el.hidden */
-  {id:'verdict', off:'all', where:'audit', css:1}
+     attribute, so their availability is the view, not el.hidden */
+  {id:'verdict', off:'all', where:'audit', css:1},
+  {id:'period',  off:'',    where:'audit', css:1}
 ];
 function activeFilters(){
   var out=[];
@@ -2588,26 +2519,6 @@ function paintChips(){
       '<button type="button" class="chipx" data-f="'+att(a.id)+
       '" title="'+att('clear '+a.text)+'" aria-label="'+
       att('clear '+a.text)+'">×</button></span>'}).join('');
-}
-function paintGate(j){
-  var el=$('gatef');if(!el)return;
-  /* only once the gate has verdicts over this queue: a dropdown that filters
-     nothing is worse than no dropdown */
-  if(!j.gate_ready){el.hidden=true;return;}
-  el.hidden=false;
-  var c=j.gate_counts||{},who=j.gate_label||'Gate';
-  var L=[['all',who+': any',null],
-         ['dog','Gate says dog','dog'],
-         ['not_dog','Gate says not a dog','not_dog'],
-         ['none','No gate verdict','none']];
-  var html='';
-  for(var i=0;i<L.length;i++){
-    var k=L[i][2],n2=(k===null)?null:(c[k]||0);
-    html+='<option value="'+att(L[i][0])+'">'+esc(L[i][1])+
-      (n2===null?'':' ('+n(n2)+')')+'</option>';
-  }
-  el.innerHTML=html;
-  el.value=j.gate||'all';
 }
 function paintLeashOptions(counts){
   var sel=$('leashf');
@@ -2680,7 +2591,8 @@ function loadAudit(){
   skeleton();
   return fetch('/api/review/annotated?page='+page+'&size='+size+
                '&sort='+auditSort()+'&label='+encodeURIComponent(verdict)+
-               '&leash='+encodeURIComponent(leashf))
+               '&leash='+encodeURIComponent(leashf)+
+               '&period='+encodeURIComponent(period))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
     if(my!==reqSeq)return;          /* superseded before it landed */
@@ -2692,11 +2604,15 @@ function loadAudit(){
     if(j.leash_counts)paintLeashOptions(j.leash_counts);
     var only=verdict==='false_positive'?' marked not a dog':
              verdict==='true_positive'?' marked a dog':' annotated';
+    /* "nothing annotated yet" is only true with nothing narrowing the list:
+       under a verdict or a period filter the honest sentence is about the
+       slice, or an empty week reads as an empty ledger */
     var lab=items.length?
       (n(items.length)+' shown \u00b7 '+n(j.total)+only+
        (verdict==='all'?' \u00b7 '+n(j.n_false_positive)+' not a dog, '+
         n(j.n_true_positive)+' a dog':'')):
-      (verdict==='all'?'nothing annotated yet':'none with that verdict');
+      (verdict!=='all'?'none with that verdict':
+       period?'none judged in this period':'nothing annotated yet');
     $('pg').textContent=lab;$('pg2').textContent=lab;
     $('next').disabled=$('next2').disabled=page>=pages-1;
     $('foot').hidden=pages<=1;
@@ -2722,11 +2638,8 @@ function load(){
   /* returns the promise: callers (and the test harness) can await a settled
      grid instead of guessing at microtask depth */
   return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort+
-    '&suggest='+encodeURIComponent(suggest)+
     '&leash='+encodeURIComponent(leashf)+
-    '&gate='+encodeURIComponent(gatef)+
     '&find='+encodeURIComponent(find)+
-    '&backend='+encodeURIComponent(BACKEND)+
                '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
@@ -2744,8 +2657,6 @@ function load(){
     if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
     if(j.leash_counts)paintLeashOptions(j.leash_counts);
     paintCountries(j.countries,j.country,j.country_coverage);
-    paintSuggest(j);
-    paintGate(j);
     paintChips();
     paintCap(j);
     trimGroups();
@@ -2933,18 +2844,11 @@ function tile(c){
       encodeURIComponent(c.name)+'" '+
       "onerror=\"this.onerror=null;this.src='"+hqURL+"'\">"+
     '<div class="rail"><i style="width:'+pc+'%"></i></div>'+
-    /* One caption line, contact-sheet style: frame slug, the model's guess,
-       exposure. The guess used to be a chip pinned over the top-left of the
-       photograph -- covering the only thing on the card worth looking at, and
-       on a queue where most guesses read "nothing" it covered it for nothing.
-       Dotted and muted here so it still never reads as a verdict. */
+    /* One caption line, contact-sheet style: frame slug and exposure.
+       Anything more used to ride over the top-left of the photograph --
+       covering the only thing on the card worth looking at. */
     '<div class="meta"><span class="id" title="'+att(c.image_id)+'">'+esc(c.image_id)+
       '</span>'+
-      (c.sg?'<span class="sg sg-'+c.sg+'" title="'+att('a general-purpose image '+
-        'model guessed '+(c.sgl||c.sg)+((c.sgp!=null)?' ('+Math.round(c.sgp*100)+
-        '% of its confidence on '+SG_WORD[c.sg]+')':'')+
-        '. A suggestion for sorting the queue — not a label, and not recorded.')+
-      '">'+esc(c.sgl||SG_WORD[c.sg])+'</span>':'')+
       '<span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
     '<div class="actwrap">'+
     '<div class="acts">'+
@@ -3740,7 +3644,6 @@ $('unkeep').onclick=function(){
    options on the way back in, so a stale value left by an older build -- or
    anything else that ends up in storage -- cannot put the page into a sort
    the server does not know. */
-var SG_WORD={dog:'a dog',animal:'an animal',object:'not an animal'};
 var ICO_REFRESH='<svg class="bico" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
 var SORT_KEY='sdReviewSort';          /* the older single-key store */
 var PREFS_KEY='sdReview';
@@ -3769,17 +3672,16 @@ function restoreSel(id,val){
   return null;
 }
 function restorePrefs(){
+  /* keys from removed features (suggest, backend, gatef) may still sit in
+     the stored object; nothing reads them, so a stale preference cannot put
+     a control-less filter back into any request */
   var o=loadPrefs(),v;
   if((v=restoreSel('sort',o.sort))!==null)sort=v;
   if((v=restoreSel('size',o.size))!==null)size=parseInt(v,10)||size;
   if((v=restoreSel('verdict',o.verdict))!==null)verdict=v;
-  /* the options are rebuilt from the response, like country's, so the value
-     rides along in the first request instead of being matched now */
-  if(o.suggest)suggest=o.suggest;
+  if((v=restoreSel('period',o.period))!==null)period=v;
   if((v=restoreSel('leashf',o.leashf))!==null)leashf=v;
   if(typeof o.find==='string'){find=o.find;if($('find'))$('find').value=find;}
-  if(typeof o.backend==='string'&&o.backend)BACKEND=o.backend;
-  if(typeof o.gatef==='string'&&o.gatef)gatef=o.gatef;
   if(o.npanel&&$('npanel')){$('npanel').hidden=false;
     if($('narrow')){$('narrow').classList.add('on');
       $('narrow').setAttribute('aria-expanded','true');}}
@@ -3847,10 +3749,6 @@ function paintCountries(list,cur,cov){
   if(cur!=null)$('country').value=cur;
 }
 var countryHealed=false;
-/* Only offered once the triage tool has produced predictions: an empty
-   dropdown that silently filters nothing is worse than no dropdown. Counts
-   come from the server, tallied on the post-collapse queue, so each option
-   promises exactly what it delivers. */
 /* A group whose every control is hidden is a heading over nothing: an
    uppercase label and 29px of panel naming a category that offers no choice.
    The flat row it replaced left no trace when its selects were hidden. */
@@ -3860,48 +3758,9 @@ function trimGroups(){
     var g=gs[i],row=g.querySelector('.nrow'),live=0;
     if(!row)continue;
     for(var k=0;k<row.children.length;k++)if(!row.children[k].hidden)live++;
-    /* a group with an owner decides for itself; see data-own in the markup */
-    if(!g.dataset.own)g.hidden=!live;
+    g.hidden=!live;
   }
 }
-function paintSuggest(j){
-  var el=$('suggest');if(!el)return;
-  /* The server is the authority on what it applied. It drops a guess filter
-     whose bucket the chosen guesser cannot produce, and the page has to adopt
-     that or it re-sends the dropped value forever -- which is how a hidden
-     control went on emptying the queue across reloads, the preference
-     outliving every surface that could show or clear it. */
-  if(typeof j.suggest==='string'&&j.suggest!==suggest){
-    suggest=j.suggest;savePref('suggest',suggest);
-  }
-  /* The gate has its own control, so it must not also appear here: two
-     dropdowns filtering by one model's verdict is a choice the reader has to
-     work out is not a choice. Selecting it in the toggle still runs it and
-     still shows its coverage — that is what the toggle is for. */
-  if(j.backend==='dogbin'&&j.gate_ready){el.hidden=true;return;}
-  if(!j.suggest_ready){el.hidden=true;return;}
-  el.hidden=false;
-  /* The options are the chosen guesser's own vocabulary, sent with the
-     payload. Hard-coding three buckets here offered the dog-bin gate an
-     "Other animal" filter it can never fill, and hid the "Not a dog" one it
-     answers with. */
-  var c=j.suggest_counts||{},L=[['','Any guess',null]];
-  var bk=j.buckets||[{key:'dog',label:'Looks like a dog'},
-                     {key:'animal',label:'Other animal'},
-                     {key:'object',label:'Not an animal'}];
-  for(var b=0;b<bk.length;b++)L.push([bk[b].key,bk[b].label,bk[b].key]);
-  L.push(['none','No guess yet','none']);
-  var html='';
-  for(var i=0;i<L.length;i++){
-    var k=L[i][2],n2=(k===null)?null:(c[k]||0);
-    html+='<option value="'+att(L[i][0])+'">'+esc(L[i][1])+
-      (n2===null?'':' ('+n(n2)+')')+'</option>';
-  }
-  el.innerHTML=html;
-  el.value=j.suggest||'';
-}
-$('suggest').onchange=function(){var v=this.value;
-  savePref('suggest',v);suggest=v;page=0;sel=-1;load()};
 $('country').onchange=function(){var v=this.value;
   savePref('country',v);country=v;page=0;sel=-1;load()};
 /* Switching mode does NOT bank the screen, for the same reason the other view
@@ -3970,9 +3829,6 @@ if($('chips'))$('chips').addEventListener('click',function(e){
   if(el.onchange)el.onchange.call(el);
   else{page=0;sel=-1;load();}
 });
-if($('gatef'))$('gatef').onchange=function(){
-  gatef=this.value;savePref('gatef',gatef);page=0;sel=-1;load();
-};
 if($('leashf'))$('leashf').onchange=function(){
   leashf=this.value;savePref('leashf',leashf);page=0;sel=-1;load();
 };
@@ -3986,243 +3842,17 @@ $('mode').onchange=function(){
    the next load drops it. */
 $('verdict').onchange=function(){verdict=this.value;
   savePref('verdict',verdict);page=0;sel=-1;load()};
+$('period').onchange=function(){period=this.value;
+  savePref('period',period);page=0;sel=-1;load()};
 restorePrefs();
 load();loadBal();
-/* ── crop-suggestion run progress ── polls /api/triage while the tab is
-   visible. No fold to gate on here (unlike the dashboard's sweep panel), so
-   it just runs whenever the page is shown. Hidden until a run exists. */
-(function(){
-  var el=document.getElementById('trg');
-  if(!el)return;
-  function setPara(id,text){
-    var el=$(id); if(!el)return;
-    el.textContent=text||''; el.hidden=!text;
-  }
-  function paintBackends(j){
-    var sel=$('trgModel'), note=$('trgNote'), list=(j&&j.backends)||[];
-    if(!sel)return;
-    /* one guesser is not a choice, so do not draw a control that offers one */
-    sel.hidden=list.length<2;
-    if(sel.hidden){if(note)note.hidden=true;return;}
-    var want=list.map(function(b){
-      return b.key+'|'+b.label+'|'+b.recall}).join(',');
-    /* rebuilt only when the offer itself changes: this repaints every 5s and
-       an unconditional innerHTML would close the dropdown under the pointer */
-    if(sel.dataset.sig!==want){
-      sel.dataset.sig=want;
-      sel.innerHTML=list.map(function(b){
-        /* BOTH numbers. One alone is not a claim: a guesser that called
-           everything a dog would read 100% here. The set they came from is
-           the fold below — an <option> cannot hold a sentence. */
-        var pct=b.recall==null?'':' · finds '+Math.round(b.recall*100)+
-                '%, clears '+Math.round((b.clears||0)*100)+'%';
-        return '<option value="'+esc(b.key)+'">'+esc(b.label)+pct+
-               '</option>'}).join('');
-    }
-    if(sel.value!==BACKEND)sel.value=BACKEND;
-    var cur=list.filter(function(b){return b.key===BACKEND})[0];
-    if(note){
-      note.hidden=!cur;
-      if(cur){
-        /* The summary answers the question the dropdown raises — 75% of
-           WHICH dogs — in one line. Everything else waits behind the fold. */
-        var pct=cur.recall==null?'':Math.round(cur.recall*100)+'%';
-        $('trgNoteSum').textContent=pct
-          ? cur.label+' finds '+pct+' of the dogs in a fixed test set, and '+
-            'clears '+Math.round((cur.clears||0)*100)+'% of the not-dogs — '+
-            'what that means'
-          : 'about '+cur.label;
-        /* Set through a helper that tolerates an absent node. paint() runs
-           inside a promise chain, so a throw here is swallowed and the strip
-           simply stops repainting -- the whole of it, not just the legend.
-           One missing paragraph is not worth the progress bar. */
-        setPara('trgNoteBasis',j.recall_basis);
-        setPara('trgNoteCaveat',j.recall_caveat);
-        setPara('trgNoteWhich',cur.note);
-      }
-    }
-  }
-  function paint(j){
-    /* shown once a run has happened OR once one could be started -- the
-       button lives in here, so hiding it on an empty file left no way back */
-    /* The controls moved out of this row into the panel, and the only thing
-       that ever hid them was being inside it. On a checkout with no guesser
-       at all the row correctly disappears and this returns -- leaving a Run
-       button on screen showing the markup's raw placeholder, enabled, and
-       clickable: it reads its own label to decide direction, so the dash was
-       treated as "start". The group goes with the row. */
-    var who=$('ngrpWho');
-    if(!j||(!j.ever&&!j.can_run)){
-      el.hidden=true;if(who)who.hidden=true;return;
-    }
-    el.hidden=false;if(who)who.hidden=false;
-    paintBackends(j);
-    var running=!!j.running, cov=Math.round((j.coverage||0)*100),
-        gap=Math.max(0,(j.pool||0)-(j.guessed||0)), state, sub='';
-    /* 'line trg' is the base: the strip became one of the two caption lines,
-       and rewriting className wholesale used to drop the class that gives it
-       its type and layout */
-    el.className='line trg'+(running?' on':(j.stalled?' warn':''));
-    if(j.starting){
-      /* spawned, but the model is still loading and it has not written a
-         count yet; "0 of 0" would read as nothing to do */
-      state='Starting the guesser';
-      sub='loading the model';
-    }else if(running&&j.total&&(j.done||0)>=j.total){
-      /* the pass finished and it is sleeping until the next look -- saying
-         "Guessing crops" through that is the same lie as saying "stopped" */
-      state='Watching for new crops';
-      sub='last pass did '+(j.total||0).toLocaleString()+
-          (j.watch?' \u00b7 looks again every '+j.watch+'s':'');
-    }else if(running&&j.total){
-      state='Guessing crops';
-      sub=(j.done||0).toLocaleString()+' of '+(j.total||0).toLocaleString()+
-          ' this pass'+(j.rate?' \u00b7 '+j.rate+'/s':'');
-    }else if(running){
-      state='Watching for new crops';
-      sub='nothing waiting'+(j.watch?' \u00b7 rechecks every '+j.watch+'s':'');
-    }else if(j.stalled){
-      state='Run stopped';
-      sub='no progress for '+Math.round((j.age_s||0)/60)+' min';
-    }else if(gap>0&&j.why){
-      /* it stopped for a reason it left behind -- name it, because "not
-         running" alone sends the reader to look at the dashboard */
-      state='Guessing stopped';
-      sub=j.why+' \u00b7 '+gap.toLocaleString()+' crop'+(gap===1?'':'s')+
-          ' still have no guess';
-      el.className='line trg warn';
-    }else if(j.busy_with){
-      /* the OTHER guesser has the card. Saying "Not running" here is true and
-         useless: it invites a Run press that can only be refused. */
-      state='Waiting for '+j.busy_with;
-      sub=j.busy_with+' is guessing now · they share the card'+
-          (gap>0?' · '+gap.toLocaleString()+' crop'+(gap===1?'':'s')+
-                 ' have no guess from this one':'');
-    }else if(gap>0){
-      /* no run active says nothing about coverage: do not claim "up to date"
-         while the queue is only partly guessed */
-      state='Not running';
-      sub=gap.toLocaleString()+' crop'+(gap===1?'':'s')+' have no guess yet';
-      el.className='line trg warn';
-    }else if(!j.ever){
-      state='No guesses yet';
-      sub=(j.pool||0).toLocaleString()+' crops in the queue';
-    }else{
-      state='Guesses up to date';
-      sub=j.model?j.model.split('/').pop():'';
-    }
-    $('trgState').textContent=state;
-    $('trgSub').textContent=sub;
-    /* the percentage alone. "3,385 crops have no guess yet" and "1,633 of
-       5,018 crops guessed" are the same fact twice, and they sat either side
-       of the bar that is a third telling of it. The counts move to the hover,
-       where a breakdown belongs. */
-    $('trgPct').textContent=cov+'%';
-    el.title=(j.guessed||0).toLocaleString()+' of '+
-      (j.pool||0).toLocaleString()+' crops in the queue have a guess from '+
-      (j.model?String(j.model).split('/').pop():'this model')+'.';
-    $('trgFill').style.width=cov+'%';
-    /* the button reflects what the run IS doing, so the label is the action
-       it would take -- not the state it is in */
-    var btn=$('trgRun');
-    /* `dataset.busy`, not `disabled`: the guard means "a click of mine is in
-       flight, do not overwrite its label", and now that paint() also disables
-       the button for the other guesser, reading disabled would latch it off
-       forever. */
-    if(btn&&btn.dataset.busy!=='1'){
-      btn.textContent=running?'Pause':'Run guesses';
-      btn.title=running
-        ?'Stop guessing. Everything already guessed is kept.'
-        :'Guess the crops that have none yet, then watch for new ones.';
-      /* Pressing it while the other guesser holds the card can only be
-         refused, so do not offer the press. Not hidden -- a control that
-         vanishes reads as a broken page -- just plainly unavailable. */
-      var blocked=!running&&!!j.busy_with;
-      btn.disabled=blocked;
-      if(blocked)btn.title='Pause '+j.busy_with+' first — the two guessers '+
-                           'share the card.';
-    }
-  }
-  /* Bumped whenever the run is started or stopped. A poll issued BEFORE an
-     action can land after it and repaint the state the action just changed,
-     which showed "Not running" for a few seconds under a button already
-     reading Pause. Responses from an older generation are dropped. */
-  var gen=0;
-  function poll(){
-    if(document.hidden)return;
-    var mine=gen;
-    /* catch is for a dropped request only, never a bug in paint() */
-    fetch('/api/triage?backend='+encodeURIComponent(BACKEND))
-      .then(function(r){return r.json()})
-      .catch(function(){return null})
-      .then(function(j){if(j&&mine===gen)paint(j)});
-  }
-  poll(); setInterval(poll,5000);
-  document.addEventListener('visibilitychange',function(){if(!document.hidden)poll()});
-  /* Reachable from outside the closure. The strip is otherwise repainted only
-     by a 5s timer, which means nothing can ask it to catch up after an event
-     that changed what it should say -- and a harness with a stubbed
-     setInterval could never see it repaint at all. */
-  window.__trgPoll=poll;
-
-  var msel=$('trgModel');
-  if(msel) msel.addEventListener('change',function(){
-    BACKEND=this.value; savePref('backend',BACKEND);
-    /* Both halves move together. The strip's coverage and the queue's guess
-       filter are two views of the same guesser, and repainting one without
-       the other is how a page ends up reporting SigLIP's coverage over
-       RF-DETR's guesses. */
-    gen++; page=0; sel=-1;
-    poll(); load();
-  });
-
-  var btn=$('trgRun');
-  if(btn) btn.addEventListener('click',function(){
-    /* what the button says is what it does: read the label, not a cached
-       flag that a poll may have moved underneath it */
-    var stopping=btn.textContent.indexOf('Pause')===0;
-    var old=document.querySelector('.trgerr');
-    if(old) old.remove();
-    gen++;
-    btn.dataset.busy='1';
-    btn.disabled=true; btn.textContent=stopping?'Pausing\u2026':'Starting\u2026';
-    fetch('/api/triage',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action:stopping?'stop':'start',backend:BACKEND})})
-      .then(function(r){return r.json()})
-      .catch(function(){return {ok:false,msg:'the dashboard did not answer'}})
-      .then(function(j){
-        btn.dataset.busy='';
-        btn.disabled=false;
-        if(j&&j.ok){
-          /* the server already said what happened; showing it now beats
-             waiting up to 5s for a poll to say the same thing */
-          btn.textContent=j.running?'Pause':'Run guesses';
-        }
-        if(j&&!j.ok&&j.msg){
-          /* a start that fails does so for a reason the reader can act on --
-             usually an interpreter without torch -- so say it rather than
-             silently going back to "Not running" */
-          /* beside the button that failed, not in the progress row it used
-             to live in -- that row is hidden in exactly the cases a start is
-             refused */
-          var e=document.createElement('div');
-          e.className='trgerr'; e.textContent=j.msg;
-          ($('ngrpWho')||el).appendChild(e);
-        }
-        /* the status file is written by the run itself, so it lags the
-           spawn; poll now for the button, and again once it has caught up */
-        poll(); setTimeout(poll,1500);
-      });
-  });
-})();
 </script></body></html>"""
 # Substituted at import time, so the server and the tests both read a
 # finished document -- a placeholder left in REVIEW_HTML would parse as a
 # bare identifier and only fail when a button was pressed.
 REVIEW_HTML = REVIEW_HTML.replace('__COPY_JS__', COPY_JS)
 
-# ── bulk review page (/review) + sweep control ──────────────────────────────
+# ── bulk review page (/audit/review; /review redirects) + sweep control ─────
 
 REVIEW_PAGE = 50
 
@@ -8204,9 +7834,34 @@ ANNOT_SORTS = {
     'low': lambda r: (r['conf'], -r['ts']),
 }
 
+# "What did I judge this week" over the annotation ledgers. The tokens, the
+# words on the control and the midnight are the audit pages' (audit.py keeps
+# an identical period_cutoff): three surfaces answer the same question, and
+# two of them disagreeing about what 'today' covers would be a bug report.
+PERIODS = ('today', '7d', '30d')
+
+
+def period_cutoff(period, now=None):
+    """The flagged_at a ledger row must reach to sit inside the period.
+
+    'today' is the SERVER's local midnight -- the ledgers are stamped with
+    this machine's clock, so the browser's timezone would draw the line
+    through somebody else's day.
+    """
+    now = time.time() if now is None else now
+    if period == 'today':
+        lt = time.localtime(now)
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                            0, 0, 0, 0, 0, -1))
+    if period == '7d':
+        return now - 7 * 86400
+    if period == '30d':
+        return now - 30 * 86400
+    return None
+
 
 def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
-                      leash=''):
+                      leash='', period=''):
     """Crops that already carry a verdict, for auditing the annotations.
 
     A misannotation is worse than an unjudged crop: it does not sit in a queue
@@ -8264,6 +7919,15 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
     live = {lb: _flag_names(lb) for lb in FLAG_LABELS}
     items = [it for it in by_name.values() if it['name'] in live[it['label']]]
 
+    # WHEN it was judged, applied server-side and before anything counts or
+    # paginates: a client-side hide would leave total/pages describing rows
+    # nobody can see. A row without a flagged_at cannot prove when it was
+    # judged, so it sits in no period -- only in 'any time'.
+    want_period = period if period in PERIODS else ''
+    cutoff = period_cutoff(want_period) if want_period else None
+    if cutoff is not None:
+        items = [it for it in items if it['flagged_at'] >= cutoff]
+
     items.sort(key=ANNOT_SORTS[sort])
     # Counted before the filter narrows them, so the option can say how many
     # it would show -- and counted over the SAME list the filter is applied to.
@@ -8284,19 +7948,27 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
             'leash_totals': _leash_counts(),
             'leash_filter': want_leash, 'leash_counts': leash_offer,
             'pages': pages, 'total': total, 'sort': sort, 'label': label,
-            # What the list holds before EITHER filter. len(by_name) was
+            'period': want_period,
+            # What the list holds before ANY filter. len(by_name) was
             # wrong: `want` decides which ledger files are read at all, so the
             # verdict filter narrows upstream of the baseline and the baseline
             # collapsed onto the total exactly when the one filter this view
             # has was on. Counted from the live sets instead, which do not
             # move with the request.
             'pool_unfiltered': sum(len(live[lb]) for lb in FLAG_LABELS),
+            # the per-verdict tallies describe the list being read, so the
+            # period narrows them too -- "5 not a dog" over a week holding 1
+            # is the count line disagreeing with the grid under it
             'n_false_positive': sum(1 for i in by_name.values()
                                     if i['label'] == FLAG_LABEL
-                                    and i['name'] in live[FLAG_LABEL]),
+                                    and i['name'] in live[FLAG_LABEL]
+                                    and (cutoff is None
+                                         or i['flagged_at'] >= cutoff)),
             'n_true_positive': sum(1 for i in by_name.values()
                                    if i['label'] == POS_LABEL
-                                   and i['name'] in live[POS_LABEL])}
+                                   and i['name'] in live[POS_LABEL]
+                                   and (cutoff is None
+                                        or i['flagged_at'] >= cutoff))}
 
 
 # ── model suggestions: a way to sort the queue, never a label ───────────────
@@ -9870,7 +9542,8 @@ FAVICON_SVG = (b"<svg xmlns='http://www.w3.org/2000/svg' "
 # working files are the server's own and stay unreachable.
 STATIC_FILES = frozenset({'/', '/index.html', '/echarts.min.js',
                           '/world.json', '/map_points.json',
-                          '/map_points_fine.json'})
+                          '/map_points_fine.json', '/map_layer_dogs.json',
+                          '/map_layer_leash.json'})
 STATIC_DIRS = ('/recent_crops/', '/review_set/')
 
 
@@ -9890,7 +9563,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
     # Every visible change here landed on disk and stayed invisible.
     # no-cache is not no-store: the copy is kept, it just has to be
     # revalidated, so an unchanged page still answers 304.
-    _NO_CACHE_PATHS = ('/', '/index.html', '/review')
+    _NO_CACHE_PATHS = ('/', '/index.html', '/review', '/audit/review')
     # The built page carries the training section between these, so the server
     # can swap in a fresh render without parsing HTML -- the section nests
     # divs, so "up to the next </div>" would cut it in the wrong place.
@@ -10272,19 +9945,47 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     # in do_GET raised UnboundLocalError
                     q = {k: v[0] for k, v in
                          parse_qs(self.path.split('?', 1)[1]).items()}
+                # suggest=, backend= and gate= are still ACCEPTED and
+                # deliberately not passed through: the guess controls are
+                # gone from the page, so a stale bookmark carrying them must
+                # neither 500 nor quietly narrow a queue that no longer
+                # offers a way to see or clear the narrowing.
                 self._json(review_payload(int(q.get('page', 0)),
                                           int(q.get('size', REVIEW_PAGE)),
                                           str(q.get('sort', REVIEW_SORT_DEFAULT)),
                                           str(q.get('country', '')),
-                                          str(q.get('suggest', '')),
-                                          str(q.get('leash', '')),
-                                          str(q.get('find', '')),
-                                          str(q.get('backend', 'siglip')),
-                                          str(q.get('gate', ''))))
+                                          leash=str(q.get('leash', '')),
+                                          find=str(q.get('find', ''))))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
         _p = self.path.split('?', 1)[0]
+        # The review queue is a judging surface, so it lives beside the two
+        # audits at /audit/review -- the address the shared tab strip links
+        # from every judging page. Claimed BEFORE the generic /audit
+        # dispatch: _audit_get owns that prefix, and the day it grows a
+        # catch-all this page would silently become its 404.
+        if _p == '/audit/review':
+            body = REVIEW_HTML.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if _p == '/review':
+            # The old address, answered with the new one. Bookmarks and
+            # muscle memory predate the move, and the query string rides
+            # along -- a redirect that drops ?country=JPN loses the filter
+            # the bookmark was made for. (end_headers adds no-cache here, so
+            # a browser cannot pin the 301 past a change of mind.)
+            q = self.path.split('?', 1)[1] if '?' in self.path else ''
+            self.send_response(301)
+            self.send_header('Location',
+                             '/audit/review' + (('?' + q) if q else ''))
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         if _p.startswith('/audit') or _p.startswith('/api/audit'):
             if self._audit_get():
                 return
@@ -10302,14 +10003,6 @@ class BoardHandler(SimpleHTTPRequestHandler):
                          or _p.startswith('/api/llm')):
             if self._llm_get():
                 return
-        if self.path.split('?', 1)[0] == '/review':
-            body = REVIEW_HTML.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if self.path.split('?', 1)[0] == '/api/review/annotated':
             try:
                 q = parse_qs(urlparse(self.path).query)
@@ -10318,7 +10011,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     int(q.get('size', [REVIEW_PAGE])[0]),
                     str(q.get('label', ['all'])[0]),
                     str(q.get('sort', ['recent'])[0]),
-                    str(q.get('leash', [''])[0])))
+                    str(q.get('leash', [''])[0]),
+                    str(q.get('period', [''])[0])))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
@@ -10839,6 +10533,28 @@ def render(ov, per, tr, now, locs=()):
     return page
 
 
+_MAP_LAYERS = {'mod': None, 'tried': False}
+
+
+def _map_layers():
+    """The model-layer builder, imported once and only when a build asks.
+
+    Same contract as _audit()/_datasets(): the atlas's model layers are a
+    convenience, so a map_layers.py that is missing or broken must cost this
+    server nothing at boot -- the harvest map draws without it, and the two
+    chips it feeds fetch a file that simply is not there.
+    """
+    if not _MAP_LAYERS['tried']:
+        _MAP_LAYERS['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import map_layers as _ml
+            _MAP_LAYERS['mod'] = _ml
+        except Exception:
+            _MAP_LAYERS['mod'] = None
+    return _MAP_LAYERS['mod']
+
+
 def build(args):
     """Refresh (optionally) the catalog, snapshot history, write index.html."""
     if not getattr(args, 'no_refresh', False):
@@ -10866,6 +10582,16 @@ def build(args):
             build_map_points()
         except Exception as e:
             print('map build error:', e)
+    # The MODEL layers (gate-kept dogs, leashed vs loose) ride every cycle,
+    # not the atlas's 6-hour clock: refresh() signatures on the shard mtimes
+    # and answers in ~0.1s when nothing moved, so the interval loop can
+    # afford it -- and no page request ever pays for the 32M-row join.
+    ml = _map_layers()
+    if ml:
+        try:
+            ml.refresh()
+        except Exception as e:
+            print('map layers refresh error:', e)
     os.makedirs(OUT, exist_ok=True)
     dst = os.path.join(OUT, 'echarts.min.js')
     if os.path.exists(ECHARTS_SRC) and not os.path.exists(dst):
@@ -11375,7 +11101,14 @@ transition:color .12s,border-color .12s,background .12s}
 .mchip.on{color:#f0b85f;border-color:rgba(240,184,95,.55);background:rgba(232,166,69,.08)}
 .mchip.on[data-l=dogs]{color:#43b581;border-color:rgba(67,181,129,.55);background:rgba(67,181,129,.08)}
 .mchip.on[data-l=rate]{color:#7fb2d8;border-color:rgba(127,178,216,.55);background:rgba(127,178,216,.08)}
+.mchip.on[data-l=gate]{color:#a99aec;border-color:rgba(169,154,236,.55);background:rgba(169,154,236,.08)}
+.mchip.on[data-l=leash]{color:#4ec9c3;border-color:rgba(78,201,195,.5);background:rgba(78,201,195,.08)}
+/* a model chip whose file is still in flight: the click lands when it does */
+.mchip.busy{opacity:.55;cursor:progress}
 .mtog{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);cursor:pointer;margin-left:4px}
+/* a toggle that has nothing to act on: taken off screen by class, never by a
+   second writer of style.display on the same element */
+.mtog.off{display:none}
 .mtog input{accent-color:var(--acc)}
 #mapFind{margin-left:auto;background:var(--panel2);border:1px solid var(--bd);border-radius:8px;
 color:var(--tx);font-family:inherit;font-size:12px;padding:5px 10px;width:180px}
@@ -12230,7 +11963,7 @@ outline-offset:2px}
     <!-- The count is the point: a queue depth is what makes someone open the
          page, and an empty queue should say so quietly rather than shout a
          zero in the accent colour. -->
-    <a class="revbtn" id="revBtn" href="/review"
+    <a class="revbtn" id="revBtn" href="/audit/review"
        title="Judge detections one by one — dog or not a dog">
       <span class="rvf">&#9873;</span>
       <span class="rvn"><b id="revN">&mdash;</b><em id="revL">to review</em>
@@ -12363,7 +12096,7 @@ __LLMNAV__
       <div class="dsub">Live detections</div>
       <span class="dcropsub" id="dcropSub">random sample from the last minute</span>
       <button id="dcropShuffle" class="rbtn" title="draw a different random sample from the last minute">↻ Shuffle</button>
-      <a href="/review" class="rbtn nav rev" title="flag false positives in bulk — 50 or 100 per page">⚑ Review all</a>
+      <a href="/audit/review" class="rbtn nav rev" title="flag false positives in bulk — 50 or 100 per page">⚑ Review all</a>
     </div>
     <div class="dcrops" id="dcropGrid"></div>
     <div class="dflag" id="dcropFlagged"></div>
@@ -12432,14 +12165,18 @@ __LB_HTML__
 </details>
 
 <details class="fold panel sec" id="f-map" open>
-  <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, where the detector called dogs, and each region's stage &mdash; click any country for its numbers</span></summary>
+  <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, what the detector called a dog, what the gate kept, leashed vs loose, and each region's stage &mdash; click any country for its numbers</span></summary>
   <div class="mapbar">
     <button type="button" class="mchip on" data-l="harvest"
       title="Every Mapillary frame the harvest downloaded, binned by where it was taken. This is coverage — where you have looked, not what was found.">Harvest</button>
     <button type="button" class="mchip" data-l="dogs"
-      title="Frames where the detection sweep called at least one dog with confidence 0.5 or better. Unreviewed model output, so some of these are goats, sheep and shadows.">Dogs found</button>
+      title="Frames where the detection sweep called at least one dog with confidence 0.5 or better. Unreviewed model output, so some of these are goats, sheep and shadows.">Dog calls</button>
     <button type="button" class="mchip" data-l="rate"
-      title="Dogs found ÷ harvest, per cell. Corrects for how hard each place was searched: a bright cell here means dogs were common in the frames, not just that many frames exist. Needs 30+ frames in a cell to show.">Hit rate</button>
+      title="Dog calls ÷ harvest, per cell. Corrects for how hard each place was searched: a bright cell here means dogs were common in the frames, not just that many frames exist. Needs 30+ frames in a cell to show.">Hit rate</button>
+    <button type="button" class="mchip" data-l="gate"
+      title="Dog crops the dog/not-dog gate kept at p ≥ 0.5, placed where their frame was taken. Model-called and unreviewed — counts crops, so one frame can hold several dogs.">Dogs found</button>
+    <button type="button" class="mchip" data-l="leash"
+      title="The leash model on every kept crop: a cell leans orange where its crops were called loose, teal where they were called leashed. Model-called shares, not human verdicts — hover a cell for its counts.">Leashed vs loose</button>
     <label class="mtog" title="One marker per region, placed at the median of its frames. Its colour follows the layer; its stage and download progress are in the tooltip. Turn them off if they are in the way of the map."><input type="checkbox" id="mapRegions" checked> region markers</label>
     <label class="mtog" id="mapCleanWrap" title="Hides frames whose GPS cannot be right: points out at sea, and frames sitting a continent away from the rest of their own capture session. Untick to see them."><input type="checkbox" id="mapClean" checked> exclude GPS outliers</label>
     <input id="mapFind" list="cmdRegions" placeholder="fly to a region&hellip;" autocomplete="off"
@@ -13059,7 +12796,7 @@ function genCommands(){
   }).catch(function(){cmdOut.innerHTML='<div style="color:var(--red);padding:8px 2px">failed to generate</div>'});
 }
 if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListener('keydown',function(e){if(e.key==='Enter')genCommands()});}
-/* ── atlas (Equal Earth, three layers, zoom-adaptive raster) ── */
+/* ── atlas (Equal Earth, five layers, zoom-adaptive raster) ── */
 (function(){
   var mapEl=document.getElementById('map');
   if(!mapEl||typeof echarts==='undefined')return;
@@ -13160,12 +12897,17 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       rampEl=document.getElementById('mapRamp'),
       minEl=document.getElementById('mapMin'),maxEl=document.getElementById('mapMax'),
       labEl=document.getElementById('mapRampLab'),statsEl=document.getElementById('mapStats');
-  /* the three layers wear the site's own inks: amber = the harvest, green =
-     the detector's calls, cool blue = the rate between them */
+  /* the layers wear the site's own inks: amber = the harvest, green = the
+     detector's calls, cool blue = the rate between them, violet = what the
+     gate kept. Leash is the odd one out on purpose -- it is a SHARE, not a
+     density, so its ramp runs between its two answers (orange = loose,
+     teal = leashed) instead of dark-to-bright. */
   var RAMPS={
     harvest:['#191024','#3b1a4e','#7c2d59','#c15a41','#e89a4d','#f0b85f','#fdf0cd'],
     dogs:['#08211c','#0d3f31','#1a6b4c','#2f9a68','#43b581','#8ce8b6','#e2fbee'],
-    rate:['#141d2b','#1e3a5c','#2f6296','#4a8fc2','#8cc3e8','#e8f6ff']
+    rate:['#141d2b','#1e3a5c','#2f6296','#4a8fc2','#8cc3e8','#e8f6ff'],
+    gate:['#120e26','#251d4e','#3d3380','#5a4cb4','#8577dd','#b3a7f0','#eae6fc'],
+    leash:['#e8734a','#e9a77c','#e0d7c4','#7fd0ca','#2fb5ad']
   };
   var RATE_MIN=30;  /* a rate needs a denominator: cells with fewer harvested
                        frames than this stay off the hit-rate layer */
@@ -13201,20 +12943,42 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         outLevels=md.out_levels||{},dogOutLevels=md.dog_out_levels||{};
     if(!Object.keys(levels).length&&md.points)levels[String(md.res)]={res:md.res,max:md.max,points:md.points};
     var hasDogs=!!Object.keys(dogLevels).length;
-    if(!hasDogs)mchips.forEach(function(c){if(c.dataset.l!=='harvest')c.style.display='none'});
-    /* an older map_points.json has no outlier grids; hide the control rather
-       than offer a toggle that would do nothing */
+    /* only the two chips FED by map_points.json follow its age -- the model
+       chips have their own files and answer for themselves on first click */
+    if(!hasDogs)mchips.forEach(function(c){if(c.dataset.l==='dogs'||c.dataset.l==='rate')c.style.display='none'});
+    /* an older map_points.json has no outlier grids: nothing to leave out,
+       so the toggle is forced on and taken off screen by syncClean() below
+       rather than left offering a choice that does nothing */
     var hasOut=!!Object.keys(outLevels).length;
-    if(!hasOut){
-      var cw=document.getElementById('mapCleanWrap');
-      if(cw)cw.style.display='none';
-      if(cleanTog)cleanTog.checked=true;
-    }
+    if(!hasOut&&cleanTog)cleanTog.checked=true;
     var fineRes=md.fine_res||0,fine={state:'none'};   /* none|loading|ready|failed */
     var keys=Object.keys(levels).map(parseFloat).sort(function(a,b){return b-a}); // coarse→fine
-    var layer='harvest',cache={};
+    var layer='harvest',wantLayer='harvest',cache={};
+    /* The two MODEL layers live in their own files (built by map_layers.py,
+       refreshed by every dashboard build) and are fetched the first time
+       their chip is clicked -- an ordinary visit never downloads them. Both
+       carry all three grids inline, 0.05° included, and a 'source' naming
+       the model: every number they contribute is a model's, never a
+       human's, and the legend says so. */
+    var MODEL={gate:{file:'map_layer_dogs.json',doc:null,state:'none'},
+               leash:{file:'map_layer_leash.json',doc:null,state:'none'}};
     function cellKey(p){return p[0]+'|'+p[1]}
     function clean(){return !cleanTog||cleanTog.checked}
+    /* One owner for the outlier control, because it now has two reasons to
+       be absent and two writers of display on one element is how a control
+       comes back from the dead. It applies only where a layer HAS an outlier
+       grid to leave out: an older map_points.json carries none, and the
+       model layers count from their own files, which place every crop at its
+       raw coordinate and carry no outlier split at all. Ticked over one of
+       those, "exclude GPS outliers" claimed an exclusion that was not
+       happening -- 154 gate crops sit in 89 cells the harvest layer hides.
+       Keyed on MODEL, so a third layer built the same way inherits this
+       instead of having to be remembered. */
+    function cleanApplies(){return hasOut&&!MODEL[layer]}
+    function syncClean(){
+      var cw=document.getElementById('mapCleanWrap');
+      if(cw)cw.classList.toggle('off',!cleanApplies());
+    }
     /* The clean grid and the outlier grid are separate files of cells, and a
        cell can appear in both (a real street with one bad frame in it), so
        showing outliers means SUMMING per cell, not concatenating -- a
@@ -13253,6 +13017,33 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         /* p99 cap: one 30-frame cell at 100% must not flatten the ramp */
         out={res:parseFloat(resKey),max:vals.length?vals[Math.floor(vals.length*0.99)]:1,data:data};
         if(!out.max)out.max=0.01;
+      }else if(lyr==='gate'){
+        /* crops the dog/not-dog gate kept, from the layer's own file --
+           binned on the harvest's exact grid, no outlier split to merge */
+        var G=((MODEL.gate.doc||{}).levels||{})[resKey]||{res:parseFloat(resKey),max:0,points:[]};
+        out={res:G.res,max:Math.log10((G.max||1)+1),
+          data:G.points.map(function(p){return {value:[p[0],p[1],Math.log10(p[2]+1)],cnt:p[2]}})};
+      }else if(lyr==='leash'){
+        /* one cell, one colour: the share of the model calls here that said
+           leashed. The file ships the two sides as separate grids, but two
+           overlaid count layers would paint two rects on one spot (the
+           pointsOf problem), so the sides are joined per cell instead and
+           the ramp runs loose-orange to leashed-teal. */
+        var ld=MODEL.leash.doc||{},
+            A=(((ld.leashed_levels||{})[resKey])||{points:[]}).points,
+            B=(((ld.loose_levels||{})[resKey])||{points:[]}).points,
+            by2={},ldata=[],k2;
+        A.forEach(function(p){by2[cellKey(p)]={value:[p[0],p[1],1],lsh:p[2],lse:0}});
+        B.forEach(function(p){
+          var c=by2[cellKey(p)];
+          if(c)c.lse=p[2];else by2[cellKey(p)]={value:[p[0],p[1],0],lsh:0,lse:p[2]};
+        });
+        for(k2 in by2){
+          var c2=by2[k2];
+          c2.value[2]=c2.lsh/(c2.lsh+c2.lse);c2.cnt=c2.lsh+c2.lse;
+          ldata.push(c2);
+        }
+        out={res:parseFloat(resKey),max:1,data:ldata};
       }else{
         var L=lyr==='dogs'?pointsOf(dogLevels,dogOutLevels,resKey)
                           :pointsOf(levels,outLevels,resKey);
@@ -13282,7 +13073,8 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
        harvest read as a third data colour that meant nothing on that map.
        Stage stays where it can be read: the tooltip. The dark fill and halo
        keep the ring legible over both a bright cell and open ocean. */
-    var RING={harvest:'#f7d9a0',dogs:'#bff0d6',rate:'#cfe6f8'};
+    var RING={harvest:'#f7d9a0',dogs:'#bff0d6',rate:'#cfe6f8',
+              gate:'#d9d0f8',leash:'#bfe9e5'};
     function rings(){
       var c=RING[layer];
       return regData.map(function(r){
@@ -13423,6 +13215,13 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       if(layer==='rate')
         return '<b>'+(p.data.value[2]*100).toFixed(1)+'%</b> of '+fmt(p.data.cnt)+
           ' frames had a dog call<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
+      if(layer==='gate')
+        return '<b>'+fmt(p.data.cnt)+'</b> model-called dog crops kept'+
+          '<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
+      if(layer==='leash')
+        return '<b>'+Math.round(p.data.value[2]*100)+'%</b> of model calls here said leashed'+
+          '<br>'+fmt(p.data.lsh)+' leashed · '+fmt(p.data.lse)+' loose'+
+          '<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
       return '<b>'+fmt(p.data.cnt)+'</b> '+(layer==='dogs'?'frames with a dog call':'frames harvested')+
         '<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
     }
@@ -13471,6 +13270,25 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     });
     function legend(){
       rampEl.style.background='linear-gradient(90deg,'+RAMPS[layer].join(',')+')';
+      /* The model layers count from their own files, and every figure is
+         prefixed model-called: on this dashboard a model number must never
+         read as a human one, and the caption is where that line is drawn. */
+      if(layer==='gate'){
+        var dg=MODEL.gate.doc||{};
+        minEl.textContent='1';
+        maxEl.textContent=fmt(Math.round(Math.pow(10,cur.max)-1));
+        labEl.textContent='model-called dog crops kept at p ≥ '+(dg.conf_min!=null?dg.conf_min:0.5)+' per '+cur.res+'° cell · '+(dg.source||'model');
+        statsEl.textContent=fmt(dg.total||0)+' model-called dog crops on '+fmt(dg.images||0)+' frames · '+fmt(dg.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
+        return;
+      }
+      if(layer==='leash'){
+        var dl=MODEL.leash.doc||{};
+        minEl.textContent='all loose';
+        maxEl.textContent='all leashed';
+        labEl.textContent='share of model-called crops the leash model called leashed · '+(dl.source||'model');
+        statsEl.textContent=fmt(dl.leashed_total||0)+' model-called leashed · '+fmt(dl.loose_total||0)+' loose · '+fmt(dl.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
+        return;
+      }
       if(layer==='rate'){
         minEl.textContent='0%';
         maxEl.textContent=(cur.max*100).toFixed(cur.max<0.1?1:0)+'%';
@@ -13500,10 +13318,15 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       var src=mchips.filter(function(c){return c.dataset.l===layer})[0];
       if(ledeEl&&src)ledeEl.textContent=src.title;
       legend();
+      /* here rather than in setLayer(): the reset button puts the layer back
+         to harvest without going through it, and this is the one path both
+         take */
+      syncClean();
     }
     cellSize=cellNum(cur.res);  // sizeable only once the geo layout exists
     ch.setOption({series:upd(null,cellSize,null)});
     legend();
+    syncClean();
     /* Keep the world inside the frame. echarts roam has no pan bounds, so a
        drag could carry the whole map off the panel and leave an empty field
        with no way back but Reset. The rule is the ordinary one for a map:
@@ -13554,6 +13377,17 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     /* pick the finest grid whose cells are big enough to see; the 0.05° grid
        lives in its own file and is fetched the first time zoom warrants it */
     function wantRes(){
+      /* a model layer carries all three grids inline, so its ladder is its
+         own file's keys -- deep zoom on it never fetches the harvest's fine
+         file, and never waits on one either */
+      if(MODEL[layer]&&MODEL[layer].doc){
+        var md2=MODEL[layer].doc,
+            mk=Object.keys(layer==='gate'?(md2.levels||{}):(md2.leashed_levels||{}))
+              .map(parseFloat).sort(function(a,b){return b-a}),
+            mw=mk.length?mk[0]:keys[0],mi;
+        for(mi=0;mi<mk.length;mi++)if(cellPx(mk[mi])[0]>=1.9)mw=mk[mi];
+        return mw;
+      }
       var want=keys[0],i;
       for(i=0;i<keys.length;i++)if(cellPx(keys[i])[0]>=1.9)want=keys[i];
       if(fineRes&&cellPx(fineRes)[0]>=1.9){
@@ -13599,15 +13433,44 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       t=setTimeout(roamed,130);
     });
     /* layer chips */
-    mchips.forEach(function(c){c.addEventListener('click',function(){
-      if(c.dataset.l===layer)return;
-      layer=c.dataset.l;
-      mchips.forEach(function(x){x.classList.toggle('on',x===c)});
+    function setLayer(l){
+      layer=l;
+      mchips.forEach(function(x){x.classList.toggle('on',x.dataset.l===l)});
       apply();
+      /* re-pick the grid: a model layer has 0.05° inline while the harvest
+         may not have loaded it yet, and vice versa -- staying on the old res
+         would paint an empty grid the new layer does not carry */
+      roamed();
       /* the card is a view of the active layer, so it follows the tab --
          without this, clicking the same country after a switch read as a
          second click on it and just closed the card */
       if(popName)showCountry(popName);
+    }
+    /* A model chip's first click fetches its file, and the click lands when
+       the payload does. A second click while in flight is a no-op, not a
+       second fetch; a failed fetch says what is missing instead of leaving
+       a chip that silently does nothing. */
+    function loadModel(l,c){
+      var m=MODEL[l];
+      if(m.state==='loading')return;
+      m.state='loading';c.classList.add('busy');
+      fetch(m.file).then(function(r){
+        if(!r.ok)throw new Error('http '+r.status);
+        return r.json();
+      }).then(function(doc){
+        m.doc=doc;m.state='ready';c.classList.remove('busy');
+        if(wantLayer===l)setLayer(l);   /* unless another tab won since */
+      }).catch(function(){
+        m.state='failed';c.classList.remove('busy');
+        toast('the '+(l==='gate'?'dogs-found':'leash')+' layer file is missing — a dashboard build writes it');
+      });
+    }
+    mchips.forEach(function(c){c.addEventListener('click',function(){
+      if(c.dataset.l===layer)return;
+      wantLayer=c.dataset.l;
+      var m=MODEL[c.dataset.l];
+      if(m&&!m.doc){loadModel(c.dataset.l,c);return;}
+      setLayer(c.dataset.l);
     })});
     /* region markers on/off */
     if(regTog)regTog.addEventListener('change',function(){
@@ -13667,7 +13530,9 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
           worldD=md.dogs_total+(clean()?0:(md.dogs_outlier_total||0)),
           rate=pct(dogs,frames),worldRate=pct(worldD,worldF),h='';
       h+='<div class="cpname">'+esc(name)+'</div>';
-      var rk=cRank[layer==='harvest'?'n':(layer==='dogs'?'d':'rate')][name];
+      /* the per-country join covers the harvest trio only; on a model layer
+         the card answers with the harvest's numbers and says so below */
+      var rk=cRank[layer==='dogs'?'d':(layer==='rate'?'rate':'n')][name];
       h+='<div class="cprank">'+(rk?('#'+rk[0]+' of '+rk[1]+' countries'
             +(layer==='rate'?' with enough frames to rate':''))
           :'not ranked')+'</div>';
@@ -13708,6 +13573,9 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
           +popRow('Dog calls',fmt(dogs));
         if(!clean()&&v[1])h+=popRow('GPS outliers shown',fmt(v[1]));
         if(clean()&&v[1])h+=popRow('GPS outliers hidden',fmt(v[1]));
+        if(MODEL[layer])h+='<div class="cpnote">No per-country join for the '
+          +'model layers yet, so this card shows the country’s harvest '
+          +'numbers.</div>';
       }
       popBody.innerHTML=h;
       pop.hidden=false;
@@ -13792,6 +13660,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
        stash and put back. Rebuilding the geo component restores that fitted
        state exactly, at whatever size the panel is now. */
     if(resetEl)resetEl.addEventListener('click',function(){
+      wantLayer='harvest';   /* a model fetch still in flight must not undo this */
       if(layer!=='harvest'){
         layer='harvest';
         mchips.forEach(function(x){x.classList.toggle('on',x.dataset.l==='harvest')});
