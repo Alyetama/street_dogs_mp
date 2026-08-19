@@ -11,7 +11,10 @@ Everything here guards one of the four claims the page makes:
   * and it says what it is a share OF -- the sheets record every crop put in
     front of a person, a fraction of them come back, and until one is answered
     in full the rate off it is a ceiling rather than an estimate;
-  * the crop shown is the crop the model saw.
+  * the crop shown is the crop the model saw;
+  * a draw is what it says it is -- 'least/most confident' really walks the
+    distance from the threshold, the annotated-date filter really narrows the
+    ledger on the server, and the shared tab strip is the contract's markup.
 
 And one the page must NOT make: a human verdict here is ground truth about a
 model's output, and the model's own opinion never becomes a label.
@@ -924,6 +927,311 @@ def selection_checks(bad):
                        f'another {min(quota)}')
 
 
+def draw_filter_checks(bad):
+    """The two confidence draws pick the crops they claim to pick.
+
+    'least' is the crops the model could barely decide -- scores nearest the
+    threshold; 'most' is its surest calls -- the far ends of whichever side
+    is asked for, and BOTH ends on 'all', where millions of boxes at 0.0 tie
+    with a few hundred thousand at 1.0 and a tie broken at random is a page
+    entirely of the crowded end. The walk is deterministic, so the no-repeat
+    rule is the only thing standing between the reader and the same page for
+    ever: a drawn sequence must move the walk on.
+    """
+    try:
+        import duckdb
+    except ModuleNotFoundError:
+        print('SKIP: no duckdb in this interpreter — draw modes not exercised')
+        return
+    try:
+        import audit
+    except Exception:
+        return
+    import fn_audit as fa
+    import tempfile as _tf
+    for v, want in (('rejected~least', 'rejected~least'),
+                    ('kept~most', 'kept~most'),
+                    ('4~most', '4~most'),
+                    ('rejected~bogus', 'rejected'),   # a typo is not a mode
+                    ('bogus~least', None),            # nor a band
+                    ('rejected', 'rejected'), (4, 4), (None, None)):
+        if audit.band_arg(v) != want:
+            bad.append(f'band_arg({v!r}) = {audit.band_arg(v)!r}, want '
+                       f'{want!r} — the mode rides the band value and a '
+                       f'wrong parse draws from somewhere else')
+    mark = 'zzdraw_'
+    tmp = _tf.mkdtemp()
+    real_paths = fa.paths
+    lay = dict(real_paths('gate'))
+    lay.update(out=tmp, pool=os.path.join(tmp, 'pool.parquet'),
+               drawn=os.path.join(tmp, 'drawn.jsonl'),
+               verdicts=os.path.join(tmp, 'v.jsonl'),
+               pages=os.path.join(tmp, 'pages'),
+               crops=os.path.join(tmp, 'crops'),
+               full=os.path.join(tmp, 'full'),
+               dataset=os.path.join(tmp, 'ds'))
+    fa.paths = lambda stage='gate': lay
+    real_mat = audit.materialise
+    audit.materialise = lambda c, workers=8, stage='gate': c
+    try:
+        # seq 'm1' holds a coin-flip AND a sure call: each walk must offer
+        # the sequence through the box that belongs on that walk.
+        #
+        # LOPSIDED ON PURPOSE, because that is the shape of the pool and the
+        # shape the interleave exists for: nine sequences below the line
+        # against three above, and the four boxes farthest from the
+        # threshold (0.001..0.004, distance 0.496+) all sit below it, ahead
+        # of the surest call above (0.99, distance 0.49). An 'all~most' walk
+        # that does NOT partition by side therefore returns 4/0 here. With
+        # an even fixture it returned 2/2 either way and the assertion below
+        # asserted nothing -- the interleave could be deleted and this file
+        # stayed green.
+        rows = [(0.49, 'm1'), (0.02, 'm1'), (0.45, 's2'), (0.48, 's3'),
+                (0.05, 's4'), (0.30, 's8'),
+                (0.001, 's9'), (0.002, 's10'), (0.003, 's11'),
+                (0.004, 's12'),
+                (0.55, 's5'), (0.95, 's6'), (0.99, 's7')]
+        con = duckdb.connect()
+        con.execute('CREATE TEMP TABLE t(band INT, image_id VARCHAR, '
+                    'det_idx INT, p_dog DOUBLE, x1 DOUBLE, y1 DOUBLE, '
+                    'x2 DOUBLE, y2 DOUBLE, cell VARCHAR, drive VARCHAR, '
+                    'seq VARCHAR, conf DOUBLE)')
+        con.executemany(
+            'INSERT INTO t VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            [(fa.band_of(p), f'{mark}{i}', 0, p, 0, 0, 50, 50,
+              'c', 'd', seq, 0.5) for i, (p, seq) in enumerate(rows)])
+        con.execute(f"COPY t TO '{lay['pool']}' (FORMAT PARQUET)")
+        con.close()
+
+        def ps(cands):
+            # three places, not two: the far-below rows that make the
+            # 'all~most' fixture lopsided differ in the third, and rounding
+            # them together would hide which of them a walk actually drew
+            return sorted(round(c['p_dog'], 3) for c in cands)
+
+        got = audit.sample(n=3, band='rejected~least', stage='gate')
+        if ps(got) != [0.45, 0.48, 0.49]:
+            bad.append(f'least-confident below the line drew {ps(got)}, not '
+                       f'the three scores nearest the threshold')
+        m1 = [c for c in got if c['seq'] == 'm1']
+        if not m1 or round(m1[0]['p_dog'], 2) != 0.49:
+            bad.append('a sequence holding a 0.49 and a 0.02 was offered '
+                       'through the wrong box on a least-confident walk')
+        got = audit.sample(n=2, band='rejected~most', stage='gate')
+        if ps(got) != [0.001, 0.002]:
+            bad.append(f'most-confident below the line drew {ps(got)}, not '
+                       f'the scores nearest 0')
+        got = audit.sample(n=2, band='kept~most', stage='gate')
+        if ps(got) != [0.95, 0.99]:
+            bad.append(f'most-confident above the line drew {ps(got)}, not '
+                       f'the scores nearest 1')
+        got = audit.sample(n=4, band='all~most', stage='gate')
+        lo = sum(1 for c in got if c['p_dog'] < fa.THRESHOLD)
+        if (lo, len(got) - lo) != (2, 2):
+            bad.append(f"most-confident over 'all' split "
+                       f'{lo}/{len(got) - lo} — the surest calls are BOTH '
+                       f'ends, and one ordered walk over the pool hands back '
+                       f'the crowded end alone (the fixture is lopsided the '
+                       f'way the pool is, so 4/0 is what dropping the '
+                       f'per-side partition looks like)')
+        # and it is the surest TWO of each side, not any two: the walk is
+        # ordered within a side as well as interleaved across the two
+        if ps(got) != [0.001, 0.002, 0.95, 0.99]:
+            bad.append(f"most-confident over 'all' drew {ps(got)}, not the "
+                       f'two boxes farthest from the threshold on each side')
+        # the walk is deterministic, so only the drawn record moves it on
+        with open(lay['drawn'], 'w') as fh:
+            fh.write(json.dumps({'key': f'{mark}0#0', 'seq': 'm1'}) + '\n')
+        got = audit.sample(n=2, band='rejected~least', stage='gate')
+        if ps(got) != [0.45, 0.48] or any(c['seq'] == 'm1' for c in got):
+            bad.append(f'a drawn sequence came round again on a '
+                       f'least-confident walk ({ps(got)}) — a deterministic '
+                       f'order that ignores the record is the same page for '
+                       f'ever')
+        os.remove(lay['drawn'])
+        # the page document keeps the compound value, so a page read back
+        # says how it was chosen, not only where from
+        doc = audit.draw_page(n=2, band='rejected~least', stage='gate')
+        if doc.get('band') != 'rejected~least':
+            bad.append(f"a page drawn least-confident is stored as "
+                       f"band={doc.get('band')!r} — the position line can "
+                       f"no longer say what was drawn")
+        doc2 = audit.draw_page(n=2, band='rejected~least', stage='gate')
+        if {c['key'] for c in doc.get('items') or []} & \
+                {c['key'] for c in doc2.get('items') or []}:
+            bad.append('two least-confident pages shared a crop — drawn '
+                       'boxes must never be shown twice, whatever the draw')
+        # and the spread is untouched: no mode means the even draw
+        got = audit.sample(n=4, band='rejected', stage='gate')
+        if any(c['p_dog'] >= fa.THRESHOLD for c in got):
+            bad.append('a plain rejected draw reached above the threshold')
+    finally:
+        audit.materialise = real_mat
+        fa.paths = real_paths
+    for name in fa.STAGES:
+        hit = _leaked(fa.paths(name), mark)
+        if hit:
+            bad.append(f'this check wrote its own keys into the LIVE {name} '
+                       f'audit ({hit}) — redirecting fa.paths did not take, '
+                       f'and the fixtures went to human data')
+
+
+def period_filter_checks(bad):
+    """The annotated-date filter narrows the ledger read-back on the server.
+
+    The rows carry ts, so "what did I answer this week" is a filter over the
+    record -- and it has to happen in judged() before pagination, because a
+    hide on the client leaves 'page 2 of 5' describing rows nobody can see.
+    The wire value rides the verdict filter ('all~7d'), so the route's
+    membership check must know the compounds or every period request quietly
+    becomes 'all time'.
+    """
+    try:
+        import audit
+    except Exception:
+        return
+    import fn_audit as fa
+    import tempfile as _tf
+    import time as _t
+    for name in fa.STAGES:
+        views = audit.judged_views(name)
+        for w in ('all~7d', 'flagged~today', 'wrong~30d'):
+            if w not in views:
+                bad.append(f'{name}: {w!r} is not a judged view — the route '
+                           f'checks membership before calling judged(), so '
+                           f'the period never reaches it')
+    now = _t.time()
+    lt = _t.localtime(now)
+    midnight = _t.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0,
+                          0, 0, -1))
+    got = audit.period_cutoff('today', now)
+    if got != midnight:
+        bad.append(f'period_cutoff("today") = {got}, not the server\'s local '
+                   f'midnight {midnight} — "today" must be the server\'s day')
+    if abs(audit.period_cutoff('7d', now) - (now - 7 * 86400)) > 1:
+        bad.append('period_cutoff("7d") is not seven days back')
+    if audit.period_cutoff(None) is not None or \
+            audit.period_cutoff('bogus') is not None:
+        bad.append('an unknown period filters something — a typo must mean '
+                   'all time, not an empty page')
+    mark = 'zzperiod_'
+    tmp = _tf.mkdtemp()
+    real_paths = fa.paths
+    lay = dict(real_paths('gate'))
+    lay.update(out=tmp, verdicts=os.path.join(tmp, 'v.jsonl'),
+               drawn=os.path.join(tmp, 'drawn.jsonl'),
+               pages=os.path.join(tmp, 'pages'),
+               pool=os.path.join(tmp, 'pool.parquet'))
+    fa.paths = lambda stage='gate': lay
+    try:
+        rows = ((f'{mark}k1#0', 'dog', midnight + 60),       # today
+                (f'{mark}k2#0', 'dog', midnight - 3600),     # yesterday
+                (f'{mark}k3#0', 'not_dog', now - 10 * 86400),
+                (f'{mark}k4#0', 'dog', now - 40 * 86400),
+                (f'{mark}k5#0', 'dog', None))                # ts predates ts
+        with open(lay['verdicts'], 'w') as fh:
+            for key, v, ts in rows:
+                rec = {'key': key, 'verdict': v, 'band': 1, 'p_dog': 0.1,
+                       'seq': 's' + key[-4:]}
+                if ts is not None:
+                    rec['ts'] = ts
+                fh.write(json.dumps(rec) + '\n')
+        for which, want in (('all', 5), ('all~30d', 3), ('all~7d', 2),
+                            ('all~today', 1), ('dog~30d', 2),
+                            ('dog', 4), ('not_dog~today', 0)):
+            got = audit.judged('gate', which, 0, 25)
+            if got['total'] != want:
+                bad.append(f'judged({which!r}) holds {got["total"]} rows, '
+                           f'want {want} — the period is not filtering, or '
+                           f'is filtering the wrong rows')
+            if which.startswith('all') and got['counts'].get('all') != want:
+                bad.append(f'judged({which!r}) counts {got["counts"]} beside '
+                           f'{got["total"]} rows — the button would count '
+                           f'rows the view no longer shows')
+        # pagination is over the FILTERED rows, so the page count is truthful
+        got = audit.judged('gate', 'all~30d', 0, 2)
+        if (got['total'], got['pages']) != (3, 2):
+            bad.append(f'all~30d at 2 per page reads {got["total"]} rows on '
+                       f'{got["pages"]} pages — the filter must run before '
+                       f'pagination, not after it')
+        if got.get('period') != '30d':
+            bad.append('the response does not say which period produced it')
+        # a row with no ts cannot prove it is inside any period
+        keys30 = {i['key']
+                  for i in audit.judged('gate', 'all~30d', 0, 25)['items']}
+        if f'{mark}k5#0' in keys30:
+            bad.append('a row with no ts passed a period filter — it cannot '
+                       'prove when it was judged')
+    finally:
+        fa.paths = real_paths
+    for name in fa.STAGES:
+        hit = _leaked(fa.paths(name), mark)
+        if hit:
+            bad.append(f'this check wrote its own keys into the LIVE {name} '
+                       f'audit ({hit}) — redirecting fa.paths did not take, '
+                       f'and the fixtures went to human data')
+
+
+def tab_checks(bad):
+    """The shared tab strip, exactly as the contract spells it.
+
+    Three judging surfaces carry one strip -- same markup, same classes,
+    rendered by two different owners (audit.py here, dashboard.py on the
+    review page) -- so any drift in it is two pages disagreeing about the
+    same navigation. The current page is marked with 'jtab on' and
+    aria-current, and the old gate/leash header cross-link folded INTO the
+    strip: a second link to the other audit is the duplication it replaced.
+    """
+    try:
+        import audit
+    except Exception:
+        return
+    import fn_audit as fa
+    import re as _re
+    labels = {'review': 'Review queue', 'gate': 'Dog-bin audit',
+              'leash': 'Leash audit'}
+    order = ('review', 'gate', 'leash')
+    for stage in fa.STAGES:
+        html = audit.page_html(stage)
+        nav = '<nav class="jtabs" aria-label="judging surfaces">'
+        if html.count(nav) != 1:
+            bad.append(f'{stage}: the page carries {html.count(nav)} shared '
+                       f'tab strips, not one')
+            continue
+        if not _re.search(r'</header>\s*<nav class="jtabs"', html):
+            bad.append(f'{stage}: the tab strip is not directly under the '
+                       f'header — the contract puts it in the same place on '
+                       f'every judging page')
+        at = []
+        for k in order:
+            a = (f'<a href="/audit/{k}" class="jtab on" '
+                 f'aria-current="page">{labels[k]}</a>' if k == stage
+                 else f'<a href="/audit/{k}" class="jtab">{labels[k]}</a>')
+            if a not in html:
+                bad.append(f'{stage}: the strip is missing the exact tab '
+                           f'{a!r} — three agents render this markup and '
+                           f'they must render it identically')
+                at.append(-1)
+            else:
+                at.append(html.index(a))
+        if -1 not in at and at != sorted(at):
+            bad.append(f'{stage}: the tabs are out of order — review queue, '
+                       f'then the two audits')
+        if html.count('aria-current') != 1:
+            bad.append(f'{stage}: aria-current appears '
+                       f'{html.count("aria-current")} times; exactly one tab '
+                       f'IS the current page')
+        if '<span class="tabs">' in html:
+            bad.append(f'{stage}: the old header tab strip is still there '
+                       f'beside the shared one')
+        for k in order:
+            n = html.count(f'href="/audit/{k}"')
+            if n != 1:
+                bad.append(f'{stage}: /audit/{k} is linked {n} times — the '
+                           f'old cross-link folds into the strip, it does '
+                           f'not ride beside it')
+
+
 def prefetch_checks(bad):
     """The page after the last one is the page already being cut.
 
@@ -1528,6 +1836,99 @@ view = 'sheet';
 render();
 chk(/draw a page/i.test(String(els.empty.textContent)),
   'the empty SHEET lost its own invitation: ' + els.empty.textContent);
+
+// ── the confidence draws ──
+// A sheet of the model's surest calls and a sheet of its coin-flips look
+// identical, so the choice has to exist, say what it means in this stage's
+// words, and travel with the page so the position line can name the draw.
+chk(/data-draw="least"/.test(PAGE_HTML) && /data-draw="most"/.test(PAGE_HTML),
+  'no visible control for the least/most confident draws');
+chk(/data-draw="spread"/.test(PAGE_HTML),
+  'the even spread is no longer a choice — there is no way back to the '
+  + 'measurement\'s own draw');
+chk(typeof DRAW_TITLE === 'object' &&
+    new RegExp(reWord(TITLE)).test(String(DRAW_TITLE.least)) &&
+    /barely decide/.test(String(DRAW_TITLE.least)),
+  'the least-confident draw is not explained in this stage\'s vocabulary: '
+  + JSON.stringify(DRAW_TITLE && DRAW_TITLE.least));
+chk(new RegExp(reWord(BELOW)).test(String(DRAW_TITLE.most)) &&
+    new RegExp(reWord(ABOVE)).test(String(DRAW_TITLE.most)),
+  'the most-confident draw does not say which ends it draws from: '
+  + JSON.stringify(DRAW_TITLE && DRAW_TITLE.most));
+// the mode rides the band value on the wire, exactly the way the band does
+band = 'rejected'; mode = 'most';
+chk(wireBand() === 'rejected~most',
+  'wireBand() is ' + wireBand() + ' with mode=most — the server never '
+  + 'learns how to draw');
+mode = 'spread';
+chk(wireBand() === 'rejected',
+  'the spread must put the plain band on the wire, not ' + wireBand());
+// chosen like the band: the click paints, remembers, and redraws (debounced)
+var _setT = setTimeout; setTimeout = function (f) { f(); return 1 };
+var BODIES = []; var _oldFetch = fetch;
+// the boot-time stub never learned the judged endpoint, so answer it here
+// with an empty ledger page rather than the bare {} that crashes render()
+fetch = function (u, o) {
+  BODIES.push((o && o.body) || '');
+  if (/audit\/judged/.test(u)) {
+    FETCHES.push(u);
+    return {then:function (f) {
+      var r = f({ok:true, json:function () {
+        return {items:[], total:0, page:0, pages:1, counts:{all:0}} }});
+      return {then:function (g) { g && g(r);
+          return {catch:function () { return {} }} },
+        catch:function () { return {then:function () { return {} }} }};
+    }};
+  }
+  return _oldFetch(u, o);
+};
+view = 'sheet'; page = null; busy = false; FETCHES.length = 0;
+listeners.draws.click({target:{closest:function (sel) {
+  return sel === '.sidebtn'
+    ? {getAttribute:function () { return 'least' }} : null }}});
+chk(mode === 'least', 'clicking a draw button did not set the mode: ' + mode);
+chk(localStorage.getItem('sdAuditDraw:' + STAGE) === 'least',
+  'the draw choice is not remembered the way the band choice is');
+chk(FETCHES.some(function (u) { return /audit\/draw/.test(u) }),
+  'picking a draw did not redraw the sheet the way the band filter does');
+chk(BODIES.some(function (b) { return /rejected~least/.test(String(b)) }),
+  'the draw request does not carry the mode: ' + JSON.stringify(BODIES));
+// re-picking the draw already on screen cuts NOTHING -- each cut spends
+// sample the pool never offers again
+page = {index:0, band:'rejected~least', n:25, dropped:0, items:[]};
+FETCHES.length = 0; dirty = true;
+applyFilter();
+chk(!FETCHES.some(function (u) { return /audit\/draw/.test(u) }),
+  'reselecting the draw already on screen cut a fresh page');
+// the position line says what was drawn, off the page document itself
+show({index:0, band:'rejected~least', n:25, dropped:0, items:[]}, 0, 1);
+chk(/least confident/.test(els.pos.textContent) &&
+    new RegExp(reWord(BELOW)).test(els.pos.textContent),
+  'the position line does not say what was drawn: ' + els.pos.textContent);
+chk(/most confident/.test(bandName('kept~most')),
+  'a stored most-confident page reads back as: ' + bandName('kept~most'));
+chk(/0\.3–0\.4/.test(bandName('3~least')) &&
+    /least confident/.test(bandName('3~least')),
+  'a single-band mode page is not named: ' + bandName('3~least'));
+
+// ── the annotated-date filter ──
+chk(/id="period"/.test(PAGE_HTML), 'no period filter over the annotations');
+['today', '7d', '30d'].forEach(function (p) {
+  chk(new RegExp('value="' + p + '"').test(PAGE_HTML),
+    'the period filter cannot select ' + p);
+});
+chk(/server(&#8217;|’|')s local day/.test(PAGE_HTML),
+  'nothing says whose midnight “today” is — the title attribute '
+  + 'went missing');
+// server-side, not a client hide: choosing a period must re-fetch with the
+// compound which, or the page counts describe rows nobody can see
+view = 'judged'; anno = 'all'; FETCHES.length = 0;
+els.period.value = '7d';
+listeners.period.change.call(els.period);
+chk(FETCHES.some(function (u) { return /judged\?[^"]*which=all~7d/.test(u) }),
+  'choosing a period did not reach the server: ' + JSON.stringify(FETCHES));
+setTimeout = _setT; fetch = _oldFetch;
+view = 'sheet'; period = ''; els.period.value = ''; mode = 'spread';
 """
 
 
@@ -1635,6 +2036,7 @@ def main():
                serving_checks, isolation_checks, correction_checks,
                concurrency_checks,
                persistence_checks, selection_checks, passive_load_checks,
+               draw_filter_checks, period_filter_checks, tab_checks,
                prefetch_checks, page_checks):
         try:
             fn(bad)

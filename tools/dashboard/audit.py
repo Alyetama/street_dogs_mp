@@ -144,8 +144,17 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     second apart down one road, so a sequence's boxes are the same handful of
     objects photographed repeatedly -- scoring twenty of them would state a
     confidence twenty independent samples would earn and these do not.
+
+    `band` may carry a draw mode -- 'rejected~least' and friends. 'least'
+    takes the scores nearest the threshold, where the model could barely
+    decide; 'most' takes the far ends of whichever side is asked for, its
+    surest calls. Both replace the even spread with a deterministic walk:
+    one distance from the threshold, ordered, and because every draw retires
+    its sequences the next page picks up where this one stopped. Everything
+    else -- one per sequence, never twice -- holds exactly as for a spread.
     """
     import duckdb
+    sel, mode = band_mode(band)
     keys, seqs = _drawn_keys(stage)
     con = duckdb.connect()
     con.execute("SET preserve_insertion_order=false")
@@ -157,7 +166,7 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     # the whole reason to run this -- only exist where the gate said no, so
     # "rejected" is a first-class choice and the page's default rather than
     # something to be assembled by picking five bands one at a time.
-    bands = band_list(band, stage)
+    bands = band_list(sel, stage)
     # Evenly over the bands asked for, with the remainder going to the ones
     # NEAREST the threshold -- that is where a wrong answer is most likely to
     # be found, and flooring instead quietly dropped four crops off every
@@ -167,25 +176,59 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
              for i, b in enumerate(bands)}
     per = max(quota.values()) if quota else 1
     salt = str(seed if seed is not None else random.getrandbits(48))
-    rows = con.execute(f"""
-        WITH fresh AS (
-            SELECT p.* FROM read_parquet('{P(stage)['pool']}') p
-            ANTI JOIN seen_seq s ON s.seq = p.seq
-            WHERE p.band IN ({','.join(str(int(b)) for b in bands)})
-        ), one_per_seq AS (
-            SELECT * FROM (
-                SELECT *, row_number() OVER (
-                    PARTITION BY seq ORDER BY hash(image_id || ? )) rn
-                FROM fresh) WHERE rn = 1
-        )
-        SELECT band, image_id, det_idx, p_dog, x1, y1, x2, y2,
-               cell, drive, seq, conf
-        FROM (SELECT *, row_number() OVER (
-                  PARTITION BY band ORDER BY hash(seq || ? )) bn
-              FROM one_per_seq)
-        WHERE bn <= {int(per)}
-        ORDER BY band, bn
-    """, [salt, salt]).fetchall()
+    if mode:
+        # One ordering serves every selection: distance from the threshold,
+        # walked inward for 'least' and outward for 'most'. The sequence's
+        # own representative is picked by the same order, so a sequence
+        # holding a 0.49 is not offered through its 0.02 on a least-confident
+        # walk. Ranked WITHIN each side of the threshold and interleaved,
+        # because on 'all' the ends are millions of boxes at 0.0 against a
+        # few hundred thousand at 1.0 -- both exactly 0.5 away, and that tie
+        # broken at random is a page entirely of the crowded end. With one
+        # side asked for the partition is constant and changes nothing.
+        away = f"abs(p_dog - {fa.THRESHOLD})"
+        direction = 'ASC' if mode == 'least' else 'DESC'
+        rows = con.execute(f"""
+            WITH fresh AS (
+                SELECT p.* FROM read_parquet('{P(stage)['pool']}') p
+                ANTI JOIN seen_seq s ON s.seq = p.seq
+                WHERE p.band IN ({','.join(str(int(b)) for b in bands)})
+            ), one_per_seq AS (
+                SELECT * FROM (
+                    SELECT *, row_number() OVER (
+                        PARTITION BY seq
+                        ORDER BY {away} {direction}, hash(image_id || ? )) rn
+                    FROM fresh) WHERE rn = 1
+            )
+            SELECT band, image_id, det_idx, p_dog, x1, y1, x2, y2,
+                   cell, drive, seq, conf
+            FROM (SELECT *, row_number() OVER (
+                      PARTITION BY (p_dog >= {fa.THRESHOLD})
+                      ORDER BY {away} {direction}, hash(seq || ? )) sn
+                  FROM one_per_seq)
+            ORDER BY sn, {away} {direction}
+            LIMIT {int(n)}
+        """, [salt, salt]).fetchall()
+    else:
+        rows = con.execute(f"""
+            WITH fresh AS (
+                SELECT p.* FROM read_parquet('{P(stage)['pool']}') p
+                ANTI JOIN seen_seq s ON s.seq = p.seq
+                WHERE p.band IN ({','.join(str(int(b)) for b in bands)})
+            ), one_per_seq AS (
+                SELECT * FROM (
+                    SELECT *, row_number() OVER (
+                        PARTITION BY seq ORDER BY hash(image_id || ? )) rn
+                    FROM fresh) WHERE rn = 1
+            )
+            SELECT band, image_id, det_idx, p_dog, x1, y1, x2, y2,
+                   cell, drive, seq, conf
+            FROM (SELECT *, row_number() OVER (
+                      PARTITION BY band ORDER BY hash(seq || ? )) bn
+                  FROM one_per_seq)
+            WHERE bn <= {int(per)}
+            ORDER BY band, bn
+        """, [salt, salt]).fetchall()
     con.close()
     cols = ('band', 'image_id', 'det_idx', 'p_dog', 'x1', 'y1', 'x2', 'y2',
             'cell', 'drive', 'seq', 'conf')
@@ -195,10 +238,13 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
         d['key'] = f"{d['image_id']}#{d['det_idx']}"
         if d['key'] in keys:
             continue
-        b = int(d['band'])
-        if taken.get(b, 0) >= quota.get(b, 0):
-            continue                     # the SQL drew `per`; keep this band's
-        taken[b] = taken.get(b, 0) + 1
+        if mode is None:
+            b = int(d['band'])
+            if taken.get(b, 0) >= quota.get(b, 0):
+                continue                 # the SQL drew `per`; keep this band's
+            taken[b] = taken.get(b, 0) + 1
+        elif len(out) >= n:
+            break                        # ordered walk: the SQL already capped
         d['p_dog'] = float(d['p_dog'])
         d['conf'] = float(d['conf'])
         out.append(d)
@@ -656,13 +702,18 @@ header{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;
   padding:22px 0 16px;border-bottom:1px solid var(--bd);margin-bottom:18px}
 h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .sub{color:var(--dim);font-size:12.5px;margin-top:3px;max-width:56ch}
-.tabs{margin-left:auto;display:inline-flex;gap:2px;padding:2px;
+/* The shared judging strip. One markup, three pages -- the review queue and
+   both audits carry it in the same place with the same classes, so moving
+   between the surfaces reads as one product. The gate/leash cross-link that
+   used to sit in the header folded into it rather than being a second copy
+   of the same navigation. */
+.jtabs{display:inline-flex;gap:2px;padding:2px;margin:0 0 14px;
   border:1px solid var(--bd);border-radius:10px}
-.tab{font-size:12px;color:var(--dim);text-decoration:none;padding:5px 11px;
+.jtab{font-size:12px;color:var(--dim);text-decoration:none;padding:5px 11px;
   border-radius:8px}
-.tab:hover{color:var(--tx)}
-.tab.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
-.back{font-size:12px;color:var(--mut);text-decoration:none;
+.jtab:hover{color:var(--tx)}
+.jtab.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
+.back{margin-left:auto;font-size:12px;color:var(--mut);text-decoration:none;
   border:1px solid var(--bd);border-radius:8px;padding:6px 11px}
 .back:hover{color:var(--tx);border-color:rgba(130,140,150,.3)}
 /* ── the measurement ── */
@@ -771,6 +822,9 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .spacer{margin-left:auto}
 .sides{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--bd);
   border-radius:10px}
+/* an author display: rule beats the [hidden] attribute's UA one, so the
+   toggles that hide these while the annotations are open need this said */
+.sides[hidden],.pick[hidden]{display:none}
 .sidebtn{appearance:none;background:transparent;border:0;color:var(--dim);
   border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;
   font-family:inherit;white-space:nowrap}
@@ -919,9 +973,9 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 <header>
   <div><h1>__H1__</h1>
     <div class="sub">__SUB__</div></div>
-  <span class="tabs">__TABS__</span>
   <a class="back" href="/">&larr; dashboard</a>
 </header>
+__TABS__
 
 <details class="figures" id="figures">
   <summary class="figsum">
@@ -968,6 +1022,17 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
       <option value="unsure">unsure</option>
       <option value="wrong">where we disagreed</option>
     </select></label>
+  <!-- the ledger rows carry ts, so "what did I answer this week" is a filter
+       over the record -- applied in the server's judged(), because a hide on
+       the client would leave the page counts describing rows nobody can see -->
+  <label class="pick" id="periodwrap" hidden
+    title="filters by when you judged; &#8216;today&#8217; is the server&#8217;s local day, not your browser&#8217;s">judged
+    <select id="period">
+      <option value="">any time</option>
+      <option value="today">today</option>
+      <option value="7d">last 7 days</option>
+      <option value="30d">last 30 days</option>
+    </select></label>
   <button class="btn" id="prev">&larr; back</button>
   <button class="btn go" id="next">next page &rarr;</button>
   <span class="pos" id="pos">&mdash;</span>
@@ -988,6 +1053,16 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   </span>
   <label class="pick">band
     <select id="bandsel"><option value="">any</option></select></label>
+  <!-- HOW to draw from the chosen side, not only where. The spread is the
+       measurement's own draw -- even over the bands. The other two are
+       deterministic walks: what each means is written on the button in this
+       stage's vocabulary, because a sheet of surest calls and a sheet of
+       coin-flips look identical until the reader knows which was asked for. -->
+  <span class="sides" id="draws" role="tablist">
+    <button type="button" class="sidebtn on" data-draw="spread">spread</button>
+    <button type="button" class="sidebtn" data-draw="least">least confident</button>
+    <button type="button" class="sidebtn" data-draw="most">most confident</button>
+  </span>
   <button class="btn" id="fresh">&#8635; draw a new page</button>
 </div>
 
@@ -1047,23 +1122,39 @@ var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
    both. */
 var page=null,idx=0,cur=-1,total=0,band=DEFAULT_BAND,busy=false,size=25,
     dirty=false;
+/* HOW the next page is drawn, beside WHERE from. 'spread' is the
+   measurement's own draw, even over the bands; 'least' walks the scores
+   nearest the threshold outward, 'most' walks the far ends inward. It rides
+   the band value on the wire -- band~mode -- so a stored page carries how it
+   was chosen and the position line can say so. */
+var mode='spread';
+function wireBand(){return mode==='spread'?band:band+'~'+mode}
 /* 'sheet' draws from the pool and is the only view that spends new crops.
    The other two read the ledger back, so you can look at what you answered
    and change it -- the ledger already took withdrawals; the only thing
    missing was a way to find the crop again. */
-var view='sheet',anno='all';
+var view='sheet',anno='all',period='';
 
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
   e.hidden=false;clearTimeout(e._t);e._t=setTimeout(function(){e.hidden=true},1600)}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function pctTxt(v){return (v*100).toFixed(1)+'%'}
 function bandName(b){
+  /* the draw mode travels inside the stored band value, so a page read back
+     says not only which side it came from but how its crops were chosen --
+     without this the position line called a sheet of surest calls a draw */
+  var how='';
+  if(typeof b==='string'&&b.indexOf('~')>=0){
+    var q=b.split('~');b=/^\d+$/.test(q[0])?+q[0]:q[0];
+    how=q[1]==='least'?' \u00b7 least confident':
+        q[1]==='most'?' \u00b7 most confident':'';
+  }
   if(typeof b==='number'&&BANDS[b])
-    return BANDS[b][0].toFixed(1)+'–'+BANDS[b][1].toFixed(1);
+    return BANDS[b][0].toFixed(1)+'–'+BANDS[b][1].toFixed(1)+how;
   /* A page drawn with no band at all was drawn from all of them -- the server
      reads a missing band exactly as 'all' -- and the early pages in the store
      carry one, so it cannot fall through to the below-the-line wording. */
-  return b==='kept'?ABOVE : (b==='all'||b==null)?'every band' : BELOW;
+  return (b==='kept'?ABOVE : (b==='all'||b==null)?'every band' : BELOW)+how;
 }
 function fmtn(n){return (n||0).toLocaleString('en-US')}
 var CROP_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" '+
@@ -1302,8 +1393,10 @@ function show(doc,at,tot){
 }
 function loadJudged(at){
   busy=true;setPos();
+  /* the period rides the verdict filter -- which~period -- the same way the
+     draw mode rides the band, so the route passes one string through */
   fetch('/api/audit/judged?stage='+STAGE+'&which='+
-        encodeURIComponent(anno)+'&page='+at+'&n='+size)
+        encodeURIComponent(anno+(period?'~'+period:''))+'&page='+at+'&n='+size)
     .then(function(r){return r.json()})
     .then(function(j){
       busy=false;
@@ -1322,7 +1415,7 @@ function load(at){
   if(view!=='sheet')return loadJudged(at);
   busy=true;setPos();
   fetch('/api/audit/page?stage='+STAGE+'&i='+at+'&n='+size+
-        (band==null?'':'&band='+encodeURIComponent(band))).then(function(r){return r.json()})
+        (band==null?'':'&band='+encodeURIComponent(wireBand()))).then(function(r){return r.json()})
     .then(function(j){busy=false;if(!j||j.error){toast(j&&j.error||'failed');setPos();return}
       show(j.page,j.index,j.total)})
     .catch(function(){busy=false;toast('failed');setPos()});
@@ -1332,7 +1425,7 @@ function draw(){
   document.getElementById('fresh').textContent='cutting…';
   fetch('/api/audit/draw?stage='+STAGE,{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({band:band,n:size})})
+    body:JSON.stringify({band:wireBand(),n:size})})
     .then(function(r){return r.json()})
     .then(function(j){busy=false;
       document.getElementById('fresh').textContent='↻ draw a new page';
@@ -1518,7 +1611,22 @@ grid.addEventListener('click',function(e){
   if(a){cur=+a.getAttribute('data-i');judge(cur,a.getAttribute('data-v'))}
 });
 var sizeSel=document.getElementById('size'),bandSel=document.getElementById('bandsel'),
-    sideEl=document.getElementById('sides');
+    sideEl=document.getElementById('sides'),drawsEl=document.getElementById('draws');
+/* What each draw MEANS, in this stage's own words -- a sheet of the model's
+   surest calls and a sheet of its coin-flips look identical, so the choice
+   has to say which crops it puts up before anyone reads answers off them. */
+var DRAW_TITLE={
+  spread:'an even draw across the score bands \u2014 the measurement\u2019s '+
+    'own sample',
+  least:'the '+TITLE+'\u2019s least confident calls \u2014 scores nearest '+
+    THRESH+', where it could barely decide',
+  most:'the '+TITLE+'\u2019s surest calls \u2014 scores near 0 for '+BELOW+
+    ', near 1 for '+ABOVE+', and both ends on \u201cboth\u201d'};
+(function(){
+  var bs=drawsEl.querySelectorAll('.sidebtn');
+  for(var i=0;i<bs.length;i++)
+    bs[i].title=DRAW_TITLE[bs[i].getAttribute('data-draw')]||'';
+})();
 for(var bi=0;bi<BANDS.length;bi++){
   var o=document.createElement('option');
   o.value=bi;o.textContent=BANDS[bi][0].toFixed(1)+' \u2013 '+
@@ -1538,6 +1646,9 @@ function paintFilter(){
   for(var i=0;i<bs.length;i++)
     bs[i].classList.toggle('on',bs[i].getAttribute('data-side')===on);
   bandSel.value=(typeof band==='number')?String(band):'';
+  var ds=drawsEl.querySelectorAll('.sidebtn');
+  for(var j=0;j<ds.length;j++)
+    ds[j].classList.toggle('on',ds[j].getAttribute('data-draw')===mode);
 }
 /* Both choices are remembered. Working through an audit is a long sitting and
    re-picking them after every reload is a tax on the only thing this page is
@@ -1548,6 +1659,8 @@ try{
   var bv=localStorage.getItem('sdAuditBand:'+STAGE);
   if(bv==='rejected'||bv==='kept'||bv==='all')band=bv;
   else if(bv!==null&&bv!==''&&+bv>=0&&+bv<BANDS.length)band=+bv;
+  var dv=localStorage.getItem('sdAuditDraw:'+STAGE);
+  if(dv==='least'||dv==='most')mode=dv;
 }catch(_){}
 size=+sizeSel.value||25;
 paintFilter();
@@ -1585,11 +1698,11 @@ function applyFilter(){
       /* the ledger read-back is paged by index and filtered by verdict, not by
          the model's score -- so say where the choice landed rather than
          re-fetching a list it cannot change */
-      toast(bandName(band)+' — applies to the sheet');
+      toast(bandName(wireBand())+' — applies to the sheet');
       return;
     }
     var was=(page&&'band' in page)?page.band:null;
-    if(was===band){dirty=false;return}
+    if(was===wireBand()){dirty=false;return}
     draw();
   },250);
 }
@@ -1599,8 +1712,20 @@ sideEl.addEventListener('click',function(e){
   band=b.getAttribute('data-side');dirty=true;rememberBand();paintFilter();
   applyFilter();
 });
+/* remembered and applied exactly the way the band is: a redraw on selection,
+   debounced, and never a draw the sheet on screen already answers */
+drawsEl.addEventListener('click',function(e){
+  var b=e.target.closest&&e.target.closest('.sidebtn');
+  if(!b)return;
+  mode=b.getAttribute('data-draw')||'spread';dirty=true;
+  try{localStorage.setItem('sdAuditDraw:'+STAGE,mode)}catch(_){}
+  paintFilter();applyFilter();
+});
 document.getElementById('anno').addEventListener('change',function(){
   anno=this.value;idx=0;load(0);
+});
+document.getElementById('period').addEventListener('change',function(){
+  period=this.value;idx=0;load(0);
 });
 bandSel.addEventListener('change',function(){
   band=bandSel.value===''?sideOf(band)||DEFAULT_BAND:+bandSel.value;
@@ -1636,7 +1761,9 @@ document.getElementById('views').addEventListener('click',function(e){
   var sheet=view==='sheet';
   document.getElementById('fresh').hidden=!sheet;
   document.getElementById('sides').hidden=!sheet;
+  document.getElementById('draws').hidden=!sheet;
   document.getElementById('annowrap').hidden=sheet;
+  document.getElementById('periodwrap').hidden=sheet;
   idx=0;load(0);
 });
 /* lightbox */
@@ -1847,7 +1974,7 @@ document.addEventListener('keydown',function(e){
 });
 /* boot: the last page if there is one, otherwise an invitation */
 fetch('/api/audit/page?stage='+STAGE+'&i=-1&n='+size+
-      (band==null?'':'&band='+encodeURIComponent(band))).then(function(r){return r.json()})
+      (band==null?'':'&band='+encodeURIComponent(wireBand()))).then(function(r){return r.json()})
   .then(function(j){
     if(j&&j.page)show(j.page,j.index,j.total);
     else{total=0;setPos();render()}
@@ -1866,10 +1993,22 @@ def page_html(stage=DEFAULT_STAGE):
     place to fix every bug found in the first.
     """
     sp = fa.spec(stage)
-    tabs = ''.join(
-        f'<a class="tab{" on" if k == stage else ""}" '
-        f'href="/audit{"" if k == fa.DEFAULT_STAGE else "/" + k}">'
-        f'{v["title"]}</a>' for k, v in fa.STAGES.items())
+    # The shared tab strip, one contract across every judging page: the same
+    # markup on the review queue and both audits, with 'jtab on' (and
+    # aria-current) on the page being read. The labels and hrefs are the
+    # contract's, not this module's vocabulary -- dashboard.py renders the
+    # identical strip on the review page, and two spellings of one strip is
+    # how cross-links drift. The old gate/leash header link folded into it.
+    tabs = ('<nav class="jtabs" aria-label="judging surfaces">'
+            + ''.join(
+                f'<a href="{href}" class="jtab on" aria-current="page">'
+                f'{label}</a>' if key == stage else
+                f'<a href="{href}" class="jtab">{label}</a>'
+                for href, label, key in (
+                    ('/audit/review', 'Review queue', 'review'),
+                    ('/audit/gate', 'Dog-bin audit', 'gate'),
+                    ('/audit/leash', 'Leash audit', 'leash')))
+            + '</nav>')
     if sp['asymmetric']:
         sub = (f'{sp["asks"]} Below a score of 0.5 the model said no, so a '
                f'yes there is a {sp["positive"]} it threw away and nothing '
@@ -1980,16 +2119,41 @@ PAGE_SIZES = (25, 50, 75, 100)
 
 BAND_GROUPS = ('rejected', 'kept', 'all')
 
+# The two deterministic draws. 'least' is the crops the model could barely
+# decide -- scores nearest the threshold; 'most' is its surest calls -- the
+# far ends of whichever side is selected. They ride inside the band value on
+# the wire ('rejected~least') because the routes pass exactly one selection
+# string through, and everything that has to remember what a page was drawn
+# from -- the page document, the prefetch, the position line -- already
+# carries that string.
+DRAW_MODES = ('least', 'most')
+
+
+def band_mode(v):
+    """A wire band value split into (band selection, draw mode or None).
+
+    A mode spelled wrongly is dropped rather than kept: 'rejected~bogus' is
+    somebody's URL, and the spread is the draw whose meaning does not depend
+    on trusting the typo.
+    """
+    if isinstance(v, str) and '~' in v:
+        sel, _, m = v.partition('~')
+        return sel, (m if m in DRAW_MODES else None)
+    return v, None
+
 
 def band_arg(v):
-    """A band selection off the wire: a group name, an index, or nothing."""
-    if v in BAND_GROUPS:
-        return v
-    try:
-        i = int(v)
-    except (TypeError, ValueError):
-        return None
-    return i if 0 <= i < len(fa.BANDS) else None
+    """A band selection off the wire: a group name, an index, or nothing --
+    optionally carrying a draw mode, as '<band>~least' or '<band>~most'."""
+    sel, mode = band_mode(v)
+    if sel not in BAND_GROUPS:
+        try:
+            sel = int(sel)
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= sel < len(fa.BANDS):
+            return None
+    return f'{sel}~{mode}' if mode else sel
 
 
 def page_size(v, default=25):
@@ -2005,9 +2169,33 @@ def page_size(v, default=25):
 # it. But an answer given at speed is an answer worth being able to look at
 # again -- and the ledger already supports changing your mind, so the only
 # thing missing was a way to find the crop.
+# How far back "recently judged" reaches. 'today' is the SERVER's local day:
+# the ledger's timestamps are the server's clock, so its midnight is the only
+# one the rows can be compared against -- the page says so where the choice
+# is offered.
+PERIODS = ('today', '7d', '30d')
+
+
+def period_cutoff(period, now=None):
+    """The ts a ledger row must reach to sit inside the period, or None."""
+    now = time.time() if now is None else now
+    if period == 'today':
+        lt = time.localtime(now)
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                            0, 0, 0, 0, 0, -1))
+    if period == '7d':
+        return now - 7 * 86400
+    if period == '30d':
+        return now - 30 * 86400
+    return None
+
+
 def judged_views(stage=DEFAULT_STAGE):
-    """What `which` may be: a verdict, or one of the two groupings."""
-    return tuple(fa.spec(stage)['answers']) + ('flagged', 'wrong', 'all')
+    """What `which` may be: a verdict or a grouping, optionally carrying a
+    period -- 'all~7d' and friends -- the same way a draw mode rides the band
+    value, because the route passes exactly one string through."""
+    base = tuple(fa.spec(stage)['answers']) + ('flagged', 'wrong', 'all')
+    return base + tuple(f'{w}~{p}' for w in base for p in PERIODS)
 
 
 def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
@@ -2019,8 +2207,18 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
     false positives above the threshold. `all` is everything, unsure included.
     """
     sp = fa.spec(stage)
+    period = None
+    if isinstance(which, str) and '~' in which:
+        which, _, period = which.partition('~')
+        period = period if period in PERIODS else None
+    cutoff = period_cutoff(period)
     rows = [v for v in fa.read_verdicts(stage=stage)
             if fa.verdict_of(v.get('verdict'), stage)]
+    if cutoff is not None:
+        # In the server, before pagination -- a hide on the client would
+        # leave 'page 2 of 5' describing rows nobody can see. A row without
+        # a ts cannot prove it is inside the period, so it is not.
+        rows = [v for v in rows if (v.get('ts') or 0) >= cutoff]
     for v in rows:
         v['verdict'] = fa.verdict_of(v['verdict'], stage)
     # p_dog is what decides the tag, the score chip and the threshold rule.
@@ -2077,15 +2275,21 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
             it['v'] = got[4]
         out.append(it)
     return {'items': out, 'total': total, 'page': page, 'pages': pages,
-            'which': which, 'stage': stage,
-            'counts': _judged_counts(stage)}
+            'which': which, 'period': period, 'stage': stage,
+            'counts': _judged_counts(stage, period)}
 
 
-def _judged_counts(stage=DEFAULT_STAGE):
-    """How many sit behind each view, so the switch can say so."""
+def _judged_counts(stage=DEFAULT_STAGE, period=None):
+    """How many sit behind each view, so the switch can say so.
+
+    The period narrows this too: a button reading 356 over a list filtered
+    to today's twelve is a count of something the view no longer shows.
+    """
     sp = fa.spec(stage)
+    cutoff = period_cutoff(period)
     rows = [fa.verdict_of(v.get('verdict'), stage)
-            for v in fa.read_verdicts(stage=stage)]
+            for v in fa.read_verdicts(stage=stage)
+            if cutoff is None or (v.get('ts') or 0) >= cutoff]
     rows = [v for v in rows if v]
     # only `all` is read -- the button shows one number now
     return {'all': len(rows)}
