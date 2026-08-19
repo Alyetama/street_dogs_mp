@@ -494,6 +494,27 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    explains what those runs were. */
 .ds.gone .dsname{color:var(--mut)}
 .ds.gone .dsnums{color:var(--red);font-family:inherit}
+/* ── folding the list away ─────────────────────────────────────────────────
+   The list is how a dataset gets PICKED; once one is open it is 322px of
+   names the reader already chose between, on every screenful of pictures.
+   Folded, the card narrows to a rail wide enough to say what it is holding
+   and to bring it back. Class-driven display, never the hidden attribute:
+   .chead carries display:flex, which beats [hidden] -- the exact bug this
+   codebase has shipped twice. Open by default; the choice is remembered the
+   way the page already remembers the dataset and the page size. */
+.cols.folded{grid-template-columns:44px minmax(0,1fr)}
+.side.folded .chead,.side.folded .dslist{display:none}
+.rail{display:none}
+.side.folded .rail{display:block;padding:6px}
+.rail button{width:100%;background:transparent;border:0;border-radius:8px;
+  cursor:pointer;font-family:inherit;color:var(--dim);font-size:11.5px;
+  padding:10px 4px;writing-mode:vertical-rl;letter-spacing:.06em;
+  display:flex;align-items:center;gap:8px}
+.rail button:hover{background:var(--panel2);color:var(--tx)}
+.rail .n{font-family:var(--num);color:var(--mut)}
+.fold{background:transparent;border:0;color:var(--dim);cursor:pointer;
+  font-size:13px;padding:2px 6px;border-radius:6px;line-height:1}
+.fold:hover{background:var(--panel2);color:var(--tx)}
 .rescan{background:var(--panel2);border:1px solid var(--bd);color:var(--dim);
   border-radius:8px;padding:4px 9px;font-size:11px;cursor:pointer;
   font-family:inherit;margin-left:10px;text-transform:none;letter-spacing:0}
@@ -666,6 +687,8 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
      the run table's fixed columns were holding both panes wider than a
      phone screen -- the page scrolled sideways to 468px at 390px wide. */
   .cols{grid-template-columns:minmax(0,1fr)}
+  .cols.folded{grid-template-columns:minmax(0,1fr)}
+  .rail button{writing-mode:horizontal-tb;justify-content:center}
   .panes{grid-template-columns:minmax(0,1fr)}
   .struct{grid-template-columns:minmax(0,1fr)}
   .struct .balance{border-right:0;border-bottom:1px solid var(--bd)}
@@ -689,13 +712,17 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 <div class="banner" id="banner" hidden></div>
 
 <div class="cols">
-  <aside class="card">
+  <aside class="card side" id="side">
     <div class="chead"><span>built</span>
       <span class="n" id="dscount">&mdash;</span>
       <button class="rescan" id="rescan" title="walk the disk again — a dataset
         built in the last few seconds may not be in the cached answer">&#8635;
-        rescan</button></div>
+        rescan</button>
+      <button class="fold" id="fold" title="fold the list away — the pictures
+        get the width">&#9666;</button></div>
     <div class="dslist" id="dslist"></div>
+    <div class="rail"><button id="unfold" title="bring the dataset list back">
+      &#9656; <span id="railn" class="n"></span> datasets</button></div>
   </aside>
   <main>
     <div class="card dshead" id="dshead" hidden></div>
@@ -843,6 +870,7 @@ function paintList(){
   var el=$('dslist');
   $('dscount').textContent=rows.length?fmtn(rows.length)+
     (rows.length===1?' dataset':' datasets'):'none';
+  $('railn').textContent=rows.length?fmtn(rows.length):'0';
   if(!rows.length){
     el.innerHTML='<div class="empty">Nothing on this machine looks like a '+
       'dataset yet. Build one &mdash; a detector set under the training root, '+
@@ -1264,6 +1292,17 @@ $('grid').addEventListener('click',function(e){
 $('prev').addEventListener('click',function(){if(pg>0){pg--;loadFiles()}});
 $('next').addEventListener('click',function(){
   if(files&&pg+1<files.pages){pg++;loadFiles()}});
+/* The list folds to a rail and the pictures take the width. Open by
+   default; the choice survives a reload the way the picked dataset and the
+   page size already do. */
+function foldList(want){
+  document.querySelector('.cols').classList.toggle('folded',want);
+  $('side').classList.toggle('folded',want);
+  try{localStorage.setItem('sdDatasetList',want?'folded':'')}catch(_){}
+}
+$('fold').addEventListener('click',function(){foldList(true)});
+$('unfold').addEventListener('click',function(){foldList(false)});
+try{if(localStorage.getItem('sdDatasetList')==='folded')foldList(true)}catch(_){}
 var sizeSel=$('size');
 try{
   var sv=localStorage.getItem('sdDatasetSize');
