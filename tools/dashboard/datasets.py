@@ -436,8 +436,17 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 /* ── the three panes ── */
 .cols{display:grid;grid-template-columns:322px minmax(0,1fr);gap:16px;
   align-items:start}
-.panes{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;
+/* Stacked, not a sidebar. The structure is read once and then consulted;
+   the pictures are the work, and they run for pages. A 290px column spent a
+   screen-tall strip of every row on an element about 400px tall -- the grid
+   paid for it on every scroll. So the structure lies as a band across the
+   top: balance on the left, the folder tree flowing into columns beside it. */
+.panes{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;
   align-items:start;margin-top:14px}
+.struct{display:grid;grid-template-columns:minmax(250px,320px) minmax(0,1fr);
+  grid-template-rows:auto minmax(0,1fr)}
+.struct .chead{grid-column:1/-1}
+.struct .balance{border-bottom:0;border-right:1px solid var(--bd)}
 /* `display:grid` beats the hidden attribute's `display:none`, so without this
    the two empty panes sat under "pick a dataset" before anything was opened. */
 .panes[hidden]{display:none}
@@ -556,7 +565,9 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    fewer label files than images is usually a build that stopped half way, and
    that is worth saying rather than leaving as two numbers to subtract. */
 .mismatch{color:var(--acc)}
-.tree{padding:8px 6px 12px;max-height:52vh;overflow:auto}
+.tree{padding:8px 10px 12px;max-height:236px;overflow:auto;
+  columns:15em;column-gap:4px}
+.tnode{break-inside:avoid}
 .tnode{display:flex;gap:8px;align-items:baseline;width:100%;
   background:transparent;border:0;border-radius:8px;padding:5px 8px;
   cursor:pointer;font-family:inherit;color:var(--mut);font-size:12px;
@@ -656,6 +667,9 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
      phone screen -- the page scrolled sideways to 468px at 390px wide. */
   .cols{grid-template-columns:minmax(0,1fr)}
   .panes{grid-template-columns:minmax(0,1fr)}
+  .struct{grid-template-columns:minmax(0,1fr)}
+  .struct .balance{border-right:0;border-bottom:1px solid var(--bd)}
+  .struct .tree{columns:auto;max-height:52vh}
   .dslist{max-height:340px}
 }
 @media(max-width:560px){
@@ -688,7 +702,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
     <div class="empty" id="pickone">Pick a dataset on the left to see what is
       inside it.</div>
     <div class="panes" id="panes" hidden>
-      <section class="card">
+      <section class="card struct">
         <div class="chead"><span>structure</span></div>
         <div class="balance" id="balance"></div>
         <div class="tree" id="tree"></div>

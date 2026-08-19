@@ -10902,23 +10902,35 @@ def serve(args):
     # silently reverted to the old one -- the map came back upside down with
     # controls that had been added since simply missing. Whoever edits the
     # source is not necessarily watching the server, so the server checks.
-    _src = os.path.abspath(__file__)
-    _src_mtime = os.path.getmtime(_src)
+    # Not only this file. The pages this process serves also come out of
+    # audit.py, datasets.py and llm_page.py, imported once and held -- so an
+    # edit to a sibling sat invisible behind a healthy-looking server until
+    # somebody restarted it by hand, which is the same failure this watcher
+    # exists to close.
+    _src_dir = os.path.dirname(os.path.abspath(__file__))
+    _watched = {os.path.abspath(__file__)}
+    for _m in ('audit.py', 'datasets.py', 'llm_page.py'):
+        _q = os.path.join(_src_dir, _m)
+        if os.path.exists(_q):
+            _watched.add(_q)
+    _src_mtimes = {q: os.path.getmtime(q) for q in _watched}
 
     def _reexec_if_stale():
-        """Restart in place when this file changes underneath us."""
-        try:
-            if os.path.getmtime(_src) == _src_mtime:
+        """Restart in place when any served source file changes underneath us."""
+        for q, was in _src_mtimes.items():
+            try:
+                if os.path.getmtime(q) == was:
+                    continue
+                with open(q) as fh:
+                    body = fh.read()
+                compile(body, q, 'exec')  # never exec into a half-written file
+            except (OSError, SyntaxError) as e:
+                print(f'{os.path.basename(q)} changed but will not load ({e}); '
+                      f'staying on the running copy', file=sys.stderr)
                 return
-            with open(_src) as fh:
-                body = fh.read()
-            compile(body, _src, 'exec')   # never exec into a half-written file
-        except (OSError, SyntaxError) as e:
-            print(f'source changed but will not load ({e}); '
-                  f'staying on the running copy', file=sys.stderr)
-            return
-        print('source changed on disk -- restarting to serve it', flush=True)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+            print(f'{os.path.basename(q)} changed on disk -- restarting to '
+                  f'serve it', flush=True)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def loop():
         cyc = 1
