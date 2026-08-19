@@ -4,7 +4,9 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now street-dogs-dashboard
 #
 # The dashboard has NO authentication. --host must be a private address (a
-# Tailscale or LAN interface). Binding it to 0.0.0.0 on a public-facing box
+# Tailscale or LAN interface), or a comma-separated list of them -- the
+# usual pair is the Tailscale IP plus 127.0.0.1, which is how localhost:8050
+# works on the machine itself without opening the LAN. Binding it to 0.0.0.0 on a public-facing box
 # exposes the review queue and the catalog to anyone who finds the port.
 
 [Unit]
@@ -28,7 +30,7 @@ Environment=PYTHONUNBUFFERED=1
 # I/O against the drives the sweep is already reading. A large number leaves the
 # image count to be rebuilt on demand instead, which is what you want unless the
 # box is idle.
-ExecStart=<path-to-python> tools/dashboard/dashboard.py serve --host <private-bind-addr> --port 8050 --no-initial-refresh --interval 3600 --images-every 999999
+ExecStart=<path-to-python> tools/dashboard/dashboard.py serve --host <private-bind-addr>,127.0.0.1 --port 8050 --no-initial-refresh --interval 3600 --images-every 999999
 # always, not on-failure: a clean exit is not a failure, so on-failure leaves a
 # dashboard that merely stopped stopped -- which is how one stayed down for
 # nearly seven hours with nobody watching.

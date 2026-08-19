@@ -10965,13 +10965,32 @@ def serve(args):
     threading.Thread(target=loop, daemon=True).start()
     BoardHandler.db = args.db
     handler = functools.partial(BoardHandler, directory=OUT)
-    httpd = ThreadingHTTPServer((args.host, args.port), handler)
-    print(f"serving dashboard on http://{args.host}:{args.port}/ "
-          f"(refresh every {args.interval // 60} min)")
+    # --host takes a comma-separated list, because the two addresses anyone
+    # actually wants -- the Tailscale IP for the phone and 127.0.0.1 for the
+    # machine itself -- are one socket each, and binding 0.0.0.0 to get both
+    # would also hand the unauthenticated review queue to the whole LAN. One
+    # server per address, sharing the handler and everything behind it.
+    hosts = [h.strip() for h in args.host.split(',') if h.strip()]
+    servers = []
+    for h in hosts:
+        try:
+            servers.append(ThreadingHTTPServer((h, args.port), handler))
+        except OSError as e:
+            # a machine whose Tailscale is down still gets its localhost
+            print(f'cannot bind {h}:{args.port} ({e}); continuing without it',
+                  file=sys.stderr)
+    if not servers:
+        raise SystemExit(f'none of {", ".join(hosts)} could be bound')
+    for srv in servers:
+        print(f"serving dashboard on http://{srv.server_address[0]}:"
+              f"{args.port}/ (refresh every {args.interval // 60} min)")
+    for srv in servers[1:]:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        httpd.serve_forever()
+        servers[0].serve_forever()
     except KeyboardInterrupt:
-        httpd.shutdown()
+        for srv in servers:
+            srv.shutdown()
 
 
 def main():
@@ -10997,7 +11016,9 @@ def main():
     s = sub.add_parser('serve', help='Serve + auto-refresh on an interval.')
     s.add_argument('--host',
                    default='0.0.0.0',
-                   help='Bind address (e.g. a Tailscale IP). Default 0.0.0.0.')
+                   help='Bind address, or a comma-separated list of them '
+                        '(e.g. a Tailscale IP plus 127.0.0.1). '
+                        'Default 0.0.0.0.')
     s.add_argument('--port', type=int, default=8050)
     s.add_argument('--interval',
                    type=int,
