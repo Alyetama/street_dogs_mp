@@ -401,11 +401,67 @@ def targeted(stage=DEFAULT_STAGE):
     return out
 
 
+# ── who judged it ───────────────────────────────────────────────────────────
+# Every store a person's DECISION lands in names its annotator in a field
+# called `by`: the two flag ledgers, both verdict ledgers here, the box
+# corrections, the reviewed-and-kept ledger, and the two databases' column of
+# the same name -- leash verdicts and wrong-label flags. The exported dataset
+# manifests carry the same name as `judged_by`, spelled out because a manifest
+# row is read next to `judged_at` and `judged_model` and `by` alone would say
+# nothing there. What has no annotator is what nobody decided: the two
+# drawn.jsonl ledgers record which crops were SHOWN, which is the denominator
+# of the rates the audit reports and not an answer anybody gave.
+#
+# The word for a row that has none is spelled ONCE, here, and imported by
+# every module that writes or reads one -- a second spelling is the day one
+# reader says admin and another says None, over the same 3,247 lines.
+AUTHOR_FIELD = 'by'
+LEGACY_AUTHOR = 'admin'
+"""Who an annotation with no author on it was made by.
+
+An absent author does not mean "nobody" and it does not mean "unknown": it
+means the row was written before the dashboard had accounts, when there was
+exactly one person judging crops and that person is the admin. So it reads as
+the admin at the point of reading, everywhere, and it reads that way from the
+file exactly as it stands.
+
+WHY THE LEDGERS WERE NOT REWRITTEN. Adding `by` to 3,247 existing lines would
+put a script in front of the only copy of work nobody can reproduce -- crops
+cut from a pool that rotates hourly, judged one at a time by hand -- to add a
+fact that is already known and that nothing was missing. The stores are
+append-only because that is the property that makes them safe; a migration
+that rewrites them spends it. A default costs one function call per read and
+cannot lose a line.
+
+AND IT IS NEVER WRITTEN. Nothing puts this value into a new record: a write
+that cannot name its annotator is refused instead (see the write paths in
+dashboard.py, audit.py and leash_store.py). Defaulting on the way OUT states
+a fact about rows that predate accounts; defaulting on the way IN would forge
+attribution for rows that do not, which is the one thing this field exists to
+prevent.
+"""
+
+
+def author_of(who):
+    """The annotator to show for one stored value -- LEGACY_AUTHOR if absent.
+
+    Takes the field as it came off disk (``rec.get('by')``, a NULL column),
+    so a missing key, a None and an empty string all resolve the same way.
+    """
+    return str(who) if who else LEGACY_AUTHOR
+
+
 def read_verdicts(path=None, stage=DEFAULT_STAGE):
-    """[{key, verdict, band, p_dog, ts}] -- append-only, last write wins.
+    """[{key, verdict, band, p_dog, ts, by}] -- append-only, last write wins.
 
     Keyed on image_id#det_idx so a crop judged twice (reloaded page, changed
     mind) counts once, as its latest answer.
+
+    THE ONE READER of both verdict ledgers -- the audit page, the statistics
+    and the dataset export all come through here, as does everything outside
+    this module that reads a verdict at all -- so the legacy author is applied
+    once, on the way out, and no caller downstream can see a row with no
+    annotator on it.
     """
     out = {}
     try:
@@ -424,6 +480,7 @@ def read_verdicts(path=None, stage=DEFAULT_STAGE):
                     if d.get('verdict') is None:
                         out.pop(d['key'], None)
                     else:
+                        d[AUTHOR_FIELD] = author_of(d.get(AUTHOR_FIELD))
                         out[d['key']] = d
     except OSError:
         pass
@@ -709,6 +766,11 @@ def export(args):
                 # whether a person redrew this box before it was exported
                 'corrected': os.path.exists(os.path.join(edited, name)),
                 'judged_at': v.get('ts'),
+                # WHO said so, beside WHEN. read_verdicts() has already put
+                # the legacy author on the rows that predate accounts, so a
+                # manifest row can name a person even when its ledger line
+                # could not.
+                'judged_by': author_of(v.get(AUTHOR_FIELD)),
                 'judged_model': getattr(args, 'model', None) or sp['model'],
                 'stage': stage}) + '\n')
     model = getattr(args, 'model', None) or sp['model']

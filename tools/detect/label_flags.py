@@ -23,6 +23,12 @@ still holds for a dataset built next month.
 A DATABASE, so a flag can be taken back. This is a judgement about someone
 else's judgement and it will sometimes be wrong; a store you cannot undo is
 the wrong place to keep one.
+
+AND IT SAYS WHOSE. A judgement about someone else's judgement is exactly the
+kind that wants a name on it now that the dashboard has more than one person
+making them -- and the row is an overrule that the next build acts on by
+dropping the crop. Rows written before there were accounts carry no author
+and read as the admin, the same way every other store in this repo reads one.
 """
 
 import argparse
@@ -32,6 +38,12 @@ import re
 import sqlite3
 import sys
 import time
+
+# One spelling of "who judged this", shared with the flag ledgers, both audit
+# ledgers and the leash store -- fn_audit owns it, this store imports it.
+# Same directory, no third-party imports, and the alternative is a second copy
+# of the word `admin` that drifts the first time one of the two changes.
+from fn_audit import AUTHOR_FIELD, author_of
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,10 +68,24 @@ CREATE TABLE IF NOT EXISTS flags (
     should_be  TEXT,
     run        TEXT,
     note       TEXT,
-    flagged_at INTEGER NOT NULL
+    flagged_at INTEGER NOT NULL,
+    -- WHO overruled the dataset. NULL is allowed and means what an absent
+    -- `by` means in the jsonl ledgers -- see fn_audit.LEGACY_AUTHOR -- so the
+    -- flags raised before the dashboard had accounts keep reading as the
+    -- admin's without one of them being rewritten. Quoted because BY is a
+    -- keyword to sqlite's parser; every statement below quotes it too.
+    "by"       TEXT
 );
 CREATE INDEX IF NOT EXISTS flags_image ON flags(image_id);
 """
+
+# An annotation nobody can be named for. The run panel is behind the login
+# gate, so a relabel POST that reaches add() is signed in by construction and
+# a missing annotator is a PROGRAMMING error -- a caller that forgot to pass
+# the session -- not a state a reviewer can get into. Refused rather than
+# recorded as the admin: the row would then claim a person called somebody
+# else's label wrong when they never did.
+NO_AUTHOR = 'no annotator — this write was not made by a signed-in account'
 
 
 def connect(path=None):
@@ -70,7 +96,39 @@ def connect(path=None):
     con.execute('PRAGMA journal_mode=WAL')
     con.execute('PRAGMA synchronous=FULL')
     con.executescript(SCHEMA)
+    _migrate(con)
     return con
+
+
+def _migrate(con):
+    """Bring an existing store up to SCHEMA. Idempotent, and non-destructive.
+
+    CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so
+    a column added to SCHEMA after the first flag was raised reaches the live
+    database only through here. ALTER TABLE ADD COLUMN appends a column of
+    NULLs and rewrites no row: the flags on disk are unchanged afterwards and
+    read as the admin's, because NULL is what an absent author means.
+
+    IDEMPOTENT ACROSS THREADS, not just across runs. connect() is called once
+    per request and the dashboard is a ThreadingHTTPServer, so the first click
+    on a store that has not been migrated yet can be racing the panel reads
+    beside it: every thread sees the column missing, every thread issues the
+    ALTER, one wins and the rest get "duplicate column name: by". Losing that
+    race is the expected outcome and not an error -- the column is there
+    either way -- so it is swallowed only after asking the table again.
+    Anything else (a locked database, most likely) still raises: that one
+    leaves the store WITHOUT the column, and a silent pass would turn it into
+    "no such column" on the next insert.
+    """
+    have = {r['name'] for r in con.execute('PRAGMA table_info(flags)')}
+    if AUTHOR_FIELD not in have:
+        try:
+            with con:
+                con.execute('ALTER TABLE flags ADD COLUMN "by" TEXT')
+        except sqlite3.OperationalError:
+            have = {r['name'] for r in con.execute('PRAGMA table_info(flags)')}
+            if AUTHOR_FIELD not in have:
+                raise
 
 
 def image_id_of(name):
@@ -80,22 +138,33 @@ def image_id_of(name):
 
 
 def add(file, dataset='', class_was='', should_be='', run='', note='',
-        now=None, path=None):
-    """Flag one crop. Idempotent; re-flagging updates rather than duplicates."""
+        now=None, path=None, by=None):
+    """Flag one crop, and say who did. Idempotent; re-flagging updates.
+
+    ``by`` is the signed-in username and is required -- see NO_AUTHOR. A
+    re-flag takes the new annotator with it, the same way it takes the new
+    ``should_be``: this table holds one row per file and that row is the
+    overrule standing right now, so the person who owns it is the person
+    whose call it now is.
+    """
     file = (file or '').strip()
     if not file:
         return {'ok': False, 'error': 'no file'}, 400
+    if not by:
+        return {'ok': False, 'error': NO_AUTHOR}, 400
     con = connect(path)
     try:
         with con:
             con.execute(
                 'INSERT INTO flags (file, image_id, dataset, class_was, '
-                '  should_be, run, note, flagged_at) VALUES (?,?,?,?,?,?,?,?) '
+                '  should_be, run, note, flagged_at, "by") '
+                'VALUES (?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(file) DO UPDATE SET '
                 '  should_be=excluded.should_be, run=excluded.run, '
-                '  note=excluded.note, flagged_at=excluded.flagged_at',
+                '  note=excluded.note, flagged_at=excluded.flagged_at, '
+                '  "by"=excluded."by"',
                 (file, image_id_of(file), dataset, class_was, should_be, run,
-                 note, int(time.time() if now is None else now)))
+                 note, int(time.time() if now is None else now), str(by)))
         return dict(counts(path=path, con=con), ok=True, file=file), 200
     finally:
         con.close()
@@ -112,13 +181,26 @@ def remove(file, path=None):
         con.close()
 
 
+def row_dict(row):
+    """One stored flag as a plain dict, with its annotator resolved.
+
+    Every path OUT of this store goes through here, so nothing downstream ever
+    sees a flag whose author is null. A row raised before the column existed
+    reads as fn_audit.LEGACY_AUTHOR, which is what it has always meant.
+    """
+    out = dict(row)
+    out[AUTHOR_FIELD] = author_of(out.get(AUTHOR_FIELD))
+    return out
+
+
 def flagged_files(path=None):
     """{file: row} -- what the dashboard needs to light a tile."""
     if not os.path.exists(path or DB_PATH):
         return {}
     con = connect(path)
     try:
-        return {r['file']: dict(r) for r in con.execute('SELECT * FROM flags')}
+        return {r['file']: row_dict(r)
+                for r in con.execute('SELECT * FROM flags')}
     finally:
         con.close()
 
@@ -189,7 +271,8 @@ def main(argv=None):
     for r in rows[:100]:
         when = dt.datetime.fromtimestamp(r['flagged_at'] or 0)
         print(f"  {when:%Y-%m-%d %H:%M}  {r.get('class_was') or '?':9s} "
-              f"-> {r.get('should_be') or '?':9s} {r['file']}")
+              f"-> {r.get('should_be') or '?':9s} {r['file']}"
+              f"  by {author_of(r.get(AUTHOR_FIELD))}")
     if len(rows) > 100:
         print(f'  ... and {len(rows) - 100} more')
     if rows:

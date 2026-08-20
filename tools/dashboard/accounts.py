@@ -76,6 +76,13 @@ import time
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The name every annotation written before there were accounts is read as.
+# Imported, never re-spelled -- fn_audit owns the word, and a second copy of
+# it here is the day the ledgers say one thing and the signup form guards
+# another. In-tree and standard-library-only, like audit.py's import of it.
+sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+from fn_audit import LEGACY_AUTHOR                              # noqa: E402
+
 OUT = os.path.join(REPO, 'data', 'dashboard')
 DB_PATH = os.path.join(OUT, 'accounts.db')
 ENV_PATH = os.path.join(REPO, '.env')
@@ -481,8 +488,46 @@ def normalise_username(name):
     return (name or '').strip().casefold()
 
 
-def check_username(name):
-    """Return the normalised username, or raise AccountError saying why not."""
+def _reserved_for(env=None):
+    """The one account allowed to hold LEGACY_AUTHOR: the .env admin.
+
+    Reads the FILE when the environment does not already carry the variable.
+    Normally it does -- the server calls load_env() in bootstrap() before the
+    first request -- but a process that skipped that (a CLI subcommand, a test
+    harness) would fall back to DEFAULT_ADMIN, which is the very name being
+    reserved, and the reservation would quietly permit everyone on exactly the
+    deployment it exists to protect. Into a scratch dict, never os.environ:
+    resolving a username must not import the rest of .env into the process,
+    and nothing here is printed.
+    """
+    got = _env_str(ENV_USER, env)
+    if not got and env is None:
+        scratch = {}
+        try:
+            load_env(env=scratch)
+        except OSError:                  # unreadable .env is not a crash here
+            scratch = {}
+        got = _env_str(ENV_USER, scratch)
+    return got or DEFAULT_ADMIN
+
+
+def check_username(name, env=None):
+    """Return the normalised username, or raise AccountError saying why not.
+
+    ONE NAME IS RESERVED. Every annotation made before the dashboard had
+    accounts carries no author and is read as LEGACY_AUTHOR -- 3,247 of them,
+    and they are read that way at the review page's byline, in the audit
+    statistics and in the dataset manifest's judged_by. That word is also an
+    ordinary username, and nothing else here would stop somebody taking it:
+    the charset allows it and username_taken only fires once an account
+    already holds it. On a deployment whose admin is called something else --
+    DASHBOARD_USER renamed, or data/ restored beside a fresh accounts.db --
+    the name is free, and an invited member claiming it from the signup form
+    would be credited with every judgement made before they existed while
+    their own new rows became indistinguishable from the founder's. So it is
+    refusable for everyone except the account .env actually names, which is
+    the one person it has always meant.
+    """
     raw = (name or '').strip()
     if not raw:
         raise AccountError('username_missing', 'Choose a username.')
@@ -496,7 +541,15 @@ def check_username(name):
             'username_charset',
             'A username may use letters, digits, dot, dash and underscore, '
             'and must start and end with a letter or digit.')
-    return normalise_username(raw)
+    norm = normalise_username(raw)
+    if norm == normalise_username(LEGACY_AUTHOR) and \
+            norm != normalise_username(_reserved_for(env)):
+        raise AccountError(
+            'username_reserved',
+            'That username is reserved. It is the name every annotation made '
+            'before this dashboard had accounts is recorded under, and only '
+            'the %s account may use it.' % (ENV_USER,))
+    return norm
 
 
 def check_password(password):
@@ -1308,7 +1361,10 @@ def ensure_admin(path=None, now=None, env=None):
             out['ok'] = out['admins'] > 0
             return out
         try:
-            norm = check_username(name)
+            # with THIS env, not the process's: the reserved-name rule asks
+            # who the admin is, and a test (or a re-exec) that passes an
+            # environment in has to be judged against the one it passed
+            norm = check_username(name, env=env)
         except AccountError as e:
             out.update(action='refused',
                        detail='%s is not a usable username: %s' % (ENV_USER,

@@ -1325,6 +1325,26 @@ HP_DIR = os.path.join(REPO, 'data', 'hard_positives')
 POS_LABEL = 'true_positive'
 FLAG_LABELS = (FLAG_LABEL, POS_LABEL)
 
+# Who judged a crop, in the word every store in this repo uses for it.
+# Imported and NOT lazy, unlike leash_store() above: that one is optional
+# tooling and a checkout without it should lose two buttons rather than the
+# page, while this is a single word shared by five ledgers, and the fallback a
+# guarded import would need is precisely the second spelling of `admin` this
+# constant exists to prevent. fn_audit is in-tree and imports nothing but the
+# standard library, so it cannot fail the way an optional dependency can.
+sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+from fn_audit import AUTHOR_FIELD, LEGACY_AUTHOR, author_of  # noqa: E402,F401
+# An annotation nobody can be named for. _gate() answers every request before
+# a route is matched, so a POST that reaches a write path here is signed in by
+# construction: a missing annotator is a PROGRAMMING error -- a route that
+# forgot to pass self.session -- and not a state a reviewer can reach. It is
+# refused rather than recorded, and NOT because a flag cannot be taken back:
+# undo takes one out through _rewrite_labels. It is refused because a row
+# written with no author reads as the admin's for the life of the project,
+# which would claim a person made a call they never made. A refusal is one
+# visible failure at the first click, and it writes nothing untrue.
+NO_AUTHOR = 'no annotator — this write was not made by a signed-in account'
+
 _flag_lock = threading.Lock()
 _flagged = {}  # label -> set of crop names; built once, then kept in memory
 
@@ -1423,7 +1443,17 @@ def _copy_out(src, dst):
 
 
 def _rewrite_labels(drop, label=FLAG_LABEL):
-    """Rewrite one ledger without ``drop``'s record, atomically."""
+    """Rewrite one ledger without ``drop``'s record, atomically.
+
+    ONE crop comes out and nothing else does. A line this cannot parse is
+    carried through exactly as it was read: the readers skip a torn final line
+    (a crash mid-append) and call the rest authoritative, and this used to be
+    the one place that quietly disagreed -- it kept what it could read and
+    dropped what it could not, so an undo by one person silently spent a
+    damaged line out of a ledger holding everybody's work. A line that cannot
+    be read is not the crop being withdrawn, and deciding it is worthless is
+    not this function's call to make.
+    """
     st = _store_for(label)
     keep = []
     try:
@@ -1435,6 +1465,7 @@ def _rewrite_labels(drop, label=FLAG_LABEL):
                 try:
                     rec = json.loads(s)
                 except ValueError:
+                    keep.append(s)
                     continue
                 if isinstance(rec, dict) and rec.get('crop') == drop:
                     continue
@@ -1451,15 +1482,16 @@ def _rewrite_labels(drop, label=FLAG_LABEL):
     os.replace(tmp, st['labels'])
 
 
-def flag_crop(name, label=FLAG_LABEL, undo=False, now=None):
-    """Record (or undo) one crop's verdict. Returns (body, code).
+def flag_crop(name, label=FLAG_LABEL, undo=False, now=None, by=None):
+    """Record (or undo) one crop's verdict, and who made it. (body, code).
 
     ``label`` picks the store: false_positive -> hard_negatives,
-    true_positive -> hard_positives. Idempotent in both directions: a second
-    flag neither duplicates the jsonl line nor re-copies, and undoing
-    something never flagged is a no-op success. Only a malformed name or an
-    unknown label is a 4xx; every filesystem failure comes back 200 with
-    ``ok:false`` so a cosmetic button never 500s.
+    true_positive -> hard_positives. ``by`` is the signed-in username and is
+    required in both directions -- see NO_AUTHOR. Idempotent in both
+    directions: a second flag neither duplicates the jsonl line nor re-copies,
+    and undoing something never flagged is a no-op success. Only a malformed
+    name, an unknown label or a nameless annotator is a 4xx; every filesystem
+    failure comes back 200 with ``ok:false`` so a cosmetic button never 500s.
     """
     name = name or ''
     m = _CROP_RE.match(name)
@@ -1467,6 +1499,11 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None):
         return {'ok': False, 'error': 'malformed crop name'}, 400
     if label not in FLAG_LABELS:
         return {'ok': False, 'error': 'unknown label %r' % (label,)}, 400
+    # An undo is held to the same rule as a flag. It is not a lesser act --
+    # it REWRITES a ledger, taking a judgement out of a training set -- and
+    # a caller that cannot say who is doing that is the same bug either way.
+    if not by:
+        return {'ok': False, 'error': NO_AUTHOR}, 400
     st = _store_for(label)
     try:
         with _flag_lock:
@@ -1485,7 +1522,14 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None):
                         'total': len(names),
                         'flagged_total': len(_flag_names(FLAG_LABEL)),
                         'positive_total': len(_flag_names(POS_LABEL))}, 200
-            if name in names:  # already flagged -> no second line, no re-copy
+            # Already flagged -> no second line, no re-copy, and the annotator
+            # on it does not change. A second reviewer pressing the verdict a
+            # crop already carries is AGREEING with it, not re-deciding it:
+            # the call is the same call, and it is still the first person's.
+            # (The leash store answers the other way round -- see its
+            # record() -- because there a second click can carry a different
+            # label, and the row holds one verdict rather than a history.)
+            if name in names:
                 return {'ok': True, 'copied': False, 'duplicate': True,
                         'label': label, 'total': len(names),
                         'flagged_total': len(_flag_names(FLAG_LABEL)),
@@ -1535,7 +1579,8 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None):
                    'conf': round(int(m.group(3)) / 100.0, 2),
                    'ts': int(m.group(1)), 'crop': name, 'label': label,
                    'copied': bool(got_crop or got_full),
-                   'flagged_at': int(time.time() if now is None else now)}
+                   'flagged_at': int(time.time() if now is None else now),
+                   AUTHOR_FIELD: str(by)}
             os.makedirs(st['dir'], exist_ok=True)
             with open(st['labels'], 'a') as w:
                 w.write(json.dumps(rec) + '\n')
@@ -1961,6 +2006,12 @@ padding:5px 8px;font:400 10.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
 color:var(--dim);font-variant-numeric:tabular-nums}
 .meta .id{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta .cf{color:var(--mut);font-weight:600;flex:none}
+/* WHO judged it, on the caption line and dimmer than the frame slug beside
+   it. A byline, not a column: it appears only in the audit view, where every
+   tile carries a verdict and whose verdict it is belongs to reading it back.
+   The queue has nothing to attribute and shows nothing. */
+.meta .by{color:var(--dim);flex:none;opacity:.85;max-width:45%;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* two verdicts, side by side and equal weight -- neither is the default, and
    a hairline keeps them from reading as one wide button */
 /* A CONTACT SHEET. At rest a tile is a photograph and one caption line --
@@ -2857,6 +2908,11 @@ function tile(c){
        covering the only thing on the card worth looking at. */
     '<div class="meta"><span class="id" title="'+att(c.image_id)+'">'+esc(c.image_id)+
       '</span>'+
+      /* Only where there is a verdict to attribute. A crop in the queue has
+         nobody to name, and a byline on one would read as somebody having
+         already judged it. */
+      (c.by?'<span class="by" title="judged by '+att(c.by)+'">'+
+        esc(c.by)+'</span>':'')+
       '<span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
     '<div class="actwrap">'+
     '<div class="acts">'+
@@ -7378,7 +7434,11 @@ def warm_hq(names):
 
 
 def _saved_box(name):
-    """The most recent correction for a crop, if any."""
+    """The most recent correction for a crop, if any.
+
+    The author comes back resolved: a box redrawn before there were accounts
+    carries no `by`, and it was the admin who drew it.
+    """
     out = None
     try:
         with open(BOX_LABELS) as f:
@@ -7394,14 +7454,22 @@ def _saved_box(name):
                     out = r          # last write wins
     except OSError:
         pass
+    if out is not None:
+        out[AUTHOR_FIELD] = author_of(out.get(AUTHOR_FIELD))
     return out
 
 
-def save_box(name, det_idx, box, now=None):
-    """Record a corrected box in ORIGINAL pixels. Append-only, last wins."""
+def save_box(name, det_idx, box, now=None, by=None):
+    """Record a corrected box in ORIGINAL pixels. Append-only, last wins.
+
+    ``by`` is the signed-in username and is required: hand-drawn geometry is
+    an annotation like a verdict, and the same rule covers it (NO_AUTHOR).
+    """
     m = _CROP_RE.match(name or '')
     if not m:
         return {'ok': False, 'error': 'malformed crop name'}
+    if not by:
+        return {'ok': False, 'error': NO_AUTHOR}
     try:
         x1, y1, x2, y2 = (float(v) for v in box)
     except (TypeError, ValueError):
@@ -7416,7 +7484,8 @@ def save_box(name, det_idx, box, now=None):
            'det_idx': int(det_idx or 0),
            'x1': round(x1, 2), 'y1': round(y1, 2),
            'x2': round(x2, 2), 'y2': round(y2, 2),
-           'saved_at': int(time.time() if now is None else now)}
+           'saved_at': int(time.time() if now is None else now),
+           AUTHOR_FIELD: str(by)}
     try:
         with _box_lock:
             os.makedirs(BOX_DIR, exist_ok=True)
@@ -7433,7 +7502,12 @@ def save_box(name, det_idx, box, now=None):
 # too, every crop judged "yes that's a dog" stays in the pool forever, so each
 # visit to the review page reopens the same dogs -- the queue never advances.
 # Paging past a screen IS the decision: everything on it that was not flagged
-# was judged a dog.
+# was judged a dog. So a row here names its annotator like any other verdict,
+# and the 8,996 written before there were accounts carry none and read as the
+# admin's. Nothing reads that name back yet -- the two consumers, _load_seen()
+# below and build_review_set.py, both want image_ids and nothing else -- but
+# what a person decided is recorded where it happened, because the queue moves
+# on and the decision cannot be reconstructed afterwards from anything else.
 SEEN_FILE = os.path.join(HN_DIR, 'reviewed.jsonl')
 _seen_lock = threading.Lock()
 _seen = None  # set of image_ids judged and kept
@@ -7489,10 +7563,23 @@ def reset_seen(now=None):
                 'backup': os.path.basename(bak) if bak else None}
 
 
-def mark_seen(names, now=None):
-    """Record crops as reviewed-and-kept. Keyed by image_id, not crop name, so
-    a cell twin of the same photo cannot come back on a later page."""
+def mark_seen(names, now=None, by=None):
+    """Record crops as reviewed-and-kept, and who kept them.
+
+    Keyed by image_id, not crop name, so a cell twin of the same photo cannot
+    come back on a later page.
+
+    ``by`` is the signed-in username and is required, on the same terms as a
+    flag -- see NO_AUTHOR. This ledger is the AFFIRMATIVE half of the same
+    decision the flag button records: paging past a screen says everything on
+    it was judged a dog, build_review_set.py reads it beside the two flag
+    ledgers as one exclusion set, and it is the largest of the three. A page
+    whose negative verdicts name a person and whose positive ones name nobody
+    records half of what the reviewer did.
+    """
     now = int(time.time() if now is None else now)
+    if not by:
+        return {'ok': False, 'error': NO_AUTHOR, 'added': 0}
     added = 0
     with _seen_lock:
         cur = _seen_ids()
@@ -7505,7 +7592,8 @@ def mark_seen(names, now=None):
             if iid in cur:
                 continue
             cur.add(iid)
-            new.append({'image_id': iid, 'crop': str(nm), 'seen_at': now})
+            new.append({'image_id': iid, 'crop': str(nm), 'seen_at': now,
+                        AUTHOR_FIELD: str(by)})
         if new:
             try:
                 os.makedirs(HN_DIR, exist_ok=True)
@@ -7950,6 +8038,10 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
                     'conf': round(int(m.group(3)) / 100.0, 2),
                     'label': lb,
                     'flagged_at': int(r.get('flagged_at') or 0),
+                    # WHO judged it, beside WHEN. The rows written before the
+                    # dashboard had accounts carry no author and resolve to
+                    # the admin, which is who made them.
+                    AUTHOR_FIELD: author_of(r.get(AUTHOR_FIELD)),
                     'has_crop': True})
     # collapse to one entry per crop, keeping the newest verdict
     by_name = {}
@@ -9781,6 +9873,21 @@ class BoardHandler(SimpleHTTPRequestHandler):
             reply.send(self)
         return True
 
+    def _annotator(self):
+        """The username to attribute this request's annotations to.
+
+        Read off the session _gate() resolved, never off the request body: a
+        client that could name its own annotator could sign somebody else's
+        name to a verdict, and the ledgers are append-only.
+
+        Empty when there is no session, which the gate makes unreachable for a
+        real request -- see NO_AUTHOR. The write paths refuse it; this returns
+        it rather than inventing one, because inventing one here is exactly
+        the forgery the field exists to prevent.
+        """
+        return str((getattr(self, 'session', None) or {}).get('username')
+                   or '')
+
     def _gate_broken(self, path, exc=None):
         """Serve the explanation, and only the explanation.
 
@@ -10588,7 +10695,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 a = _audit()
                 stage = self._audit_stage(parse_qs(urlparse(self.path).query))
                 self._json(a.save_correction(
-                    data.get('key'), data.get('box') or [], stage)
+                    data.get('key'), data.get('box') or [], stage,
+                    by=self._annotator())
                     if a and a.pool_ready(stage)
                     else {'ok': False, 'msg': 'pool not built'})
             except Exception as e:
@@ -10620,7 +10728,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                         data.get('key'),
                         None if v is None else str(v),
                         {'band': data.get('band'), 'p_dog': data.get('p_dog'),
-                         'seq': data.get('seq')}, stage=stage))
+                         'seq': data.get('seq')}, stage=stage,
+                        by=self._annotator()))
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
             return
@@ -10710,7 +10819,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                         f, dataset=str(data.get('dataset') or ''),
                         class_was=str(data.get('was') or ''),
                         should_be=str(data.get('should') or ''),
-                        run=str(data.get('run') or ''))
+                        run=str(data.get('run') or ''),
+                        by=self._annotator())
                 self._json(body, code)
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
@@ -10739,7 +10849,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     body, code = mod.record(
                         name, str(data.get('label') or ''),
                         copy_from={'crop': src,
-                                   'full': os.path.join(src, 'full')})
+                                   'full': os.path.join(src, 'full')},
+                        by=self._annotator())
                 self._json(body, code)
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
@@ -10750,7 +10861,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 d = json.loads(self.rfile.read(n) or b'{}')
                 self._json(save_box(str(d.get('name') or ''),
                                     d.get('det_idx'),
-                                    d.get('box') or []))
+                                    d.get('box') or [],
+                                    by=self._annotator()))
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
             return
@@ -10762,7 +10874,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     self._json(reset_seen())
                     return
                 names = data.get('names') if isinstance(data, dict) else None
-                self._json(mark_seen(names or []))
+                self._json(mark_seen(names or [], by=self._annotator()))
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})
             return
@@ -10774,7 +10886,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     raise ValueError('body is not an object')
                 body, code = flag_crop(str(data.get('name') or ''),
                                        str(data.get('label') or FLAG_LABEL),
-                                       bool(data.get('undo')))
+                                       bool(data.get('undo')),
+                                       by=self._annotator())
             except Exception as e:  # a cosmetic button never 500s
                 body, code = {'ok': False, 'error': str(e)}, 200
             self._json(body, code)

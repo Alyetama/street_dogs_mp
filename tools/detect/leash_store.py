@@ -41,6 +41,12 @@ import sqlite3
 import sys
 import time
 
+# One spelling of "who judged this", shared with the flag ledgers and both
+# audit ledgers -- fn_audit owns it, this store imports it. Same directory, no
+# third-party imports, and the alternative is a second copy of the word
+# `admin` that drifts the first time one of the two changes.
+from fn_audit import AUTHOR_FIELD, author_of
+
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LEASH_DIR = os.path.join(REPO, 'data', 'leash_labels')
@@ -60,11 +66,30 @@ CREATE TABLE IF NOT EXISTS leash (
     ts          INTEGER,
     labelled_at INTEGER NOT NULL,
     source      TEXT NOT NULL DEFAULT 'review_page',
-    note        TEXT
+    note        TEXT,
+    -- WHO said so. `source` was here first and answers a different question:
+    -- it is the SURFACE a verdict came off ('review_page'), which was as near
+    -- to an author as this table could get before the dashboard had accounts.
+    -- NULL is allowed and means exactly what an absent `by` means in the
+    -- jsonl ledgers -- see fn_audit.LEGACY_AUTHOR -- so the rows written
+    -- before this column existed keep reading as the admin's without one of
+    -- them being rewritten. Quoted because BY is a keyword to sqlite's
+    -- parser; every statement below quotes it for the same reason.
+    "by"        TEXT
 );
 CREATE INDEX IF NOT EXISTS leash_label ON leash(label);
 CREATE INDEX IF NOT EXISTS leash_when  ON leash(labelled_at);
 """
+
+# An annotation nobody can be named for. The review page is behind the login
+# gate, so a leash POST that reaches record() is signed in by construction and
+# a missing annotator is a PROGRAMMING error -- a caller that forgot to pass
+# the session -- not a state a reviewer can get into. Refused rather than
+# recorded as the admin: this row would then claim a person made a call they
+# never made, and that is the one thing naming the annotator exists to stop.
+# (A leash row CAN be taken back, unlike a jsonl line -- the refusal is not
+# about recoverability, it is about not writing something untrue.)
+NO_AUTHOR = 'no annotator — this write was not made by a signed-in account'
 
 
 def connect(path=None):
@@ -82,7 +107,46 @@ def connect(path=None):
     con.execute('PRAGMA journal_mode=WAL')
     con.execute('PRAGMA synchronous=FULL')   # a verdict must survive a crash
     con.executescript(SCHEMA)
+    _migrate(con)
     return con
+
+
+def _migrate(con):
+    """Bring an existing store up to SCHEMA. Idempotent, and non-destructive.
+
+    CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so
+    a column added to SCHEMA after the first verdict was recorded reaches the
+    live database only through here. ALTER TABLE ADD COLUMN appends a column
+    of NULLs and rewrites no row: the thirteen verdicts on disk are the same
+    thirteen bytes-for-bytes afterwards, and they read as the admin's because
+    NULL is what an absent author means.
+
+    Reading the table's own columns rather than a version number, because
+    this store predates having one and a schema_version table introduced now
+    would have to guess which version the rows on disk already are.
+
+    IDEMPOTENT ACROSS THREADS, not just across runs. connect() is called once
+    per request and the dashboard is a ThreadingHTTPServer, so the very first
+    click on a store that has not been migrated yet can be racing the page
+    reads beside it: every thread sees the column missing, every thread issues
+    the ALTER, one wins and the rest get "duplicate column name: by". record()
+    has no handler for that, so the loser's verdict came back to the reviewer
+    as {'ok': false} and was never written. Losing the race is the expected
+    outcome here and not an error -- the column is there either way, which is
+    all the caller wanted -- so it is swallowed only after asking the table
+    again. Anything else (a locked database, most likely) still raises: that
+    one leaves the store WITHOUT the column, and a silent pass would turn it
+    into "no such column" on the next insert.
+    """
+    have = {r['name'] for r in con.execute('PRAGMA table_info(leash)')}
+    if AUTHOR_FIELD not in have:
+        try:
+            with con:
+                con.execute('ALTER TABLE leash ADD COLUMN "by" TEXT')
+        except sqlite3.OperationalError:
+            have = {r['name'] for r in con.execute('PRAGMA table_info(leash)')}
+            if AUTHOR_FIELD not in have:
+                raise
 
 
 def parse_crop(name):
@@ -94,16 +158,28 @@ def parse_crop(name):
 
 
 def record(name, label, copy_from=None, source='review_page', note=None,
-           now=None, path=None):
-    """Record one verdict. Idempotent, and re-deciding replaces the old one.
+           now=None, path=None, by=None):
+    """Record one verdict, and who made it. Idempotent; re-deciding replaces.
 
     Returns (dict, http status) so the dashboard can hand it straight back.
+
+    ``by`` is the signed-in username and is required -- see NO_AUTHOR. A
+    re-decision takes the new annotator with it: THIS table holds one row per
+    crop and that row is the verdict standing right now, so the person who
+    owns it is the person whose call it now is. The flag ledgers answer the
+    same question the other way (the first flag stands and a second press of
+    it changes nothing, annotator included) because a flag is a line in an
+    append-only file rather than a row that gets replaced -- see flag_crop's
+    duplicate branch. Neither is the general rule; each follows the shape of
+    the store it is written into.
     """
     got = parse_crop(name)
     if not got:
         return {'ok': False, 'error': 'malformed crop name'}, 400
     if label not in LABELS:
         return {'ok': False, 'error': 'unknown label %r' % (label,)}, 400
+    if not by:
+        return {'ok': False, 'error': NO_AUTHOR}, 400
     image_id, ts, conf = got
     copied = False
     if copy_from:
@@ -113,13 +189,15 @@ def record(name, label, copy_from=None, source='review_page', note=None,
         with con:
             con.execute(
                 'INSERT INTO leash (crop, image_id, label, conf, ts, '
-                '                   labelled_at, source, note) '
-                'VALUES (?,?,?,?,?,?,?,?) '
+                '                   labelled_at, source, note, "by") '
+                'VALUES (?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(crop) DO UPDATE SET '
                 '  label=excluded.label, labelled_at=excluded.labelled_at, '
-                '  source=excluded.source, note=excluded.note',
+                '  source=excluded.source, note=excluded.note, '
+                '  "by"=excluded."by"',
                 (name, image_id, label, conf, ts,
-                 int(time.time() if now is None else now), source, note))
+                 int(time.time() if now is None else now), source, note,
+                 str(by)))
         return dict(_counts(con), ok=True, crop=name, label=label,
                     copied=copied), 200
     finally:
@@ -153,6 +231,19 @@ def remove_label(label, path=None):
         return dict(_counts(con), ok=True, removed=len(names)), 200
     finally:
         con.close()
+
+
+def row_dict(row):
+    """One stored verdict as a plain dict, with its annotator resolved.
+
+    Every path OUT of this store goes through here, so nothing downstream --
+    a dataset build reading the export, a person reading --list -- ever sees
+    a verdict whose author is null. A row recorded before the column existed
+    reads as fn_audit.LEGACY_AUTHOR, which is what it has always meant.
+    """
+    out = dict(row)
+    out[AUTHOR_FIELD] = author_of(out.get(AUTHOR_FIELD))
+    return out
 
 
 def labels_for(names=None, path=None):
@@ -278,7 +369,7 @@ def main(argv=None):
         if a.export:
             with open(a.export, 'w') as w:
                 for r in rows:
-                    w.write(json.dumps(dict(r)) + '\n')
+                    w.write(json.dumps(row_dict(r)) + '\n')
             print(f'{len(rows)} verdict(s) -> {a.export}')
             return 0
 
@@ -290,7 +381,8 @@ def main(argv=None):
             for r in rows[:200]:
                 when = dt.datetime.fromtimestamp(r['labelled_at'])
                 print(f"  {when:%Y-%m-%d %H:%M}  {r['label']:9s} "
-                      f"conf={r['conf']}  {r['crop']}")
+                      f"conf={r['conf']}  {r['crop']}"
+                      f"  by {author_of(r[AUTHOR_FIELD])}")
             if len(rows) > 200:
                 print(f'  ... and {len(rows) - 200} more')
         return 0

@@ -889,7 +889,9 @@ def concurrency_checks(bad):
         t.start()
         _t.sleep(0.15)
         a = _t.time()
-        audit.record('probe#0', 'unsure')
+        # named, or the write is refused before it ever reaches the lock this
+        # is timing and the measurement passes by measuring nothing
+        audit.record('probe#0', 'unsure', by='probe')
         waited = _t.time() - a
         t.join(timeout=5)
         if waited > 0.25:

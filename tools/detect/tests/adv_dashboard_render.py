@@ -888,12 +888,17 @@ def check_flag_api():
                 except OSError:
                     return []
 
-            b, c = dash.flag_crop('../../etc/passwd')
+            # Every call names its annotator: flag_crop refuses a write it
+            # cannot attribute, so a guard that left it out would be driving
+            # the refusal path and asserting nothing about flagging. The
+            # attribution itself is graded in adv_attribution.py.
+            who = 'flagtester'
+            b, c = dash.flag_crop('../../etc/passwd', by=who)
             want(c == 400 and not b['ok'], 'malformed name did not 400')
-            b, c = dash.flag_crop('')
+            b, c = dash.flag_crop('', by=who)
             want(c == 400, 'empty name did not 400')
 
-            b, c = dash.flag_crop(name)
+            b, c = dash.flag_crop(name, by=who)
             want(c == 200 and b['ok'] and b['copied'] is True,
                  f'flag of a live crop: {b}')
             want(b['flagged_total'] == 1, 'flagged_total should be 1')
@@ -919,13 +924,13 @@ def check_flag_api():
             want(os.path.exists(os.path.join(dash.HN_CROPS, name)),
                  'the copy did not survive the source being pruned')
 
-            b, _ = dash.flag_crop(name)          # idempotent
+            b, _ = dash.flag_crop(name, by=who)  # idempotent
             want(b['ok'] and b.get('duplicate') is True, f're-flag: {b}')
             want(len(lines()) == 1, 'a duplicate flag appended a second line')
 
             # lost the race with the pruner entirely: record it anyway
             gone = '1785663399999_777777777777777_042.jpg'
-            b, c = dash.flag_crop(gone)
+            b, c = dash.flag_crop(gone, by=who)
             want(c == 200 and b['ok'] and b['copied'] is False,
                  f'pruned crop should be ok/copied:false, got {b}')
             want(len(lines()) == 2, 'pruned crop did not get a ledger line')
@@ -936,14 +941,15 @@ def check_flag_api():
             race = '1785663311111_888888888888888_055.jpg'
             with open(os.path.join(crops, race), 'wb') as f:
                 f.write(b'\xff\xd8x')
-            ts = [threading.Thread(target=dash.flag_crop, args=(race,))
+            ts = [threading.Thread(target=dash.flag_crop, args=(race,),
+                                   kwargs={'by': who})
                   for _ in range(12)]
             [t.start() for t in ts]
             [t.join() for t in ts]
             want(len([r for r in lines() if r['crop'] == race]) == 1,
                  'concurrent flags of one crop duplicated the ledger line')
 
-            b, _ = dash.flag_crop(name, undo=True)
+            b, _ = dash.flag_crop(name, undo=True, by=who)
             want(b['ok'] and b['undone'], f'undo: {b}')
             want(not os.path.exists(os.path.join(dash.HN_CROPS, name)),
                  'undo left the copied crop behind')
@@ -951,7 +957,7 @@ def check_flag_api():
                  'undo left the copied full frame behind')
             want([r['crop'] for r in lines()] == [gone, race],
                  f'undo mangled the ledger: {[r["crop"] for r in lines()]}')
-            b, _ = dash.flag_crop(name, undo=True)   # no-op success
+            b, _ = dash.flag_crop(name, undo=True, by=who)  # no-op
             want(b['ok'], 'undo of an unflagged crop should still be ok')
 
             # a torn final line (crash mid-append) must not poison the reload

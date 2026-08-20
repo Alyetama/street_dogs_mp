@@ -30,6 +30,20 @@ import fn_audit as fa                                          # noqa: E402
 
 DEFAULT_STAGE = fa.DEFAULT_STAGE
 STAGES = fa.STAGES
+# fn_audit owns the spelling, the same way it owns the stages: one word for
+# the annotator of a row written before accounts existed, imported rather
+# than repeated here.
+AUTHOR_FIELD = fa.AUTHOR_FIELD
+LEGACY_AUTHOR = fa.LEGACY_AUTHOR
+# An annotation nobody can be named for. The gate (dashboard.py's _gate)
+# answers every request before a route is matched, so a verdict POST that
+# reaches here is signed in by construction and a missing annotator is a
+# PROGRAMMING error -- a route that forgot to pass the session -- not a state
+# a reviewer can get into. It is refused rather than recorded: these ledgers
+# are append-only, nothing can take a line back out, and a row written with
+# no author would read as the admin's forever. A refused write is one visible
+# failure at the first click; a forged one is a fact about a person.
+NO_AUTHOR = 'no annotator — this write was not made by a signed-in account'
 # Paths are looked up per request, never held in module state: one process
 # serves both audits and two requests can be in flight at once, so a global
 # "current stage" would have one page writing into the other's ledger.
@@ -376,12 +390,15 @@ VIEW_MAX = 1100
 
 
 def corrections():
-    """{(image_id, det_idx): (x1, y1, x2, y2, saved_at)} -- last write wins.
+    """{(image_id, det_idx): (x1, y1, x2, y2, saved_at, by)} -- last wins.
 
     The timestamp is carried because the tile has to be able to ASK for the
     redrawn crop. Crops are served with a day of browser cache, so without a
     version on the URL a redraw showed until the page was reloaded and then
     silently reverted to the cut it replaced.
+
+    The author is carried through fa.author_of, so a box drawn before there
+    were accounts reads as the admin here rather than as None.
     """
     out = {}
     try:
@@ -397,7 +414,8 @@ def corrections():
                     out[(str(d['image_id']), int(d.get('det_idx') or 0))] = (
                         float(d['x1']), float(d['y1']),
                         float(d['x2']), float(d['y2']),
-                        int(d.get('saved_at') or 0))
+                        int(d.get('saved_at') or 0),
+                        fa.author_of(d.get(AUTHOR_FIELD)))
                 except (KeyError, TypeError, ValueError):
                     continue
     except OSError:
@@ -405,7 +423,7 @@ def corrections():
     return out
 
 
-def save_correction(key, box, stage=DEFAULT_STAGE):
+def save_correction(key, box, stage=DEFAULT_STAGE, by=None):
     """Record a hand-drawn box and re-cut the crop a future model trains on.
 
     It does NOT touch what the audit measured. The verdict on this box is a
@@ -417,6 +435,10 @@ def save_correction(key, box, stage=DEFAULT_STAGE):
     cand = _pool_row(str(key).replace('#', '_'), stage)
     if not cand:
         return {'ok': False, 'msg': 'not a box in this pool'}
+    # geometry drawn by hand is an annotation like any other, and the same
+    # rule applies to it: no annotator, no line. See NO_AUTHOR.
+    if not by:
+        return {'ok': False, 'msg': NO_AUTHOR}
     try:
         x1, y1, x2, y2 = (float(box[0]), float(box[1]),
                           float(box[2]), float(box[3]))
@@ -428,7 +450,7 @@ def save_correction(key, box, stage=DEFAULT_STAGE):
            'det_idx': int(cand['det_idx']),
            'x1': round(x1, 2), 'y1': round(y1, 2),
            'x2': round(x2, 2), 'y2': round(y2, 2),
-           'saved_at': int(time.time())}
+           'saved_at': int(time.time()), AUTHOR_FIELD: str(by)}
     with _BOX_LOCK:
         os.makedirs(os.path.dirname(BOX_FILE), exist_ok=True)
         with open(BOX_FILE, 'a') as fh:
@@ -641,19 +663,24 @@ def place(key, verdict, stage=DEFAULT_STAGE, force=False):
     return True
 
 
-def record(key, verdict, meta=None, stage=DEFAULT_STAGE):
-    """Append one human judgement.
+def record(key, verdict, meta=None, stage=DEFAULT_STAGE, by=None):
+    """Append one human judgement, and who made it.
 
     Append-only and re-readable: a mind changed later is another line, and the
     reader keeps the last one. Nothing rewrites history in place, so a crash
     mid-write costs one line rather than the file.
+
+    ``by`` is the signed-in username. It is required -- see NO_AUTHOR.
     """
     # `None` clears: undo is a verdict being withdrawn, not a third opinion,
     # and the ledger is append-only so it is written as one more line.
     if verdict is not None and fa.verdict_of(verdict, stage) is None:
         return {'ok': False, 'msg': f'unknown verdict {verdict!r}'}
+    if not by:
+        return {'ok': False, 'msg': NO_AUTHOR}
     verdict = fa.verdict_of(verdict, stage) if verdict is not None else None
-    rec = {'key': str(key), 'verdict': verdict, 'ts': time.time()}
+    rec = {'key': str(key), 'verdict': verdict, 'ts': time.time(),
+           AUTHOR_FIELD: str(by)}
     for k in ('band', 'p_dog', 'seq'):
         if meta and meta.get(k) is not None:
             rec[k] = meta[k]
@@ -900,6 +927,15 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   letter-spacing:.04em;text-transform:uppercase;border-radius:5px;
   padding:2px 6px;background:rgba(10,12,16,.86);color:var(--mut);
   border:1px solid var(--bd)}
+/* WHO judged it, opposite the redraw mark. A byline and nothing more: it is
+   dimmer than every other word on the tile, it appears only where there is
+   an answer to attribute, and it carries no control -- who judged a crop is
+   worth knowing while you look at the crop, and is not a way to sort the
+   ledger. */
+.by{position:absolute;right:6px;bottom:6px;font-size:10px;border-radius:5px;
+  padding:2px 6px;background:rgba(10,12,16,.72);color:var(--dim);
+  border:1px solid var(--bd);max-width:60%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
 /* Top-right, opposite the model's verdict -- the two things the MODEL says
    read together along the top, and the bottom belongs to what YOU say. It sat
    bottom-right, in the same corner the buttons appear in, so the score showed
@@ -1163,6 +1199,11 @@ var view='sheet',anno='all',period='';
 function toast(t){var e=document.getElementById('toast');e.textContent=t;
   e.hidden=false;clearTimeout(e._t);e._t=setTimeout(function(){e.hidden=true},1600)}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
+/* textContent->innerHTML escapes & < > and NOT the quote, which is enough for
+   text between tags and not enough for a title="". Usernames cannot hold one
+   (accounts.USERNAME_RE), but a ledger is a file and a value out of a file is
+   never trusted to a shape the reader has not checked. */
+function att(s){return esc(s).replace(/"/g,'&quot;')}
 function pctTxt(v){return (v*100).toFixed(1)+'%'}
 function bandName(b){
   /* the draw mode travels inside the stored band value, so a page read back
@@ -1358,6 +1399,11 @@ function render(){
         (it.corrected?'<span class="redrawn" title="you redrew this box; '+
           'the training crop uses your framing, the measurement uses the '+
           'model\u2019s">redrawn</span>':'')+
+        /* Only where there IS an answer on record. An unjudged box on the
+           sheet has nobody to name, and a byline over one would read as a
+           verdict somebody had already given. */
+        (it.by?'<span class="by" title="judged by '+att(it.by)+
+          '">'+esc(it.by)+'</span>':'')+
         '<span class="ptag '+(predOf(it)===POS?'yes':'no')+
         '" title="what the model called it: '+predOf(it)+', scoring '+
         it.p_dog.toFixed(3)+' for '+POS+'">'+esc(predOf(it))+'</span>'+
@@ -2183,16 +2229,21 @@ def with_verdicts(doc, stage=DEFAULT_STAGE):
     """
     if not doc or not doc.get('items'):
         return doc
-    seen = {v['key']: v.get('verdict') for v in fa.read_verdicts(stage=stage)}
+    # the answer AND who gave it: the page is reading the ledger back, and on
+    # a shared queue "already judged" is half the fact
+    seen = {v['key']: (v.get('verdict'), v.get(AUTHOR_FIELD))
+            for v in fa.read_verdicts(stage=stage)}
     fixed = corrections()
     for it in doc['items']:
         # through verdict_of, because the page paints from this stage's own
         # two words and the gate's ledger still holds forty rows written in
         # the older ones -- those came back as 'missed', matched nothing on
         # the tile, and a find read as an ordinary answered card
-        v = fa.verdict_of(seen.get(it['key']), stage)
+        was, who = seen.get(it['key']) or (None, None)
+        v = fa.verdict_of(was, stage)
         if v:
             it['verdict'] = v
+            it[AUTHOR_FIELD] = fa.author_of(who)
         iid, _, di = str(it['key']).partition('#')
         got = fixed.get((iid, int(di or 0)))
         if got:
@@ -2362,6 +2413,10 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
               'p_dog': float(v['p_dog']) if v.get('p_dog') is not None else 0.0,
               'band': v.get('band'), 'seq': v.get('seq'),
               'judged_at': v.get('ts'),
+              # read_verdicts has already resolved the legacy author, so this
+              # names a person on every row including the ones that predate
+              # accounts
+              AUTHOR_FIELD: fa.author_of(v.get(AUTHOR_FIELD)),
               'unknown_score': v.get('p_dog') is None}
         got = fixed.get((iid, int(di or 0)))
         if got:
