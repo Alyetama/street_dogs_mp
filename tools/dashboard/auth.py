@@ -132,6 +132,7 @@ LOGIN_PATH = '/login'
 LOGOUT_PATH = '/logout'
 SIGNUP_PATH = '/signup'
 ADMIN_PATH = '/admin'
+ACCOUNT_PATH = '/account'
 CSRF_FIELD = 'csrf'
 TOKEN_FIELD = 't'
 NEXT_FIELD = 'next'
@@ -148,6 +149,8 @@ PUBLIC_PATHS = frozenset({LOGIN_PATH, SIGNUP_PATH, LOGOUT_PATH})
 # put on your admin page.
 NOTICES = {
     'invite_revoked': 'That invite was withdrawn.',
+    'password_changed': 'Your password is changed. Every other device signed '
+                        'in as you has been signed out.',
     'assigned': 'That work is delegated. They will see it the next time they '
                 'open a judging page.',
     'assign_cancelled': 'That target is called off. What was judged towards '
@@ -705,7 +708,7 @@ def owns(path):
     under it, and for nothing else -- /login/x is not a page and falls through
     to the dashboard's own 404.
     """
-    return (path in (LOGIN_PATH, LOGOUT_PATH, SIGNUP_PATH)
+    return (path in (LOGIN_PATH, LOGOUT_PATH, SIGNUP_PATH, ACCOUNT_PATH)
             or path == ADMIN_PATH or path.startswith(ADMIN_PATH + '/'))
 
 
@@ -899,6 +902,102 @@ def do_login(req, now=None):
                           status=401)
     value, ttl = mint(got['user'], now=now, key_path=_state()['key'])
     return redirect(nxt, extra=[set_cookie(value, ttl)])
+
+
+def change_password(session, current, new, confirm, now=None, path=None):
+    """One password change. A dict, never an exception.
+
+        {'ok', 'user', 'message', 'retry_after'}
+
+    THE CURRENT PASSWORD IS REQUIRED, and that is the whole point of the
+    route. This cookie travels in the clear over the tailnet; somebody
+    holding a copy can already read everything the owner can, and without
+    this they could also take the account away from them -- change the
+    password, bump the epoch, and be the only one left signed in. Knowing the
+    old password is the one thing a stolen cookie does not carry.
+
+    THROTTLED ON ITS OWN KEY. Guessing the current password from inside a
+    session is worth doing, so it is counted -- but counted under the account
+    rather than under the login source, or a stolen cookie could be used to
+    lock the real owner out of the login form by failing here on purpose.
+    """
+    try:
+        return _change_password(session, current, new, confirm, now, path)
+    except accounts.AccountError as e:
+        return {'ok': False, 'user': None, 'retry_after': 0,
+                'message': e.message}
+    except Exception as e:               # noqa: BLE001
+        # Same shape as attempt_login's: a store that went away is a sentence
+        # naming the fault, not a 500 in the middle of somebody's password.
+        return {'ok': False, 'user': None, 'retry_after': 0,
+                'message': 'The accounts database could not be read (%s).'
+                           % (type(e).__name__,)}
+
+
+def _change_password(session, current, new, confirm, now, path):
+    """The change itself. See change_password() for every decision in here."""
+    p = path or _state()['db']
+    ts = int(time.time() if now is None else now)
+    if not session or not session.get('username'):
+        return {'ok': False, 'user': None, 'retry_after': 0,
+                'message': 'Sign in first.'}
+    who = session['username']
+    # Checked before the store is touched, so a typo in the confirmation
+    # costs nothing and does not count as a failed guess.
+    if new != confirm:
+        return {'ok': False, 'user': None, 'retry_after': 0,
+                'message': 'Those two passwords are not the same.'}
+    if new == current:
+        return {'ok': False, 'user': None, 'retry_after': 0,
+                'message': 'That is the password you already have.'}
+    accounts.check_password(new)          # raises AccountError with the reason
+    source = 'pw:' + accounts.normalise_username(who)
+    st = accounts.reserve_attempt(source, now=ts, path=p)
+    if st['was_locked']:
+        return {'ok': False, 'user': None, 'retry_after': st['retry_after'],
+                'message': 'Too many wrong passwords. Try again in %s.'
+                           % (_span(st['retry_after']),)}
+    # touch=False: this is not a login, and stamping last_login_at here would
+    # make "last seen" mean "last changed their password" for anybody who did.
+    user = accounts.verify_password(who, current, touch=False, path=p)
+    if user is None:
+        return {'ok': False, 'user': None, 'retry_after': 0,
+                'message': 'That is not your current password.'}
+    accounts.clear_failures(source, path=p)
+    return {'ok': True, 'retry_after': 0, 'message': '',
+            'user': accounts.set_password(who, new, now=ts, path=p)}
+
+
+def do_account(req, now=None):
+    """Your own account: the one thing you can change about it.
+
+    A member had no way to change their password at all. It could only be
+    done from a terminal, by an admin, with dashboard.py passwd -- so the
+    answer to "somebody watched me type it" was to go and find the person who
+    runs the machine.
+    """
+    session = req.session
+    if session is None:
+        return redirect(LOGIN_PATH, status=302)
+    if req.method != 'POST':
+        return page_reply(account_page(
+            session, notice=NOTICES.get(req.arg('m'), '')))
+    if req.oversize:
+        return page_reply(account_page(session,
+                                       error='That form was too large.'),
+                          status=413)
+    got = change_password(session, req.one('current'), req.one('password'),
+                          req.one('confirm'), now=now)
+    if not got['ok']:
+        return page_reply(account_page(session, error=got['message']),
+                          status=401 if got['retry_after'] else 400)
+    # THE EPOCH JUST MOVED, which is the point -- every other device is
+    # signed out. This browser has to be handed a cookie minted under the new
+    # epoch or the person who just changed their password is bounced to the
+    # login form by their own success, which reads exactly like a failure.
+    value, ttl = mint(got['user'], now=now, key_path=_state()['key'])
+    return redirect(ACCOUNT_PATH + '?m=password_changed',
+                    extra=[set_cookie(value, ttl)])
 
 
 def do_logout(req):
@@ -1312,6 +1411,8 @@ def serve_request(req, now=None):
             # and signing out first is one click away.
             return redirect('/', status=302)
         return do_signup(req, now=now)
+    if req.path == ACCOUNT_PATH:
+        return do_account(req, now=now)
     if req.path == ADMIN_PATH or req.path.startswith(ADMIN_PATH + '/'):
         if not req.session or req.session.get('role') != 'admin':
             # Gated on ROLE, not on being signed in, and answered with the
@@ -1461,7 +1562,10 @@ width:20px;height:20px;margin:3px 0 3px 3px;border-radius:50%;
 background:rgba(130,140,150,.16);color:var(--mut);
 font-size:10.5px;font-weight:700;text-transform:uppercase}
 .whon{padding:0 10px 0 7px;color:var(--tx);font-weight:620;letter-spacing:.01em;
-max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+text-decoration:none;display:inline-block;line-height:26px}
+.whon:hover{color:var(--acc)}
+.whon:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
 /* A form that takes up no room. Sign-out is a POST because it ends the
    session on every device by bumping session_epoch, and a state change a GET
    can make is one that any page the reader happens to open can make for
@@ -1498,8 +1602,13 @@ def identity_html(session):
     return ('<span class="hsep" aria-hidden="true"></span>'
             '<div class="who"><span class="whoi" aria-hidden="true">'
             + esc(raw[:1]) + '</span>'
-            '<span class="whon" title="signed in as ' + name + '">'
-            + name + '</span>'
+            # THE NAME IS THE WAY IN. A third control in the pill would
+            # crowd it, and the one thing behind this link is the account the
+            # name belongs to -- which is what a name in a corner means
+            # everywhere else.
+            '<a class="whon" href="' + esc(ACCOUNT_PATH)
+            + '" title="Your account \u2014 change your password">'
+            + name + '</a>'
             '<form class="whof" method="post" action="' + esc(LOGOUT_PATH)
             + '"><input type="hidden" name="' + esc(CSRF_FIELD)
             + '" value="' + esc(session.get('csrf') or '')
@@ -1758,6 +1867,55 @@ def _day_end(s):
     if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, m, d):
         return None                       # mktime turns Feb 31 into March
     return int(ts) + 86400
+
+
+def account_page(session, error='', notice=''):
+    """Your own account. One form, because there is one thing to change.
+
+    Deliberately not a settings page. A username is on every annotation this
+    person has ever made and renaming them would either rewrite that or make
+    it lie, and a role is somebody else's decision -- so the page offers the
+    one thing that is genuinely theirs and says what it costs.
+    """
+    who = esc(str(session.get('username') or ''))
+    role = 'admin' if session.get('role') == 'admin' else 'member'
+    bits = ['<div class="card">\n  <h1>Your account</h1>\n'
+            '  <div class="sub">Signed in as <b>%s</b> \u2014 %s.</div>\n'
+            % (who, role)]
+    if error:
+        bits.append('  <div class="msg bad">%s</div>\n' % (esc(error),))
+    elif notice:
+        bits.append('  <div class="msg ok">%s</div>\n' % (esc(notice),))
+    bits.append(
+        '  <form method="post" action="%s">\n'
+        # The username, hidden and disabled: a password manager needs to know
+        # WHICH login it is being asked to update, and without it some of
+        # them save the new password as a second, nameless entry.
+        '    <input type="text" name="username" value="%s" '
+        'autocomplete="username" hidden disabled>\n'
+        '    <div class="field"><label for="c0">current password</label>\n'
+        '      <input id="c0" name="current" type="password" '
+        'autocomplete="current-password" autofocus required></div>\n'
+        '    <div class="field"><label for="p1">new password</label>\n'
+        '      <input id="p1" name="password" type="password" minlength="%d" '
+        'maxlength="%d" autocomplete="new-password" required></div>\n'
+        '    <div class="field"><label for="p2">new password again</label>\n'
+        '      <input id="p2" name="confirm" type="password" minlength="%d" '
+        'maxlength="%d" autocomplete="new-password" required></div>\n'
+        '    <button class="btn go" type="submit">Change password</button>\n'
+        '  </form>\n'
+        # Said before it happens, not after. Somebody changing a password on
+        # a phone should know the laptop is about to ask them to sign in
+        # again, or they will read it as the change having broken something.
+        '  <div class="note">Changing it signs out every other device signed '
+        'in as you \u2014 this one stays. There is no way to recover a '
+        'forgotten password: an admin has to set a new one.</div>\n'
+        '  <div class="note"><a href="/">&larr; dashboard</a></div>\n'
+        '</div>'
+        % (esc(ACCOUNT_PATH), who,
+           accounts.PASSWORD_MIN, accounts.PASSWORD_MAX,
+           accounts.PASSWORD_MIN, accounts.PASSWORD_MAX))
+    return _doc('Your account', CENTRED_CSS, ''.join(bits))
 
 
 def admin_page(session, req, now=None, error='', minted=None):

@@ -1639,6 +1639,116 @@ def reply_checks(bad, fx):
         bad.append('a reply cannot carry two Set-Cookie headers')
 
 
+def account_checks(bad, fx):
+    """Changing your own password: the one thing this page is for.
+
+    Before it existed, a password could only be changed from a terminal by an
+    admin -- so the answer to "somebody watched me type it" was to go and find
+    whoever runs the machine.
+
+    Three things have to hold, and only one of them is obvious.
+
+    The obvious one: the CURRENT password is required. This cookie travels in
+    the clear, and somebody holding a copy can already read what the owner
+    can -- without this they could also take the account away, changing the
+    password and leaving themselves the only session alive.
+
+    The second: the browser doing the changing must SURVIVE it. set_password
+    bumps the epoch, which is what signs the other devices out; the cookie in
+    the hand of the person who just succeeded is minted under the old one, so
+    without a fresh cookie on the reply their success bounces them to the
+    login form and reads exactly like a failure.
+
+    The third: the throttle here must not be the login's. Counting these
+    failures against the login source would let anybody holding a stolen
+    cookie lock the real owner out of the form by failing on purpose.
+    """
+    member = fx.member(name='sam.field', pw=PW2)
+    cookie = fx.cookie_for(member)
+
+    def go(form, ck=cookie):
+        return U.serve_request(fx.req(method='POST', path=U.ACCOUNT_PATH,
+                                      form=form, cookie=ck))
+
+    # THE BODY IS ONLY READ FOR ROUTES THE MODULE OWNS. Off that list, every
+    # field arrives empty and the page silently does nothing at all.
+    if not U.owns(U.ACCOUNT_PATH):
+        bad.append('the gate does not own %s, so its form body is never read'
+                   % (U.ACCOUNT_PATH,))
+    if U.ACCOUNT_PATH in U.PUBLIC_PATHS or U.is_public(U.ACCOUNT_PATH):
+        bad.append('%s is public — anybody can open a password form'
+                   % (U.ACCOUNT_PATH,))
+    # signed out is the login form, not a page
+    out = U.serve_request(fx.req(path=U.ACCOUNT_PATH))
+    if not out or not out.header('Location').startswith(U.LOGIN_PATH):
+        bad.append('a signed-out reader was served the account page')
+
+    NEW = 'a-brand-new-password'
+    for form, why in (
+            ({'current': 'not-the-password', 'password': NEW,
+              'confirm': NEW}, 'a wrong current password'),
+            ({'current': '', 'password': NEW, 'confirm': NEW},
+             'no current password at all'),
+            ({'current': PW2, 'password': NEW, 'confirm': NEW + 'x'},
+             'a confirmation that does not match'),
+            ({'current': PW2, 'password': 'short', 'confirm': 'short'},
+             'a password under the minimum'),
+            ({'current': PW2, 'password': PW2, 'confirm': PW2},
+             'the password they already have')):
+        r = go(form)
+        if r is None or r.status < 400 or r.header('Set-Cookie'):
+            bad.append('%s was accepted' % (why,))
+    if A.verify_password('sam.field', PW2, touch=False,
+                                path=fx.db) is None:
+        bad.append('a refused attempt changed the password anyway')
+
+    # ── the change ──
+    r = go({'current': PW2, 'password': NEW, 'confirm': NEW})
+    if r is None or r.status not in (302, 303):
+        bad.append('a good password change was refused: %r'
+                   % (r.status if r else None,))
+        return
+    fresh = _cookie_value(r)
+    if not fresh:
+        bad.append('the reply carried no new cookie — the person who just '
+                   'changed their password is bounced to the login form by '
+                   'their own success')
+    elif U.resolve(fresh, path=fx.db, key_path=fx.key) is None:
+        bad.append('the new cookie does not resolve, so the browser that '
+                   'did the changing is signed out too')
+    # every OTHER device is out, which is the point
+    if U.resolve(cookie, path=fx.db, key_path=fx.key) is not None:
+        bad.append('the old cookie still resolves — a password change did '
+                   'not end the sessions it was made to end')
+    if A.verify_password('sam.field', PW2, touch=False,
+                                path=fx.db) is not None:
+        bad.append('the old password still works')
+    if A.verify_password('sam.field', NEW, touch=False,
+                                path=fx.db) is None:
+        bad.append('the new password does not work')
+
+    # ── the throttle is the ACCOUNT's, not the login source's ──
+    m2 = fx.member(name='ana.field', pw=PW2)
+    ck2 = fx.cookie_for(m2)
+    locked = False
+    for i in range(12):
+        r = U.serve_request(fx.req(
+            method='POST', path=U.ACCOUNT_PATH, cookie=ck2,
+            form={'current': 'wrong-%d-wrong' % i, 'password': NEW,
+                  'confirm': NEW}))
+        if r is not None and 'Too many' in (r.body or b'').decode(
+                'utf-8', 'replace'):
+            locked = True
+            break
+    if not locked:
+        bad.append('wrong current passwords are never throttled — a stolen '
+                   'cookie can guess at the old password for ever')
+    got = U.attempt_login('ana.field', PW2, '10.0.0.9', path=fx.db)
+    if not got['ok']:
+        bad.append('failing at the password form locked the account out of '
+                   'the LOGIN form: %s' % got['message'])
+
+
 def identity_checks(bad, fx):
     """ONE identity strip, written once, on every page that has a header.
 
@@ -1668,7 +1778,10 @@ def identity_checks(bad, fx):
             ('class="hsep"', 'the divider does not ship with the strip, so a '
              'page draws a rule that hangs there when nobody is signed in'),
             ('class="whoi"', 'the monogram is gone — the one place a person '
-             'appears on a page made of counts')):
+             'appears on a page made of counts'),
+            ('href="' + U.ACCOUNT_PATH + '"',
+             'the name is not a way to your own account, so the only route '
+             'to a password change is somebody else with a terminal')):
         if need not in strip:
             bad.append('the identity strip: ' + why)
     if strip.count('sign out') != 1:
@@ -1755,7 +1868,7 @@ def main():
                        locked_checks, login_checks, logout_checks,
                        burst_checks, redirect_checks,
                        signup_checks, admin_checks, page_checks,
-                       identity_checks,
+                       account_checks, identity_checks,
                        silence_checks, source_checks, import_checks,
                        handler_checks, reply_checks, wiring_checks):
                 try:
