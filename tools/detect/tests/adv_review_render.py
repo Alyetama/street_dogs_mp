@@ -215,6 +215,56 @@ def sign_in(mod):
     return {'Cookie': auth.COOKIE + '=' + value}, tmp
 
 
+def score_checks(html, script):
+    """The detector's score, on every tile, without the cursor.
+
+    It used to be the last item of the caption line -- and the caption line is
+    the bottom of the card, which is exactly where the verdict row rides over
+    it. So the number was legible only on a tile nobody was pointing at, and
+    gone from every tile in audit mode, where that row never hides at all.
+    The user reported it as the score having disappeared, which is what it had
+    done.
+
+    Three pins, because there are three ways to lose it again: stop drawing
+    it, draw it inside the overlay that covers the caption, or hide it behind
+    a hover. The last is the one that reads as a design choice.
+    """
+    bad = []
+    if 'class="cfx"' not in script:
+        bad.append('the tile draws no score chip at all (class="cfx" gone)')
+    # It must be built BEFORE the action overlay, which is the element that
+    # covers the foot of the card -- inside it, the score is hidden again by
+    # the very thing that hid it the first time.
+    i_chip, i_wrap = script.find('class="cfx"'), script.find('class="actwrap"')
+    if i_chip >= 0 and i_wrap >= 0 and i_chip > i_wrap:
+        bad.append('the score chip is built inside/after the action overlay, '
+                   'which is what covered it before')
+    rule = re.search(r'\.cfx\{[^}]*\}', html)
+    if not rule:
+        bad.append('no .cfx rule: the chip has no styling and no position')
+    else:
+        body = rule.group(0)
+        if re.search(r'opacity:\s*0(?![.\d])', body):
+            bad.append('the score chip starts invisible (opacity:0)')
+        if 'position:absolute' not in body:
+            bad.append('the score chip is not positioned over the frame, so '
+                       'it is back in the flow the overlay covers')
+        # Permanent furniture over a PHOTOGRAPH cannot be a wash: whatever the
+        # crop shows comes through the number on exactly the bright frames
+        # that need reading. Same defect the verdict buttons were fixed for.
+        m = re.search(r'background:([^;}]+)', body)
+        if m and re.search(r'rgba\([^)]*,\s*0?\.\d+\s*\)', m.group(1)):
+            bad.append('the score chip is translucent (%s) -- the crop shows '
+                       'through a number that is now always on screen'
+                       % (m.group(1).strip(),))
+    for m in re.finditer(r'([^{}]*)\{[^}]*\}', html):
+        sel = m.group(1)
+        if '.cfx' in sel and (':hover' in sel or ':focus-within' in sel):
+            bad.append('a hover rule targets the score chip again: %s'
+                       % (sel.strip()[:80],))
+    return bad
+
+
 def route_checks(mod):
     """/audit/review serves the queue; /review answers with the new address.
 
@@ -2389,6 +2439,7 @@ def main():
                        guess_absence_checks(html, script)),
                       ('the annotated-date filter',
                        period_payload_checks(mod)),
+                      ('the always-on score', score_checks(html, script)),
                       ('the /audit/review routes', route_checks(mod))):
         for b in bad:
             print('FAIL %s: %s' % (name, b))

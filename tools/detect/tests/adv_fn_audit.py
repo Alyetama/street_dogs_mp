@@ -1917,6 +1917,27 @@ var acts = /\.acts\{[^}]*\}/.exec(PAGE_CSS)[0];
 chk(!(/bottom:\s*\d/.test(chip) && /bottom:\s*0/.test(acts)),
   'the score chip and the action row share the bottom of the tile, so the '
   + 'score shows through the buttons');
+// AND IT IS ON WITHOUT THE CURSOR. A band IS a range of scores, so how sure
+// the model was is the reason a tile is on this sheet at all. Revealed on
+// hover it could be read one tile at a time, which on a fifty-tile sheet is
+// fifty passes of the cursor to learn what one glance should carry.
+chk(!/opacity:\s*0(?![.\d])/.test(chip),
+  'the score chip starts invisible (opacity:0) — the score is back to one '
+  + 'tile at a time, under the cursor');
+chk(!/\.pchip[^{}]*\{[^}]*opacity:\s*1/.test(
+      PAGE_CSS.replace(/\.pchip\{[^}]*\}/, '')),
+  'a rule still switches the score chip on, so something switches it off');
+// Two marks are now permanent furniture over a PHOTOGRAPH: the class tag and
+// the score. Neither can be a wash — whatever the crop shows comes through
+// the text on exactly the bright frames that most need reading, which is the
+// defect the verdict buttons above were fixed for, two elements along.
+[['pchip', chip], ['ptag', /\.ptag\{[^}]*\}/.exec(PAGE_CSS)[0]]
+].forEach(function (pair) {
+  var bg = /background:([^;}]+)/.exec(pair[1]);
+  chk(bg && !/rgba\([^)]*,\s*0?\.\d+\s*\)/.test(bg[1]),
+    'the ' + pair[0] + ' is translucent (' + (bg && bg[1]) + ') — the crop '
+    + 'comes through a mark that is always on screen');
+});
 page.items.forEach(function (it) {
   var want = (+it.p_dog >= THRESH) ? POS : NEG;
   chk(predOf(it) === want,

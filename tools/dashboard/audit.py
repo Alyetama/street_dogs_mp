@@ -915,7 +915,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .shot img{max-width:100%;max-height:100%;display:block}
 .ptag{position:absolute;left:6px;top:6px;font-size:10.5px;border-radius:6px;
   padding:2px 7px;letter-spacing:.02em;border:1px solid var(--bd);
-  background:rgba(10,12,16,.82);color:var(--mut)}
+  background:#0a0c10;color:var(--mut)}
 /* No background of its own: the plate above stays under the amber. This rule
    used to replace the scrim with a 16% wash, which left the model's own
    verdict -- the one thing on a tile that is always visible -- reading at
@@ -940,12 +940,23 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    read together along the top, and the bottom belongs to what YOU say. It sat
    bottom-right, in the same corner the buttons appear in, so the score showed
    through "not a dog" whenever the row came up. */
+/* ALWAYS ON. The score is the reason a tile is on this sheet at all -- a
+   band IS a range of scores, and how sure the model was is what separates a
+   call worth arguing with from one that is merely wrong. Revealed on hover it
+   could only be read one tile at a time, which on a fifty-tile sheet is fifty
+   passes of the cursor to learn what one glance should carry.
+   Permanent furniture over a photograph has to be legible over ANY
+   photograph, so it is opaque now rather than the 86% it could afford while
+   it only ever appeared under a cursor -- the same defect the verdict buttons
+   and the class tag were fixed for. Hover still does something: it brightens
+   the number rather than conjuring it. */
 .pchip{position:absolute;right:6px;top:6px;font-size:10.5px;
   font-family:var(--num);
-  background:rgba(10,12,16,.86);border:1px solid var(--bd);border-radius:6px;
+  background:#0a0c10;border:1px solid var(--bd);border-radius:6px;
   padding:2px 6px;color:var(--mut);font-variant-numeric:tabular-nums;
-  opacity:0;transition:opacity .12s ease}
-.card:hover .pchip,.card:focus-within .pchip,.card.cur .pchip{opacity:1}
+  transition:color .12s ease}
+.card:hover .pchip,.card:focus-within .pchip,.card.cur .pchip{color:var(--tx)}
+@media(prefers-reduced-motion:reduce){.pchip{transition:none}}
 /* The row rides over a PHOTOGRAPH, so it cannot be nearly-opaque and nearly
    legible: at 94% a bright cobbled street came through 11.5px type and the
    labels were unreadable on exactly the tiles that most need looking at. The

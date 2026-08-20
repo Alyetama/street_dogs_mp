@@ -2005,7 +2005,21 @@ border-color .12s}
 padding:5px 8px;font:400 10.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
 color:var(--dim);font-variant-numeric:tabular-nums}
 .meta .id{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.meta .cf{color:var(--mut);font-weight:600;flex:none}
+/* HOW SURE THE DETECTOR WAS, ON THE FRAME AND ALWAYS ON. It used to be the
+   last item of the caption line -- and the caption line is at the bottom of
+   the card, which is exactly where the verdict row rides over it. So the
+   score was legible only on a tile nobody was pointing at, and gone from
+   every tile in audit mode, where the row never hides at all.
+   Top-right, the one corner nothing else claims: the buttons come up from
+   the bottom and the byline sits with them. Opaque rather than a wash,
+   because permanent furniture over a photograph has to hold up over a bright
+   pavement as well as a dark one. pointer-events:none so it is a reading, not
+   a target -- the whole frame under it stays one click to zoom. */
+.cfx{position:absolute;right:6px;top:6px;z-index:1;pointer-events:none;
+background:#0a0c10;border:1px solid var(--bd);border-radius:6px;
+padding:2px 6px;color:var(--mut);
+font:600 10.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+font-variant-numeric:tabular-nums}
 /* WHO judged it, on the caption line and dimmer than the frame slug beside
    it. A byline, not a column: it appears only in the audit view, where every
    tile carries a verdict and whose verdict it is belongs to reading it back.
@@ -2884,7 +2898,8 @@ function bumpBal(dNeg,dPos){
 function tile(c){
   var d=document.createElement('div');
   d.className='card';d.dataset.name=c.name;
-  var pc=Math.round(Math.max(0,Math.min(1,+c.conf||0))*100);
+  var pc=Math.round(Math.max(0,Math.min(1,+c.conf||0))*100),
+      cf=(+c.conf||0).toFixed(2);
   /* PREVIEW first, HQ when it lands. The HQ cut (from the ORIGINAL -- the
      preview thumbnails are cut from the 1280 letterbox and capped at 160px,
      which throws away 3.6-5.3x the pixels actually available) is cut on
@@ -2902,6 +2917,12 @@ function tile(c){
        c.harvested?'/review_set/':'/recent_crops/')+
       encodeURIComponent(c.name)+'" '+
       "onerror=\"this.onerror=null;this.src='"+hqURL+"'\">"+
+    /* The score, on the picture rather than under it. Same number the rail
+       below draws as a length: the bar answers "which of these is the least
+       sure" across a screenful, the chip answers "how sure, exactly" on the
+       one being looked at. */
+    '<span class="cfx" title="the detector scored this detection '+cf+
+      '">'+cf+'</span>'+
     '<div class="rail"><i style="width:'+pc+'%"></i></div>'+
     /* One caption line, contact-sheet style: frame slug and exposure.
        Anything more used to ride over the top-left of the photograph --
@@ -2913,7 +2934,7 @@ function tile(c){
          already judged it. */
       (c.by?'<span class="by" title="judged by '+att(c.by)+'">'+
         esc(c.by)+'</span>':'')+
-      '<span class="cf">'+(+c.conf||0).toFixed(2)+'</span></div>'+
+      '</div>'+
     '<div class="actwrap">'+
     '<div class="acts">'+
       '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
