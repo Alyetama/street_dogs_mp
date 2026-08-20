@@ -20,6 +20,7 @@ import glob
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -895,6 +896,26 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   color:var(--mut);border-radius:9px;padding:7px 9px;font-size:12.5px;
   font-family:inherit;cursor:pointer}
 .pick select:hover{color:var(--tx)}
+/* JUDGED, BETWEEN TWO DATES. Native inputs, so the calendar is the
+   platform's: a hand-built one is a month of edge cases -- locale order,
+   which day a week starts on, every keyboard path -- to arrive somewhere
+   worse than the control the browser already ships. color-scheme is the
+   whole reason it looks like it belongs: without it Chrome draws a white
+   calendar panel and a black-on-black picker icon on a dark field. */
+.pdate{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
+  border-radius:9px;padding:6px 8px;font-size:12.5px;font-family:inherit;
+  cursor:pointer;color-scheme:dark;font-variant-numeric:tabular-nums}
+.pdate:hover{color:var(--tx)}
+.pdate:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.pdash{color:var(--dim)}
+/* Only where there is something to clear: a x standing over two empty fields
+   is a control for undoing nothing. Its own display rule because an author
+   `display` beats the browser's [hidden], which is how a control this page
+   meant to hide has shipped visible twice. */
+.pclr{background:0;border:0;color:var(--dim);font:inherit;font-size:14px;
+  line-height:1;cursor:pointer;padding:3px 6px;border-radius:7px}
+.pclr:hover{background:rgba(130,140,150,.12);color:var(--tx)}
+.pclr[hidden]{display:none}
 /* ── the sheet ──
    A CONTACT SHEET, the same conclusion the review page reached and this page
    did not inherit: at rest a tile is a photograph and the model's own verdict,
@@ -1096,14 +1117,20 @@ __TABS__
   <!-- the ledger rows carry ts, so "what did I answer this week" is a filter
        over the record -- applied in the server's judged(), because a hide on
        the client would leave the page counts describing rows nobody can see -->
-  <label class="pick" id="periodwrap" hidden
-    title="filters by when you judged; &#8216;today&#8217; is the server&#8217;s local day, not your browser&#8217;s">judged
-    <select id="period">
-      <option value="">any time</option>
-      <option value="today">today</option>
-      <option value="7d">last 7 days</option>
-      <option value="30d">last 30 days</option>
-    </select></label>
+  <!-- A span, not a label: a label points at ONE control, and pointing it at
+       the first of a pair would leave the second unnamed for a screen reader
+       and hand its clicks to the wrong field. The word sits beside them and
+       each input carries its own name. -->
+  <span class="pick" id="periodwrap" hidden
+    title="filters by when you judged &#8212; the dates are the server&#8217;s local days, not your browser&#8217;s. Leave either side empty for open.">judged
+    <input type="date" class="pdate" id="pfrom"
+           aria-label="judged on or after this date">
+    <span class="pdash" aria-hidden="true">&ndash;</span>
+    <input type="date" class="pdate" id="pto"
+           aria-label="judged on or before this date">
+    <button type="button" class="pclr" id="pclr" hidden
+            title="any time" aria-label="clear the date filter">&times;</button>
+  </span>
   <button class="btn" id="prev">&larr; back</button>
   <button class="btn go" id="next">next page &rarr;</button>
   <span class="pos" id="pos">&mdash;</span>
@@ -1866,8 +1893,27 @@ drawsEl.addEventListener('click',function(e){
 document.getElementById('anno').addEventListener('change',function(){
   anno=this.value;idx=0;load(0);
 });
-document.getElementById('period').addEventListener('change',function(){
-  period=this.value;idx=0;load(0);
+/* The two fields ARE the filter; `period` is what they spell. Either side
+   may be empty -- 'from' alone is everything since that morning, 'to' alone
+   everything up to that midnight -- and the far date covers its whole day,
+   which the server decides so that all three surfaces agree about it. */
+function periodValue(){
+  var a=document.getElementById('pfrom'),b=document.getElementById('pto'),
+      x=a?a.value:'',y=b?b.value:'';
+  return (x||y)?(x+'..'+y):'';
+}
+function periodChanged(){
+  period=periodValue();
+  document.getElementById('pclr').hidden=!period;
+  idx=0;load(0);
+}
+['pfrom','pto'].forEach(function(id){
+  document.getElementById(id).addEventListener('change',periodChanged);
+});
+document.getElementById('pclr').addEventListener('click',function(){
+  document.getElementById('pfrom').value='';
+  document.getElementById('pto').value='';
+  periodChanged();
 });
 bandSel.addEventListener('change',function(){
   band=bandSel.value===''?sideOf(band)||DEFAULT_BAND:+bandSel.value;
@@ -2329,33 +2375,113 @@ def page_size(v, default=25):
 # it. But an answer given at speed is an answer worth being able to look at
 # again -- and the ledger already supports changing your mind, so the only
 # thing missing was a way to find the crop.
-# How far back "recently judged" reaches. 'today' is the SERVER's local day:
-# the ledger's timestamps are the server's clock, so its midnight is the only
-# one the rows can be compared against -- the page says so where the choice
-# is offered.
-PERIODS = ('today', '7d', '30d')
+# WHEN it was judged, as two dates rather than four presets. 'any time,
+# today, last 7, last 30' is four windows out of every window there is, and
+# the one somebody wants is the day the gate changed or the afternoon they
+# went through the leash sheet. A pair says all four back -- a from-date
+# alone is "the last seven days" if that is the date you pick, and the same
+# date on both sides is one day -- and says the ones the presets could not.
+#
+# The wire format is `from..to`, either side allowed to be empty:
+# '2026-08-12..' is since the 12th, '..2026-08-12' is up to and including it,
+# '' is any time. It carries no '~', which is the separator the audit route
+# uses to hang a window off a verdict.
+#
+# dashboard.py keeps an identical copy of everything down to in_period():
+# three surfaces answer the same question, and two of them disagreeing about
+# which rows a day covers would be a bug report. adv_fn_audit pins them equal.
+PERIOD_SEP = '..'
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
-def period_cutoff(period, now=None):
-    """The ts a ledger row must reach to sit inside the period, or None."""
-    now = time.time() if now is None else now
-    if period == 'today':
-        lt = time.localtime(now)
-        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
-                            0, 0, 0, 0, 0, -1))
-    if period == '7d':
-        return now - 7 * 86400
-    if period == '30d':
-        return now - 30 * 86400
-    return None
+def _day_start(s):
+    """Local midnight opening the given YYYY-MM-DD, or None if it is not one.
+
+    Strict on purpose. mktime happily normalises the 31st of February into
+    the 3rd of March, so a typo would come back as a real window over the
+    wrong days -- which is worse than no window, because it looks like an
+    answer. The round-trip through localtime is what catches that.
+    """
+    if not _DATE_RE.match(str(s or '')):
+        return None
+    y, m, d = int(s[:4]), int(s[5:7]), int(s[8:10])
+    try:
+        ts = time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
+    except (OverflowError, ValueError):
+        return None
+    lt = time.localtime(ts)
+    if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, m, d):
+        return None
+    return ts
+
+
+def period_norm(period):
+    """The window exactly as it will be applied, or '' for none.
+
+    What comes back is what BIT. A control reading "since the 12th" over a
+    list the server never narrowed is the phantom-filter failure this project
+    has shipped once already, so an unreadable date normalises to no filter
+    rather than to itself, and reversed dates come back the way round they
+    were used.
+    """
+    a, _, b = str(period or '').partition(PERIOD_SEP)
+    a = a if _day_start(a) is not None else ''
+    b = b if _day_start(b) is not None else ''
+    if a and b and a > b:                       # ISO sorts chronologically
+        a, b = b, a
+    return (a + PERIOD_SEP + b) if (a or b) else ''
+
+
+def period_range(period):
+    """(lo, hi) the stamp on a ledger row must sit in: lo <= ts < hi.
+
+    Either end is None for open, and both are None when nothing was picked.
+
+    The dates are the SERVER's local days. The ledgers are stamped with this
+    machine's clock, so a browser's midnight would draw the line through
+    somebody else's day -- the page says so where the dates are picked.
+
+    The far date is INCLUSIVE of its whole day: hi is the midnight AFTER it.
+    Picking the same date twice means that day, and a window that stopped at
+    its first second would return the handful of rows judged at 00:00 and
+    call it a day's work.
+    """
+    a, _, b = period_norm(period).partition(PERIOD_SEP)
+    lo, hi = _day_start(a), _day_start(b)
+    return lo, (None if hi is None else hi + 86400)
+
+
+def in_period(ts, lo, hi):
+    """Whether a row's stamp sits in the window. A row without one does not:
+    it cannot prove it is inside, and a filter that keeps what it cannot
+    place is a filter that quietly widens."""
+    if lo is None and hi is None:
+        return True
+    ts = ts or 0
+    return bool(ts) and (lo is None or ts >= lo) and (hi is None or ts < hi)
 
 
 def judged_views(stage=DEFAULT_STAGE):
-    """What `which` may be: a verdict or a grouping, optionally carrying a
-    period -- 'all~7d' and friends -- the same way a draw mode rides the band
-    value, because the route passes exactly one string through."""
-    base = tuple(fa.spec(stage)['answers']) + ('flagged', 'wrong', 'all')
-    return base + tuple(f'{w}~{p}' for w in base for p in PERIODS)
+    """What `which` may be, before a window is hung off it."""
+    return tuple(fa.spec(stage)['answers']) + ('flagged', 'wrong', 'all')
+
+
+def judged_which_ok(which, stage=DEFAULT_STAGE):
+    """Whether the route may pass this `which` through.
+
+    It was an enumerated allow-list -- every view crossed with the three
+    presets -- and a pair of free dates cannot be enumerated. So the halves
+    are checked for what they are: the view against the list, the window by
+    whether it is spelled like one. A stale bookmark holding 'all~7d' is
+    refused rather than quietly served as 'all', because a list wider than
+    the address asked for is the failure that looks like an answer.
+    """
+    if not isinstance(which, str):
+        return False
+    view, sep, period = which.partition('~')
+    if view not in judged_views(stage):
+        return False
+    return not sep or PERIOD_SEP in period
 
 
 def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
@@ -2367,18 +2493,17 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
     false positives above the threshold. `all` is everything, unsure included.
     """
     sp = fa.spec(stage)
-    period = None
+    period = ''
     if isinstance(which, str) and '~' in which:
         which, _, period = which.partition('~')
-        period = period if period in PERIODS else None
-    cutoff = period_cutoff(period)
+    period = period_norm(period)
+    lo, hi = period_range(period)
     rows = [v for v in fa.read_verdicts(stage=stage)
             if fa.verdict_of(v.get('verdict'), stage)]
-    if cutoff is not None:
+    if lo is not None or hi is not None:
         # In the server, before pagination -- a hide on the client would
-        # leave 'page 2 of 5' describing rows nobody can see. A row without
-        # a ts cannot prove it is inside the period, so it is not.
-        rows = [v for v in rows if (v.get('ts') or 0) >= cutoff]
+        # leave 'page 2 of 5' describing rows nobody can see.
+        rows = [v for v in rows if in_period(v.get('ts'), lo, hi)]
     for v in rows:
         v['verdict'] = fa.verdict_of(v['verdict'], stage)
     # p_dog is what decides the tag, the score chip and the threshold rule.
@@ -2446,15 +2571,14 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
 def _judged_counts(stage=DEFAULT_STAGE, period=None):
     """How many sit behind each view, so the switch can say so.
 
-    The period narrows this too: a button reading 356 over a list filtered
-    to today's twelve is a count of something the view no longer shows.
+    The window narrows this too: a button reading 356 over a list filtered
+    to one day's twelve is a count of something the view no longer shows.
     """
     sp = fa.spec(stage)
-    cutoff = period_cutoff(period)
+    lo, hi = period_range(period)
     vs = [v for v in fa.read_verdicts(stage=stage)
           if fa.verdict_of(v.get('verdict'), stage)]
-    rows = [v for v in vs
-            if cutoff is None or (v.get('ts') or 0) >= cutoff]
+    rows = [v for v in vs if in_period(v.get('ts'), lo, hi)]
     # `all` is the number the annotations list is showing. `ledger` is the
     # whole ledger whatever the period -- the tab keeps this badge when the
     # view goes back to the sheet, where the period control is hidden, and a

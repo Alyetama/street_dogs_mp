@@ -265,6 +265,42 @@ def score_checks(html, script):
     return bad
 
 
+def period_markup_checks(html):
+    """The window control says what it is, on this page and on the audits.
+
+    Two date fields with nothing beside them are a range over something
+    unnamed. The audit pages carry the word already (adv_fn_audit pins it
+    there); this is the same pin here, so the judging surfaces go on speaking
+    one language.
+    """
+    bad = []
+    for need, why in (
+            ('type="date"', 'the window is not two calendars any more'),
+            ('id="pfrom"', 'the near end of the window is gone'),
+            ('id="pto"', 'the far end of the window is gone'),
+            ('id="pclr"', 'there is no way back to any time'),
+            ('aria-label="judged on or after',
+             'the near calendar is unnamed for a screen reader'),
+            ('aria-label="judged on or before',
+             'the far calendar is unnamed for a screen reader'),
+            ('>judged<', 'the control does not say what it filters — two '
+             'bare date fields beside a verdict select'),
+            ('color-scheme:dark', "the picker draws in the browser's light "
+             'theme over a dark page')):
+        if need not in html:
+            bad.append(why + ' (%r)' % (need,))
+    for gone in ('value="7d"', 'value="30d"', '>last 7 days<', '>any time<'):
+        if gone in html:
+            bad.append('a preset is still in the markup beside the calendars '
+                       '(%r)' % (gone,))
+    # The hidden input is the FILTER: one element, one value, one onchange,
+    # which is what the chip row and every clear are written against.
+    if 'type="hidden" id="period"' not in html:
+        bad.append('the filter is no longer one element with one value — the '
+                   'chip row and the clear-all are written against that')
+    return bad
+
+
 def route_checks(mod):
     """/audit/review serves the queue; /review answers with the new address.
 
@@ -402,24 +438,68 @@ def route_checks(mod):
 
 
 def period_payload_checks(mod):
-    """The annotated-date filter is server-side, truthful, and shared maths.
+    """The annotated-date window is server-side, truthful, and shared maths.
 
     The rows carry flagged_at, so annotated_payload narrows by it BEFORE
     counting and paginating -- a client-side hide would leave total/pages
-    describing rows nobody can see. The cutoffs are the audit pages'
-    (audit.py period_cutoff): same tokens, same server-local midnight.
+    describing rows nobody can see. The maths is the audit pages' (audit.py
+    keeps a character-identical copy): same wire format, same server-local
+    days, same answer about which rows a day covers.
     """
     bad = []
-    noon = time.mktime((2026, 8, 19, 12, 30, 0, 0, 0, -1))
-    if mod.period_cutoff('today', now=noon) != \
-            datetime(2026, 8, 19).timestamp():
-        bad.append("'today' does not start at the server's local midnight")
-    if mod.period_cutoff('7d', now=noon) != noon - 7 * 86400:
-        bad.append("'7d' is not seven days")
-    if mod.period_cutoff('30d', now=noon) != noon - 30 * 86400:
-        bad.append("'30d' is not thirty days")
-    if mod.period_cutoff('yesterweek', now=noon) is not None:
-        bad.append('an unknown period must mean no cutoff, never a surprise')
+    # ── the window itself ──
+    lo, hi = mod.period_range('2026-08-12..2026-08-12')
+    if lo != datetime(2026, 8, 12).timestamp():
+        bad.append('a window does not open at the server\'s local midnight')
+    if hi != datetime(2026, 8, 13).timestamp():
+        bad.append('the far date does not cover its whole day — picking one '
+                   'date returns the rows judged at 00:00 and calls it a day')
+    if mod.period_range('2026-08-12..') != (
+            datetime(2026, 8, 12).timestamp(), None):
+        bad.append('an open far end is not open')
+    if mod.period_range('..2026-08-12') != (
+            None, datetime(2026, 8, 13).timestamp()):
+        bad.append('an open near end is not open')
+    if mod.period_range('') != (None, None):
+        bad.append('no window is not no window')
+    # A date that is not one must mean no filter, never a filter over the
+    # wrong days: mktime turns the 31st of February into the 3rd of March,
+    # and a window over the wrong days LOOKS like an answer.
+    for junk in ('2026-02-31..', '2026-8-1..', 'yesterweek', '7d',
+                 'today..tomorrow', '..', 'x' * 200):
+        if mod.period_norm(junk) or mod.period_range(junk) != (None, None):
+            bad.append('%r is read as a window (%r) — a typo must mean any '
+                       'time' % (junk, mod.period_norm(junk)))
+    # backwards is a reader's slip, not a request for nothing
+    if mod.period_norm('2026-08-20..2026-08-12') != '2026-08-12..2026-08-20':
+        bad.append('a backwards window is not turned around, so it selects '
+                   'nothing and the page blames the ledger')
+    # a row with no stamp cannot prove it is inside anything
+    if mod.in_period(0, datetime(2026, 8, 12).timestamp(), None) or \
+            mod.in_period(None, None, datetime(2026, 8, 13).timestamp()):
+        bad.append('a row with no stamp sits inside a window')
+    if not mod.in_period(0, None, None):
+        bad.append('no window drops the rows it cannot place')
+    # AND THE AUDIT PAGES DO THE SAME MATHS, character for character. Three
+    # surfaces answer "what did I judge on the 12th" and two of them
+    # disagreeing about which rows a day covers would be a bug report that
+    # takes a week to believe. The files each keep a copy because neither
+    # imports the other; this is what stops the copies drifting.
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+        import audit as _a
+        import inspect as _i
+        for fn in ('_day_start', 'period_norm', 'period_range', 'in_period'):
+            here = _i.getsource(getattr(mod, fn))
+            there = _i.getsource(getattr(_a, fn, None) or (lambda: None))
+            if here != there:
+                bad.append('dashboard.py and audit.py no longer agree on '
+                           '%s() — two surfaces, two answers about which '
+                           'rows a day holds' % (fn,))
+        if getattr(_a, 'PERIOD_SEP', None) != mod.PERIOD_SEP:
+            bad.append('the two files spell the wire format differently')
+    except ImportError:
+        pass                      # no audit module in this checkout
 
     keep = {k: getattr(mod, k) for k in
             ('HN_DIR', 'HN_CROPS', 'HN_FULL', 'HN_LABELS', 'HP_DIR')}
@@ -462,40 +542,63 @@ def period_payload_checks(mod):
             if j_all['total'] != 60 or j_all['pages'] != 2:
                 bad.append('no period: total/pages %s/%s, want 60/2'
                            % (j_all['total'], j_all['pages']))
-            j7 = mod.annotated_payload(size=50, period='7d')
+            # the windows the four presets used to be, spelled as dates
+            def day(back):
+                return time.strftime('%Y-%m-%d',
+                                     time.localtime(now - back * 86400))
+            j7 = mod.annotated_payload(size=50, period=day(7) + '..')
             if j7['total'] != 2 or j7['pages'] != 1:
-                bad.append('period=7d: total/pages %s/%s, want 2/1 — the '
-                           'filter must run before pagination'
+                bad.append('since seven days back: total/pages %s/%s, want '
+                           '2/1 — the filter must run before pagination'
                            % (j7['total'], j7['pages']))
-            if j7.get('period') != '7d':
-                bad.append('the payload does not say which period it '
+            if j7.get('period') != day(7) + '..':
+                bad.append('the payload does not say which window it '
                            'applied: %r' % j7.get('period'))
             if (j7['n_true_positive'], j7['n_false_positive']) != (2, 0):
-                bad.append('period=7d: per-verdict counts %s/%s describe '
-                           'more than the week'
+                bad.append('per-verdict counts %s/%s describe more than the '
+                           'window'
                            % (j7['n_true_positive'], j7['n_false_positive']))
             if j7['leash_counts']['all'] != 2:
-                bad.append('period=7d: the leash options were counted over '
-                           'the unfiltered list (%s)'
-                           % j7['leash_counts']['all'])
+                bad.append('the leash options were counted over the '
+                           'unfiltered list (%s)' % j7['leash_counts']['all'])
             if j7['pool_unfiltered'] != 60:
-                bad.append('period=7d: pool_unfiltered moved with the '
-                           'filter (%s) — the "narrowed from" baseline must '
-                           'not' % j7['pool_unfiltered'])
-            if mod.annotated_payload(size=50, period='today')['total'] != 1:
-                bad.append("period=today counts more than today's row")
-            j30 = mod.annotated_payload(size=50, period='30d')
+                bad.append('pool_unfiltered moved with the filter (%s) — the '
+                           '"narrowed from" baseline must not'
+                           % j7['pool_unfiltered'])
+            # ONE DAY, which is the window the presets could never express
+            if mod.annotated_payload(
+                    size=50, period=day(0) + '..' + day(0))['total'] != 1:
+                bad.append("one day counts more than that day's row")
+            if mod.annotated_payload(
+                    size=50, period=day(3) + '..' + day(3))['total'] != 1:
+                bad.append('a single day three days back does not hold the '
+                           'one row judged in it — the far date must cover '
+                           'its whole day')
+            # an open near end, up to and including today
+            jup = mod.annotated_payload(size=50, period='..' + day(0))
+            if jup['total'] != 59:
+                bad.append('up to today holds %s, want 59 (everything but '
+                           'the row with no stamp)' % jup['total'])
+            j30 = mod.annotated_payload(size=50, period=day(30) + '..')
             if j30['total'] != 3:
-                bad.append('period=30d: total %s, want 3' % j30['total'])
+                bad.append('since thirty days back: total %s, want 3'
+                           % j30['total'])
             if any(it['name'].startswith('1700000000005_')
                    for it in j30['items']):
-                bad.append('a row with no flagged_at sits inside a period '
+                bad.append('a row with no flagged_at sits inside a window '
                            'it cannot prove it belongs to')
-            jx = mod.annotated_payload(size=50, period='yesterweek')
-            if jx['total'] != 60 or jx.get('period'):
-                bad.append('an unknown period must fall back to any time, '
-                           'never to an empty or surprise page (total %s)'
-                           % jx['total'])
+            # backwards, and it still selects the same three
+            if mod.annotated_payload(
+                    size=50, period=day(0) + '..' + day(30))['total'] != 3:
+                bad.append('a backwards window selects nothing instead of '
+                           'the days between its two dates')
+            for junk in ('yesterweek', '7d', '2026-02-31..'):
+                jx = mod.annotated_payload(size=50, period=junk)
+                if jx['total'] != 60 or jx.get('period'):
+                    bad.append('%r must fall back to any time AND say so, '
+                               'never to an empty or surprise page (total '
+                               '%s, echoed %r)'
+                               % (junk, jx['total'], jx.get('period')))
     finally:
         for k, v in keep.items():
             setattr(mod, k, v)
@@ -779,8 +882,11 @@ function fetch(url, opts) {
 
 // ── the page's own element graph (built from the real markup ids) ───────────
 for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','next','next2','mode','verdict',
-                  // the audit view's annotated-date filter
-                  'period',
+                  // The audit view's annotated-date window. 'period' is the
+                  // FILTER -- one hidden input, one value, one onchange, which
+                  // is what the chips and the clear-all are written against --
+                  // and the two calendars beside it are how it gets set.
+                  'period','periodwrap','pfrom','pto','pclr',
                   'foot','grid','state','sort','size','reload','country','leftlab',
                   'balNum','balNumU','balLeft','leashN',
                   // findmsg is what says the search cannot work; leaving it
@@ -1675,13 +1781,22 @@ async function t25() {
   ck(q.url.indexOf('period=') < 0,
      't25: the queue request carries a filter that means nothing there: ' +
      q.url);
-  fire('period', '7d'); await flush(); await flush();
+  // the two calendars spell the value; the hidden input IS the filter
+  byId['pfrom'].value = '2026-08-12';
+  byId['pto'].value = '2026-08-19';
+  (byId['pfrom']._listeners.change || []).forEach(f =>
+    f.call(byId['pfrom']));
+  await flush(); await flush();
   let sent = CALLS.filter(c => /annotated/.test(c.url)).pop().url;
-  ck(/period=7d/.test(sent),
-     't25: the chosen period never reached the request: ' + sent);
-  ck(/last 7 days/.test(byId['chips'].textContent),
-     't25: no chip for the period narrowing the list: ' +
+  ck(/period=2026-08-12\.\.2026-08-19/.test(sent),
+     't25: the dates never reached the request: ' + sent);
+  ck(byId['period'].value === '2026-08-12..2026-08-19',
+     't25: the calendars did not spell the filter: ' + byId['period'].value);
+  ck(/judged 2026-08-12/.test(byId['chips'].textContent),
+     't25: no chip for the window narrowing the list: ' +
      byId['chips'].textContent);
+  ck(byId['pclr'].hidden === false,
+     't25: nothing offers to clear a window that is set');
   // an empty week must not read as an empty ledger
   ck(!/nothing annotated yet/.test(byId['pg'].textContent),
      't25: an empty period claims the ledger is empty: ' +
@@ -1698,6 +1813,40 @@ async function t25() {
   sent = CALLS.filter(c => /annotated/.test(c.url)).pop().url;
   ck(/period=(&|$)/.test(sent),
      't25: clearing the chip did not clear the period: ' + sent);
+  // ...and it clears the CALENDARS, not just the value behind them: a chip
+  // dismissed while the fields still read 12 Aug is a control disagreeing
+  // with the list it is over.
+  ck(byId['pfrom'].value === '' && byId['pto'].value === '',
+     't25: the chip cleared the filter and left the dates on screen: ' +
+     byId['pfrom'].value + '/' + byId['pto'].value);
+  ck(byId['pclr'].hidden === true,
+     't25: the clear button stands over two empty fields');
+  // one open end is a window too, and the x is the way back from it
+  byId['pfrom'].value = '2026-08-12';
+  (byId['pfrom']._listeners.change || []).forEach(f =>
+    f.call(byId['pfrom']));
+  await flush(); await flush();
+  ck(/period=2026-08-12\.\.(&|$)/.test(
+       CALLS.filter(c => /annotated/.test(c.url)).pop().url),
+     't25: an open far end is not sent as one');
+  ck(/judged since 2026-08-12/.test(byId['chips'].textContent),
+     't25: an open window is not named as one: ' +
+     byId['chips'].textContent);
+  (byId['pclr']._listeners.click || []).forEach(f => f.call(byId['pclr']));
+  await flush(); await flush();
+  ck(/period=(&|$)/.test(
+       CALLS.filter(c => /annotated/.test(c.url)).pop().url) &&
+     byId['period'].value === '',
+     't25: the clear button did not clear the window');
+  // A value that is not a window -- a preference saved when this control
+  // offered "last 7 days" -- names nothing. The server reads it the same way
+  // and narrows nothing, so a chip announcing it would be the page claiming
+  // a narrowing the list does not have.
+  fire('period', '7d'); await flush(); await flush();
+  ck(!/7d/.test(byId['chips'].textContent),
+     't25: a value that is not a window still claims a chip: ' +
+     byId['chips'].textContent);
+  fire('period', ''); await flush(); await flush();
   fire('mode', 'queue'); await flush(); await flush();
 }
 
@@ -1715,9 +1864,9 @@ async function t26() {
               n_false_positive: 1, n_true_positive: 0})};
   fire('mode', 'audit'); await flush(); await flush();
   fire('verdict', 'false_positive'); await flush(); await flush();
-  fire('period', '30d'); await flush(); await flush();
+  fire('period', '2026-07-01..'); await flush(); await flush();
   ck(/not a dog/.test(byId['chips'].textContent) &&
-     /last 30 days/.test(byId['chips'].textContent),
+     /judged since 2026-07-01/.test(byId['chips'].textContent),
      't26: the two audit filters do not both show as chips: ' +
      byId['chips'].textContent);
   const xs = byId['chips'].querySelectorAll('.chipx')
@@ -2440,6 +2589,8 @@ def main():
                       ('the annotated-date filter',
                        period_payload_checks(mod)),
                       ('the always-on score', score_checks(html, script)),
+                      ('the annotated-date window',
+                       period_markup_checks(html)),
                       ('the /audit/review routes', route_checks(mod))):
         for b in bad:
             print('FAIL %s: %s' % (name, b))

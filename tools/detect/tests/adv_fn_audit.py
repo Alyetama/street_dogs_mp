@@ -1235,26 +1235,35 @@ def period_filter_checks(bad):
     import tempfile as _tf
     import time as _t
     for name in fa.STAGES:
-        views = audit.judged_views(name)
-        for w in ('all~7d', 'flagged~today', 'wrong~30d'):
-            if w not in views:
-                bad.append(f'{name}: {w!r} is not a judged view — the route '
-                           f'checks membership before calling judged(), so '
-                           f'the period never reaches it')
+        for w in ('all~2026-08-12..2026-08-19', 'flagged~2026-08-12..',
+                  'wrong~..2026-08-19'):
+            if not audit.judged_which_ok(w, name):
+                bad.append(f'{name}: {w!r} is refused by the route, so the '
+                           f'window never reaches judged()')
+        # A stale bookmark holding a preset is REFUSED, not quietly served as
+        # the whole ledger: a list wider than the address asked for is the
+        # failure that looks like an answer.
+        for w in ('all~7d', 'flagged~today', 'bogus', 'bogus~2026-08-12..'):
+            if audit.judged_which_ok(w, name):
+                bad.append(f'{name}: {w!r} is accepted — a view or a window '
+                           f'nothing can read is served as something else')
     now = _t.time()
     lt = _t.localtime(now)
     midnight = _t.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0,
                           0, 0, -1))
-    got = audit.period_cutoff('today', now)
-    if got != midnight:
-        bad.append(f'period_cutoff("today") = {got}, not the server\'s local '
-                   f'midnight {midnight} — "today" must be the server\'s day')
-    if abs(audit.period_cutoff('7d', now) - (now - 7 * 86400)) > 1:
-        bad.append('period_cutoff("7d") is not seven days back')
-    if audit.period_cutoff(None) is not None or \
-            audit.period_cutoff('bogus') is not None:
-        bad.append('an unknown period filters something — a typo must mean '
-                   'all time, not an empty page')
+    today = _t.strftime('%Y-%m-%d', lt)
+    lo, hi = audit.period_range(f'{today}..{today}')
+    if lo != midnight:
+        bad.append(f'a window over today opens at {lo}, not the server\'s '
+                   f'own midnight {midnight}')
+    if hi is None or abs(hi - (midnight + 86400)) > 1:
+        bad.append('one day does not cover its whole day — picking today '
+                   'twice returns whatever was judged at 00:00')
+    if audit.period_range(None) != (None, None) or \
+            audit.period_range('bogus') != (None, None) or \
+            audit.period_norm('2026-02-31..'):
+        bad.append('an unreadable date filters something — a typo must mean '
+                   'any time, not a window over the wrong days')
     mark = 'zzperiod_'
     tmp = _tf.mkdtemp()
     real_paths = fa.paths
@@ -1277,31 +1286,47 @@ def period_filter_checks(bad):
                 if ts is not None:
                     rec['ts'] = ts
                 fh.write(json.dumps(rec) + '\n')
-        for which, want in (('all', 5), ('all~30d', 3), ('all~7d', 2),
-                            ('all~today', 1), ('dog~30d', 2),
-                            ('dog', 4), ('not_dog~today', 0)):
+        # the windows the four presets used to be, spelled as dates -- plus
+        # the two they could never express: one day, and an open near end
+        def day(back):
+            return _t.strftime('%Y-%m-%d', _t.localtime(now - back * 86400))
+        d30, d7, d0 = day(30) + '..', day(7) + '..', day(0) + '..'
+        for which, want in (('all', 5), ('all~' + d30, 3), ('all~' + d7, 2),
+                            ('all~' + d0, 1),
+                            ('all~' + day(0) + '..' + day(0), 1),
+                            ('all~..' + day(0), 4),
+                            ('all~' + day(1) + '..' + day(1), 1),
+                            ('dog~' + d30, 2),
+                            ('dog', 4), ('not_dog~' + d0, 0)):
             got = audit.judged('gate', which, 0, 25)
             if got['total'] != want:
                 bad.append(f'judged({which!r}) holds {got["total"]} rows, '
-                           f'want {want} — the period is not filtering, or '
+                           f'want {want} — the window is not filtering, or '
                            f'is filtering the wrong rows')
             if which.startswith('all') and got['counts'].get('all') != want:
                 bad.append(f'judged({which!r}) counts {got["counts"]} beside '
                            f'{got["total"]} rows — the button would count '
                            f'rows the view no longer shows')
         # pagination is over the FILTERED rows, so the page count is truthful
-        got = audit.judged('gate', 'all~30d', 0, 2)
+        got = audit.judged('gate', 'all~' + d30, 0, 2)
         if (got['total'], got['pages']) != (3, 2):
-            bad.append(f'all~30d at 2 per page reads {got["total"]} rows on '
-                       f'{got["pages"]} pages — the filter must run before '
-                       f'pagination, not after it')
-        if got.get('period') != '30d':
-            bad.append('the response does not say which period produced it')
-        # a row with no ts cannot prove it is inside any period
+            bad.append(f'a thirty-day window at 2 per page reads '
+                       f'{got["total"]} rows on {got["pages"]} pages — the '
+                       f'filter must run before pagination, not after it')
+        if got.get('period') != d30:
+            bad.append('the response does not say which window produced it')
+        # ...and what comes back is what BIT: an unreadable date is echoed as
+        # no window, never as itself, or the page names a narrowing the
+        # server did not make
+        junk = audit.judged('gate', 'all~7d', 0, 25)
+        if junk['total'] != 5 or junk.get('period'):
+            bad.append(f'a stale preset window ({junk.get("period")!r}) is '
+                       f'served as something, or claimed after the fact')
+        # a row with no ts cannot prove it is inside any window
         keys30 = {i['key']
-                  for i in audit.judged('gate', 'all~30d', 0, 25)['items']}
+                  for i in audit.judged('gate', 'all~' + d30, 0, 25)['items']}
         if f'{mark}k5#0' in keys30:
-            bad.append('a row with no ts passed a period filter — it cannot '
+            bad.append('a row with no ts passed a date window — it cannot '
                        'prove when it was judged')
     finally:
         fa.paths = real_paths
@@ -2156,24 +2181,53 @@ chk(/0\.3–0\.4/.test(bandName('3~least')) &&
     /least confident/.test(bandName('3~least')),
   'a single-band mode page is not named: ' + bandName('3~least'));
 
-// ── the annotated-date filter ──
-chk(/id="period"/.test(PAGE_HTML), 'no period filter over the annotations');
-['today', '7d', '30d'].forEach(function (p) {
-  chk(new RegExp('value="' + p + '"').test(PAGE_HTML),
-    'the period filter cannot select ' + p);
+// ── the annotated-date window ──
+// Two calendars, not four presets. 'any time / today / last 7 / last 30' is
+// four windows out of every window there is, and the one somebody wants is
+// the day the gate changed. A date input is the platform's own calendar --
+// a hand-built one is locale order, week start and every keyboard path, to
+// arrive somewhere worse.
+['pfrom', 'pto'].forEach(function (id) {
+  chk(new RegExp('id="' + id + '"[^>]*|type="date"[^>]*id="' + id + '"')
+        .test(PAGE_HTML) && /type="date"/.test(PAGE_HTML),
+    'the annotated-date window has no ' + id + ' calendar');
 });
+chk(!/value="7d"|value="30d"|>last 7 days</.test(PAGE_HTML),
+  'the presets are still in the markup beside the calendars');
+chk(/aria-label="judged on or after/.test(PAGE_HTML) &&
+    /aria-label="judged on or before/.test(PAGE_HTML),
+  'the two calendars are unnamed — a screen reader gets two date fields '
+  + 'and no way to tell which end is which');
 chk(/server(&#8217;|’|')s local day/.test(PAGE_HTML),
-  'nothing says whose midnight “today” is — the title attribute '
-  + 'went missing');
-// server-side, not a client hide: choosing a period must re-fetch with the
+  'nothing says whose midnight a date is — the title attribute went missing');
+// server-side, not a client hide: choosing dates must re-fetch with the
 // compound which, or the page counts describe rows nobody can see
 view = 'judged'; anno = 'all'; FETCHES.length = 0;
-els.period.value = '7d';
-listeners.period.change.call(els.period);
-chk(FETCHES.some(function (u) { return /judged\?[^"]*which=all~7d/.test(u) }),
-  'choosing a period did not reach the server: ' + JSON.stringify(FETCHES));
+els.pfrom.value = '2026-08-12';
+els.pto.value = '2026-08-19';
+listeners.pfrom.change.call(els.pfrom);
+chk(FETCHES.some(function (u) {
+      return /judged\?[^"]*which=all~2026-08-12\.\.2026-08-19/.test(u) }),
+  'the chosen dates did not reach the server: ' + JSON.stringify(FETCHES));
+chk(els.pclr.hidden === false,
+  'nothing offers to clear a window that is set');
+// one open end is a window too
+FETCHES.length = 0;
+els.pto.value = '';
+listeners.pto.change.call(els.pto);
+chk(FETCHES.some(function (u) {
+      return /judged\?[^"]*which=all~2026-08-12\.\.(&|$)/.test(u) }),
+  'an open far end is not sent as one: ' + JSON.stringify(FETCHES));
+// ...and the x is the way back to any time, fields and all
+FETCHES.length = 0;
+listeners.pclr.click.call(els.pclr);
+chk(els.pfrom.value === '' && els.pto.value === '' &&
+    els.pclr.hidden === true,
+  'clearing left a date on screen over a list it no longer narrows');
+chk(FETCHES.some(function (u) { return /judged\?[^"]*which=all(&|$)/.test(u) }),
+  'clearing the window did not reach the server: ' + JSON.stringify(FETCHES));
 setTimeout = _setT; fetch = _oldFetch;
-view = 'sheet'; period = ''; els.period.value = ''; mode = 'spread';
+view = 'sheet'; period = ''; mode = 'spread';
 
 // ── an empty SLICE is not an empty ledger ──
 // The sentence a reader gets when a filter matches nothing used to be

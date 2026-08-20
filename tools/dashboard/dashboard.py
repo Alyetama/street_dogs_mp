@@ -2077,8 +2077,34 @@ font-size:10px;color:var(--dim)}
 body.auditing #ngrpWhere,
 body.auditing #country,body.auditing #unkeep,
 body.auditing #find,body.auditing #findmsg{display:none}
-#verdict,#period{display:none}
-body.auditing #verdict,body.auditing #period{display:inline-block}
+#verdict,#periodwrap{display:none}
+body.auditing #verdict{display:inline-block}
+body.auditing #periodwrap{display:inline-flex;align-items:center;gap:6px}
+/* The word, in the audit pages' own voice. Two bare date fields standing
+   beside a verdict select is a range over nothing in particular; the chip
+   below says "judged" and so does the control that sets it. */
+.plab{color:var(--dim);font-size:11.5px}
+/* JUDGED, BETWEEN TWO DATES. Native inputs, so the calendar is the
+   platform's: a hand-built one is a month of edge cases -- locale order,
+   which day a week starts on, every keyboard path -- to arrive somewhere
+   worse than the control the browser already ships. color-scheme is the
+   whole reason it looks like it belongs: without it Chrome draws a white
+   calendar panel and a black-on-black picker icon on a dark field. */
+.pdate{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
+  border-radius:9px;padding:6px 8px;font-size:12.5px;font-family:inherit;
+  cursor:pointer;color-scheme:dark;font-variant-numeric:tabular-nums}
+.pdate:hover{color:var(--tx)}
+.pdate:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.pdash{color:var(--dim)}
+/* Only where there is something to clear: a x standing over two empty fields
+   is a control for undoing nothing. Its own display rule because an author
+   `display` beats the browser's [hidden], which is how a control this page
+   meant to hide has shipped visible twice. */
+.pclr{background:0;border:0;color:var(--dim);font:inherit;font-size:14px;
+  line-height:1;cursor:pointer;padding:3px 6px;border-radius:7px}
+.pclr:hover{background:rgba(130,140,150,.12);color:var(--tx)}
+.pclr[hidden]{display:none}
+
 /* The leash row. In THIS stylesheet for the reason the comment above gives:
    /review is its own document, and these rules in the dashboard's block
    styled nothing -- the buttons rendered as browser defaults. A second axis,
@@ -2269,13 +2295,24 @@ background:rgba(67,181,129,.14)}
          the server's annotated_payload(), because a hide on the client would
          leave the page counts describing rows nobody can see. The words are
          the audit pages' own, so the judging surfaces speak one language. -->
-    <select id="period"
-            title="filters by when you judged; &#8216;today&#8217; is the server&#8217;s local day, not your browser&#8217;s">
-      <option value="">any time</option>
-      <option value="today">today</option>
-      <option value="7d">last 7 days</option>
-      <option value="30d">last 30 days</option>
-    </select>
+    <!-- A span, not a label: a label points at ONE control, and pointing it
+         at the first of a pair would leave the second unnamed for a screen
+         reader and hand its clicks to the wrong field. The hidden input
+         beside them is the FILTER -- one element with one value and one
+         onchange, which is what the chip row, the panel and the clear-all
+         are all written against; the two calendars are how it gets set. -->
+    <span id="periodwrap"
+          title="filters by when you judged &#8212; the dates are the server&#8217;s local days, not your browser&#8217;s. Leave either side empty for open.">
+      <span class="plab">judged</span>
+      <input type="date" class="pdate" id="pfrom"
+             aria-label="judged on or after this date">
+      <span class="pdash" aria-hidden="true">&ndash;</span>
+      <input type="date" class="pdate" id="pto"
+             aria-label="judged on or before this date">
+      <button type="button" class="pclr" id="pclr" hidden
+              title="any time" aria-label="clear the date filter">&times;</button>
+    </span>
+    <input type="hidden" id="period">
     <button type="button" class="nbtn" id="narrow" aria-expanded="false"
             aria-controls="npanel"
             title="filters and sorting">Filter<span class="ncar" aria-hidden="true">&#8250;</span></button>
@@ -2551,6 +2588,22 @@ function optText(el,strip){
   if(!o)return '';
   return strip?o.text.replace(/\s*\(.*\)$/,''):o.text;
 }
+/* A filter whose control is not a <select> has to say its own name. The chip
+   is the only place the window is written out in words, and a chip that
+   cannot name itself is dropped from the row -- which is a filter narrowing
+   the list with nothing on screen admitting it. */
+var PDATE=/^\d{4}-\d{2}-\d{2}$/;
+function periodText(v){
+  var p=String(v||'').split('..'),a=p[0]||'',b=p[1]||'';
+  /* A value that is not a window names nothing. The server reads it the same
+     way -- period_norm() hands back '' -- so the chip and the list agree
+     about there being no filter, rather than a chip announcing a narrowing
+     the server never made. */
+  if((a&&!PDATE.test(a))||(b&&!PDATE.test(b))||p.length!==2)return '';
+  if(!a&&!b)return '';
+  if(a&&b)return a===b?('judged '+a):('judged '+a+' \u2013 '+b);
+  return a?('judged since '+a):('judged up to '+b);
+}
 /* `where` is which VIEW each filter actually narrows, and it is not
    decoration: the two views send different requests. The audit list is
    fetched with label=, leash= and period= and nothing else, so a country
@@ -2563,7 +2616,7 @@ var FILTERS=[
   /* shown and hidden by CSS on body.auditing rather than by the hidden
      attribute, so their availability is the view, not el.hidden */
   {id:'verdict', off:'all', where:'audit', css:1},
-  {id:'period',  off:'',    where:'audit', css:1}
+  {id:'period',  off:'',    where:'audit', css:1, label:periodText}
 ];
 function activeFilters(){
   var out=[];
@@ -2573,7 +2626,7 @@ function activeFilters(){
     if(f.where!=='both'&&f.where!==mode)continue;
     if(!f.css&&el.hidden)continue;
     if(el.value===f.off)continue;
-    var t=optText(el,f.strip);
+    var t=f.label?f.label(el.value):optText(el,f.strip);
     if(t)out.push({id:f.id,off:f.off,text:t});
   }
   return out;
@@ -3791,7 +3844,22 @@ function restorePrefs(){
   if((v=restoreSel('sort',o.sort))!==null)sort=v;
   if((v=restoreSel('size',o.size))!==null)size=parseInt(v,10)||size;
   if((v=restoreSel('verdict',o.verdict))!==null)verdict=v;
-  if((v=restoreSel('period',o.period))!==null)period=v;
+  /* NOT restoreSel: there are no options to match against any more. And it
+     is validated rather than trusted -- a preference saved when this control
+     offered 'last 7 days' would otherwise be sent to a server that no longer
+     knows the word, and come back as a list wider than the chip claims. An
+     unreadable one is dropped to 'any time', which is what the control will
+     then show. */
+  if(typeof o.period==='string'&&
+     /^(\d{4}-\d{2}-\d{2})?\.\.(\d{4}-\d{2}-\d{2})?$/.test(o.period)&&
+     o.period!=='..'){
+    period=o.period;
+    var pp=period.split('..');
+    if($('pfrom'))$('pfrom').value=pp[0]||'';
+    if($('pto'))$('pto').value=pp[1]||'';
+    if($('period'))$('period').value=period;
+    if($('pclr'))$('pclr').hidden=false;
+  }
   if(typeof o.find==='string'){find=o.find;if($('find'))$('find').value=find;}
   if(o.npanel&&$('npanel')){$('npanel').hidden=false;
     if($('narrow')){$('narrow').classList.add('on');
@@ -3962,8 +4030,30 @@ $('mode').onchange=function(){
    the next load drops it. */
 $('verdict').onchange=function(){verdict=this.value;
   savePref('verdict',verdict);page=0;sel=-1;load()};
-$('period').onchange=function(){period=this.value;
+/* THE HIDDEN INPUT IS THE FILTER. Everything that clears a filter -- the x
+   on the chip, a reset -- writes '' here and calls this, and nothing else
+   knows the two calendars exist; this is where they are brought back into
+   line. One filter, one code path, whether the change arrived from a
+   calendar or from a chip being dismissed. */
+$('period').onchange=function(){
+  var p=String(this.value||'').split('..');
+  if($('pfrom'))$('pfrom').value=p[0]||'';
+  if($('pto'))$('pto').value=p[1]||'';
+  if($('pclr'))$('pclr').hidden=!this.value;
+  period=this.value;
   savePref('period',period);page=0;sel=-1;load()};
+/* the calendars spell the value, then hand over to the one path above */
+function periodSet(){
+  var a=$('pfrom'),b=$('pto'),el=$('period');
+  el.value=(a.value||b.value)?(a.value+'..'+b.value):'';
+  el.onchange.call(el);
+}
+['pfrom','pto'].forEach(function(id){
+  if($(id))$(id).addEventListener('change',periodSet);
+});
+if($('pclr'))$('pclr').addEventListener('click',function(){
+  $('pfrom').value='';$('pto').value='';periodSet();
+});
 restorePrefs();
 load();loadBal();
 </script></body></html>"""
@@ -7986,30 +8076,80 @@ ANNOT_SORTS = {
     'low': lambda r: (r['conf'], -r['ts']),
 }
 
-# "What did I judge this week" over the annotation ledgers. The tokens, the
-# words on the control and the midnight are the audit pages' (audit.py keeps
-# an identical period_cutoff): three surfaces answer the same question, and
-# two of them disagreeing about what 'today' covers would be a bug report.
-PERIODS = ('today', '7d', '30d')
+# "What did I judge on the 12th" over the annotation ledgers. Two dates, not
+# the four presets they replace -- see the long note in audit.py, which keeps
+# a copy of every line below. Three surfaces answer the same question, and
+# two of them disagreeing about which rows a day covers would be a bug
+# report; adv_fn_audit pins the two copies equal, character for character.
+PERIOD_SEP = '..'
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
-def period_cutoff(period, now=None):
-    """The flagged_at a ledger row must reach to sit inside the period.
+def _day_start(s):
+    """Local midnight opening the given YYYY-MM-DD, or None if it is not one.
 
-    'today' is the SERVER's local midnight -- the ledgers are stamped with
-    this machine's clock, so the browser's timezone would draw the line
-    through somebody else's day.
+    Strict on purpose. mktime happily normalises the 31st of February into
+    the 3rd of March, so a typo would come back as a real window over the
+    wrong days -- which is worse than no window, because it looks like an
+    answer. The round-trip through localtime is what catches that.
     """
-    now = time.time() if now is None else now
-    if period == 'today':
-        lt = time.localtime(now)
-        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
-                            0, 0, 0, 0, 0, -1))
-    if period == '7d':
-        return now - 7 * 86400
-    if period == '30d':
-        return now - 30 * 86400
-    return None
+    if not _DATE_RE.match(str(s or '')):
+        return None
+    y, m, d = int(s[:4]), int(s[5:7]), int(s[8:10])
+    try:
+        ts = time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
+    except (OverflowError, ValueError):
+        return None
+    lt = time.localtime(ts)
+    if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, m, d):
+        return None
+    return ts
+
+
+def period_norm(period):
+    """The window exactly as it will be applied, or '' for none.
+
+    What comes back is what BIT. A control reading "since the 12th" over a
+    list the server never narrowed is the phantom-filter failure this project
+    has shipped once already, so an unreadable date normalises to no filter
+    rather than to itself, and reversed dates come back the way round they
+    were used.
+    """
+    a, _, b = str(period or '').partition(PERIOD_SEP)
+    a = a if _day_start(a) is not None else ''
+    b = b if _day_start(b) is not None else ''
+    if a and b and a > b:                       # ISO sorts chronologically
+        a, b = b, a
+    return (a + PERIOD_SEP + b) if (a or b) else ''
+
+
+def period_range(period):
+    """(lo, hi) the stamp on a ledger row must sit in: lo <= ts < hi.
+
+    Either end is None for open, and both are None when nothing was picked.
+
+    The dates are the SERVER's local days. The ledgers are stamped with this
+    machine's clock, so a browser's midnight would draw the line through
+    somebody else's day -- the page says so where the dates are picked.
+
+    The far date is INCLUSIVE of its whole day: hi is the midnight AFTER it.
+    Picking the same date twice means that day, and a window that stopped at
+    its first second would return the handful of rows judged at 00:00 and
+    call it a day's work.
+    """
+    a, _, b = period_norm(period).partition(PERIOD_SEP)
+    lo, hi = _day_start(a), _day_start(b)
+    return lo, (None if hi is None else hi + 86400)
+
+
+def in_period(ts, lo, hi):
+    """Whether a row's stamp sits in the window. A row without one does not:
+    it cannot prove it is inside, and a filter that keeps what it cannot
+    place is a filter that quietly widens."""
+    if lo is None and hi is None:
+        return True
+    ts = ts or 0
+    return bool(ts) and (lo is None or ts >= lo) and (hi is None or ts < hi)
 
 
 def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
@@ -8079,10 +8219,10 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
     # paginates: a client-side hide would leave total/pages describing rows
     # nobody can see. A row without a flagged_at cannot prove when it was
     # judged, so it sits in no period -- only in 'any time'.
-    want_period = period if period in PERIODS else ''
-    cutoff = period_cutoff(want_period) if want_period else None
-    if cutoff is not None:
-        items = [it for it in items if it['flagged_at'] >= cutoff]
+    want_period = period_norm(period)
+    plo, phi = period_range(want_period)
+    if plo is not None or phi is not None:
+        items = [it for it in items if in_period(it['flagged_at'], plo, phi)]
 
     items.sort(key=ANNOT_SORTS[sort])
     # Counted before the filter narrows them, so the option can say how many
@@ -8118,13 +8258,13 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
             'n_false_positive': sum(1 for i in by_name.values()
                                     if i['label'] == FLAG_LABEL
                                     and i['name'] in live[FLAG_LABEL]
-                                    and (cutoff is None
-                                         or i['flagged_at'] >= cutoff)),
+                                    and in_period(i['flagged_at'],
+                                                  plo, phi)),
             'n_true_positive': sum(1 for i in by_name.values()
                                    if i['label'] == POS_LABEL
                                    and i['name'] in live[POS_LABEL]
-                                   and (cutoff is None
-                                        or i['flagged_at'] >= cutoff))}
+                                   and in_period(i['flagged_at'],
+                                                 plo, phi))}
 
 
 # ── model suggestions: a way to sort the queue, never a label ───────────────
@@ -10097,7 +10237,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json({'items': [], 'total': 0, 'pages': 1, 'page': 0})
                 return True
             which = q.get('which', ['all'])[0]
-            if which not in a.judged_views(stage):
+            if not a.judged_which_ok(which, stage):
                 which = 'all'
             try:
                 pg = int(q.get('page', ['0'])[0])
