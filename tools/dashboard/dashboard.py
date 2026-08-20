@@ -11526,7 +11526,14 @@ __ACCTCSS__
    what the page KNOWS (pushed to the far end by .hgap). Identity left the row
    entirely and went up beside the title, where it belongs. */
 .hact{display:flex;align-items:center;flex-wrap:wrap;gap:10px 14px;
-justify-content:flex-end}
+justify-content:flex-end;flex:1 1 auto}
+/* The elastic between doing and reporting. Everything used to pack against
+   the right edge in one contiguous run -- queue, nav, name, status, refresh --
+   so the row had a dead gap after the title and no seam where its meaning
+   changes. This holds the reader's own details and the page's clock at the far
+   edge while the controls stay with the title, and it collapses to nothing
+   when the row wraps, so the narrow layout is unchanged. */
+.hgap{flex:1 1 0;min-width:0}
 /* Navigation: a mark and a word. No border, because a border makes a
    destination look like an action, and this page has exactly one action. */
 .hnav{display:inline-flex;align-items:center;gap:7px;text-decoration:none;
@@ -12519,6 +12526,7 @@ outline-offset:2px}
     <a class="hnav" href="/datasets" title="Every dataset the logged runs trained on — open one and look inside"><span class="hnf">&#9638;</span>Datasets</a>
     <!--NAV--><!--/NAV-->
 __LLMNAV__
+    <span class="hgap"></span>
     <!--ACCT--><!--/ACCT-->
     <!-- What the page knows and when it knew it. The date is today on a page
          rebuilt hourly and the cadence never changes, so both moved into the
