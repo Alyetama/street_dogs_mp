@@ -881,14 +881,14 @@ function fetch(url, opts) {
 }
 
 // ── the page's own element graph (built from the real markup ids) ───────────
-for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend','balMain','balSub','balLg','pg','pg2','next','next2','mode','verdict',
+for (const id of ['left','done','seen','dups','unkeep','pg','pg2','next','next2','mode','verdict',
                   // The audit view's annotated-date window. 'period' is the
                   // FILTER -- one hidden input, one value, one onchange, which
                   // is what the chips and the clear-all are written against --
                   // and the two calendars beside it are how it gets set.
                   'period','periodwrap','pfrom','pto','pclr',
                   'foot','grid','state','sort','size','reload','country','leftlab',
-                  'balNum','balNumU','balLeft','leashN',
+                  'leashN',
                   // findmsg is what says the search cannot work; leaving it
                   // out of the stub makes paintFind's guard skip the whole
                   // branch, so every state would 'pass' untested
@@ -1948,28 +1948,20 @@ async function t27() {
   ck(byId['npanel'].hidden, 't27: Filter does not shut the panel again');
 }
 
-// ── 28. every state of the progress line is still a line ────────────────
-// The row sets className wholesale to add a state class, and 'line' is what
-// gives it its flex, its gap and its track. Writes like that have dropped
-// the layout class before, and the suite stayed green because no test drove
-// the branch.
+// ── 28. the training-set balance row stays gone ─────────────────────────
+// It used to paint "N crops left to judge" over a track, and 28 drove the
+// three exits of its painter. The row answered a question about the DATASET
+// on a page about the crop in front of you, and took a line of the viewport
+// on every visit to say something that only moves at a rebuild. Removed --
+// so the check is that it does not come back, ids and all, because the
+// element and its painter were wired to each other in four places.
 async function t28() {
-  // the balance row's painter has three exits of its own
-  for (const [what, bal] of [
-      ['no dataset', {ok: false, error: 'nope'}],
-      ['short',      {ok: true, have: 1549, want: 1652, pending: 0,
-                      judged: 900, n_pos: 100, yield_per_flag: 0.5,
-                      dataset: 'dogbin_v5'}],
-      ['balanced',   {ok: true, have: 1700, want: 1652, pending: 0,
-                      judged: 900, n_pos: 100, yield_per_flag: 0.5,
-                      dataset: 'dogbin_v5'}]]) {
-    RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 3), [],
-                                          {balance: bal}) };
-    await API.load(); await flush();
-    ck((byId['bal'].className || '').split(' ').indexOf('line') >= 0,
-       't28: the balance row lost its layout class while ' + what +
-       ': class="' + byId['bal'].className + '"');
+  for (const id of ['bal', 'balNum', 'balNumU', 'balFill', 'balLeft',
+                    'balMain']) {
+    ck(!byId[id], 't28: #' + id + ' is back on the review page');
   }
+  ck(typeof API.paintBal === 'undefined',
+     't28: the balance painter is back');
 }
 
 // ── 29. the chips describe the request that was actually sent ───────────

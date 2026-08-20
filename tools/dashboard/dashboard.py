@@ -1782,11 +1782,10 @@ body.compact header{padding-top:7px}
 /* Collapsed, not deleted. display:none took the height in one frame and the
    grid jumped; a height transition makes the same change read as the header
    folding rather than the page lurching. */
-.tally,.lines{overflow:hidden;
+.tally{overflow:hidden;
 transition:max-height .18s ease,opacity .18s ease,padding .18s ease}
 .tally{max-height:40px}
-.lines{max-height:64px}
-body.compact .tally,body.compact .lines{max-height:0;opacity:0;padding-top:0;
+body.compact .tally{max-height:0;opacity:0;padding-top:0;
 padding-bottom:0}
 /* The panel is NOT shed. It used to be -- display:none under body.compact --
    which read as tidy until somebody scrolled with it open: the filters they
@@ -1794,7 +1793,7 @@ padding-bottom:0}
    scrolled life of the page, because its toggle flips [hidden] and the shed
    rule overruled it either way. An open panel is the reviewer's own doing;
    it stays until they close it, and the header folds back down when they do. */
-@media(prefers-reduced-motion:reduce){.tally,.lines{transition:none}}
+@media(prefers-reduced-motion:reduce){.tally{transition:none}}
 body.compact h1{font-size:14px}
 body.compact .score>b{font-size:19px;letter-spacing:-.3px}
 body.compact .score>span{font-size:11px}
@@ -1958,31 +1957,10 @@ flex-wrap:wrap;gap:6px 14px;align-items:center}
    and 27px number -- four times the volume for one number, in a block that
    is supposed to recede behind the crops. It is now one line of the caption
    type, with a hairline track sharing the row rather than owning it. */
-.lines{display:grid;gap:2px;padding:10px 0 0}
+
 /* A FIXED height. The sub-line's text changes length as verdicts land, and
    with a row free to wrap, the header changed height under the reader and
    shoved the grid down the page. */
-.line{display:flex;align-items:center;gap:10px;margin:0;padding:5px 0;
-min-height:22px;
-font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
-.line[hidden]{display:none}
-.line b{color:var(--tx);font-weight:640;flex:none}
-/* shrinkable, and allowed to break: at flex:none the sub's base size is its
-   max-content width, which pushed the sticky header wider than the viewport
-   and gave the whole page a horizontal scrollbar below ~510px. */
-.line .lsub{color:var(--dim);flex:0 1 auto;min-width:0;
-white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.line .lend{flex:none;color:var(--mut)}
-.line .track{flex:1;min-width:60px;height:3px;border-radius:2px;
-background:rgba(130,140,150,.18);overflow:hidden;display:block}
-.line .track i{display:block;height:100%;width:0;background:var(--red);
-transition:width .45s ease}
-#bal.ok b{color:var(--green)}
-#bal.ok .track i{background:var(--green)}
-/* the track drops to its own row on a phone; the text still elides
-   rather than wrapping, so the row keeps one height everywhere */
-@media(max-width:700px){.line{flex-wrap:wrap}
-.line .track{order:9;flex-basis:100%}}
 .pagebar{display:flex;align-items:center;justify-content:flex-end;gap:10px;
 padding:9px 0 12px}
 kbd{background:var(--panel2);border:1px solid var(--bd);border-bottom-width:2px;
@@ -2258,6 +2236,30 @@ background:rgba(67,181,129,.14)}
        is; the filters you have actually applied appear as chips beneath it;
        everything set once and forgotten sits behind one disclosure. Resting
        state is two quiet lines rather than a wall of pills. -->
+</header>
+
+<nav class="jtabs" aria-label="judging surfaces"><a href="/audit/review" class="jtab on" aria-current="page">Review queue</a><a href="/audit/gate" class="jtab">Dog-bin audit</a><a href="/audit/leash" class="jtab">Leash audit</a></nav>
+<!-- ^ the shared tab strip, one contract across every judging page:
+     identical markup on this queue and both audits, with 'jtab on' (and the
+     current-page mark) on the page being read, and nothing between it and
+     the header. audit.py renders the same line on the audit pages, and
+     adv_fn_audit's tab_checks pins it byte for byte -- so any change here
+     must land there too, or the surfaces stop matching. -->
+
+<!-- WHAT YOU HAVE BEEN ASKED FOR, under the tabs and above the work. It
+     draws nothing at all unless somebody has an open target that applies to
+     this surface, so a dashboard nobody delegates on looks exactly as it
+     did. It is not a gate: judging past the number is not an error and
+     nothing here is withheld from somebody who has not reached it. -->
+__WORKSTRIP__
+
+<!-- THE CONTROLS, under the tabs rather than inside the header.
+     They used to live in a sticky <header> nine and a half thousand
+     characters long: the caption, the filters, the chips, the panel
+     and the pager all stacked above the tab strip, so this page put
+     four rows of setup between its title and its navigation while
+     the two audit sheets put none. Same reading order as those now
+     -- what this page is, where else to go, then what to change. -->
   <div class="cap">
     <p class="capline" id="cap">&mdash;</p>
     <span class="capsp"></span>
@@ -2357,35 +2359,11 @@ background:rgba(67,181,129,.14)}
   <!-- The page's own progress, one quiet line. A full-width strip with its
        own bar, dot and legend said the same number at four times the
        volume. -->
-  <div class="lines">
-    <p class="line" id="bal" hidden>
-      <b id="balNum">&mdash;</b><span id="balNumU">crops left to judge</span>
-      <i class="track"><i id="balFill"></i></i>
-      <span class="lend" id="balLeft"></span>
-      <span class="lsub" id="balMain"></span>
-    </p>
-  </div>
 
   <div class="pagebar">
     <span class="cnt" id="pg">&mdash;</span>
     <button class="rbtn quiet" id="next" title="bank this screen and bring up the next unjudged crops">Next &rsaquo;</button>
   </div>
-</header>
-
-<nav class="jtabs" aria-label="judging surfaces"><a href="/audit/review" class="jtab on" aria-current="page">Review queue</a><a href="/audit/gate" class="jtab">Dog-bin audit</a><a href="/audit/leash" class="jtab">Leash audit</a></nav>
-<!-- ^ the shared tab strip, one contract across every judging page:
-     identical markup on this queue and both audits, with 'jtab on' (and the
-     current-page mark) on the page being read, and nothing between it and
-     the header. audit.py renders the same line on the audit pages, and
-     adv_fn_audit's tab_checks pins it byte for byte -- so any change here
-     must land there too, or the surfaces stop matching. -->
-
-<!-- WHAT YOU HAVE BEEN ASKED FOR, under the tabs and above the work. It
-     draws nothing at all unless somebody has an open target that applies to
-     this surface, so a dashboard nobody delegates on looks exactly as it
-     did. It is not a gate: judging past the number is not an error and
-     nothing here is withheld from somebody who has not reached it. -->
-__WORKSTRIP__
 
 <!-- The legend is a lesson, and a lesson stops being one after the first
      day. It kept two full lines of the viewport permanently to teach four
@@ -2844,110 +2822,11 @@ function score(){
       +'sequence, which is how near-identical crops used to be judged twice.';}
 }
 
-/* ── training-set balance ─────────────────────────────────────────────────
-   Flagging only ever produces NEGATIVES, so while not_dog < dog the answer is
-   always "keep flagging" -- annotating more dogs would move the target away.
-   Counts come from the built dataset; flags made since that build are shown
-   separately as "banked", because they only become training data at the next
-   rebuild. Updated locally on every flag, re-fetched on load and page change. */
-var BAL=null;
-function loadBal(){
-  return fetch('/api/dataset').then(function(r){return r.json()})
-    /* an error payload must still be PAINTED -- bailing here left the
-       "Dataset not found" branch unreachable and the strip showing stale
-       numbers for a dataset that no longer exists */
-    .then(function(j){if(!j)return;BAL=j;paintBal()})
-    .catch(function(){});
-}
-function paintBal(){
-  var b=BAL;if(!b)return;
-  var el=$('bal');el.hidden=false;
-  if(b.ok===false){
-    el.className='line';
-    $('balFill').style.width='0%';
-    $('balNum').textContent='—';$('balNumU').textContent='dataset not found';
-    $('balLeft').textContent='';
-    $('balMain').textContent=b.error||('missing '+(b.dataset||'dataset'));
-    el.title='';
-    return;
-  }
-  /* the server's measured value, never a copy: this line used to carry its
-     own 0.822 and drifted 1.8x out of date when the acceptance reservation
-     started withholding 30% of every harvest. 0 is the honest fallback -- it
-     paints "nothing banked yet" instead of inventing progress. */
-  var y=(typeof b.yield_per_flag==='number')?b.yield_per_flag:0;
-  var pend=Math.round((b.new_flags||0)*y);
-  var pendPos=Math.round((b.new_positive_flags||0)*y);
-  var have=b.not_dog||0, want=(b.dog||0)+pendPos;   /* positives raise the bar */
-  /* One fill, one meaning: not-dog crops standing against the dog target,
-     counting both those already built into the dataset and those your flags
-     have earned since. Splitting the two put the difference between
-     bookkeeping states in front of the number that matters. */
-  var got=Math.min(want,have+pend);
-  var pct=want?Math.min(100,100*got/want):0;
-  $('balFill').style.width=pct.toFixed(1)+'%';
-  var short=Math.max(0,want-have-pend);
-  /* JUDGEMENTS, not flags. Dividing the shortfall by the yield answers a
-     different question -- how many more NOT-DOGS are needed -- and that only
-     equals the reviewer's workload if every future verdict is "not a dog".
-     About a fifth are not, and each of those joins the very class being
-     chased, so a judgement closes the gap by yield x (negatives - positives).
-     Mirrored from the server so banking a verdict updates it without a round
-     trip. */
-  var nf=b.new_flags||0,np=b.new_positive_flags||0,jd=nf+np;
-  var share=(jd>=(b.mix_min_sample||50))?np/jd:0;
-  var net=y*(1-2*share);
-  var need=short?(net>0?Math.ceil(short/net):null):0;
-  el.className='line'+(short?'':' ok');
-  var ds=b.dataset||'the dataset';
-  if(!short){
-    $('balNum').textContent='0';
-    $('balNumU').textContent='crops left to judge';
-    $('balLeft').textContent='100%';
-    $('balMain').textContent='balanced';
-  }else if(need===null){
-    /* every judgement adds to both sides at the same rate: reviewing alone
-       cannot close this, and a number here would be a lie */
-    $('balNum').textContent='—';
-    $('balNumU').textContent='not closing';
-    $('balLeft').textContent=Math.round(pct)+'%';
-    $('balMain').textContent='not closing at this rate';
-  }else{
-    $('balNum').textContent=n(need);
-    $('balNumU').textContent='crops left to judge';
-    /* One number at the end of the track, in the track's own unit. The line
-       used to carry three readings of one thing -- the crops to judge, the
-       crops the bar is short, and the percentage with its fraction spelled
-       out -- in three different units, which is what made a one-line summary
-       longer than the thing it summarised. */
-    $('balLeft').textContent=Math.round(pct)+'%';
-    $('balLeft').title=n(short)+' more not-dog crops fill this bar. That is '+
-      'not the same as the '+n(need)+' on the left: those are crops to JUDGE, '+
-      'and only some of what you judge ends up a usable not-dog crop.';
-    $('balMain').textContent='';
-  }
-  /* The breakdown that used to occupy four legend swatches. It explains the
-     number rather than competing with it, so it lives on hover. */
-  el.title=n(have)+' not-dog crops in '+ds+', plus '+n(pend)+' earned from '+
-    n(nf)+' flag'+(nf===1?'':'s')+' since that build, against '+n(want)+
-    ' dog crops'+(pendPos?' (+'+n(pendPos)+' from crops you marked as dogs)':'')+
-    '.\n\nAbout '+Math.round(y*100)+'% of what you flag survives into the '+
-    'dataset — the rest is held back for acceptance, near-duplicate, under '+
-    'the size floor, or ambiguous'+
-    (share?'; and '+Math.round(share*100)+'% of what you judge comes back "a '+
-      'dog", which raises the target':'')+
-    (b.reserved_ids?'.\n\n'+n(b.reserved_ids)+' crops are reserved to test '+
-      'the gate and never trained on.':'.');
-}
-/* a verdict immediately banks yield_per_flag of a crop; reflect it without a
-   round trip. Negatives close the gap, positives widen it. */
-function bumpBal(dNeg,dPos){
-  if(!BAL)return;
-  BAL.new_flags=Math.max(0,(BAL.new_flags||0)+(dNeg||0));
-  BAL.new_positive_flags=Math.max(0,(BAL.new_positive_flags||0)+(dPos||0));
-  paintBal();
-}
-
+/* The training-set balance bar is gone from this page. It answered "how
+   many more not-dog crops before the set is even" -- a question about the
+   DATASET, on a page about the crop in front of you, taking a line of the
+   viewport on every visit to say something that moves once a rebuild.
+   /api/dataset still serves it and the front page still reads it. */
 /* ── render ─────────────────────────────────────────────────────────────── */
 function tile(c){
   var d=document.createElement('div');
@@ -3221,7 +3100,7 @@ function flag(i,viaKey,label){
       /* the bar moves with the work. Debounced inside, so holding D down is
          one request rather than one per crop. */
       refreshWorkStrip();
-      score();bumpBal(label==='true_positive'?0:1,label==='true_positive'?1:0);
+      score();
       if(hold){
         /* judged, kept: the verdict shows on the tile and the leash row is
            now the only thing left to answer on it */
@@ -3319,8 +3198,7 @@ function undo(){
       todoN++;
       if(u.label==='true_positive')posN=Math.max(0,posN-1);
       else flaggedN=Math.max(0,flaggedN-1);
-      score();bumpBal(u.label==='true_positive'?0:-1,
-                      u.label==='true_positive'?-1:0);
+      score();
       mark();
    });
 }
@@ -3806,7 +3684,7 @@ $('unkeep').onclick=function(){
       if(!j||!j.ok){window.alert('Could not restore: '+
         (st===401?'that session has ended \u2014 reload the page to sign in again'
                  :((j&&j.error)||'unknown error')));return}
-      seenN=0;page=0;sel=-1;load();loadBal();
+      seenN=0;page=0;sel=-1;load();
    }).catch(function(){b.disabled=false;b.innerHTML='\u21ba Restore kept';});
 };
 /* The sort choice survives the visit. Validated against the <select>'s own
@@ -4059,7 +3937,7 @@ if($('pclr'))$('pclr').addEventListener('click',function(){
   $('pfrom').value='';$('pto').value='';periodSet();
 });
 restorePrefs();
-load();loadBal();
+load();
 __WORKJS__
 </script></body></html>"""
 # Substituted at import time, so the server and the tests both read a
