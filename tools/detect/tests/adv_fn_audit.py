@@ -1217,6 +1217,128 @@ def draw_filter_checks(bad):
                        f'and the fixtures went to human data')
 
 
+def split_checks(bad):
+    """Who answered what, split between the two classes.
+
+    Two scopes on one sheet: what this reader put there, and what the ledger
+    holds. Counted through read_verdicts() rather than by walking the file,
+    which is what makes a crop answered twice count once, a withdrawal count
+    as nothing, and a row written before this project had accounts belong to
+    the admin who wrote it.
+
+    The number that would go wrong quietly is `mine`. A split that credits
+    one annotator with another's answers is not an error anybody will spot
+    -- it just makes the two rows agree.
+    """
+    try:
+        import audit
+    except Exception:
+        return
+    import fn_audit as fa
+    import tempfile as _tf
+    mark = 'zzsplit_'
+    tmp = _tf.mkdtemp()
+    real_paths = fa.paths
+    lay = dict(real_paths('gate'))
+    lay.update(out=tmp, verdicts=os.path.join(tmp, 'v.jsonl'),
+               drawn=os.path.join(tmp, 'drawn.jsonl'),
+               pages=os.path.join(tmp, 'pages'),
+               pool=os.path.join(tmp, 'pool.parquet'))
+    fa.paths = lambda stage='gate': lay
+    try:
+        rows = [
+            (f'{mark}a#0', 'dog', 'sam'), (f'{mark}b#0', 'dog', 'sam'),
+            (f'{mark}c#0', 'not_dog', 'sam'),
+            (f'{mark}d#0', 'dog', 'ana'),
+            (f'{mark}e#0', 'not_dog', 'ana'),
+            (f'{mark}f#0', 'unsure', 'ana'),
+            (f'{mark}g#0', 'dog', None),          # legacy -> the admin
+            # answered, then answered again: the LATEST answer, counted once
+            (f'{mark}h#0', 'dog', 'sam'), (f'{mark}h#0', 'not_dog', 'sam'),
+            # answered, then withdrawn: counted for nobody
+            (f'{mark}i#0', 'dog', 'sam'), (f'{mark}i#0', None, 'sam'),
+        ]
+        with open(lay['verdicts'], 'w') as fh:
+            for key, v, who in rows:
+                rec = {'key': key, 'verdict': v, 'band': 1, 'p_dog': 0.1,
+                       'seq': 's' + key[-4:], 'ts': 1_800_000_000}
+                if who:
+                    rec[fa.AUTHOR_FIELD] = who
+                fh.write(json.dumps(rec) + '\n')
+        got = audit.class_split('gate', who='sam')
+        want_all = {'dog': 4, 'not_dog': 3, 'unsure': 1}
+        want_mine = {'dog': 2, 'not_dog': 2, 'unsure': 0}
+        if got['all'] != want_all:
+            bad.append(f'the whole sheet splits {got["all"]}, want {want_all}')
+        if got['mine'] != want_mine:
+            bad.append(f'sam\'s share is {got["mine"]}, want {want_mine} — '
+                       f'one annotator is credited with another\'s answers')
+        if audit.class_split('gate', who='ana')['mine'] != \
+                {'dog': 1, 'not_dog': 1, 'unsure': 1}:
+            bad.append('the split does not follow the annotator asked for')
+        if audit.class_split('gate', who=fa.LEGACY_AUTHOR)['mine']['dog'] != 1:
+            bad.append('a row written before accounts existed is not the '
+                       'admin\'s in the split')
+        # NOBODY IS NOT EVERYBODY. Signed out, or a name nobody holds, gets a
+        # share of nothing -- never the whole sheet relabelled as theirs.
+        for nobody in (None, '', 'ghost'):
+            share = audit.class_split('gate', who=nobody)
+            if any(share['mine'].values()):
+                bad.append(f'{nobody!r} is credited with {share["mine"]}')
+            if share['all'] != want_all:
+                bad.append('the whole-sheet count moves with who is asking')
+        sp = fa.spec('gate')
+        if got['positive'] != sp['positive'] or got['negative'] != \
+                sp['negative']:
+            bad.append('the split names the wrong ends for this stage')
+        for k in (sp['positive'], sp['negative']):
+            if not got['words'].get(k):
+                bad.append(f'{k} has no word on the readout, so the bar is '
+                           f'two colours and no names')
+        # the words are the BUTTONS' words: a reader should not have to work
+        # out that "dog" and "it's a dog" are the same answer
+        if got['words'][sp['positive']] != sp['yes'] or \
+                got['words'][sp['negative']] != sp['no']:
+            bad.append('the split names the classes differently from the '
+                       'buttons that record them')
+    finally:
+        fa.paths = real_paths
+    for name in fa.STAGES:
+        hit = _leaked(fa.paths(name), mark)
+        if hit:
+            bad.append(f'this check wrote its own keys into the LIVE {name} '
+                       f'audit ({hit})')
+
+    # THE NAME COMES OFF THE SESSION THE GATE RESOLVED. A split is a
+    # measurement of a person; a route that took it from the query string
+    # would hand any signed-in reader a scoreboard of their colleagues, and
+    # that is a hole nothing on the page would look wrong about. Read off the
+    # source because the route needs a built pool to answer at all, and a
+    # check that quietly does nothing on a machine without one is worse than
+    # no check.
+    try:
+        src = open(os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py'),
+                   encoding='utf-8').read()
+    except OSError as e:
+        bad.append(f'could not read the route: {e}')
+        return
+    i = src.find("if path == '/api/audit/stats':")
+    blk = src[i:src.find('return True', i)] if i >= 0 else ''
+    if not blk:
+        bad.append('the stats route is gone, or moved somewhere this check '
+                   'cannot see it')
+        return
+    if 'self.session' not in blk:
+        bad.append('the stats route does not take the annotator off the '
+                   'session it was handed')
+    for tell in ("q.get('who'", 'q.get("who"', "q.get('user'",
+                 "q.get('username'"):
+        if tell in blk:
+            bad.append(f'the stats route reads the annotator out of the '
+                       f'query string ({tell}) — every signed-in reader '
+                       f'could ask about anybody')
+
+
 def period_filter_checks(bad):
     """The annotated-date filter narrows the ledger read-back on the server.
 
@@ -2181,6 +2303,54 @@ chk(/0\.3–0\.4/.test(bandName('3~least')) &&
     /least confident/.test(bandName('3~least')),
   'a single-band mode page is not named: ' + bandName('3~least'));
 
+// ── the class split ──
+// Two facts the page could not answer before: what this reader contributed
+// to each class, and what the sheet holds in each. Drawn as ONE scale per
+// scope rather than four figures, because on a two-class question the number
+// that matters is where the split falls.
+chk(/id="split"/.test(PAGE_HTML), 'no class split on the page');
+chk(/<div class="split" id="split" hidden>/.test(PAGE_HTML),
+  'the split ships visible, so a stage nobody has touched grows an empty '
+  + 'panel above the crops');
+var SP = {positive:'dog', negative:'not_dog',
+          words:{dog:'a dog', not_dog:'not a dog', unsure:'unsure'}};
+paintSplit(null);
+chk(els.split.hidden, 'a page with no split payload shows the panel anyway');
+paintSplit(Object.assign({mine:{dog:0,not_dog:0,unsure:0},
+                          all:{dog:0,not_dog:0,unsure:0}}, SP));
+chk(els.split.hidden,
+  'a sheet nobody has answered draws a panel of zeros over the crops');
+// YOURS AND EVERYONE'S, two rows, when they differ
+paintSplit(Object.assign({mine:{dog:318,not_dog:84,unsure:2},
+                          all:{dog:1204,not_dog:1572,unsure:11}}, SP));
+chk(!els.split.hidden, 'the split stayed hidden with answers to show');
+chk((els.split.innerHTML.match(/class="sprow/g) || []).length === 2,
+  'yours and everyone\'s are not two rows: ' + els.split.innerHTML);
+['318', '84', '1,204', '1,572'].forEach(function (n) {
+  chk(els.split.innerHTML.indexOf('>' + n + '<') >= 0,
+    'the split does not print ' + n + ' — the counts are the thing that was '
+    + 'asked for, the bar is how they read');
+});
+chk(/a dog/.test(els.split.innerHTML) &&
+    /not a dog/.test(els.split.innerHTML),
+  'the two ends of the scale are unnamed');
+// ...and ONE row when every answer on the sheet is this reader's, because
+// two identical bars is the same bar drawn twice
+paintSplit(Object.assign({mine:{dog:242,not_dog:102,unsure:0},
+                          all:{dog:242,not_dog:102,unsure:0}}, SP));
+chk((els.split.innerHTML.match(/class="sprow/g) || []).length === 1,
+  'the same numbers are drawn as two identical rows');
+chk(/every answer here is yours/.test(els.split.innerHTML),
+  'nothing says why there is only one row');
+// the segments are a PROPORTION of that row, so they fill the track
+var segs = els.split.innerHTML.match(/width:([\d.]+)%/g) || [];
+chk(segs.length === 3, 'a row is not three segments: ' + segs.join(' '));
+var tot = segs.reduce(function (a, s) {
+  return a + parseFloat(s.replace(/[^\d.]/g, '')) }, 0);
+chk(Math.abs(tot - 100) < 0.5,
+  'the segments of a row add to ' + tot.toFixed(1) + '%, not 100 — the bar '
+  + 'is drawn to a scale it does not have');
+
 // ── the annotated-date window ──
 // Two calendars, not four presets. 'any time / today / last 7 / last 30' is
 // four windows out of every window there is, and the one somebody wants is
@@ -2409,7 +2579,8 @@ def main():
                serving_checks, isolation_checks, correction_checks,
                concurrency_checks,
                persistence_checks, selection_checks, passive_load_checks,
-               draw_filter_checks, period_filter_checks, tab_checks,
+               draw_filter_checks, period_filter_checks, split_checks,
+               tab_checks,
                prefetch_checks, page_checks, mobile_checks):
         try:
             fn(bad)

@@ -699,12 +699,56 @@ def record(key, verdict, meta=None, stage=DEFAULT_STAGE, by=None):
     return {'ok': True, 'placed': placed}
 
 
-def stats(stage=DEFAULT_STAGE):
+def stats(stage=DEFAULT_STAGE, who=None):
     s = fa.summarise(stage=stage)
     s['counts'] = _judged_counts(stage)
     s['pages'] = page_count(stage)
     s['drawn'] = len(_drawn_keys(stage)[0])
+    s['split'] = class_split(stage, who=who)
     return s
+
+
+def class_split(stage=DEFAULT_STAGE, who=None):
+    """How the answers on this sheet fall between the two classes.
+
+        {'answers', 'positive', 'negative', 'who', 'mine', 'all'}
+
+    Two scopes, because they answer different questions. `all` is what the
+    ledger holds and says what the sheet is made of; `mine` is what one
+    person put there. Read together they say a third thing neither says
+    alone -- whether this annotator's split looks like everybody's -- and an
+    annotator calling four in five leashed against a corpus that runs half
+    and half is worth knowing about while it is still fixable.
+
+    Counted through read_verdicts(), which is the ONE reader of these
+    ledgers: it collapses a crop answered twice to its latest answer, drops
+    the withdrawals, and resolves the rows written before this project had
+    accounts to their author. A second count with its own ideas about any of
+    those is a second answer to "how many have I done".
+    """
+    sp = fa.spec(stage)
+    answers = list(sp['answers'])
+    mine = {a: 0 for a in answers}
+    every = {a: 0 for a in answers}
+    who = str(who or '')
+    try:
+        rows = fa.read_verdicts(stage=stage)
+    except Exception:
+        rows = []
+    for v in rows:
+        got = fa.verdict_of(v.get('verdict'), stage)
+        if got not in every:
+            continue
+        every[got] += 1
+        if who and v.get(fa.AUTHOR_FIELD) == who:
+            mine[got] += 1
+    return {'answers': answers, 'positive': sp['positive'],
+            'negative': sp['negative'],
+            # The words the buttons on this page use, so the readout names
+            # the classes the way the reader named them.
+            'words': {sp['positive']: sp['yes'], sp['negative']: sp['no'],
+                      'unsure': 'unsure'},
+            'who': who, 'mine': mine, 'all': every}
 
 
 # ── the page ────────────────────────────────────────────────────────────────
@@ -765,6 +809,56 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    crops and taking answers. The numbers move by a tenth of a percent per
    verdict; they are worth reading once a session, not once a click. So they
    fold into one line that is always true and open when asked. */
+/* ── how the answers fall between the two classes ──
+   A two-class question is a SPLIT, not two counts, so it is drawn as one
+   scale running from one class to the other with the undecided sitting in
+   the middle -- which is where "unsure" actually is. Two of them stacked,
+   yours over everyone's and aligned on the same axis, so the thing worth
+   reading is not either bar's length but whether the two break in the same
+   place: somebody calling four in five leashed against a sheet that runs half
+   and half is worth knowing about while it is still fixable.
+
+   BOTH BARS ARE FULL WIDTH ON PURPOSE. Drawn to scale, one person's 344
+   against a corpus of 2,787 is a stub that says nothing. The magnitudes are
+   the figures at the ends; the bars are proportions.
+
+   The colours are the ones the VERDICT BUTTONS use -- amber for the positive
+   class, green for the negative -- so a length in this bar means what the
+   button that produced it means. Nothing new is introduced here: this is a
+   component inside an established page, and a fresh palette in it would be
+   the seam showing. */
+.split{display:grid;gap:7px;margin-bottom:14px;background:var(--panel);
+  border:1px solid var(--bd);border-radius:12px;padding:11px 16px 12px}
+.split[hidden]{display:none}
+.spax{display:flex;align-items:baseline;gap:12px;font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}
+.spxa{color:rgba(232,166,69,.85)}
+.spxb{margin-left:auto;color:rgba(67,181,129,.85)}
+/* Centred by taking the same auto margin the right-hand label takes, so the
+   two split the gap between them. Left where it was written it butted against
+   the first class name and read as a caption on that class. */
+.spxn{margin-left:auto;color:var(--dim);text-transform:none;letter-spacing:0;
+  font-size:11px}
+.sprow{display:flex;align-items:center;gap:11px;font-size:12px}
+.sprl{flex:none;width:58px;color:var(--dim)}
+.spn{font-family:var(--num);font-variant-numeric:tabular-nums;font-size:13px;
+  font-weight:650;flex:none;min-width:52px}
+.spna{color:var(--acc);text-align:right}
+.spnb{color:var(--green)}
+/* One track, three segments, no gaps between them: the segments ARE the
+   split, and a gap would read as a fourth thing. */
+.spbar{flex:1;min-width:70px;display:flex;height:9px;border-radius:5px;
+  overflow:hidden;background:rgba(130,140,150,.12)}
+.spbar i{display:block;height:100%;transition:width .35s ease}
+.spbar .sa{background:rgba(232,166,69,.72)}
+.spbar .su{background:rgba(130,140,150,.34)}
+.spbar .sb{background:rgba(67,181,129,.66)}
+/* A row with nothing in it is not a row with a bar of nothing: it says so,
+   because an empty rail beside somebody else's full one reads as a fault. */
+.sprow.nil .spn{color:var(--dim)}
+.sprow.nil .spbar{background:rgba(130,140,150,.07)}
+@media(prefers-reduced-motion:reduce){.spbar i{transition:none}}
+@media(max-width:640px){.sprl{width:46px}.spn{min-width:44px}}
 .figures{margin-bottom:14px}
 .figsum{list-style:none;cursor:pointer;display:flex;gap:12px;
   align-items:baseline;padding:9px 14px;background:var(--panel);
@@ -1060,6 +1154,10 @@ __TABS__
      work_strip.py rather than being written here as well. -->
 __WORKSTRIP__
 
+<!-- The split, filled by paintSplit() from /api/audit/stats. Empty and
+     invisible until somebody has answered something on this sheet, so a
+     stage nobody has touched looks exactly as it did. -->
+<div class="split" id="split" hidden></div>
 <details class="figures" id="figures">
   <summary class="figsum">
     <span class="figline" id="figline">nothing judged yet</span>
@@ -1563,8 +1661,49 @@ function loadStats(){
   fetch('/api/audit/stats?stage='+STAGE).then(function(r){return r.json()}).then(paintStats)
     .catch(function(){});
 }
+/* WHOSE ANSWERS, AND ALL OF THEM. Two facts the page could not answer
+   before: what this reader has contributed to each class, and what the sheet
+   holds in each class. Drawn as one scale per scope rather than four
+   figures, because the number that matters on a two-class question is where
+   the split falls -- see the note over .split in the stylesheet. */
+function splitRow(label,o,pos,neg,n,words){
+  var a=+o[pos]||0,b=+o[neg]||0,u=Math.max(0,n-a-b);
+  var pc=function(v){return n?(v/n*100).toFixed(2):'0'};
+  return '<div class="sprow'+(n?'':' nil')+'">'+
+    '<span class="sprl">'+esc(label)+'</span>'+
+    '<b class="spn spna">'+fmtn(a)+'</b>'+
+    '<span class="spbar" title="'+att(
+      fmtn(a)+' '+(words[pos]||pos)+
+      (u?' \u00b7 '+fmtn(u)+' unsure':'')+
+      ' \u00b7 '+fmtn(b)+' '+(words[neg]||neg))+'">'+
+      '<i class="sa" style="width:'+pc(a)+'%"></i>'+
+      '<i class="su" style="width:'+pc(u)+'%"></i>'+
+      '<i class="sb" style="width:'+pc(b)+'%"></i></span>'+
+    '<b class="spn spnb">'+fmtn(b)+'</b></div>';
+}
+function paintSplit(sp){
+  var box=document.getElementById('split');
+  if(!box)return;
+  var all=(sp&&sp.all)||{},mine=(sp&&sp.mine)||{},words=(sp&&sp.words)||{};
+  var sum=function(o){var t=0;for(var k in o)t+=+o[k]||0;return t};
+  var nAll=sum(all),nMine=sum(mine);
+  if(!sp||!nAll){box.hidden=true;box.innerHTML='';return}
+  /* mine is a subset of all, so equal totals mean the two rows would be the
+     same bar drawn twice. One row and a plain sentence instead -- which is
+     also the answer to "am I the only one working on this". */
+  var alone=nMine===nAll;
+  box.innerHTML=
+    '<div class="spax"><span class="spxa">'+esc(words[sp.positive]||
+      sp.positive)+'</span>'+
+    (alone?'<span class="spxn">every answer here is yours</span>':'')+
+    '<span class="spxb">'+esc(words[sp.negative]||sp.negative)+'</span></div>'+
+    splitRow(alone?'you':'you',mine,sp.positive,sp.negative,nMine,words)+
+    (alone?'':splitRow('everyone',all,sp.positive,sp.negative,nAll,words));
+  box.hidden=false;
+}
 function paintStats(s){
   if(!s)return;
+  paintSplit(s.split);
   counts(s.counts||{all:s.judged});
   var r=document.getElementById('rate'),ci=document.getElementById('ci'),
       rej=s.rejected||{},kept=s.kept||{};

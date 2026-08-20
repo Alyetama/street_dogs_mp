@@ -10161,7 +10161,12 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if path == '/api/audit/stats':
             q = parse_qs(urlparse(self.path).query)
             stage = self._audit_stage(q)
-            self._json(a.stats(stage) if a and a.pool_ready(stage)
+            # WHOSE ANSWERS, off the session the gate resolved and never off
+            # the query string. The split is a measurement of a person, and
+            # one any signed-in reader could ask for by name is a scoreboard
+            # of their colleagues.
+            who = (self.session or {}).get('username') or ''
+            self._json(a.stats(stage, who=who) if a and a.pool_ready(stage)
                        else {'judged': 0, 'bands': []})
             return True
         return False
