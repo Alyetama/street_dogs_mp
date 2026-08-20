@@ -9694,6 +9694,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
     # The header's account strip, spliced the same way and for a related
     # reason: one built page is read by several people and it has to say
     # which of them this is.
+    _NAV_OPEN = b'<!--NAV-->'
+    _NAV_CLOSE = b'<!--/NAV-->'
     _ACCT_OPEN = b'<!--ACCT-->'
     _ACCT_CLOSE = b'<!--/ACCT-->'
 
@@ -10539,6 +10541,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
         body = self._splice(
             body, self._ACCT_OPEN, self._ACCT_CLOSE,
             lambda: render_account(getattr(self, 'session', None)))
+        body = self._splice(
+            body, self._NAV_OPEN, self._NAV_CLOSE,
+            lambda: render_account_nav(getattr(self, 'session', None)))
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -10824,6 +10829,8 @@ def render(ov, per, tr, now, locs=()):
             .replace('__DATA__', json.dumps(data))
             .replace('__LLMNAV__', LLM_NAV if LLM_PAGE else '')
             .replace('__NOW__', now.strftime('%Y-%m-%d %H:%M'))
+            .replace('__CLOCK__', now.strftime('%H:%M'))
+            .replace('__ACCTCSS__', ACCOUNT_CSS)
             .replace('__PROG__', f"{ov['pct']:.1f}")
             .replace('__LB_CSS__', LB_CSS)
             .replace('__LB_HTML__', LB_HTML)
@@ -11085,11 +11092,28 @@ def serve(args):
 ACCOUNT_CSS = """.who{display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}
 .whon{font-weight:600;letter-spacing:.01em}
 .whof{display:flex}
-.whox{color:var(--mut);text-decoration:none;border:1px solid var(--bd);
+.whox{color:var(--mut);text-decoration:none;border:1px solid transparent;
 background:0;font:inherit;font-size:12px;cursor:pointer;
 border-radius:8px;padding:3px 9px;transition:background .12s}
 .whox:hover{background:rgba(130,140,150,.08);color:var(--fg)}
 .whox:focus-visible{outline:2px solid var(--acc);outline-offset:2px}"""
+
+
+def render_account_nav(session):
+    """The admin's way to the Accounts page, for the action row.
+
+    Split from the identity strip below because the two are different kinds of
+    thing standing in one place. Accounts is somewhere to GO, and belongs
+    beside Datasets; who is reading and the way out are CONTEXT, and belong
+    beside the title. Rendering them together put a person's name in the
+    middle of a row of controls, which is what made that row read as seven
+    equal things instead of two doing something and the rest reporting.
+    """
+    if not session or session.get('role') != 'admin':
+        return ''
+    return ('<a class="hnav" href="/admin" title="Invite someone, '
+            'or retire an account">'
+            '<span class="hnf">&#9781;</span>Accounts</a>')
 
 
 def render_account(session):
@@ -11116,12 +11140,6 @@ def render_account(session):
     # is not the day anybody will remember that a name reaches the front page.
     name = html.escape(str(session.get('username') or ''), quote=True)
     out = ''
-    if session.get('role') == 'admin':
-        out = ('<a class="revbtn quiet" href="/admin" title="Invite someone, '
-               'or retire an account">'
-               '<span class="rvf">&#9781;</span>'
-               '<span class="rvn"><b>Accounts</b>'
-               '<em>invites &amp; people</em></span></a>')
     # A FORM, NOT A LINK. Sign-out ends the session on every device -- it
     # bumps the account's session_epoch, which is the only thing that takes a
     # cookie already copied off the wire back -- and a state change that a
@@ -11493,27 +11511,31 @@ h1 .o{color:var(--acc)}
    account is context, not an action, and the only reason it is on screen at
    all is that a dashboard you cannot sign out of is a dashboard that stays
    signed in on a phone somebody leaves on a table. */
-.who{display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}
-.whon{font-weight:600;letter-spacing:.01em}
-/* The control is a submit button in a form, because signing out ends the
-   session on every device and a GET that does that is one <img src> away
-   from being fired by any page the reader visits. It has to keep looking
-   exactly like the link it replaced, so the form contributes no box of its
-   own and the button inherits the page's type instead of the browser's. */
-.whof{display:flex}
-.whox{color:var(--mut);text-decoration:none;border:1px solid var(--bd);
-background:0;font:inherit;font-size:12px;cursor:pointer;
-border-radius:8px;padding:3px 9px;transition:background .12s}
-.whox:hover{background:rgba(130,140,150,.08);color:var(--fg)}
-.whox:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+__ACCTCSS__
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2.4s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(67,181,129,.5)}70%{box-shadow:0 0 0 7px rgba(67,181,129,0)}100%{box-shadow:0 0 0 0 rgba(67,181,129,0)}}
 /* The one solid-filled control on the page. Everything else is a tint or an
    outline, so filling exactly one thing makes it unambiguously THE action --
    and the action this dashboard exists to send someone to is the queue.
    #13151a on #e8a645 is the page background on the page accent: 8.9:1. */
-.hact{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;
+/* THE ROW READS AS THREE TIERS, NOT SEVEN CONTROLS.
+   It held a filled button, two bordered cards each carrying a two-line
+   caption, a name, a sign-out, a sentence and a second button -- eight boxes
+   at one weight, and the eye had nowhere to land. The tiers now are: the one
+   thing to DO (filled), the places to GO (a mark and a word, no box), and
+   what the page KNOWS (pushed to the far end by .hgap). Identity left the row
+   entirely and went up beside the title, where it belongs. */
+.hact{display:flex;align-items:center;flex-wrap:wrap;gap:10px 14px;
 justify-content:flex-end}
+/* Navigation: a mark and a word. No border, because a border makes a
+   destination look like an action, and this page has exactly one action. */
+.hnav{display:inline-flex;align-items:center;gap:7px;text-decoration:none;
+color:var(--mut);font-size:13px;font-weight:600;letter-spacing:-.1px;
+border-radius:8px;padding:6px 9px;transition:color .12s,background .12s}
+.hnav:hover{color:var(--tx);background:rgba(130,140,150,.08)}
+.hnav:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.hnav .hnf{font-size:14px;opacity:.55}
+.hnav:hover .hnf{opacity:.8}
 .revbtn{display:inline-flex;align-items:center;gap:10px;text-decoration:none;
 background:var(--acc);color:#13151a;border:1px solid var(--acc);
 border-radius:10px;padding:7px 12px 7px 13px;line-height:1.1;
@@ -11538,8 +11560,13 @@ box-shadow:none}
 @media (prefers-reduced-motion:reduce){
   .revbtn,.revbtn:hover{transition:none;transform:none}
 }
-.rbtn{background:rgba(232,166,69,.14);border:1px solid rgba(232,166,69,.35);color:var(--acc);border-radius:8px;padding:4px 11px;font-size:12px;font-weight:600;cursor:pointer;transition:background .12s;font-variant-numeric:tabular-nums}
-.rbtn:hover{background:rgba(232,166,69,.24)}
+/* ONE filled control on the page, and it is the queue. This one was tinted
+   in the accent too, so the eye had two things to land on in a row whose
+   whole problem was that everything looked equally urgent. Re-scanning the
+   catalog is a rare, deliberate act that annotates the status beside it --
+   it earns a control, not the page's one loud colour. */
+.rbtn{background:transparent;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:4px 11px;font-size:12px;font-weight:600;cursor:pointer;transition:background .12s,color .12s;font-variant-numeric:tabular-nums}
+.rbtn:hover{background:rgba(130,140,150,.08);color:var(--tx)}
 .rbtn:disabled{cursor:default;opacity:.85}
 .rbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .rbtn.nav{text-decoration:none;display:inline-flex;align-items:center}
@@ -12467,36 +12494,36 @@ outline-offset:2px}
 </style></head><body><div class="wrap">
 
 <header>
+  <!-- Who is reading sits with the title, not in the row below. It is context
+       -- the answer to "whose session is this", asked once a day -- and it was
+       standing between two controls, which is what made a row of two actions
+       read as a row of seven. -->
   <div><h1>Street Dogs &middot; <span class="o">harvest to model</span></h1>
     <div class="sub">worldwide Mapillary survey &mdash; collecting, detecting,
     judging, training</div></div>
   <div class="hact">
     <!-- The count is the point: a queue depth is what makes someone open the
          page, and an empty queue should say so quietly rather than shout a
-         zero in the accent colour. -->
+         zero in the accent colour. It is the ONE filled control here; every
+         other thing in this row is somewhere to go or something to report,
+         and dressing those as buttons too is what crowded it. -->
     <a class="revbtn" id="revBtn" href="/audit/review"
        title="Judge detections one by one — dog or not a dog">
       <span class="rvf">&#9873;</span>
       <span class="rvn"><b id="revN">&mdash;</b><em id="revL">to review</em>
       </span></a>
-    <!-- Quiet by design: this is somewhere to go, not something to do, and
-         one solid-filled control on the page is the whole rule. It sits in
-         the header rather than in the training section because a dataset
-         outlives the runs that used it, and the section can be collapsed. -->
-    <a class="revbtn quiet" href="/datasets" title="Every dataset the logged runs trained on — open one and look inside">
-      <span class="rvf">&#9638;</span>
-      <span class="rvn"><b>Datasets</b><em>what runs trained on</em>
-      </span></a>
+    <!-- Navigation, not action: a mark and a word. The captions these carried
+         ("what runs trained on", "invites & people") are worth reading once
+         and cost width on every visit after, so they live in the title
+         attribute now, where a first-time reader still finds them. -->
+    <a class="hnav" href="/datasets" title="Every dataset the logged runs trained on — open one and look inside"><span class="hnf">&#9638;</span>Datasets</a>
+    <!--NAV--><!--/NAV-->
 __LLMNAV__
-    <!-- Filled per request, not at build time: who is reading is the one
-         thing on this page that differs between two people looking at the
-         same build. Empty here and empty in the file on disk; the server
-         splices between the sentinels on the way out. -->
     <!--ACCT--><!--/ACCT-->
-    <!-- The sentence is wrapped because a bare text node has nothing to
-         style, and the scrolled header sheds the sentence while keeping the
-         button that sits after it and the dot that says the page is live. -->
-    <div class="upd"><span class="dot"></span><span class="updt">updated __NOW__ · auto-refreshes hourly</span><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
+    <!-- What the page knows and when it knew it. The date is today on a page
+         rebuilt hourly and the cadence never changes, so both moved into the
+         title and the line says the one thing worth a glance: how old this is. -->
+    <div class="upd"><span class="dot"></span><span class="updt" title="Rebuilt __NOW__ · refreshes on the hour">updated __CLOCK__</span><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
   </div>
 </header>
 
