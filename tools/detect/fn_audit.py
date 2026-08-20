@@ -84,10 +84,10 @@ STAGES = {
         'audit_dir': 'leash_audit', 'dataset': 'audit_finds_leash',
         'title': 'leash model', 'model': 'leash_v2_001',
         'asks': 'Is this dog on a leash?',
-        'yes': 'on a leash', 'no': 'loose',
+        'yes': 'on a leash', 'no': 'unleashed',
         'asymmetric': False,
-        'below': 'called it loose', 'above': 'called it leashed',
-        'miss': 'leashed dogs called loose',
+        'below': 'called it unleashed', 'above': 'called it leashed',
+        'miss': 'leashed dogs called unleashed',
         'legacy': {},
     },
 }

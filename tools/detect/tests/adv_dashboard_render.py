@@ -2985,9 +2985,9 @@ def check_map_tabs_live():
                     'clicking the Leashed vs loose chip never switched'):
                 mn = pg.eval_on_selector('#mapMin', 'e=>e.textContent')
                 mx = pg.eval_on_selector('#mapMax', 'e=>e.textContent')
-                if (mn, mx) != ('all loose', 'all leashed'):
+                if (mn, mx) != ('all unleashed', 'all leashed'):
                     bad.append(f'the leash ramp ends read "{mn}"/"{mx}", '
-                               f'not all loose/all leashed — the two-colour '
+                               f'not all unleashed/all leashed — the two-colour '
                                f'share axis lost its labels')
                 if outlier_grids and toggle_shown():
                     bad.append('the "exclude GPS outliers" toggle is still '

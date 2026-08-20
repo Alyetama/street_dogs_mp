@@ -652,10 +652,10 @@ for (const id of ['left','done','seen','dups','unkeep','bal','balFill','balPend'
                   // findmsg is what says the search cannot work; leaving it
                   // out of the stub makes paintFind's guard skip the whole
                   // branch, so every state would 'pass' untested
-                  'leashf','find','findterms','findmsg',
+                  'find','findterms','findmsg',
                   // the redesigned block: caption, applied-filter chips
                   // and the disclosure holding the controls
-                  'cap','chips','narrow','npanel','ngrpLeash',
+                  'cap','chips','narrow','npanel',
                   // the sentinel the header watches to know it has scrolled
                   'scrollcue']) {
   const e = new El(id === 'grid' || id === 'state' || id === 'foot' ? 'div' : 'span');
@@ -1744,22 +1744,29 @@ async function t30() {
 }
 
 // ── 31. the panel offers no control that does nothing ───────────────────
-// A group whose every control is hidden rendered as an uppercase heading
-// over an empty row. The leash group is the one that can still empty out:
-// its select stays hidden until the server sends leash counts.
+// A group whose every control is hidden rendered as an uppercase heading over
+// an empty row. The leash filter -- the group that used to empty out this way,
+// and the reason this case exists -- has been removed from the page entirely,
+// so this now asserts BOTH halves: that it is gone, and that no surviving
+// group can render a heading over nothing. Written against whatever groups the
+// page ships rather than a named one, so the next group added is covered
+// without anybody remembering to come back here.
 async function t31() {
-  byId['leashf'].hidden = true;          // as the markup ships it
+  ck(!byId['leashf'] && !byId['ngrpLeash'],
+     't31: the leash filter is back on the review page');
   RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 2), []) };
   await API.load(); await flush();
-  const grp = byId['ngrpLeash'];
-  ck(grp && grp.hidden, 't31: a heading with nothing under it');
-
-  // and it comes back when the store answers
-  RESP['/api/review'] = () => payload(CROPS.normal.slice(0, 2), [],
-      {leash_counts: {all: 2, none: 1, leashed: 1, unleashed: 0},
-       leash_totals: {leashed: 1, unleashed: 0}});
-  await API.load(); await flush();
-  ck(grp && !grp.hidden, 't31: the group never came back with its control');
+  Object.keys(byId).forEach(function (id) {
+    if (id.indexOf('ngrp') !== 0) return;
+    const g = byId[id];
+    if (!g || g.hidden) return;
+    const live = (g.querySelectorAll ? [].slice.call(
+      g.querySelectorAll('select,input,button')) : []).filter(function (e) {
+        return !e.hidden;
+      });
+    ck(live.length > 0,
+       't31: ' + id + ' shows a heading with no control under it');
+  });
 }
 
 // ── 32. the header stops taking a third of the screen once you scroll ───

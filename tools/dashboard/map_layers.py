@@ -10,7 +10,7 @@ grid build_map_points() uses):
                         data/gate, placed at its image's harvest coordinate.
   map_layer_leash.json  the leash classifier's calls on those crops, split
                         p_leashed >= P_LEASH_SPLIT (leashed) vs below
-                        (loose), as two levels dicts in one file so the page
+                        (unleashed), as two levels dicts in one file so the page
                         can draw either side or a ratio without a second
                         fetch.
 
@@ -52,7 +52,7 @@ LEASH_FILE = os.path.join(OUT, 'map_layer_leash.json')
 
 SCHEMA = 1
 P_DOG_MIN = 0.5      # a crop the gate scored below this was not kept
-P_LEASH_SPLIT = 0.5  # at or above reads as leashed, below as loose
+P_LEASH_SPLIT = 0.5  # at or above reads as leashed, below as unleashed
 # The harvest map splits these across two files because its fine grid is
 # 260K cells; the gate keeps ~1/40 of the harvest's frames, so all three
 # resolutions of these layers together are smaller than map_points.json
@@ -321,7 +321,7 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
 def main():
     ap = argparse.ArgumentParser(
         description='build the map layers for model-found dogs and '
-                    'leashed-vs-loose')
+                    'leashed-vs-unleashed')
     ap.add_argument('--force', action='store_true',
                     help='rebuild even when the signature matches')
     args = ap.parse_args()
@@ -334,7 +334,7 @@ def main():
     print(f"map_layers: built in {info['secs']:.1f}s")
     print(f"  dogs : {d['total']:,} crops on {d['images']:,} images "
           f"({d['unlocated']:,} unlocated), cells {d['cells']}")
-    print(f"  leash: {l['leashed']:,} leashed / {l['loose']:,} loose "
+    print(f"  leash: {l['leashed']:,} leashed / {l['loose']:,} unleashed "
           f"({l['unlocated']:,} unlocated), cells {l['cells']}")
 
 

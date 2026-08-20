@@ -1281,7 +1281,7 @@ function paintCard(i){
   var el=grid.children[i],it=page.items[i]; if(!el||!it)return;
   /* POS and NEG, never the words themselves. These were the gate's 'dog' and
      'not_dog' spelled out, so on the leash page nothing a person answered
-     ever matched: a leashed find and a loose one painted the same grey card,
+     ever matched: a leashed find and an unleashed one painted the same grey card,
      neither button lit, and the review view -- whose whole job is reading
      back what you recorded -- could not say which answer was on record. */
   el.className='card'+(it.verdict&&it.verdict!==POS?' done':'')+
@@ -1524,7 +1524,7 @@ function paintStats(s){
       });
       /* "boxes below the line", not "it rejected": below the threshold is the
          one description that is true of both models, and the leash page was
-         telling a reader its 743,120 loose calls had been rejected. */
+         telling a reader its 743,120 unleashed calls had been rejected. */
       ci.textContent='somewhere between '+
         fmtn(Math.round(lo/(pop||1)*rej.boxes))+' and '+
         fmtn(Math.round(hi/(pop||1)*rej.boxes))+' of the '+
@@ -1560,7 +1560,7 @@ function paintStats(s){
      line" -- all four rendered unchanged on /audit/leash, where the scores
      belong to the leash model, the share is of dogs called LEASHED, and
      nothing is thrown away at all (the 273,969 boxes below its threshold are
-     dogs it called loose, and every one of them stays in the store). The
+     dogs it called unleashed, and every one of them stays in the store). The
      stage's own words are three variables away, so they are used.
      `answered YES` rather than "really are X": it is what the number IS -- k
      verdicts out of n on crops somebody chose to click -- and it needs no

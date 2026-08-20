@@ -2178,7 +2178,7 @@ background:rgba(67,181,129,.14)}
       <option value="audit">Check my annotations</option>
     </select>
     <!-- The audit view's own filter, and its ONLY one. It was folded into the
-         panel under "On a leash", which is not a question it answers, so the
+         panel beside the leash filter, which is not a question it answers, so the
          one control that view has took a click to reach and sat under a
          heading about something else. CSS shows it only while auditing. -->
     <select id="verdict" title="which verdict to check">
@@ -2217,17 +2217,6 @@ background:rgba(67,181,129,.14)}
        page" sat adjacent and identical, and one narrows the work while the
        other is a preference nobody sets twice. -->
   <div class="npanel" id="npanel" hidden>
-    <div class="ngrp" id="ngrpLeash">
-      <span class="nlab">On a leash</span>
-      <div class="nrow">
-        <select id="leashf" title="narrow by leash verdict — a separate axis from the dog verdict, kept in its own database" hidden>
-          <option value="all">Any leash state</option>
-          <option value="none">Needs a leash call</option>
-          <option value="leashed">Leashed</option>
-          <option value="unleashed">Unleashed</option>
-        </select>
-      </div>
-    </div>
     <div class="ngrp" id="ngrpWhere">
       <span class="nlab">Where</span>
       <div class="nrow">
@@ -2317,7 +2306,7 @@ __COPY_JS__
    a pre-selected first tile looks like a choice the user did not make. The
    first arrow press picks tile 0 and keyboard flow takes over from there. */
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
-    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',period='',leashf='all',find='',loading=false,
+    smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',period='',find='',loading=false,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
 /* leash verdicts for what is on screen, and whether the store exists at all.
    LEASH_ON stays false on a checkout without the tool, and the two buttons
@@ -2466,7 +2455,6 @@ function optText(el,strip){
    it explains an empty list with a cause that is not the cause. */
 var FILTERS=[
   {id:'country', off:'',    where:'queue', strip:1},
-  {id:'leashf',  off:'all', where:'both', strip:1},
   /* shown and hidden by CSS on body.auditing rather than by the hidden
      attribute, so their availability is the view, not el.hidden */
   {id:'verdict', off:'all', where:'audit', css:1},
@@ -2519,22 +2507,6 @@ function paintChips(){
       '<button type="button" class="chipx" data-f="'+att(a.id)+
       '" title="'+att('clear '+a.text)+'" aria-label="'+
       att('clear '+a.text)+'">×</button></span>'}).join('');
-}
-function paintLeashOptions(counts){
-  var sel=$('leashf');
-  if(!sel)return;
-  sel.hidden=false;
-  /* each option says how many it would show: "Needs a leash call" is the
-     number this axis is worked from, and it should be readable without
-     selecting it first */
-  var lab={all:'Any leash state',none:'Needs a leash call',
-           leashed:'Leashed',unleashed:'Unleashed'};
-  [].forEach.call(sel.options,function(o){
-    var c=counts[o.value];
-    o.textContent=lab[o.value]+(c==null?'':'  ('+n(c)+')');
-    o.disabled=(o.value!=='all'&&c===0&&leashf!==o.value);
-  });
-  sel.value=leashf;
 }
 function paintLeashCount(){
   var e=$('leashN');
@@ -2591,7 +2563,6 @@ function loadAudit(){
   skeleton();
   return fetch('/api/review/annotated?page='+page+'&size='+size+
                '&sort='+auditSort()+'&label='+encodeURIComponent(verdict)+
-               '&leash='+encodeURIComponent(leashf)+
                '&period='+encodeURIComponent(period))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
   .then(function(j){
@@ -2601,7 +2572,6 @@ function loadAudit(){
     items=j.items||[];reserve=[];page=j.page||0;pages=j.pages||1;
     if(j.leash)LEASH=j.leash;
     if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
-    if(j.leash_counts)paintLeashOptions(j.leash_counts);
     var only=verdict==='false_positive'?' marked not a dog':
              verdict==='true_positive'?' marked a dog':' annotated';
     /* "nothing annotated yet" is only true with nothing narrowing the list:
@@ -2638,7 +2608,6 @@ function load(){
   /* returns the promise: callers (and the test harness) can await a settled
      grid instead of guessing at microtask depth */
   return fetch('/api/review?page='+page+'&size='+size+'&sort='+sort+
-    '&leash='+encodeURIComponent(leashf)+
     '&find='+encodeURIComponent(find)+
                '&country='+encodeURIComponent(country))
   .then(function(r){if(!r.ok)throw 0;return r.json()})
@@ -2655,7 +2624,6 @@ function load(){
     if(j.collapsed!=null)dupN=j.collapsed;
     if(j.leash)LEASH=j.leash;
     if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
-    if(j.leash_counts)paintLeashOptions(j.leash_counts);
     paintCountries(j.countries,j.country,j.country_coverage);
     paintChips();
     paintCap(j);
@@ -3680,7 +3648,6 @@ function restorePrefs(){
   if((v=restoreSel('size',o.size))!==null)size=parseInt(v,10)||size;
   if((v=restoreSel('verdict',o.verdict))!==null)verdict=v;
   if((v=restoreSel('period',o.period))!==null)period=v;
-  if((v=restoreSel('leashf',o.leashf))!==null)leashf=v;
   if(typeof o.find==='string'){find=o.find;if($('find'))$('find').value=find;}
   if(o.npanel&&$('npanel')){$('npanel').hidden=false;
     if($('narrow')){$('narrow').classList.add('on');
@@ -3829,9 +3796,6 @@ if($('chips'))$('chips').addEventListener('click',function(e){
   if(el.onchange)el.onchange.call(el);
   else{page=0;sel=-1;load();}
 });
-if($('leashf'))$('leashf').onchange=function(){
-  leashf=this.value;savePref('leashf',leashf);page=0;sel=-1;load();
-};
 $('mode').onchange=function(){
   mode=this.value;savePref('mode',mode);page=0;sel=-1;
   document.body.classList.toggle('auditing',mode==='audit');
@@ -12165,7 +12129,7 @@ __LB_HTML__
 </details>
 
 <details class="fold panel sec" id="f-map" open>
-  <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, what the detector called a dog, what the gate kept, leashed vs loose, and each region's stage &mdash; click any country for its numbers</span></summary>
+  <summary class="phead"><i></i><b>Atlas</b><span class="phint">where the harvest went, what the detector called a dog, what the gate kept, leashed vs unleashed, and each region's stage &mdash; click any country for its numbers</span></summary>
   <div class="mapbar">
     <button type="button" class="mchip on" data-l="harvest"
       title="Every Mapillary frame the harvest downloaded, binned by where it was taken. This is coverage — where you have looked, not what was found.">Harvest</button>
@@ -12176,7 +12140,7 @@ __LB_HTML__
     <button type="button" class="mchip" data-l="gate"
       title="Dog crops the dog/not-dog gate kept at p ≥ 0.5, placed where their frame was taken. Model-called and unreviewed — counts crops, so one frame can hold several dogs.">Dogs found</button>
     <button type="button" class="mchip" data-l="leash"
-      title="The leash model on every kept crop: a cell leans orange where its crops were called loose, teal where they were called leashed. Model-called shares, not human verdicts — hover a cell for its counts.">Leashed vs loose</button>
+      title="The leash model on every kept crop: a cell leans orange where its crops were called unleashed, teal where they were called leashed. Model-called shares, not human verdicts — hover a cell for its counts.">Leashed vs unleashed</button>
     <label class="mtog" title="One marker per region, placed at the median of its frames. Its colour follows the layer; its stage and download progress are in the tooltip. Turn them off if they are in the way of the map."><input type="checkbox" id="mapRegions" checked> region markers</label>
     <label class="mtog" id="mapCleanWrap" title="Hides frames whose GPS cannot be right: points out at sea, and frames sitting a continent away from the rest of their own capture session. Untick to see them."><input type="checkbox" id="mapClean" checked> exclude GPS outliers</label>
     <input id="mapFind" list="cmdRegions" placeholder="fly to a region&hellip;" autocomplete="off"
@@ -12900,7 +12864,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
   /* the layers wear the site's own inks: amber = the harvest, green = the
      detector's calls, cool blue = the rate between them, violet = what the
      gate kept. Leash is the odd one out on purpose -- it is a SHARE, not a
-     density, so its ramp runs between its two answers (orange = loose,
+     density, so its ramp runs between its two answers (orange = unleashed,
      teal = leashed) instead of dark-to-bright. */
   var RAMPS={
     harvest:['#191024','#3b1a4e','#7c2d59','#c15a41','#e89a4d','#f0b85f','#fdf0cd'],
@@ -13028,7 +12992,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
            leashed. The file ships the two sides as separate grids, but two
            overlaid count layers would paint two rects on one spot (the
            pointsOf problem), so the sides are joined per cell instead and
-           the ramp runs loose-orange to leashed-teal. */
+           the ramp runs unleashed-orange to leashed-teal. */
         var ld=MODEL.leash.doc||{},
             A=(((ld.leashed_levels||{})[resKey])||{points:[]}).points,
             B=(((ld.loose_levels||{})[resKey])||{points:[]}).points,
@@ -13220,7 +13184,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
           '<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
       if(layer==='leash')
         return '<b>'+Math.round(p.data.value[2]*100)+'%</b> of model calls here said leashed'+
-          '<br>'+fmt(p.data.lsh)+' leashed · '+fmt(p.data.lse)+' loose'+
+          '<br>'+fmt(p.data.lsh)+' leashed · '+fmt(p.data.lse)+' unleashed'+
           '<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
       return '<b>'+fmt(p.data.cnt)+'</b> '+(layer==='dogs'?'frames with a dog call':'frames harvested')+
         '<br><span style="color:#98a2ad">'+cur.res+'° cell</span>';
@@ -13283,10 +13247,10 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
       }
       if(layer==='leash'){
         var dl=MODEL.leash.doc||{};
-        minEl.textContent='all loose';
+        minEl.textContent='all unleashed';
         maxEl.textContent='all leashed';
         labEl.textContent='share of model-called crops the leash model called leashed · '+(dl.source||'model');
-        statsEl.textContent=fmt(dl.leashed_total||0)+' model-called leashed · '+fmt(dl.loose_total||0)+' loose · '+fmt(dl.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
+        statsEl.textContent=fmt(dl.leashed_total||0)+' model-called leashed · '+fmt(dl.loose_total||0)+' unleashed · '+fmt(dl.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
         return;
       }
       if(layer==='rate'){
