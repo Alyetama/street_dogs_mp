@@ -32,6 +32,15 @@ EXTRA = (
     'tools/dashboard/dashboard.py',
     'tools/dashboard/dashboard.config.example.json',
     'tools/dashboard/street-dogs-dashboard.service.example',
+    # The login gate and its store, and the two checks that drive them. They
+    # are the newest files here and the blanket '*/' hid them from this scan
+    # entirely -- which is the worst possible file to miss, because these are
+    # the ones that handle a password and name a document root. They ship
+    # with `git add -f` like everything else above.
+    'tools/dashboard/auth.py',
+    'tools/dashboard/accounts.py',
+    'tools/detect/tests/adv_auth.py',
+    'tools/detect/tests/adv_accounts.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
@@ -132,6 +141,15 @@ MUST_NOT_TRACK = (
     'tools/dashboard/street-dogs-dashboard.service',
     '.env',
     'proxies.txt',
+    # The accounts store and the cookie signing key. A committed accounts.db
+    # is every account's scrypt hash published for offline cracking; a
+    # committed session.key lets anybody who clones this mint a cookie for
+    # the admin row. Both live under data/, which is ignored -- but so is
+    # tools/dashboard/, and `git add -f` overrides every rule in the file.
+    'data/dashboard/accounts.db',
+    'data/dashboard/accounts.db-wal',
+    'data/dashboard/accounts.db-shm',
+    'data/dashboard/session.key',
 )
 
 

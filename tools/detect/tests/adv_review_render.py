@@ -183,6 +183,38 @@ def guess_absence_checks(html, script):
     return bad
 
 
+def sign_in(mod):
+    """A session cookie header for the handler under test, or {}.
+
+    Every route below is behind the login gate now, so a guard that knocks
+    without one is answered with the login form and grades that instead --
+    which is how this file started reporting that /audit/review had lost the
+    tab strip. It signs in rather than reaching past the gate: the routes
+    have to work for somebody who is holding a real cookie, and that is the
+    only way anybody ever reaches them.
+
+    The store is a THROWAWAY in a temp directory. It never opens
+    data/dashboard/accounts.db, never reads the repo's .env, and does not
+    care whether the machine it runs on has an account at all.
+    """
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+        import auth
+    except Exception:
+        return {}, None            # no gate in this checkout; nothing to open
+    tmp = tempfile.mkdtemp(prefix='review-gate-')
+    got = auth.bootstrap(db_path=os.path.join(tmp, 'accounts.db'),
+                         key_path=os.path.join(tmp, 'session.key'),
+                         env={'DASHBOARD_USER': 'guard',
+                              'DASHBOARD_PASSWORD': 'a-password-long-enough'})
+    if not got.get('ok'):
+        return {}, tmp
+    import accounts
+    user = accounts.get_user('guard', path=os.path.join(tmp, 'accounts.db'))
+    value, _ = auth.mint(user, key_path=os.path.join(tmp, 'session.key'))
+    return {'Cookie': auth.COOKIE + '=' + value}, tmp
+
+
 def route_checks(mod):
     """/audit/review serves the queue; /review answers with the new address.
 
@@ -192,6 +224,12 @@ def route_checks(mod):
     query string a bookmark was made for.
     """
     bad = []
+    session, tmp = sign_in(mod)
+
+    def fetch(url, timeout=30):
+        """One request, carrying the session. urlopen() with a header."""
+        return urllib.request.urlopen(
+            urllib.request.Request(url, headers=session), timeout=timeout)
 
     class Quiet(mod.BoardHandler):
         def log_message(self, *a):
@@ -205,8 +243,28 @@ def route_checks(mod):
             return None
     opener = urllib.request.build_opener(NoRedirect)
     try:
+        # The gate is a route too, and it comes first: if this is answered
+        # with a bounce to /login, everything below is grading the login
+        # form and every failure it prints names the wrong file.
+        if session:
+            try:
+                probe = opener.open(
+                    urllib.request.Request(base + '/audit/review',
+                                           headers=session), timeout=10)
+                if probe.status != 200:
+                    bad.append('a signed-in request for /audit/review '
+                               'answered %d — the guard could not get past '
+                               'the login gate, so nothing below was '
+                               'actually tested' % probe.status)
+            except urllib.error.HTTPError as e:
+                bad.append('a signed-in request for /audit/review answered '
+                           '%d — the guard could not get past the login '
+                           'gate, so nothing below was actually tested'
+                           % e.code)
         try:
-            r = opener.open(base + '/review?country=JPN&x=1', timeout=10)
+            r = opener.open(
+                urllib.request.Request(base + '/review?country=JPN&x=1',
+                                       headers=session), timeout=10)
             bad.append('/review answered %d itself instead of redirecting '
                        'to /audit/review' % r.status)
         except urllib.error.HTTPError as e:
@@ -228,9 +286,8 @@ def route_checks(mod):
         stale = '&suggest=object&backend=rfdetr&gate=not_dog'
         try:
             def api(q):
-                return json.loads(urllib.request.urlopen(
-                    base + '/api/review?' + q, timeout=30).read()
-                    .decode('utf-8'))
+                return json.loads(
+                    fetch(base + '/api/review?' + q).read().decode('utf-8'))
             bare, wired = api(qs), api(qs + stale)
             if bare.get('error') or wired.get('error'):
                 bad.append('/api/review answered with an error (%r / %r) — '
@@ -252,8 +309,8 @@ def route_checks(mod):
             bad.append('/api/review could not be read with the removed '
                        'guess params set: %s' % e)
         try:
-            page = urllib.request.urlopen(base + '/audit/review',
-                                          timeout=10).read().decode('utf-8')
+            page = fetch(base + '/audit/review',
+                         timeout=10).read().decode('utf-8')
             if '<nav class="jtabs"' not in page:
                 bad.append('/audit/review serves a page without the shared '
                            'tab strip')
@@ -266,6 +323,8 @@ def route_checks(mod):
     finally:
         srv.shutdown()
         srv.server_close()
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
     # every link dashboard.py emits has to point at the new address; the old
     # one only survives as the redirect
     with open(DASH) as fh:
@@ -646,6 +705,11 @@ function runTimers() { const t = timers.slice(); timers.length = 0;
 
 // ── controllable fetch ──────────────────────────────────────────────────────
 let RESP = {};           // url-substring -> () => value | 'reject'
+// The status of the answer, by the same keys, 200 for anything unnamed. A
+// stub that could only ever hand back 200 could not pose the question the
+// login gate poses: it refuses with 401 and a body carrying no `ok` at all,
+// which is a shape no endpoint on this page has ever produced by itself.
+let STATUS = {};
 const CALLS = [];
 function fetch(url, opts) {
   CALLS.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
@@ -655,7 +719,9 @@ function fetch(url, opts) {
     if (String(url).includes(k)) {
       const v = RESP[k](url, opts);
       if (v === 'reject') return Promise.reject(new Error('boom'));
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(v) });
+      const st = STATUS[k] || 200;
+      return Promise.resolve({ ok: st < 400, status: st,
+                               json: () => Promise.resolve(v) });
     }
   }
   return Promise.reject(new Error('unstubbed ' + url));
@@ -2151,8 +2217,116 @@ async function t39() {
      global.localStorage._o);
 }
 
+// ── 40. the login gate's refusal must not read as a saved crop ──────────
+// The gate answers a request whose session has ended with 401 and
+// {"error":"sign in"} -- a body with no `ok` key in it at all. Every write on
+// this page was guarded with `j.ok===false`, which is FALSE for that body, so
+// the success branch ran: the crop left the grid, the counters counted it,
+// the toast said "Flagged as not a dog" and the ledger gained nothing. Fifty
+// crops can be lost that way while the strip counts up, and a session ends on
+// its own -- a 7-day expiry, an admin disabling the account, a password
+// change. Every case above answers 200, so none of them could see it.
+async function t40() {
+  const refuse = { '/api/detect/flag': 401, '/api/review/seen': 401 };
+  const signin = () => ({ error: 'sign in' });      // the gate's own body
+
+  // ── the queue: a flag that was refused ────────────────────────────────
+  byId['mode'].value = 'queue';
+  byId['mode'].onchange.call(byId['mode']);
+  await flush();
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6), [],
+                                        { seen_total: 7 }),
+           '/api/detect/flag': signin, '/api/review/seen': signin };
+  STATUS = refuse;
+  await API.load(); await flush();
+  const n = API.st().items.length, s0 = API.st().session;
+  const left = byId['left'].textContent, done = byId['done'].textContent;
+  const name = API.st().items[1].name;
+  API.hideToast();
+  await API.flag(1); await flush();
+  ck(API.st().items.length === n,
+     't40: a 401 took the crop out of the queue — it was never written');
+  ck(API.st().items[1].name === name, 't40: a 401 resequenced the queue');
+  ck(API.st().session === s0,
+     't40: a 401 counted as a crop reviewed this session');
+  ck(byId['left'].textContent === left && byId['done'].textContent === done,
+     't40: the counters moved on a 401 — left ' + left + '->' +
+     byId['left'].textContent + ', flagged ' + done + '->' +
+     byId['done'].textContent);
+  ck(API.st().lastUndo === null,
+     't40: a 401 staged an Undo for a flag the server never took');
+  // getElementById, not byId: the raw map keeps detached nodes findable, and
+  // an Undo control from an earlier case would read as this one's
+  ck(!document.getElementById('undoB'), 't40: a 401 drew the Undo control');
+  ck(/session has ended/.test(noticed()),
+     't40: nothing on screen said the session had ended, it said: "' +
+     noticed() + '"');
+  const card = document.querySelector('.card[data-name="' + name + '"]');
+  ck(card && !card.classList.contains('go'),
+     't40: the tile was left mid-exit after a 401');
+
+  // ── undo: the same refusal, on the way back ──────────────────────────
+  RESP['/api/detect/flag'] = () => ({ ok: true });
+  STATUS = {};
+  API.hideToast();
+  await API.flag(1); await flush();
+  ck(API.st().items.length === n - 1, 't40: the 200 flag did not land');
+  RESP['/api/detect/flag'] = signin;
+  STATUS = refuse;
+  const sBefore = API.st().session, lenBefore = API.st().items.length;
+  await API.undo(); await flush();
+  ck(API.st().items.length === lenBefore,
+     't40: a refused undo put the crop back on a grid the server still holds');
+  ck(API.st().session === sBefore,
+     't40: a refused undo decremented the session count');
+  ck(/session has ended/.test(noticed()),
+     't40: a refused undo said nothing: "' + noticed() + '"');
+
+  // ── Restore kept: the count must not zero on a refusal ───────────────
+  let alerted = '';
+  window.alert = m => { alerted = String(m); };
+  window.confirm = () => true;
+  const kept = API.st().seenN;
+  ck(kept > 0, 't40: no kept crops staged, the restore path cannot be driven');
+  byId['unkeep'].onclick(); await flush();
+  ck(API.st().seenN === kept,
+     't40: a 401 zeroed the kept counter — it says ' + API.st().seenN +
+     ' crops came back into the queue and none did');
+  ck(/session has ended/.test(alerted),
+     't40: the restore refusal did not name the ended session: "' +
+     alerted + '"');
+  ck(byId['unkeep'].disabled === false,
+     't40: the restore button was left disabled after a refusal');
+
+  // ── auditing: re-deciding a verdict the server refused ───────────────
+  // the stub answers before the switch, not after: onchange loads straight
+  // away and an unstubbed URL rejects
+  RESP['/api/review/annotated'] = () => ({
+    items: JSON.parse(JSON.stringify(CROPS.annotated)), page: 0, pages: 1,
+    total: 4, pool_unfiltered: 4, n_false_positive: 2, n_true_positive: 2 });
+  byId['mode'].value = 'audit';
+  byId['mode'].onchange.call(byId['mode']);
+  await flush(); await flush();
+  const was = API.st().items[0] && API.st().items[0].label;
+  ck(!!was, 't40: the audit view staged no annotated crop to re-decide');
+  const acard = document.querySelector(
+    '.card[data-name="' + API.st().items[0].name + '"]');
+  API.hideToast();
+  await API.flag(0, false, was === 'true_positive' ? 'false_positive'
+                                                   : 'true_positive');
+  await flush();
+  ck(API.st().items[0].label === was,
+     't40: a 401 rewrote the verdict on screen — the tile now says ' +
+     API.st().items[0].label + ' and the ledger still says ' + was);
+  ck(acard && !acard.classList.contains('changed'),
+     't40: a 401 marked the tile as differing from the ledger it never changed');
+  ck(/session has ended/.test(noticed()),
+     't40: a refused audit verdict said nothing: "' + noticed() + '"');
+  STATUS = {};
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33,t34,t35,t36,t37,t38,t39];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33,t34,t35,t36,t37,t38,t39,t40];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {
