@@ -31,6 +31,34 @@ SURFACE_WORDS = {
     'leash': 'the leash audit',
 }
 
+# THE DATE PAIR, for the three judging pages. It was written in audit.py and
+# copied into dashboard.py, which is two files that have to stay identical
+# with nothing making them -- so it lives here beside the strip, for the same
+# reason the strip does. Sized to the select it stands next to: 7px of
+# padding is 33px tall, which is what a control on these pages is.
+DATE_CSS = """/* JUDGED, BETWEEN TWO DATES. Native inputs, so the calendar is the
+   platform's: a hand-built one is a month of edge cases -- locale order,
+   which day a week starts on, every keyboard path -- to arrive somewhere
+   worse than the control the browser already ships. color-scheme is the
+   whole reason it looks like it belongs: without it Chrome draws a white
+   calendar panel and a black-on-black picker icon on a dark field. */
+.pdate{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
+  border-radius:9px;padding:7px 8px;font-size:12.5px;font-family:inherit;
+  cursor:pointer;color-scheme:dark;font-variant-numeric:tabular-nums}
+.pdate:hover{color:var(--tx)}
+.pdate:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.pdash{color:var(--dim)}
+/* Only where there is something to clear: a x standing over two empty fields
+   is a control for undoing nothing. Its own display rule because an author
+   `display` beats the browser's [hidden], which is how a control this page
+   meant to hide has shipped visible twice. */
+.pclr{background:0;border:0;color:var(--dim);font:inherit;font-size:14px;
+  line-height:1;cursor:pointer;padding:3px 6px;border-radius:7px}
+.pclr:hover{background:rgba(130,140,150,.12);color:var(--tx)}
+.pclr[hidden]{display:none}
+"""
+
+
 # One line, sitting under the tab strip: a label, then one entry per target
 # that applies to this page. Two is the most anybody can have here (their
 # target on this surface, and a target on every surface), and in practice it

@@ -898,26 +898,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   color:var(--mut);border-radius:9px;padding:7px 9px;font-size:12.5px;
   font-family:inherit;cursor:pointer}
 .pick select:hover{color:var(--tx)}
-/* JUDGED, BETWEEN TWO DATES. Native inputs, so the calendar is the
-   platform's: a hand-built one is a month of edge cases -- locale order,
-   which day a week starts on, every keyboard path -- to arrive somewhere
-   worse than the control the browser already ships. color-scheme is the
-   whole reason it looks like it belongs: without it Chrome draws a white
-   calendar panel and a black-on-black picker icon on a dark field. */
-.pdate{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
-  border-radius:9px;padding:6px 8px;font-size:12.5px;font-family:inherit;
-  cursor:pointer;color-scheme:dark;font-variant-numeric:tabular-nums}
-.pdate:hover{color:var(--tx)}
-.pdate:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
-.pdash{color:var(--dim)}
-/* Only where there is something to clear: a x standing over two empty fields
-   is a control for undoing nothing. Its own display rule because an author
-   `display` beats the browser's [hidden], which is how a control this page
-   meant to hide has shipped visible twice. */
-.pclr{background:0;border:0;color:var(--dim);font:inherit;font-size:14px;
-  line-height:1;cursor:pointer;padding:3px 6px;border-radius:7px}
-.pclr:hover{background:rgba(130,140,150,.12);color:var(--tx)}
-.pclr[hidden]{display:none}
+__DATECSS__
 /* ── the sheet ──
    A CONTACT SHEET, the same conclusion the review page reached and this page
    did not inherit: at rest a tile is a photograph and the model's own verdict,
@@ -2254,6 +2235,7 @@ def page_html(stage=DEFAULT_STAGE, account=('', '')):
                  ('__H1__', h1), ('__SUB__', sub), ('__TABS__', tabs),
                  # the target strip, from the one file the review queue reads
                  # it out of too -- three judging pages, one spelling
+                 ('__DATECSS__', work_strip.DATE_CSS),
                  ('__WORKCSS__', work_strip.STRIP_CSS),
                  ('__WORKSTRIP__', work_strip.strip_html(stage)),
                  ('__WORKJS__', work_strip.STRIP_JS)):

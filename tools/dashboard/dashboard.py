@@ -1916,8 +1916,16 @@ border-color:var(--bd);color:var(--dim)}
 .danger:hover{background:rgba(216,116,58,.16);border-color:rgba(216,116,58,.5);
 color:#e8894f}
 .danger:focus-visible{outline-color:var(--red)}
-select{background:var(--panel2);border:1px solid var(--bd);color:var(--tx);
-border-radius:8px;padding:5px 9px;font-size:12.5px;font-family:inherit;cursor:pointer}
+/* Sized and coloured like the audit sheets' controls. The three judging
+   surfaces are one product and the reader moves between them by a tab: a row
+   of 29px radius-8 pills beside their 33px radius-9 ones is the seam
+   showing. Dimmer at rest and full strength under the cursor, which is how
+   those pages read too -- a filter is a thing you go and set, not a thing
+   announcing itself. */
+select{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
+border-radius:9px;padding:7px 9px;font-size:12.5px;font-family:inherit;
+cursor:pointer}
+select:hover{color:var(--tx)}
 .cnt{color:var(--mut);font-size:12.5px;font-variant-numeric:tabular-nums}
 /* the folded legend */
 #find{background:var(--panel);color:var(--tx);border:1px solid var(--bd);
@@ -2089,26 +2097,7 @@ body.auditing #periodwrap{display:inline-flex;align-items:center;gap:6px}
    beside a verdict select is a range over nothing in particular; the chip
    below says "judged" and so does the control that sets it. */
 .plab{color:var(--dim);font-size:11.5px}
-/* JUDGED, BETWEEN TWO DATES. Native inputs, so the calendar is the
-   platform's: a hand-built one is a month of edge cases -- locale order,
-   which day a week starts on, every keyboard path -- to arrive somewhere
-   worse than the control the browser already ships. color-scheme is the
-   whole reason it looks like it belongs: without it Chrome draws a white
-   calendar panel and a black-on-black picker icon on a dark field. */
-.pdate{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
-  border-radius:9px;padding:6px 8px;font-size:12.5px;font-family:inherit;
-  cursor:pointer;color-scheme:dark;font-variant-numeric:tabular-nums}
-.pdate:hover{color:var(--tx)}
-.pdate:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
-.pdash{color:var(--dim)}
-/* Only where there is something to clear: a x standing over two empty fields
-   is a control for undoing nothing. Its own display rule because an author
-   `display` beats the browser's [hidden], which is how a control this page
-   meant to hide has shipped visible twice. */
-.pclr{background:0;border:0;color:var(--dim);font:inherit;font-size:14px;
-  line-height:1;cursor:pointer;padding:3px 6px;border-radius:7px}
-.pclr:hover{background:rgba(130,140,150,.12);color:var(--tx)}
-.pclr[hidden]{display:none}
+__DATECSS__
 
 /* The leash row. In THIS stylesheet for the reason the comment above gives:
    /review is its own document, and these rules in the dashboard's block
@@ -4081,6 +4070,7 @@ REVIEW_HTML = (REVIEW_HTML
                # The target strip: one spelling, imported by this file and by
                # audit.py, so the three judging pages cannot drift into three
                # ideas of what "137 of 500" looks like.
+               .replace('__DATECSS__', work_strip.DATE_CSS)
                .replace('__WORKCSS__', work_strip.STRIP_CSS)
                .replace('__WORKSTRIP__', work_strip.strip_html('review'))
                .replace('__WORKJS__', work_strip.STRIP_JS))
@@ -12092,13 +12082,19 @@ padding .18s ease}
 box-shadow:0 6px 16px rgba(232,166,69,.18)}
 .revbtn:focus-visible{outline:2px solid var(--acc);outline-offset:3px}
 .revbtn .rvf{font-size:15px;opacity:.7}
+/* still here for the LLM button below, which is the one that stacks a name
+   over a caption */
 .revbtn .rvn{display:flex;flex-direction:column}
-.revbtn b{font-size:17px;font-weight:680;letter-spacing:-.35px;
-font-variant-numeric:tabular-nums}
+/* A WORD, so it is sized like one. 17px and tabular figures were for a
+   four-digit count; a single word set that big reads as a shout in a row of
+   13px navigation. */
+.revbtn b{font-size:14.5px;font-weight:660;letter-spacing:-.1px}
 .revbtn em{font-style:normal;font-size:10px;font-weight:600;opacity:.68;
 letter-spacing:.04em;text-transform:uppercase}
-/* An empty queue is not an achievement to celebrate in the accent colour; it
-   is a page with nothing to do, and it should read that way. */
+/* .quiet is the LLM button's own dress now. It used to be flipped onto the
+   review button when the queue hit zero -- which only made sense while the
+   button was showing the zero. A control that greys itself out for a reason
+   it no longer states is a control nobody can account for. */
 .revbtn.quiet{background:transparent;color:var(--mut);
 border-color:var(--bd);box-shadow:none}
 .revbtn.quiet:hover{background:rgba(130,140,150,.08);transform:none;
@@ -13049,16 +13045,17 @@ outline-offset:2px}
     <div class="sub">worldwide Mapillary survey &mdash; collecting, detecting,
     judging, training</div></div>
   <div class="hact">
-    <!-- The count is the point: a queue depth is what makes someone open the
-         page, and an empty queue should say so quietly rather than shout a
-         zero in the accent colour. It is the ONE filled control here; every
-         other thing in this row is somewhere to go or something to report,
-         and dressing those as buttons too is what crowded it. -->
+    <!-- The ONE filled control here; every other thing in this row is
+         somewhere to go or something to report, and dressing those as
+         buttons too is what crowded it.
+         It used to carry the queue depth. A number that big is a
+         measurement, and a measurement on the one thing you press reads as
+         a workload rather than a way in -- 1,922 is not an invitation. The
+         depth is still on the page it leads to, counted the same way and
+         next to the crops it is about. -->
     <a class="revbtn" id="revBtn" href="/audit/review"
        title="Judge detections one by one — dog or not a dog">
-      <span class="rvf">&#9873;</span>
-      <span class="rvn"><b id="revN">&mdash;</b><em id="revL">to review</em>
-      </span></a>
+      <span class="rvf">&#9873;</span><b>Review</b></a>
     <!-- Navigation, not action: a mark and a word. The captions these carried
          ("what runs trained on", "invites & people") are worth reading once
          and cost width on every visit after, so they live in the title
@@ -13855,31 +13852,10 @@ var refreshTracker;
   });
 })();
 
-/* ── review queue depth in the header ── */
-(function(){
-  var btn=document.getElementById('revBtn'),
-      num=document.getElementById('revN'),
-      lab=document.getElementById('revL');
-  if(!btn||!num) return;
-  function paint(n){
-    if(n===null||n===undefined){ num.textContent='\u2014'; return; }
-    btn.classList.toggle('quiet',n===0);
-    num.textContent=n===0?'Review':n.toLocaleString();
-    lab.textContent=n===0?'nothing waiting':(n===1?'to review':'to review');
-  }
-  function poll(){
-    if(document.hidden) return;
-    fetch('/api/review/count').then(function(r){return r.json()})
-      .then(function(j){ paint(j&&typeof j.left==='number'?j.left:null); })
-      /* keep the last good number rather than blanking the button */
-      .catch(function(){});
-  }
-  poll();
-  setInterval(poll,30000);
-  document.addEventListener('visibilitychange',function(){
-    if(!document.hidden) poll();
-  });
-})();
+/* The queue depth used to be polled every thirty seconds to paint that
+   button. The button says a word now, so nothing on this page needs the
+   number and nothing asks for it -- /api/review/count is still served, and
+   the review page counts its own queue in the line above the crops. */
 function genCommands(){
   var region=(cmdRegion.value||'').trim();
   if(!region){cmdOut.innerHTML='';return;}

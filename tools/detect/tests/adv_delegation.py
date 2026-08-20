@@ -612,7 +612,8 @@ def strip_checks(bad, d):
                 ('/api/assignment', 'the strip asks nobody how it is going')):
             if need not in html:
                 bad.append('%s: %s (%r)' % (name, why, need))
-        for slot in ('__WORKCSS__', '__WORKSTRIP__', '__WORKJS__'):
+        for slot in ('__WORKCSS__', '__WORKSTRIP__', '__WORKJS__',
+                     '__DATECSS__'):
             if slot in html:
                 bad.append('%s: %s was never substituted' % (name, slot))
         # ONE SPELLING. The tab strip above it is duplicated between two files
@@ -623,6 +624,12 @@ def strip_checks(bad, d):
             bad.append('%s carries its own copy of the strip CSS' % (name,))
         if W.STRIP_JS not in html:
             bad.append('%s carries its own copy of the strip script' % (name,))
+        # ...and the date pair beside it, for the same reason: it lived in
+        # two files that had to stay identical with nothing making them, and
+        # they came apart by 2px of padding and a border radius.
+        if W.DATE_CSS not in html:
+            bad.append('%s carries its own copy of the date-pair styling'
+                       % (name,))
     # ONE VOCABULARY. The admin page names the surfaces, the annotator's bar
     # names them again, and the script inside the bar names them a third
     # time. They said "any surface" and "every surface" for the same target.
