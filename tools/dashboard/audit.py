@@ -27,7 +27,9 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
 import fn_audit as fa                                          # noqa: E402
+import work_strip                                              # noqa: E402
 
 DEFAULT_STAGE = fa.DEFAULT_STAGE
 STAGES = fa.STAGES
@@ -1061,6 +1063,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 @media(prefers-reduced-motion:no-preference){.card{transition:opacity .12s ease,
   border-color .12s ease}}
 __ACCTCSS__
+__WORKCSS__
 </style></head><body><div class="wrap">
 <header>
   <div><h1>__H1__</h1>
@@ -1068,6 +1071,13 @@ __ACCTCSS__
   <div class="hdrend"><a class="back" href="/">&larr; dashboard</a>__ACCOUNT__</div>
 </header>
 __TABS__
+<!-- WHAT YOU HAVE BEEN ASKED FOR, under the tabs and above the sheet. Empty
+     and invisible unless somebody has an open target that applies to THIS
+     surface -- a leash target draws no bar over the dog-bin sheet, where
+     none of the work being done counts towards it. Same markup, same class
+     names and same script as the review queue, because all three come out of
+     work_strip.py rather than being written here as well. -->
+__WORKSTRIP__
 
 <details class="figures" id="figures">
   <summary class="figsum">
@@ -1322,7 +1332,8 @@ function send(key,verdict,it){
     body:JSON.stringify({key:key,verdict:verdict,band:it?it.band:null,
                          p_dog:it?it.p_dog:null,seq:it?it.seq:null})})
     .then(function(r){return r.json()})
-    .then(function(j){if(!j||!j.ok)toast('not recorded');else loadStats()})
+    .then(function(j){if(!j||!j.ok)toast('not recorded');
+                      else {loadStats();refreshWorkStrip()}})
     .catch(function(){toast('not recorded')});
 }
 function hide(i){
@@ -2171,6 +2182,7 @@ fetch('/api/audit/page?stage='+STAGE+'&i=-1&n='+size+
     else{total=0;setPos();render()}
     loadStats();
   }).catch(function(){loadStats()});
+__WORKJS__
 </script></body></html>
 """
 _TEMPLATE = AUDIT_HTML
@@ -2239,7 +2251,12 @@ def page_html(stage=DEFAULT_STAGE, account=('', '')):
                  ('__BELOWTXT__', sp['below']),
                  ('__ABOVETXT__', sp['above']),
                  ('__MISSLAB__', sp['miss']),
-                 ('__H1__', h1), ('__SUB__', sub), ('__TABS__', tabs)):
+                 ('__H1__', h1), ('__SUB__', sub), ('__TABS__', tabs),
+                 # the target strip, from the one file the review queue reads
+                 # it out of too -- three judging pages, one spelling
+                 ('__WORKCSS__', work_strip.STRIP_CSS),
+                 ('__WORKSTRIP__', work_strip.strip_html(stage)),
+                 ('__WORKJS__', work_strip.STRIP_JS)):
         out = out.replace(k, v)
     return out
 

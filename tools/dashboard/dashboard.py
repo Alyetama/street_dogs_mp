@@ -1333,6 +1333,9 @@ FLAG_LABELS = (FLAG_LABEL, POS_LABEL)
 # constant exists to prevent. fn_audit is in-tree and imports nothing but the
 # standard library, so it cannot fail the way an optional dependency can.
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+import fn_audit as _fn_audit                                   # noqa: E402
+sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+import work_strip                                             # noqa: E402
 from fn_audit import AUTHOR_FIELD, LEGACY_AUTHOR, author_of  # noqa: E402,F401
 # An annotation nobody can be named for. _gate() answers every request before
 # a route is matched, so a POST that reaches a write path here is signed in by
@@ -2068,6 +2071,7 @@ font-size:10px;color:var(--green);letter-spacing:.04em;margin-bottom:-2px}
 .card.unjudged{opacity:.62}
 .card.unjudged .meta::after{content:'no verdict';margin-left:auto;
 font-size:10px;color:var(--dim)}
+__WORKCSS__
 /* The audit list is fetched with label=, leash= and period= and nothing
    else, so a group that narrows only the queue would be a control that does
    nothing here. #find is one of them: loadAudit never sends the term, so
@@ -2385,6 +2389,13 @@ background:rgba(67,181,129,.14)}
      the header. audit.py renders the same line on the audit pages, and
      adv_fn_audit's tab_checks pins it byte for byte -- so any change here
      must land there too, or the surfaces stop matching. -->
+
+<!-- WHAT YOU HAVE BEEN ASKED FOR, under the tabs and above the work. It
+     draws nothing at all unless somebody has an open target that applies to
+     this surface, so a dashboard nobody delegates on looks exactly as it
+     did. It is not a gate: judging past the number is not an error and
+     nothing here is withheld from somebody who has not reached it. -->
+__WORKSTRIP__
 
 <!-- The legend is a lesson, and a lesson stops being one after the first
      day. It kept two full lines of the viewport permanently to teach four
@@ -3217,6 +3228,9 @@ function flag(i,viaKey,label){
       session++;
       todoN=Math.max(0,todoN-1);
       if(label==='true_positive')posN++;else flaggedN++;
+      /* the bar moves with the work. Debounced inside, so holding D down is
+         one request rather than one per crop. */
+      refreshWorkStrip();
       score();bumpBal(label==='true_positive'?0:1,label==='true_positive'?1:0);
       if(hold){
         /* judged, kept: the verdict shows on the tile and the leash row is
@@ -4056,11 +4070,19 @@ if($('pclr'))$('pclr').addEventListener('click',function(){
 });
 restorePrefs();
 load();loadBal();
+__WORKJS__
 </script></body></html>"""
 # Substituted at import time, so the server and the tests both read a
 # finished document -- a placeholder left in REVIEW_HTML would parse as a
 # bare identifier and only fail when a button was pressed.
-REVIEW_HTML = REVIEW_HTML.replace('__COPY_JS__', COPY_JS)
+REVIEW_HTML = (REVIEW_HTML
+               .replace('__COPY_JS__', COPY_JS)
+               # The target strip: one spelling, imported by this file and by
+               # audit.py, so the three judging pages cannot drift into three
+               # ideas of what "137 of 500" looks like.
+               .replace('__WORKCSS__', work_strip.STRIP_CSS)
+               .replace('__WORKSTRIP__', work_strip.strip_html('review'))
+               .replace('__WORKJS__', work_strip.STRIP_JS))
 
 # ── bulk review page (/audit/review; /review redirects) + sweep control ─────
 
@@ -8152,26 +8174,21 @@ def in_period(ts, lo, hi):
     return bool(ts) and (lo is None or ts >= lo) and (hi is None or ts < hi)
 
 
-def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
-                      leash='', period=''):
-    """Crops that already carry a verdict, for auditing the annotations.
+def _review_verdicts(want=None):
+    """Every LIVE dog/not-dog verdict on the review queue, one per crop.
 
-    A misannotation is worse than an unjudged crop: it does not sit in a queue
-    waiting, it goes into a dataset as ground truth and teaches the wrong
-    thing. Nothing in this project could look at one again -- once flagged, a
-    crop left the queue for good.
+    Lifted out of annotated_payload because two things read this now -- the
+    audit list and the count behind a delegated target -- and two readings of
+    an append-only ledger with their own ideas about which line wins is two
+    different answers to "how many have I done". The rules are here once:
+    the newest line for a name is its verdict, and a name the in-memory set
+    no longer agrees with is not a verdict at all.
 
-    Reads the ledgers rather than the pool. The pool rotates every few
-    minutes; these crops were copied out of it when they were flagged, and
-    their originals are still in the store, so an audit works on crops the
-    live queue has long forgotten.
+    Returns (items, live) -- the collapsed list, and the live name sets the
+    caller needs for its own baselines.
     """
-    size = 100 if int(size) >= 100 else REVIEW_PAGE
-    page = max(0, int(page))
-    sort = sort if sort in ANNOT_SORTS else 'recent'
-    want = [label] if label in FLAG_LABELS else list(FLAG_LABELS)
-
-    items, seen_names = [], set()
+    want = list(FLAG_LABELS) if want is None else list(want)
+    items = []
     for lb in want:
         st = _store_for(lb)
         try:
@@ -8213,7 +8230,33 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
     # and drop any whose verdict the in-memory set no longer agrees with --
     # an undo rewrites the file, but a stale line could survive a crash
     live = {lb: _flag_names(lb) for lb in FLAG_LABELS}
-    items = [it for it in by_name.values() if it['name'] in live[it['label']]]
+    return ([it for it in by_name.values() if it['name'] in live[it['label']]],
+            live)
+
+
+def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
+                      leash='', period=''):
+    """Crops that already carry a verdict, for auditing the annotations.
+
+    A misannotation is worse than an unjudged crop: it does not sit in a queue
+    waiting, it goes into a dataset as ground truth and teaches the wrong
+    thing. Nothing in this project could look at one again -- once flagged, a
+    crop left the queue for good.
+
+    Reads the ledgers rather than the pool. The pool rotates every few
+    minutes; these crops were copied out of it when they were flagged, and
+    their originals are still in the store, so an audit works on crops the
+    live queue has long forgotten.
+    """
+    size = 100 if int(size) >= 100 else REVIEW_PAGE
+    page = max(0, int(page))
+    sort = sort if sort in ANNOT_SORTS else 'recent'
+    want = [label] if label in FLAG_LABELS else list(FLAG_LABELS)
+    items, live = _review_verdicts(want)
+    # Held before the filters narrow `items`: the per-verdict tallies below
+    # describe the whole list this request is reading, not the slice left
+    # after the period and the leash filter.
+    base = items
 
     # WHEN it was judged, applied server-side and before anything counts or
     # paginates: a client-side hide would leave total/pages describing rows
@@ -8255,12 +8298,12 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
             # the per-verdict tallies describe the list being read, so the
             # period narrows them too -- "5 not a dog" over a week holding 1
             # is the count line disagreeing with the grid under it
-            'n_false_positive': sum(1 for i in by_name.values()
+            'n_false_positive': sum(1 for i in base
                                     if i['label'] == FLAG_LABEL
                                     and i['name'] in live[FLAG_LABEL]
                                     and in_period(i['flagged_at'],
                                                   plo, phi)),
-            'n_true_positive': sum(1 for i in by_name.values()
+            'n_true_positive': sum(1 for i in base
                                    if i['label'] == POS_LABEL
                                    and i['name'] in live[POS_LABEL]
                                    and in_period(i['flagged_at'],
@@ -10573,6 +10616,24 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split('?', 1)[0] == '/api/assignment':
+            # WHOEVER IS READING, and nobody else. The username comes off the
+            # session the gate resolved, never off the query string: a target
+            # is a measurement of a person, and one that any signed-in reader
+            # could ask about by name is a scoreboard of their colleagues.
+            self._json({'assignments': assignments_for(self.session)})
+            return
+        if self.path.split('?', 1)[0] == '/api/assignments':
+            # The roster. Admin only, and the same empty 404 as an address
+            # that does not exist for anybody else -- a 403 here would tell a
+            # member the roster is real and worth asking about again.
+            if not self.session or self.session.get('role') != 'admin':
+                self.send_error(404)
+                return
+            q = parse_qs(urlparse(self.path).query)
+            self._json({'assignments': assignment_roster(
+                open_only=q.get('open', [''])[0] == '1')})
+            return
         if self.path.split('?', 1)[0] == '/api/review/count':
             # Just the queue depth. review_payload does one listdir over a
             # pool capped at 3000 plus the ledgers, so asking for size=0 is
@@ -11412,6 +11473,187 @@ def render_account(session):
     if g is None:
         return ''      # no gate, so no session and nothing to sign out of
     return g.identity_html(session)
+
+
+# ── delegated work ──────────────────────────────────────────────────────────
+# accounts.py holds the TARGET -- who, how many, on which surface, from when.
+# The LEDGERS hold what has actually been done. Nothing caches a progress
+# number anywhere, and that is the whole design: a stored count is a second
+# answer to a question the annotations already answer, and it goes wrong
+# quietly the first time somebody undoes a verdict. Counting costs two small
+# jsonl reads, which is nothing beside being wrong.
+#
+# WHAT COUNTS AS ONE. A crop judged dog-or-not is one annotation on the review
+# surface. The leash call that may follow on the same crop is a second axis on
+# the same picture, not a second piece of work, so it does not count again --
+# 'five hundred crops' would otherwise be met by two hundred and fifty. The
+# 'leash' surface is the leash AUDIT sheet, which is its own pile.
+
+def _done_review(user, since, until=None):
+    """Dog/not-dog verdicts this person left on the review queue since then."""
+    items, _ = _review_verdicts()
+    return sum(1 for it in items
+               if it[AUTHOR_FIELD] == user
+               and it['flagged_at'] >= since
+               and (until is None or it['flagged_at'] < until))
+
+
+def _done_audit(user, stage, since, until=None):
+    """Answers this person gave on one audit sheet since then.
+
+    read_verdicts() is the one reader of those ledgers: it collapses a crop
+    answered twice to its latest answer, drops the withdrawals, and resolves
+    the legacy author -- so counting its output counts verdicts rather than
+    lines, which is what somebody is being asked for five hundred of.
+    """
+    try:
+        rows = _fn_audit.read_verdicts(stage=stage)
+    except Exception:
+        return 0
+    n = 0
+    for v in rows:
+        if not _fn_audit.verdict_of(v.get('verdict'), stage):
+            continue
+        if v.get(AUTHOR_FIELD) != user:
+            continue
+        ts = int(v.get('ts') or 0)
+        if ts >= since and (until is None or ts < until):
+            n += 1
+    return n
+
+
+def done_by(user, surface='any', since=0, until=None):
+    """How many annotations this person has left, on one surface or all."""
+    user = str(user or '')
+    if not user:
+        return 0
+    since = int(since or 0)
+    if surface == 'review':
+        return _done_review(user, since, until)
+    if surface in _fn_audit.STAGES:
+        return _done_audit(user, surface, since, until)
+    return (_done_review(user, since, until)
+            + sum(_done_audit(user, s, since, until)
+                  for s in _fn_audit.STAGES))
+
+
+def assignment_progress(row, now=None, mark_done=True):
+    """One target, with how far along it is -- and stamped when it is met.
+
+    The stamp is what makes "reached it on the 14th" survive an annotation
+    being undone afterwards. Reached is something that HAPPENED; a bar that
+    slid back under the line and un-finished somebody's week would be the
+    scoreboard arguing with them.
+
+    mark_done=False for a read that must not write -- the admin roster, which
+    lists everybody and has no business completing anything as a side effect
+    of being looked at.
+    """
+    if not row:
+        return None
+    ts = int(time.time() if now is None else now)
+    done = done_by(row.get('username'), row.get('surface'),
+                   row.get('start_at') or 0)
+    target = int(row.get('target') or 0)
+    out = dict(row)
+    if (mark_done and done >= target > 0 and not row.get('done_at')
+            and not row.get('cancelled_at')):
+        g, db = _accounts(), _accounts_db()
+        if g is not None:
+            try:
+                # The path the GATE is using, never the default. Without it a
+                # stamp made while a test store is mounted lands in the real
+                # accounts.db instead -- writing to the live file is not a
+                # thing a progress read may do as a side effect.
+                fresh = g.complete_assignment(row['id'], now=ts, path=db)
+                if fresh:
+                    out = dict(fresh)
+            except Exception:
+                pass                       # a count is not worth a 500
+    out['done'] = done
+    out['left'] = max(0, target - done)
+    # A MET TARGET READS AS MET, stamped or not. The stamp records WHEN it
+    # was reached and is only written by the reader's own page; the roster is
+    # a pure read, so without this an admin sees a full green bar beside the
+    # word "open" until that person next opens a judging page -- the table
+    # arguing with the bar in the same row.
+    if done >= target > 0 and out.get('state') in ('open', 'overdue'):
+        out['state'] = 'done'
+    # THE DAY, not the instant. due_at is the midnight AFTER the last day
+    # somebody has, so printing it raw names the morning after the deadline
+    # -- the same off-by-a-day the annotated-date window is built to avoid.
+    out['due_txt'] = (time.strftime('%d %b', time.localtime(row['due_at'] - 1))
+                      if row.get('due_at') else '')
+    # Rounded DOWN and capped just under the line, so 499 of 500 cannot read
+    # as 100% on a bar somebody is being measured against.
+    out['pct'] = (0 if target <= 0 else
+                  100 if done >= target else
+                  min(99, int(done * 100 // target)))
+    return out
+
+
+# A target that has just been met stays on screen for a week. Dropping the
+# strip the instant somebody reaches 500 takes the one moment the whole thing
+# was for and shows them an empty space instead.
+ASSIGN_DONE_LINGER_S = 7 * 86400
+
+
+def assignments_for(session, now=None):
+    """The targets whoever is reading should see: open, and just finished.
+
+    Cancelled ones never appear. Work called off is the admin's answer to
+    "is this still wanted", and a bar for it would go on asking.
+    """
+    g = _accounts()
+    if g is None or not session or not session.get('username'):
+        return []
+    ts = int(time.time() if now is None else now)
+    try:
+        rows = g.list_assignments(who=session['username'], now=now,
+                                  path=_accounts_db())
+    except Exception:
+        return []
+    keep = [r for r in rows
+            if not r.get('cancelled_at')
+            and (not r.get('done_at')
+                 or ts - r['done_at'] <= ASSIGN_DONE_LINGER_S)]
+    return [p for p in (assignment_progress(r, now=now) for r in keep) if p]
+
+
+def assignment_roster(now=None, open_only=False):
+    """Every target anybody holds, with progress. For an admin only.
+
+    A pure read: nothing here completes an assignment, because a roster that
+    stamped rows as it rendered would make "an admin looked at the page" part
+    of when somebody finished.
+    """
+    g = _accounts()
+    if g is None:
+        return []
+    try:
+        rows = g.list_assignments(open_only=open_only, now=now,
+                                  path=_accounts_db())
+    except Exception:
+        return []
+    return [p for p in (assignment_progress(r, now=now, mark_done=False)
+                        for r in rows) if p]
+
+
+def _accounts():
+    """The account store, through the gate that already imports it."""
+    g = _auth()
+    return None if g is None else getattr(g, 'accounts', None)
+
+
+def _accounts_db():
+    """The file the gate is using, so a test store is not written past."""
+    g = _auth()
+    if g is None:
+        return None
+    try:
+        return g._state()['db']
+    except Exception:
+        return None
 
 
 def account_strip(session):

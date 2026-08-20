@@ -98,7 +98,7 @@ PRIVATE_FILES = frozenset({
 # WAL a reader never waits at all, and a writer only waits behind another
 # writer, which here means two invites being minted in the same instant.
 DB_TIMEOUT = 10
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 ROLES = ('admin', 'member')
 # ASCII only, and deliberately narrow. A username is compared case-folded, is
@@ -217,6 +217,41 @@ CREATE TABLE IF NOT EXISTS throttle (
 );
 CREATE INDEX IF NOT EXISTS throttle_last   ON throttle(last_at);
 CREATE INDEX IF NOT EXISTS throttle_locked ON throttle(locked_until);
+
+-- DELEGATED WORK: "judge five hundred of these" as a record rather than a
+-- conversation. The row is the ASSIGNMENT and nothing else -- who, how many,
+-- on which surface, from when. It holds no progress count, deliberately: the
+-- annotations are the truth about how much has been done, they live in the
+-- ledgers, and a number cached here would be a second answer to a question
+-- that already has one. Progress is counted from the ledgers on demand.
+--
+-- start_at is why the record exists at all. "Five hundred" means five hundred
+-- MORE; counting an annotator's whole history would hand somebody with four
+-- hundred already an instant eighty per cent, which is not what anyone means
+-- by delegating work.
+CREATE TABLE IF NOT EXISTS assignments (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    surface      TEXT    NOT NULL
+                         CHECK (surface IN ('any','review','gate','leash')),
+    target       INTEGER NOT NULL CHECK (target > 0),
+    start_at     INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    created_by   INTEGER NOT NULL REFERENCES users(id),
+    due_at       INTEGER,
+    note         TEXT    NOT NULL DEFAULT '',
+    done_at      INTEGER,
+    cancelled_at INTEGER
+);
+-- ONE OPEN JOB PER PERSON PER SURFACE, enforced by the database rather than
+-- by whichever page happens to be writing. Two open targets on one surface is
+-- two progress bars over one pile of work, and no answer to "am I done".
+CREATE UNIQUE INDEX IF NOT EXISTS assignments_one_open
+    ON assignments(user_id, surface)
+ WHERE done_at IS NULL AND cancelled_at IS NULL;
+CREATE INDEX IF NOT EXISTS assignments_user ON assignments(user_id);
+CREATE INDEX IF NOT EXISTS assignments_open ON assignments(done_at,
+                                                          cancelled_at);
 """
 
 
@@ -847,6 +882,236 @@ def bump_session_epoch(who, path=None):
                                    (row['id'],)).fetchone())
     finally:
         con.close()
+
+
+# ── delegated work ──────────────────────────────────────────────────────────
+# Storage only. This module knows a target was set and never what has been
+# done about it: the annotations live in the ledgers, and a count kept here
+# would be a second answer to a question the ledgers already answer -- one
+# that goes wrong quietly, the first time somebody undoes a verdict.
+
+SURFACES = ('any', 'review', 'gate', 'leash')
+# A cap, so a typo in the box cannot write a target nobody could ever meet
+# and leave a person staring at 0.004%.
+MAX_TARGET = 1_000_000
+
+
+def check_surface(surface):
+    """The surface a target is set on, or a message saying why it is not."""
+    s = str(surface or '').strip().lower()
+    if s not in SURFACES:
+        return None, ('Pick one of: '
+                      + ', '.join(SURFACES).replace('any', 'any surface'))
+    return s, ''
+
+
+def check_target(target):
+    """A whole number of annotations, or a message saying why it is not."""
+    try:
+        n = int(str(target).strip())
+    except (TypeError, ValueError):
+        return None, 'How many annotations? That is not a number.'
+    if n < 1:
+        return None, 'A target of nothing is not a target.'
+    if n > MAX_TARGET:
+        return None, 'That is more annotations than the project has.'
+    return n, ''
+
+
+def assignment_state(row, now=None):
+    """'cancelled' | 'done' | 'overdue' | 'open', in the order that decides.
+
+    Overdue is a state of an OPEN target, never of a finished one: work that
+    landed late is still work, and a row that flips to red the day after it
+    was completed is a scoreboard nobody trusts.
+    """
+    ts = int(time.time() if now is None else now)
+    if row['cancelled_at']:
+        return 'cancelled'
+    if row['done_at']:
+        return 'done'
+    if row['due_at'] and ts > row['due_at']:
+        return 'overdue'
+    return 'open'
+
+
+def _assignment(con, row, now=None):
+    """One row, with the names the pages need spliced in.
+
+    The usernames come from a join rather than being stored on the row: a
+    person who is renamed is the same person, and a copy taken at the moment
+    the work was handed out would say otherwise for as long as the record
+    lasts.
+    """
+    if row is None:
+        return None
+    d = dict(row)
+    d['state'] = assignment_state(row, now=now)
+    for key, col in (('username', 'user_id'), ('created_by_name',
+                                               'created_by')):
+        got = con.execute('SELECT username FROM users WHERE id = ?',
+                          (d[col],)).fetchone()
+        d[key] = got['username'] if got else None
+    return d
+
+
+def create_assignment(who, target, surface='any', created_by=None,
+                      due_at=None, note='', now=None, path=None):
+    """Hand somebody a number of annotations to reach.
+
+    Refused for an account that is retired: a target nobody can sign in to
+    work on is a row that will read as unmet for ever.
+
+    The one-open-per-surface rule is the database's, not this function's --
+    two racing admins both passing a read-then-write check is exactly the
+    hole a partial unique index does not have.
+    """
+    ts = int(time.time() if now is None else now)
+    surface, why = check_surface(surface)
+    if why:
+        return {'ok': False, 'message': why, 'assignment': None}
+    target, why = check_target(target)
+    if why:
+        return {'ok': False, 'message': why, 'assignment': None}
+    if due_at is not None:
+        try:
+            due_at = int(due_at)
+        except (TypeError, ValueError):
+            return {'ok': False, 'message': 'That is not a date.',
+                    'assignment': None}
+        if due_at <= ts:
+            return {'ok': False, 'assignment': None,
+                    'message': 'That date has already been and gone.'}
+    con = connect(path)
+    try:
+        row = _need(con, who)
+        if not row['active']:
+            return {'ok': False, 'assignment': None,
+                    'message': 'That account is retired — bring it back '
+                               'before handing it work.'}
+        author = _need(con, created_by)['id'] if created_by is not None \
+            else row['id']
+        try:
+            with _tx(con):
+                cur = con.execute(
+                    'INSERT INTO assignments (user_id, surface, target, '
+                    ' start_at, created_at, created_by, due_at, note) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (row['id'], surface, target, ts, ts, author, due_at,
+                     str(note or '')[:400]))
+                new_id = cur.lastrowid
+        except sqlite3.IntegrityError:
+            return {'ok': False, 'assignment': None,
+                    'message': '%s already has an open target on %s. '
+                               'Finish or cancel that one first.'
+                               % (row['username'],
+                                  'every surface' if surface == 'any'
+                                  else 'the ' + surface + ' surface')}
+        return {'ok': True, 'message': '',
+                'assignment': _assignment(
+                    con, con.execute('SELECT * FROM assignments WHERE id = ?',
+                                     (new_id,)).fetchone(), now=ts)}
+    finally:
+        con.close()
+
+
+def list_assignments(who=None, open_only=False, now=None, path=None):
+    """Targets, newest first. One person's, or everybody's."""
+    con = connect(path)
+    try:
+        # FOUR WHOLE STATEMENTS, not one built from pieces. The values were
+        # already bound, but a query assembled by string concatenation is a
+        # shape this module does not have anywhere -- and the check that keeps
+        # it that way cannot tell a safe concatenation from the one somebody
+        # adds next year with a username in it.
+        if who is None:
+            rows = con.execute(
+                'SELECT * FROM assignments WHERE done_at IS NULL '
+                '  AND cancelled_at IS NULL '
+                'ORDER BY created_at DESC, id DESC').fetchall() if open_only \
+                else con.execute(
+                'SELECT * FROM assignments '
+                'ORDER BY created_at DESC, id DESC').fetchall()
+        else:
+            row = _resolve(con, who)
+            if row is None:
+                return []
+            rows = con.execute(
+                'SELECT * FROM assignments WHERE user_id = ? '
+                '  AND done_at IS NULL AND cancelled_at IS NULL '
+                'ORDER BY created_at DESC, id DESC',
+                (row['id'],)).fetchall() if open_only \
+                else con.execute(
+                'SELECT * FROM assignments WHERE user_id = ? '
+                'ORDER BY created_at DESC, id DESC',
+                (row['id'],)).fetchall()
+        return [_assignment(con, r, now=now) for r in rows]
+    finally:
+        con.close()
+
+
+def get_assignment(assignment_id, now=None, path=None):
+    """One target by id, or None."""
+    con = connect(path)
+    try:
+        return _assignment(
+            con, con.execute('SELECT * FROM assignments WHERE id = ?',
+                             (_int_id(assignment_id),)).fetchone(), now=now)
+    finally:
+        con.close()
+
+
+def cancel_assignment(assignment_id, now=None, path=None):
+    """Call the work off. A finished target cannot be un-finished.
+
+    Cancelling does not delete: the row stays, so "we asked for five hundred
+    and stopped it at ninety" is still answerable a month later. Cancelling
+    something already cancelled is not an error -- two admins clicking at
+    once is a race, not a mistake worth a message.
+    """
+    ts = int(time.time() if now is None else now)
+    con = connect(path)
+    try:
+        with _tx(con):
+            con.execute('UPDATE assignments SET cancelled_at = ? '
+                        'WHERE id = ? AND cancelled_at IS NULL '
+                        '  AND done_at IS NULL',
+                        (ts, _int_id(assignment_id)))
+        return _assignment(
+            con, con.execute('SELECT * FROM assignments WHERE id = ?',
+                             (_int_id(assignment_id),)).fetchone(), now=ts)
+    finally:
+        con.close()
+
+
+def complete_assignment(assignment_id, now=None, path=None):
+    """Stamp a target as reached. Idempotent, and never un-stamps.
+
+    Called by whoever counted the ledgers and found the number met. The stamp
+    is what makes "done on the 14th" survive an annotation being undone
+    afterwards -- reached is a thing that happened, not a thing that is
+    currently true.
+    """
+    ts = int(time.time() if now is None else now)
+    con = connect(path)
+    try:
+        with _tx(con):
+            con.execute('UPDATE assignments SET done_at = ? '
+                        'WHERE id = ? AND done_at IS NULL '
+                        '  AND cancelled_at IS NULL',
+                        (ts, _int_id(assignment_id)))
+        return _assignment(
+            con, con.execute('SELECT * FROM assignments WHERE id = ?',
+                             (_int_id(assignment_id),)).fetchone(), now=ts)
+    finally:
+        con.close()
+
+
+def _int_id(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return -1
 
 
 # ── invites ─────────────────────────────────────────────────────────────────

@@ -67,6 +67,7 @@ import hmac
 import html
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -124,6 +125,8 @@ SESSION_TTL_MIN, SESSION_TTL_MAX = 300, 90 * 24 * 3600
 MAX_COOKIE = 4096
 MAX_BODY = 64 * 1024
 
+_DUE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
 LOGIN_PATH = '/login'
 LOGOUT_PATH = '/logout'
 SIGNUP_PATH = '/signup'
@@ -144,6 +147,10 @@ PUBLIC_PATHS = frozenset({LOGIN_PATH, SIGNUP_PATH, LOGOUT_PATH})
 # put on your admin page.
 NOTICES = {
     'invite_revoked': 'That invite was withdrawn.',
+    'assigned': 'That work is delegated. They will see it the next time they '
+                'open a judging page.',
+    'assign_cancelled': 'That target is called off. What was judged towards '
+                        'it stays judged.',
     'user_disabled': 'That account is disabled and its sessions are over.',
     'user_enabled': 'That account can sign in again.',
     'role_admin': 'That account is an admin now.',
@@ -1124,6 +1131,28 @@ def admin_action(action, req, session, now=None, path=None):
             accounts.revoke_invite(_int(req.one('id')), now=ts, path=p)
             return {'ok': True, 'notice': 'invite_revoked', 'invite': None,
                     'message': ''}
+        if action == 'assign':
+            what = req.one('do') or 'new'
+            if what == 'cancel':
+                accounts.cancel_assignment(_int(req.one('id')), now=ts,
+                                           path=p)
+                return {'ok': True, 'notice': 'assign_cancelled',
+                        'invite': None, 'message': ''}
+            due = _day_end(req.one('due'))
+            if req.one('due').strip() and due is None:
+                return {'ok': False, 'notice': '', 'invite': None,
+                        'message': 'That is not a date. Leave it empty for '
+                                   'no deadline.'}
+            got = accounts.create_assignment(
+                req.one('who'), req.one('target'),
+                surface=req.one('surface') or 'any',
+                created_by=session['id'], due_at=due, note=req.one('note'),
+                now=ts, path=p)
+            if not got['ok']:
+                return {'ok': False, 'notice': '', 'invite': None,
+                        'message': got['message']}
+            return {'ok': True, 'notice': 'assigned', 'invite': None,
+                    'message': ''}
         if action == 'user':
             uid = _int(req.one('id'))
             what = req.one('do')
@@ -1520,6 +1549,30 @@ td.acts form{display:inline}
 .minted .lk{display:flex;gap:8px;margin:10px 0 8px}
 .minted input{font-family:var(--num);font-size:12.5px}
 .minted .once{font-size:12px;color:var(--acc)}
+/* ── delegated work ── */
+.tag.done{color:var(--green);border-color:rgba(67,181,129,.32)}
+.tag.overdue{color:var(--red);border-color:rgba(239,83,80,.35)}
+.tag.cancelled{color:var(--dim)}
+/* The same calendar the judging pages use, so a date is picked the same way
+   wherever this project asks for one -- but sized by the `input` rule above
+   rather than by its own padding. A field 4px shorter than the ones beside it
+   drags its label out of line, because the row aligns on the BOTTOM edge. */
+.pdate{cursor:pointer;color-scheme:dark;font-variant-numeric:tabular-nums}
+/* air between the form and the table under it: they are two different things
+   and they were reading as one block of columns */
+.panel .row+table{margin-top:18px}
+/* A BAR AND THE TWO NUMBERS. The bar is for the glance down a column -- who
+   is nearly there and who has not started -- and the numbers are for the
+   answer, because a bar alone cannot tell 40 of 50 from 400 of 500. Width
+   held so a short row and a long one line up down the page. */
+td.prog{min-width:148px}
+.pbar{height:4px;border-radius:3px;background:rgba(130,140,150,.16);
+  overflow:hidden;margin-bottom:5px}
+.pbar i{display:block;height:100%;background:var(--acc);border-radius:3px}
+.pbar.full i{background:var(--green)}
+.pnum{font-family:var(--num);font-variant-numeric:tabular-nums;
+  font-size:11.5px;color:var(--mut);white-space:nowrap}
+.pnum em{font-style:normal;color:var(--dim)}
 """
 
 # A tab icon that is part of the document. dashboard.py serves the same dog at
@@ -1679,6 +1732,27 @@ def invite_link(req, token):
     return 'http://%s%s' % (host, tail)
 
 
+def _day_end(s):
+    """The instant a YYYY-MM-DD deadline runs out: the midnight AFTER it.
+
+    "Due the 20th" means the reader has the 20th. A deadline landing at
+    00:00 on the 20th would turn that whole day red, which is the same
+    off-by-a-day the annotated-date window is built to avoid.
+    """
+    s = str(s or '').strip()
+    if not _DUE_RE.match(s):
+        return None
+    y, m, d = int(s[:4]), int(s[5:7]), int(s[8:10])
+    try:
+        ts = time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
+    except (OverflowError, ValueError):
+        return None
+    lt = time.localtime(ts)
+    if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, m, d):
+        return None                       # mktime turns Feb 31 into March
+    return int(ts) + 86400
+
+
 def admin_page(session, req, now=None, error='', minted=None):
     """Invites and accounts, on one page, for an admin only."""
     ts = int(time.time() if now is None else now)
@@ -1686,8 +1760,9 @@ def admin_page(session, req, now=None, error='', minted=None):
     csrf = esc(session.get('csrf', ''))
     notice = NOTICES.get(req.arg('m'), '')
     bits = ['<div class="wrap">\n<header>\n  <div><h1>Accounts</h1>\n'
-            '    <div class="sub">Who may open this dashboard, and the '
-            'invite links that let them.</div></div>\n'
+            '    <div class="sub">Who may open this dashboard, the invite '
+            'links that let them, and the work they have been asked '
+            'for.</div></div>\n'
             '  <div class="hdrend"><a class="back" href="/">&larr; dashboard'
             '</a>%s</div>\n</header>\n' % (identity_html(session),)]
     if error:
@@ -1801,7 +1876,9 @@ def admin_page(session, req, now=None, error='', minted=None):
                 'open sessions immediately. Accounts are never deleted \u2014 '
                 'they issued and took the invites above, and the record of '
                 'that has to keep pointing at somebody.</div>\n'
-                '</div>\n</section>\n</div>\n')
+                '</div>\n</section>\n')
+    bits.append(_delegation_section(session, csrf, users, p, ts))
+    bits.append('</div>\n')
     if minted:
         # execCommand, not navigator.clipboard: the clipboard API is only
         # available in a secure context, and this page is plain HTTP on a
@@ -1816,7 +1893,146 @@ def admin_page(session, req, now=None, error='', minted=None):
             "var ok=false;try{ok=document.execCommand('copy')}catch(e){}\n"
             "b.textContent=ok?'copied':'press \\u2318C';};})();\n"
             '</script>\n')
+    # THE PROGRESS CELLS, filled from the module that reads the ledgers. It
+    # is a fetch rather than a render because this file must not learn where
+    # the annotations live: the gate imports accounts.py and nothing else, and
+    # the day it imports the ledgers too is the day a broken parquet stops
+    # anybody signing in.
+    bits.append(
+        '<script>\n'
+        "(function(){var cs=document.querySelectorAll('.prog[data-a]');\n"
+        'if(!cs.length)return;\n'
+        "function n(v){return String(v).replace(/\\B(?=(\\d{3})+(?!\\d))/g,',')}\n"
+        "function say(t){for(var i=0;i<cs.length;i++){"
+        "var e=cs[i].querySelector('.pnum');if(e)e.textContent=t;}}\n"
+        "fetch('/api/assignments',{credentials:'same-origin'})\n"
+        '.then(function(r){if(!r.ok)throw 0;return r.json()})\n'
+        '.then(function(j){var by={};\n'
+        '(j.assignments||[]).forEach(function(a){by[a.id]=a});\n'
+        'for(var i=0;i<cs.length;i++){var c=cs[i],\n'
+        "a=by[c.getAttribute('data-a')];\n"
+        "if(!a){var e=c.querySelector('.pnum');\n"
+        "if(e)e.textContent='not counted';continue}\n"
+        "c.innerHTML='<div class=\"pbar'+(a.pct>=100?' full':'')+'\">'+\n"
+        "'<i style=\"width:'+(+a.pct||0)+'%\"></i></div>'+\n"
+        "'<span class=\"pnum\">'+n(a.done)+' / '+n(a.target)+\n"
+        "' <em>'+(+a.pct||0)+'%</em></span>';}})\n"
+        "// A count that did not arrive must say so. Cells left reading a dash\n"
+        "// would read as nobody having done anything, which is a different\n"
+        "// and much more alarming thing than the server not answering.\n"
+        ".catch(function(){say('could not count')});})();\n"
+        '</script>\n')
     return _doc('Accounts', WIDE_CSS, ''.join(bits))
+
+
+SURFACE_WORDS = {
+    'any': 'any surface',
+    'review': 'the review queue',
+    'gate': 'the dog-bin audit',
+    'leash': 'the leash audit',
+}
+
+
+def _due_day(due_at):
+    """The last day somebody has, not the midnight that ends it.
+
+    due_at is the instant the deadline runs out -- the midnight AFTER the due
+    day -- so printing it raw names the morning after, and a column of those
+    is every deadline on the page off by one.
+    """
+    if not due_at:
+        return '\u2014'
+    return time.strftime('%d %b %Y', time.localtime(int(due_at) - 1))
+
+
+def _delegation_section(session, csrf, users, path, ts):
+    """Work handed out, and how far along it is.
+
+    THE PROGRESS NUMBERS ARE NOT RENDERED HERE. This module knows a target
+    was set; it has no idea what anybody has judged, and giving it one would
+    put the annotation ledgers behind the login gate's own import. The cells
+    are stamped with their row id and filled from /api/assignments, which is
+    served by the module that already reads those ledgers -- and answers a
+    member with the same empty 404 an address that does not exist gets.
+    """
+    live = [u for u in users if u['active']]
+    try:
+        rows = accounts.list_assignments(path=path, now=ts)
+    except Exception as e:                # noqa: BLE001 - a table, not the gate
+        return ('<section>\n<h2>Delegated work</h2>\n<div class="panel">\n'
+                '<div class="msg bad">%s</div>\n</div>\n</section>\n'
+                % (esc(str(e)),))
+    out = ['<section>\n<h2>Delegated work</h2>\n<div class="panel">\n']
+    if not live:
+        out.append('<div class="empty">Nobody to delegate to yet \u2014 '
+                   'invite somebody first.</div>\n')
+    else:
+        out.append(
+            '<form method="post" action="%s/assign" class="row">\n'
+            '  <input type="hidden" name="%s" value="%s">\n'
+            '  <input type="hidden" name="do" value="new">\n'
+            '  <div class="field"><label for="aw">who</label>\n'
+            '    <select id="aw" name="who">%s</select></div>\n'
+            '  <div class="field"><label for="at">how many</label>\n'
+            '    <input id="at" name="target" type="number" min="1" '
+            'max="%d" step="1" value="500"></div>\n'
+            '  <div class="field"><label for="as">on</label>\n'
+            '    <select id="as" name="surface">%s</select></div>\n'
+            '  <div class="field"><label for="ad">due (optional)</label>\n'
+            '    <input id="ad" name="due" type="date" class="pdate"></div>\n'
+            '  <div class="field wide"><label for="an">what it is for</label>\n'
+            '    <input id="an" name="note" maxlength="200" '
+            'placeholder="leash pass before the retrain" autocomplete="off">'
+            '</div>\n'
+            '  <button class="btn go" type="submit">Delegate</button>\n'
+            '</form>\n'
+            % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf,
+               ''.join('<option value="%s">%s</option>'
+                       % (esc(u['username']), esc(u['username']))
+                       for u in live),
+               accounts.MAX_TARGET,
+               ''.join('<option value="%s">%s</option>'
+                       % (esc(s), esc(SURFACE_WORDS[s]))
+                       for s in accounts.SURFACES)))
+    if not rows:
+        out.append('<div class="empty">Nothing delegated yet.</div>\n')
+    else:
+        out.append('<table><tr><th>who</th><th>on</th><th>progress</th>'
+                   '<th>for</th><th>set by</th><th>due</th><th>state</th>'
+                   '<th></th></tr>\n')
+        for a in rows:
+            act = ''
+            if a['state'] in ('open', 'overdue'):
+                act = ('<form method="post" action="%s/assign">'
+                       '<input type="hidden" name="%s" value="%s">'
+                       '<input type="hidden" name="do" value="cancel">'
+                       '<input type="hidden" name="id" value="%d">'
+                       '<button class="btn small warn" type="submit">'
+                       'call off</button></form>'
+                       % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, a['id']))
+            out.append(
+                '<tr><td class="name">%s</td><td>%s</td>'
+                '<td class="prog" data-a="%d" data-target="%d">'
+                '<span class="pnum">\u2014 / %s</span></td>'
+                '<td>%s</td><td class="name">%s</td>'
+                '<td class="when">%s</td>'
+                '<td><span class="tag %s">%s</span></td>'
+                '<td class="acts">%s</td></tr>\n'
+                % (esc(a['username'] or '\u2014'),
+                   esc(SURFACE_WORDS.get(a['surface'], a['surface'])),
+                   a['id'], a['target'], esc('{:,}'.format(a['target'])),
+                   esc(a['note'] or '\u2014'),
+                   esc(a['created_by_name'] or '\u2014'),
+                   esc(_due_day(a['due_at'])),
+                   esc(a['state']), esc(a['state']), act))
+        out.append('</table>\n')
+    out.append(
+        '<div class="note">A target counts only what is judged AFTER it is '
+        'set \u2014 "five hundred" means five hundred more. One open target '
+        'per person per surface. Calling one off leaves every annotation '
+        'made towards it exactly where it is.</div>\n'
+        '</div>\n</section>\n')
+    return ''.join(out)
 
 
 def _useract(csrf, uid, what, label, warn=False):
