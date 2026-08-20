@@ -714,6 +714,7 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    between the surfaces reads as one product. The gate/leash cross-link that
    used to sit in the header folded into it rather than being a second copy
    of the same navigation. */
+.hdrend{display:flex;align-items:center;gap:12px}
 .jtabs{display:inline-flex;gap:2px;padding:2px;margin:0 0 14px;
   border:1px solid var(--bd);border-radius:10px}
 .jtab{font-size:12px;color:var(--dim);text-decoration:none;padding:5px 11px;
@@ -987,11 +988,12 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 :focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 @media(prefers-reduced-motion:no-preference){.card{transition:opacity .12s ease,
   border-color .12s ease}}
+__ACCTCSS__
 </style></head><body><div class="wrap">
 <header>
   <div><h1>__H1__</h1>
     <div class="sub">__SUB__</div></div>
-  <a class="back" href="/">&larr; dashboard</a>
+  <div class="hdrend">__ACCOUNT__<a class="back" href="/">&larr; dashboard</a></div>
 </header>
 __TABS__
 
@@ -2067,7 +2069,7 @@ fetch('/api/audit/page?stage='+STAGE+'&i=-1&n='+size+
 _TEMPLATE = AUDIT_HTML
 
 
-def page_html(stage=DEFAULT_STAGE):
+def page_html(stage=DEFAULT_STAGE, account=('', '')):
     """The page, with this stage's words in it.
 
     One template, because the two audits differ in vocabulary and in nothing
@@ -2081,6 +2083,11 @@ def page_html(stage=DEFAULT_STAGE):
     # contract's, not this module's vocabulary -- dashboard.py renders the
     # identical strip on the review page, and two spellings of one strip is
     # how cross-links drift. The old gate/leash header link folded into it.
+    # Who is reading, and the way out. An annotator lives on this page and
+    # not on the front one; a sign-out reachable only from / is a session
+    # nobody ends. dashboard.py owns the markup and the rules -- this page
+    # borrows the one copy rather than growing a second that drifts.
+    acct_css, acct_html = account
     tabs = ('<nav class="jtabs" aria-label="judging surfaces">'
             + ''.join(
                 f'<a href="{href}" class="jtab on" aria-current="page">'
@@ -2102,7 +2109,9 @@ def page_html(stage=DEFAULT_STAGE):
                f'read the two sides of 0.5 together, not one as the error.')
         h1 = f'Where the {sp["title"]} is wrong'
     out = _TEMPLATE
-    for k, v in (('__BANDS__', json.dumps(fa.BANDS)),
+    for k, v in (('__ACCTCSS__', acct_css),
+                 ('__ACCOUNT__', acct_html),
+                 ('__BANDS__', json.dumps(fa.BANDS)),
                  ('__STAGE__', json.dumps(stage)),
                  ('__POS__', json.dumps(sp['positive'])),
                  ('__NEG__', json.dumps(sp['negative'])),

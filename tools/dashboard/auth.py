@@ -1,0 +1,1762 @@
+#!/usr/bin/env python3
+"""
+The gate. Who is holding this browser, and may they see the harvest.
+
+    import auth
+    auth.bootstrap()                      # once, in serve()
+
+    req = auth.Request.from_handler(self) # at the top of do_GET / do_POST
+    reply = auth.serve_request(req)
+    if reply is not None:
+        if reply.status == 404 and not reply.body:
+            self.send_error(404)          # byte-identical to any dead address
+        else:
+            reply.send(self)
+        return
+    ...                                   # req.session is the signed-in user
+
+and add 'auth.py' and 'accounts.py' to serve()'s _watched set, or an edit to
+either one sits invisible behind a healthy-looking server.
+
+THIS MODULE IS THE GATE, NOT THE STORE. Every password, hash, invite and
+lockout counter lives in accounts.py; nothing here writes SQL and nothing here
+decides what a valid password is. What is here is the part that only makes
+sense in front of a socket: a cookie that survives a restart, a form that
+takes a password out of a POST body, three pages that render before anybody
+is trusted, and one function the router asks "may this request continue".
+
+NO SESSION TABLE. The dashboard re-execs itself whenever one of its source
+files changes (serve()'s _reexec_if_stale), which happens while somebody is
+editing -- so a table of live sessions in memory would sign everyone out
+several times an afternoon, and a table on disk would be one more thing to
+prune, back up and get wrong. A session is therefore a signed cookie: the
+server keeps no record of it and verifies it from scratch on every request.
+
+WHICH MEANS REVOCATION NEEDS AN ANSWER, and it has one. The payload carries
+the account's session_epoch and every request compares it against the users
+row; accounts.py bumps that number on set_password, set_active(False),
+bump_session_epoch and an .env password change, and do_logout below bumps it
+too. One UPDATE ends every live session for that account, everywhere, with
+nothing to walk. Signing out is in that list on purpose: it was the one
+revoking control that revoked nothing, which mattered because it is the one
+a person reaches for when they think somebody has read their cookie.
+
+THE COOKIE IS NOT Secure, DELIBERATELY. This server speaks plain HTTP on a
+tailnet -- the Secure attribute would tell the browser to withhold the cookie
+from a non-HTTPS origin, which is every request it will ever make, and the
+login would appear to succeed and then bounce straight back to the form. The
+honest statement of the trade: anybody who can read the wire can read the
+cookie, and on this network that is the same set of people who could read the
+images anyway. HttpOnly and SameSite=Lax are set, because they cost nothing
+and close the two holes that do not need the wire.
+
+FAIL CLOSED ON DATA, FAIL OPEN ON UPTIME. With no usable admin -- a fresh
+clone, or a DASHBOARD_PASSWORD nobody has set -- this gate serves the login
+page carrying accounts.ensure_admin()'s explanation and NOTHING else: no
+page, no image, no /api answer. It does not refuse to start. The source
+watcher re-execs this process unattended, so a build that exited on a missing
+variable would take the dashboard off the air with nobody watching, and the
+dashboard being down is not more secure than the dashboard asking for a
+password.
+"""
+
+import base64
+import binascii
+import hashlib
+import hmac
+import html
+import json
+import os
+import secrets
+import sys
+import time
+from urllib.parse import parse_qs, quote
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    # dashboard.py is run as a script so its own directory is already on the
+    # path, but the guard imports this module by file location and a plain
+    # `import accounts` would fail there. Inserting the sibling directory is
+    # what audit.py does for fn_audit, for the same reason.
+    sys.path.insert(0, _HERE)
+import accounts                                               # noqa: E402
+
+REPO = os.path.dirname(os.path.dirname(_HERE))
+OUT = os.path.join(REPO, 'data', 'dashboard')
+
+# The HMAC key, when DASHBOARD_SECRET is not set. It sits beside the accounts
+# database in the static handler's document root, which serves an ALLOW-list
+# (dashboard.py's _static_allowed) matched against the name that will actually
+# be opened rather than the one the client typed -- a prefix test on the typed
+# path let a member fetch /recent_crops/../session.key and mint an admin
+# cookie with it. This name is exported so the guard can fail if a future
+# entry ever widens that list, the same protection accounts.PRIVATE_FILES
+# gives the database.
+KEY_NAME = 'session.key'
+KEY_PATH = os.path.join(OUT, KEY_NAME)
+PRIVATE_FILES = frozenset({KEY_NAME})
+
+COOKIE = 'dash_session'
+# Version prefix, inside the signature. It is what lets the payload's shape
+# change without a token minted under the old shape being read as the new
+# one -- an old cookie fails verification and its holder signs in again.
+SESSION_VERSION = 's1'
+# Domain separation. The session signature and the CSRF token are both an
+# HMAC under the same secret, and without distinct labels a value produced
+# for one is a valid value for the other.
+SIGN_LABEL = b'dashboard-session-v1'
+CSRF_LABEL = b'dashboard-csrf-v1'
+
+ENV_SECRET = 'DASHBOARD_SECRET'
+ENV_SESSION_HOURS = 'DASHBOARD_SESSION_HOURS'
+# 16 characters of anything is 128 bits at worst and far more in practice.
+# Below that the key is guessable and a guessable key is a forged cookie for
+# any account, so a short one is refused rather than silently accepted.
+SECRET_MIN = 16
+SESSION_TTL_DEFAULT = 7 * 24 * 3600
+SESSION_TTL_MIN, SESSION_TTL_MAX = 300, 90 * 24 * 3600
+
+# A cookie a browser sends is at most 4KB; anything longer is not a session
+# this server minted and is not worth an HMAC. Same for a form body: the
+# three forms here carry a username, a password and a note, and an
+# unauthenticated POST that makes the server read a gigabyte is a denial of
+# service with no password required.
+MAX_COOKIE = 4096
+MAX_BODY = 64 * 1024
+
+LOGIN_PATH = '/login'
+LOGOUT_PATH = '/logout'
+SIGNUP_PATH = '/signup'
+ADMIN_PATH = '/admin'
+CSRF_FIELD = 'csrf'
+TOKEN_FIELD = 't'
+NEXT_FIELD = 'next'
+
+# What an unauthenticated request may reach. An ALLOW-list, so a route added
+# to dashboard.py tomorrow is behind the gate by default: the failure mode of
+# a deny-list is a new page that nobody remembered to protect, and this server
+# grows a new page most weeks.
+PUBLIC_PATHS = frozenset({LOGIN_PATH, SIGNUP_PATH, LOGOUT_PATH})
+
+# One message per outcome, redirected through the URL so a POST that changed
+# something can answer with a redirect instead of a re-postable page. Codes,
+# not sentences: a sentence in a query string is a sentence an attacker can
+# put on your admin page.
+NOTICES = {
+    'invite_revoked': 'That invite was withdrawn.',
+    'user_disabled': 'That account is disabled and its sessions are over.',
+    'user_enabled': 'That account can sign in again.',
+    'role_admin': 'That account is an admin now.',
+    'role_member': 'That account is a member now.',
+    'signed_out': 'You are signed out, on this device and on every other.',
+    # Told apart from the one above on purpose: the cookie went either way,
+    # but only one of them can promise the other devices went with it.
+    'signed_out_here': 'You are signed out of this browser. The accounts '
+                       'database could not be reached, so any other device '
+                       'signed in as you may still be.',
+    'session_over': 'That session has ended. Sign in again.',
+}
+
+
+# ── the signing key ─────────────────────────────────────────────────────────
+
+# Read once and kept: the key file is opened on the first request and never
+# again, because a session check runs on every image on the page and a file
+# read per image is a syscall storm for a value that cannot change without a
+# restart. Keyed by path so a test can hold its own without disturbing the
+# server's.
+_KEYS = {}
+
+
+def secret(key_path=None):
+    """The HMAC key. DASHBOARD_SECRET if usable, else a file, made once.
+
+    A GENERATED KEY HAS TO PERSIST. The process re-execs itself when a source
+    file changes, and a key held only in memory would sign every open session
+    out on every edit -- which is exactly the annoyance the cookie design
+    exists to avoid. So it is written once, 0600, beside the accounts
+    database, and every later start reads it back.
+
+    A key set in the environment WINS, because that is how you rotate: change
+    the variable, restart, and every cookie in the world stops verifying. One
+    that is too short is refused with a line naming the variable and never the
+    value -- .env holds a hundred API keys and a "using DASHBOARD_SECRET=..."
+    is how one of them ends up in a journal.
+    """
+    p = key_path or KEY_PATH
+    got = _KEYS.get(p)
+    if got is not None:
+        return got
+    raw = (os.environ.get(ENV_SECRET) or '').strip()
+    if raw and len(raw) < SECRET_MIN:
+        print(f'{ENV_SECRET} is shorter than {SECRET_MIN} characters and will '
+              f'not be used; falling back to {KEY_NAME}', file=sys.stderr)
+        raw = ''
+    if raw:
+        key = raw.encode('utf-8')
+        _KEYS[p] = key
+        return key
+    key = _read_key(p) or _make_key(p)
+    if key is None:
+        # A filesystem that will not hold the key still gets a working login;
+        # what it loses is sessions surviving a restart, which is a nuisance
+        # and not an outage. Refusing to serve here would be the crash loop
+        # this whole module is written to avoid.
+        key = secrets.token_bytes(32)
+        print(f'{KEY_NAME} could not be written; sessions will not survive a '
+              f'restart', file=sys.stderr)
+    _KEYS[p] = key
+    return key
+
+
+def _read_key(p):
+    """The stored key, or None if there is not a usable one."""
+    try:
+        with open(p, 'rb') as fh:
+            raw = fh.read(MAX_COOKIE).strip()
+    except OSError:
+        return None
+    try:
+        key = binascii.unhexlify(raw)
+    except (binascii.Error, ValueError):
+        return None
+    return key if len(key) >= 32 else None
+
+
+def _make_key(p):
+    """Write a new key, 0600, without a window where it is not.
+
+    O_EXCL is not only about the mode: two threads can reach this at once on
+    the first two requests after a fresh install, and the loser must read the
+    winner's key rather than overwrite it -- a second key would invalidate the
+    session the first one had just minted.
+    """
+    d = os.path.dirname(p)
+    if d:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            return None
+    key = secrets.token_bytes(32)
+    try:
+        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return _read_key(p)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(binascii.hexlify(key) + b'\n')
+    except OSError:
+        return None
+    try:
+        os.chmod(p, 0o600)      # umask is 002 here; O_EXCL already set it,
+    except OSError:             # this is the belt for a pre-existing file
+        pass
+    return key
+
+
+def _mac(label, msg, key_path=None):
+    """HMAC-SHA256 under a purpose-separated subkey."""
+    sub = hmac.new(secret(key_path), label, hashlib.sha256).digest()
+    return hmac.new(sub, msg, hashlib.sha256).digest()
+
+
+# ── sessions ────────────────────────────────────────────────────────────────
+
+def _b64(raw):
+    return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+
+
+def _unb64(text):
+    return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
+
+
+def session_ttl(env=None):
+    """How long a session lasts, in seconds. DASHBOARD_SESSION_HOURS, or a week.
+
+    A week rather than a day because the phone in the field is the client that
+    matters, and a login screen in the middle of a review queue is how a queue
+    stops being reviewed. The cost of a long session is bounded by the fact
+    that any of them can be ended immediately -- accounts.bump_session_epoch()
+    and the per-request epoch check are what make a long expiry affordable.
+    """
+    src = os.environ if env is None else env
+    try:
+        ttl = int(float(str(src.get(ENV_SESSION_HOURS, '')).strip()) * 3600)
+    except (TypeError, ValueError):
+        return SESSION_TTL_DEFAULT
+    if ttl < SESSION_TTL_MIN or ttl > SESSION_TTL_MAX:
+        return SESSION_TTL_DEFAULT
+    return ttl
+
+
+def mint(user, now=None, ttl=None, key_path=None):
+    """(cookie value, max age) for one signed-in account.
+
+    THE SIGNATURE COVERS THE ENCODED PAYLOAD, NOT A JOINED STRING OF FIELDS.
+    The obvious version -- sign 'id|name|role|exp' -- is forgeable by anyone
+    whose username may contain the delimiter: sign in as `bob|admin` and the
+    verifier splits your name into a role. Here the fields are JSON, the JSON
+    is base64url, and base64url's alphabet contains neither the '.' that
+    separates the three parts nor anything else the parser looks at. No field
+    value can end its own field.
+
+    The payload is signed, not encrypted. Whoever holds the cookie can read
+    their own id, name and role out of it, which they already know; there is
+    nothing in it they do not.
+    """
+    ts = int(time.time() if now is None else now)
+    ttl = int(session_ttl() if ttl is None else ttl)
+    payload = {
+        'uid': int(user['id']),
+        'name': str(user['username']),
+        'role': str(user['role']),
+        'epoch': int(user['session_epoch']),
+        'iat': ts,
+        'exp': ts + ttl,
+        # A nonce makes two sessions for one account in one second different
+        # tokens, and gives the CSRF token below something session-specific
+        # to hang off. Without it, two browsers signed into one account would
+        # share a CSRF token and signing out of one would not invalidate the
+        # other's forms.
+        'nonce': _b64(secrets.token_bytes(12)),
+    }
+    body = SESSION_VERSION + '.' + _b64(
+        json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        .encode('utf-8'))
+    return body + '.' + _b64(_mac(SIGN_LABEL, body.encode('ascii'),
+                                  key_path)), ttl
+
+
+def read_session(value, now=None, key_path=None):
+    """The payload of a cookie this server signed and that has not expired.
+
+    None for anything else, with no distinction between a forged signature, a
+    truncated cookie and a stale one: they are all "sign in again", and the
+    only party who benefits from knowing which is the party holding a cookie
+    they made up.
+
+    EXPIRY IS READ OUT OF THE SIGNED PAYLOAD. The cookie also carries a
+    Max-Age, and a browser is expected to drop it then -- but Max-Age is a
+    request the client is free to ignore, and a stored cookie replayed a year
+    later still arrives looking exactly like a fresh one. The signed 'exp' is
+    the one the server cannot be lied to about.
+    """
+    ts = int(time.time() if now is None else now)
+    if not value or len(value) > MAX_COOKIE:
+        return None
+    parts = value.split('.')
+    if len(parts) != 3 or parts[0] != SESSION_VERSION:
+        return None
+    body = parts[0] + '.' + parts[1]
+    try:
+        given = _unb64(parts[2])
+    except (binascii.Error, ValueError):
+        return None
+    want = _mac(SIGN_LABEL, body.encode('ascii'), key_path)
+    # compare_digest, not ==: a byte-at-a-time comparison leaks how much of a
+    # forged signature was right, and a signature is exactly the value an
+    # attacker gets to retry a million times.
+    if not hmac.compare_digest(given, want):
+        return None
+    try:
+        payload = json.loads(_unb64(parts[1]).decode('utf-8'))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        if int(payload['exp']) <= ts or int(payload['iat']) > ts + 300:
+            # A token issued in the future is a clock that moved, and honouring
+            # it would let one stand for its whole lifetime plus the drift.
+            # Five minutes of slack, because the drift is usually ntp settling.
+            return None
+        int(payload['uid']), int(payload['epoch'])
+        str(payload['nonce'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return payload
+
+
+def resolve(value, now=None, path=None, key_path=None):
+    """The account behind a cookie, checked against the database. None if not.
+
+    THE ROW IS THE AUTHORITY, NOT THE PAYLOAD. The signed role is what the
+    account was when it signed in; the role that decides whether the admin
+    page opens is the one in the users table right now. accounts.set_role()
+    does not bump session_epoch -- deliberately, since a demotion is not a
+    reason to sign somebody out of the review queue -- so reading the row is
+    the only thing that makes a demotion take effect before the cookie
+    expires.
+
+    One connect() per request. Measured at 0.145ms against the ~50ms a
+    password costs, on a page that loads two dozen images.
+
+    AND IT IS NOT CACHED, DELIBERATELY. The obvious saving here is to hold
+    the row for a second or two in front of accounts.get_user, and it is the
+    wrong trade: this lookup IS the revocation mechanism. There is no session
+    table, so a disable, a password change, a demotion and a sign-out all
+    take effect by this function reading the row again -- cache it for a
+    second and every one of them has a second in which the account that was
+    just shut off is still being served. The numbers, so nobody has to
+    re-measure: read_session alone 0.005ms, resolve 0.157ms, connect+close
+    0.113ms of it, and 200 threads resolving at once finish in 0.035s. A
+    whole GET / is 1.6ms and a browser opens six connections to one origin.
+    """
+    payload = read_session(value, now=now, key_path=key_path)
+    if payload is None:
+        return None
+    try:
+        row = accounts.get_user(int(payload['uid']),
+                                path=path or _state()['db'])
+    except Exception:                    # noqa: BLE001 - see below
+        # A store that has stopped answering -- an unmounted drive, a
+        # permission that changed under the running process -- makes everybody
+        # a stranger and sends them to the login page. It does not make every
+        # request a traceback and a 500, on a process that re-execs itself
+        # unattended.
+        return None
+    if row is None or not row['active']:
+        return None
+    if int(row['session_epoch']) != int(payload['epoch']):
+        # The whole revocation mechanism, in one comparison: a password
+        # change, a disable or an explicit sign-out moved the number and
+        # every cookie minted before it stops verifying here.
+        return None
+    ses = dict(row)
+    ses['nonce'] = str(payload['nonce'])
+    ses['iat'] = int(payload['iat'])
+    ses['exp'] = int(payload['exp'])
+    ses['csrf'] = csrf_for(ses, key_path=key_path)
+    return ses
+
+
+def csrf_for(session, key_path=None):
+    """The CSRF token for one session. Derived, never stored.
+
+    SameSite=Lax already stops the cross-site POST this defends against, in
+    every browser that implements it -- but Lax is a promise made by the
+    client, and the server has no way to tell whether the client kept it. The
+    token is the server's own check: it is an HMAC over the session's nonce,
+    so it cannot be guessed, it is different for every session, and it can
+    only be read by someone who can read a page rendered for that session --
+    which an attacker on another origin cannot do, because the cookie is
+    HttpOnly and nothing here sends CORS headers.
+
+    What it is NOT is a defence against a stolen cookie. Whoever holds the
+    cookie can fetch the admin page and read the token out of it. Cookie theft
+    is what HttpOnly and the epoch check are for.
+    """
+    msg = ('%s|%s' % (session.get('nonce', ''), session.get('id', ''))).encode()
+    return _b64(_mac(CSRF_LABEL, msg, key_path))
+
+
+def csrf_ok(session, given, key_path=None):
+    """Constant-time check of a form's CSRF field against its session."""
+    if not session or not isinstance(given, str) or not given:
+        return False
+    return hmac.compare_digest(given, csrf_for(session, key_path=key_path))
+
+
+# ── cookies ─────────────────────────────────────────────────────────────────
+
+def parse_cookie(header):
+    """{name: value} from a Cookie header, without http.cookies.
+
+    SimpleCookie parses this and also unquotes, decodes and silently drops a
+    whole header when one pair in it is malformed -- which for a shared host
+    means an unrelated cookie set by something else on the same address can
+    take the session cookie down with it. This reads the pairs and nothing
+    else.
+    """
+    out = {}
+    for piece in (header or '')[:MAX_COOKIE * 2].split(';'):
+        k, sep, v = piece.partition('=')
+        if not sep:
+            continue
+        k = k.strip()
+        if k and k not in out:
+            out[k] = v.strip().strip('"')
+    return out
+
+
+def set_cookie(value, max_age):
+    """The Set-Cookie header for a fresh session.
+
+    HttpOnly: the cookie is not readable from JavaScript, so an injected
+    script on any page of this dashboard cannot walk off with a session.
+    SameSite=Lax: a cross-site POST does not carry it, which is what stops a
+    page on another origin from submitting this one's forms. Path=/: the gate
+    covers every route, so the cookie has to reach every route.
+
+    NOT Secure -- see the module docstring. On a plain-HTTP origin the browser
+    would withhold a Secure cookie from every request, and the login would
+    loop back to the form forever.
+    """
+    return ('Set-Cookie',
+            '%s=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax'
+            % (COOKIE, value, int(max_age)))
+
+
+def clear_cookie():
+    """Expire the cookie. Max-Age=0 and an empty value, so a client that
+    ignores one honours the other."""
+    return ('Set-Cookie',
+            '%s=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax' % (COOKIE,))
+
+
+# ── requests and replies ────────────────────────────────────────────────────
+
+class Request:
+    """What the gate needs to know about one HTTP request.
+
+    A plain object rather than the handler itself, so every flow below can be
+    exercised without a socket -- the guard drives all of them this way.
+    """
+
+    __slots__ = ('method', 'path', 'query', 'form', 'cookies', 'remote',
+                 'host', 'oversize', 'session')
+
+    def __init__(self, method='GET', path='/', query=None, form=None,
+                 cookies=None, remote='', host='', oversize=False):
+        self.method = method
+        self.path = path
+        self.query = query or {}
+        self.form = form or {}
+        self.cookies = cookies or {}
+        self.remote = remote
+        self.host = host
+        self.oversize = oversize
+        self.session = None
+
+    @classmethod
+    def from_handler(cls, handler):
+        """Build one out of a BaseHTTPRequestHandler.
+
+        THE BODY IS READ ONLY FOR THE ROUTES THIS MODULE OWNS. Reading it for
+        every POST would consume the JSON that /api/audit/verdict and every
+        other endpoint is about to read for itself, and the review queue would
+        start losing verdicts the day the gate went in -- silently, since the
+        handler would see an empty body rather than an error.
+        """
+        raw = handler.path or '/'
+        path, _, qs = raw.partition('?')
+        form, oversize = {}, False
+        if handler.command == 'POST' and owns(path):
+            try:
+                n = int(handler.headers.get('Content-Length') or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n > MAX_BODY:
+                oversize = True
+            elif n > 0:
+                ctype = (handler.headers.get('Content-Type') or '').lower()
+                data = handler.rfile.read(n)
+                if ctype.startswith('application/x-www-form-urlencoded'):
+                    form = parse_qs(data.decode('utf-8', 'replace'),
+                                    keep_blank_values=True)
+        return cls(
+            method=handler.command,
+            path=path,
+            query=parse_qs(qs, keep_blank_values=True),
+            form=form,
+            cookies=parse_cookie(handler.headers.get('Cookie')),
+            # client_address, never X-Forwarded-For. This server is bound to
+            # a tailnet address and to localhost with no proxy in front, so a
+            # forwarded header here is not a hop -- it is a string the caller
+            # chose, and trusting it would let anybody spend somebody else's
+            # lockout or evade their own.
+            remote=(handler.client_address[0]
+                    if getattr(handler, 'client_address', None) else ''),
+            host=handler.headers.get('Host') or '',
+            oversize=oversize)
+
+    def one(self, name, default=''):
+        """The first value of a form field, '' when it is not there."""
+        v = self.form.get(name)
+        return v[0] if isinstance(v, list) and v else default
+
+    def arg(self, name, default=''):
+        """The first value of a query parameter."""
+        v = self.query.get(name)
+        return v[0] if isinstance(v, list) and v else default
+
+
+class Reply:
+    """A response the router sends verbatim. Status, headers, bytes."""
+
+    __slots__ = ('status', 'body', 'headers')
+
+    def __init__(self, status=200, body=b'', headers=()):
+        self.status = status
+        self.body = body or b''
+        self.headers = list(headers)
+
+    def header(self, name):
+        """The first value of one header, or '' -- for the guard's benefit."""
+        for k, v in self.headers:
+            if k.lower() == name.lower():
+                return v
+        return ''
+
+    def send(self, handler):
+        """Write it. Nothing is logged: BoardHandler.log_message is a no-op
+        and must stay one, because a request line on the signup route carries
+        the invite token in its query string."""
+        handler.send_response(self.status)
+        for k, v in self.headers:
+            handler.send_header(k, v)
+        handler.send_header('Content-Length', str(len(self.body)))
+        handler.end_headers()
+        if handler.command != 'HEAD' and self.body:
+            handler.wfile.write(self.body)
+
+
+# Every page this module serves carries these. no-store because a login form,
+# an admin page and above all a freshly minted invite link have no business in
+# a disk cache; no-referrer because the signup URL contains the token and a
+# Referer header is how a URL walks off to somewhere else's log; DENY and
+# frame-ancestors because a dashboard whose admin page can be framed is a
+# dashboard whose disable buttons can be clicked by a page you were reading.
+# The CSP is deliberately total: these pages fetch nothing at all, so
+# 'none' plus the two inline sources is the whole policy they need.
+SECURITY_HEADERS = (
+    ('Cache-Control', 'no-store, max-age=0'),
+    ('Referrer-Policy', 'no-referrer'),
+    ('X-Content-Type-Options', 'nosniff'),
+    ('X-Frame-Options', 'DENY'),
+    ('Content-Security-Policy',
+     "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+     "script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; "
+     "frame-ancestors 'none'"),
+)
+
+
+def page_reply(markup, status=200, extra=()):
+    """An HTML page with the security headers on it."""
+    body = markup.encode('utf-8')
+    return Reply(status, body,
+                 [('Content-Type', 'text/html; charset=utf-8')]
+                 + list(SECURITY_HEADERS) + list(extra))
+
+
+def json_reply(obj, status=200, extra=()):
+    """A JSON answer, for the /api surface -- see guard() on why it is not a
+    redirect."""
+    body = json.dumps(obj).encode('utf-8')
+    return Reply(status, body,
+                 [('Content-Type', 'application/json')]
+                 + list(SECURITY_HEADERS) + list(extra))
+
+
+def redirect(location, status=303, extra=()):
+    """303 after a POST so a refresh does not repeat it; 302 for a gate bounce."""
+    return Reply(status, b'',
+                 [('Location', location)] + list(SECURITY_HEADERS)
+                 + list(extra))
+
+
+def not_found():
+    """An empty 404.
+
+    The router should hand this to send_error(404) so it is byte-identical to
+    every other unknown path: this is what a member gets for /admin, and a
+    page that says "admins only" is a page that tells a member the address is
+    worth attacking.
+    """
+    return Reply(404, b'', [])
+
+
+def safe_next(value):
+    """A path this server may redirect to after a login, or '/'.
+
+    An open redirect on a login page is a phishing primitive: /login?next=
+    somewhere-else sends somebody who has just typed their password to a page
+    of the attacker's choosing, from a link that starts with the address they
+    trust. Only a same-site absolute path is accepted, and '//host' is
+    rejected explicitly -- a protocol-relative URL starts with a slash and
+    goes to another host, and browsers fold a backslash into a slash before
+    they parse it, so '/\\evil' is '//evil'.
+    """
+    v = (value or '').strip()
+    if not v.startswith('/'):
+        return '/'
+    v = v.replace('\\', '/')
+    if v.startswith('//') or '://' in v or '\n' in v or '\r' in v:
+        return '/'
+    if v.startswith(LOGIN_PATH) or v.startswith(LOGOUT_PATH):
+        return '/'          # bouncing back to the form is not a destination
+    return v
+
+
+def owns(path):
+    """Is this one of the gate's own routes?
+
+    The prefix form matters for /admin, which carries its POST endpoints
+    under it, and for nothing else -- /login/x is not a page and falls through
+    to the dashboard's own 404.
+    """
+    return (path in (LOGIN_PATH, LOGOUT_PATH, SIGNUP_PATH)
+            or path == ADMIN_PATH or path.startswith(ADMIN_PATH + '/'))
+
+
+def is_public(path):
+    """May an unauthenticated request reach this path at all?"""
+    return path in PUBLIC_PATHS
+
+
+# ── the state of the deployment ─────────────────────────────────────────────
+
+_STATE = {'db': None, 'key': None, 'boot': None}
+
+
+def _state():
+    return _STATE
+
+
+def bootstrap(db_path=None, key_path=None, env=None, now=None):
+    """Read .env, make the .env admin real, and remember how it went.
+
+    Called once from serve(), before the first request. Two things have to
+    happen here and nowhere else: accounts.load_env(), because the systemd
+    unit passes no Environment= beyond PYTHONUNBUFFERED and nothing else puts
+    .env in front of this process; and accounts.ensure_admin(), which is what
+    turns DASHBOARD_PASSWORD into a row that the login path can check like
+    any other.
+
+    NEVER RAISES. A database that will not open, a value in .env that will
+    not parse -- every one of them comes back as a dict whose 'ok' is False,
+    and the gate turns that into a page that says what to set. The source
+    watcher re-execs this process unattended; an exception here is a crash
+    loop nobody is watching.
+    """
+    _STATE['db'] = db_path or accounts.DB_PATH
+    _STATE['key'] = key_path or KEY_PATH
+    if env is None:
+        accounts.load_env()
+    try:
+        got = accounts.ensure_admin(path=_STATE['db'], now=now, env=env)
+    except Exception as e:               # noqa: BLE001 - uptime beats purity
+        got = {'action': 'refused', 'ok': False,
+               'username': accounts.admin_username(env), 'user_id': None,
+               'admins': 0, 'others': [],
+               'detail': 'The accounts database could not be opened (%s: %s). '
+                         'Check that data/dashboard is writable, then restart.'
+                         % (type(e).__name__, e)}
+    _STATE['boot'] = got
+    return got
+
+
+def gate_state():
+    """The bootstrap result, bootstrapping first if the router forgot to.
+
+    A missing bootstrap() call must not become an unauthenticated dashboard,
+    so the lazy path exists and does the same work. It is not the intended
+    one: doing it here means the first request pays for a scrypt hash.
+    """
+    if _STATE['boot'] is None:
+        bootstrap(_STATE['db'], _STATE['key'])
+    return _STATE['boot']
+
+
+def usable():
+    """Is there an account anybody could sign in with?
+
+    False is the locked state: the login page and its explanation, and no
+    data at all. Note that this asks the STORE, not the environment -- an
+    admin created by an earlier run whose DASHBOARD_PASSWORD has since been
+    tidied out of .env can still sign in, and locking the dashboard over a
+    variable that is no longer needed would be an outage of our own making.
+    accounts.ensure_admin() reports exactly that case as ok=True with
+    action='unset'.
+    """
+    got = gate_state() or {}
+    return bool(got.get('ok'))
+
+
+# ── the login flow ──────────────────────────────────────────────────────────
+
+def throttle_source(req):
+    """The key a failed login is counted under: the client address.
+
+    NOT the username. Counting failures per account hands anybody who knows
+    the admin's name a way to lock the admin out of their own dashboard by
+    typing a wrong password six times -- a denial of service delivered by the
+    security feature. The address is the thing an attacker has to spend to
+    keep guessing, and on a tailnet it identifies a device.
+    """
+    return 'ip:' + (req.remote or '?')
+
+
+def attempt_login(username, password, source, now=None, path=None):
+    """Try one username and password. A dict, never an exception.
+
+        {'ok', 'user', 'message', 'retry_after'}
+
+    THE TWO WRONG ANSWERS ARE ONE ANSWER. An unknown username and a bad
+    password produce the same sentence, the same status and -- because
+    accounts.verify_password() derives a hash on both paths -- the same
+    ~50ms. A login form that answers a miss faster than a hit is a user
+    directory with a delay.
+
+    A CORRECT PASSWORD DURING A LOCKOUT STILL FAILS, and is not even checked:
+    verifying it would burn the 50ms the lockout exists to protect, and would
+    make a locked-out attacker's timing tell them when they got it right.
+
+    THE ATTEMPT IS COUNTED BEFORE IT IS CHECKED. Reading the counter, hashing
+    for 40ms and writing the failure afterwards is check-then-act, and this
+    runs on a thread per request: every attempt that arrived inside that
+    window read the same pre-failure counter and was let through, which turned
+    a 6-guess budget into 30-37 per burst. accounts.reserve_attempt() does
+    the counting and the reading under one write lock instead.
+    """
+    try:
+        return _attempt_login(username, password, source, now, path)
+    except Exception as e:               # noqa: BLE001
+        # A store that broke while the process was up -- the drive holding
+        # data/dashboard went away, most likely. The person at the form gets a
+        # sentence naming the fault instead of a 500, and the dashboard stays
+        # up for whoever is already signed in.
+        return {'ok': False, 'user': None, 'retry_after': 0,
+                'message': 'The accounts database could not be read (%s).'
+                           % (type(e).__name__,)}
+
+
+def _attempt_login(username, password, source, now, path):
+    """The attempt itself. See attempt_login() for every decision in here."""
+    p = path or _state()['db']
+    ts = int(time.time() if now is None else now)
+    # One write, before anything expensive happens. It both counts this
+    # attempt and reports whether the source was already locked when it
+    # arrived; a locked source is refused on that reading, never on the one
+    # its own increment just produced, or the account could never be checked
+    # again once it crossed the line.
+    st = accounts.reserve_attempt(source, now=ts, path=p)
+    if st['was_locked']:
+        # The wait is stated plainly. It is not a secret -- the person who has
+        # to wait it out is usually the person who owns the account -- and a
+        # lockout that looks like a wrong password sends them round the loop
+        # again, extending it.
+        return {'ok': False, 'user': None, 'retry_after': st['retry_after'],
+                'message': 'Too many attempts from this device. Try again in '
+                           '%s.' % (_span(st['retry_after']),)}
+    pw = password if isinstance(password, str) else ''
+    if len(pw) > accounts.PASSWORD_MAX:
+        # Refused before hashing: scrypt hashes whatever it is handed, so an
+        # unauthenticated POST with a megabyte in it is a way to make this
+        # box do a megabyte of work per request. The length is the one thing
+        # about the attempt the sender already knows, so this early exit
+        # tells them nothing.
+        return {'ok': False, 'user': None, 'retry_after': st['retry_after'],
+                'message': _WRONG}
+    user = accounts.verify_password(username, pw, now=ts, path=p)
+    if user is None:
+        return {'ok': False, 'user': None,
+                'retry_after': st['retry_after'], 'message': _WRONG}
+    accounts.clear_failures(source, path=p)
+    return {'ok': True, 'user': user, 'retry_after': 0, 'message': ''}
+
+
+_WRONG = 'That username and password do not match an account.'
+
+
+def do_login(req, now=None):
+    """GET renders the form; POST checks the body and mints the cookie.
+
+    THE CREDENTIALS COME OUT OF THE BODY. Never out of the query string: a
+    URL is written to browser history, to a bookmark, to the Referer of the
+    next page and -- on a server that logged its request lines, which this one
+    deliberately does not -- to disk. req.one() reads the form and nothing
+    else, so ?username=&password= is simply an empty attempt.
+    """
+    nxt = safe_next(req.arg(NEXT_FIELD) or req.one(NEXT_FIELD))
+    if not usable():
+        # No account exists to sign in to. The page says which variable to
+        # set, in the store's own words.
+        return page_reply(login_page(nxt, locked=gate_state()))
+    # Codes, looked up here -- never a sentence carried in the query string,
+    # which is a sentence anybody can put on somebody else's login page.
+    notice = NOTICES.get(req.arg('m'), '')
+    if req.method != 'POST':
+        return page_reply(login_page(nxt, notice=notice))
+    if req.oversize:
+        return page_reply(login_page(nxt, error='That form was too large.'),
+                          status=413)
+    got = attempt_login(req.one('username'), req.one('password'),
+                        throttle_source(req), now=now)
+    if not got['ok']:
+        return page_reply(login_page(nxt, error=got['message'],
+                                     username=req.one('username')),
+                          status=401)
+    value, ttl = mint(got['user'], now=now, key_path=_state()['key'])
+    return redirect(nxt, extra=[set_cookie(value, ttl)])
+
+
+def do_logout(req):
+    """End the session on the server, not just in this browser.
+
+    SIGNING OUT USED TO CHANGE NOTHING HERE. It sent
+    Set-Cookie: dash_session=; Max-Age=0 and stopped, so the browser forgot
+    its copy while the cookie itself stayed valid for the rest of its signed
+    life -- seven days by default. This module says plainly at the top that
+    the cookie travels in the clear and offers the epoch as the answer to
+    that; the epoch is moved by set_password, set_active(False),
+    bump_session_epoch and an .env password change, by every revoking action
+    EXCEPT the one a worried person actually reaches for. Somebody who
+    thought their cookie had been read off the wire clicked "sign out",
+    watched it apparently work, and left the captured cookie live. Their
+    only real remedy was to change their password.
+
+    So it bumps the epoch, which ends every session for that account on every
+    device -- and the control says so rather than pretending otherwise.
+
+    WHICH IS WHY IT IS A POST WITH A TOKEN. As a GET, that same bump was one
+    <img src="/logout"> on any page an annotator happened to visit, signing
+    them out of their phone and their laptop from across the internet, over
+    and over. The bookmark the old GET served is still served: a GET renders
+    the button instead of acting on it, which is the shape a state change is
+    supposed to have anyway.
+    """
+    if req.session is None:
+        # Nothing to revoke -- no cookie, or one that no longer resolves.
+        # There is no session to draw a token from and nothing a confirmation
+        # would confirm, so the cookie goes and the form says so.
+        return redirect(LOGIN_PATH + '?m=signed_out', status=302,
+                        extra=[clear_cookie()])
+    if req.method != 'POST':
+        return page_reply(logout_page(req.session))
+    if not csrf_ok(req.session, req.one(CSRF_FIELD), key_path=_state()['key']):
+        # A form drawn for a session that has since been replaced. Ask again
+        # rather than act on a token this session did not issue.
+        return page_reply(logout_page(req.session,
+                                      error='That form had expired — '
+                                            'here it is again.'), status=400)
+    try:
+        accounts.bump_session_epoch(req.session['id'], path=_state()['db'])
+    except Exception:                    # noqa: BLE001
+        # The store stopped answering mid-click. This browser is still out,
+        # because the cookie goes either way -- what cannot be promised is
+        # the other devices, and saying "signed out everywhere" here would be
+        # the same lie in a new place.
+        return redirect(LOGIN_PATH + '?m=signed_out_here', status=303,
+                        extra=[clear_cookie()])
+    return redirect(LOGIN_PATH + '?m=signed_out', status=303,
+                    extra=[clear_cookie()])
+
+
+# ── the signup flow ─────────────────────────────────────────────────────────
+
+def peek_invite(token, now=None, path=None):
+    """What state an invite link is in, without spending it.
+
+        {'state': 'open'|'used'|'revoked'|'expired'|'unknown', 'role', ...}
+
+    WHAT IS NOT IN HERE IS THE POINT. No created_by, no note, no id. The
+    person on this page is holding a link and nothing else -- they may be its
+    intended holder, or they may be whoever the intended holder forwarded it
+    to -- and "issued by alice, note: replacement for bob" is an org chart
+    handed to an unauthenticated stranger.
+
+    It reaches accounts._token_hash rather than hashing the token here on
+    purpose: a second spelling of how a token is stored is a second thing to
+    change, and the day accounts.py changes it, a private copy would go on
+    cheerfully validating links that no longer redeem. The guard checks the
+    two agree.
+    """
+    ts = int(time.time() if now is None else now)
+    out = {'state': 'unknown', 'role': 'member', 'expires_at': 0}
+    if not token or not isinstance(token, str) or len(token) > 256:
+        return out
+    try:
+        con = accounts.connect(path or _state()['db'])
+    except Exception:                    # noqa: BLE001 - see attempt_login
+        return out                       # unknown, which draws no form
+    try:
+        row = con.execute('SELECT * FROM invites WHERE token_hash = ?',
+                          (accounts._token_hash(token),)).fetchone()
+        if row is None:
+            return out
+        out['state'] = accounts.invite_state(row, ts)
+        out['role'] = row['role']
+        out['expires_at'] = int(row['expires_at'])
+        return out
+    finally:
+        con.close()
+
+
+INVITE_WORDS = {
+    'unknown': 'That invite link is not valid. Ask for a new one.',
+    'used': 'That invite link has already been used. If the account is '
+            'yours, sign in instead.',
+    'revoked': 'That invite link was withdrawn. Ask for a new one.',
+    'expired': 'That invite link has expired. Ask for a new one.',
+}
+
+
+def attempt_signup(token, username, password, confirm, source, now=None,
+                   path=None):
+    """Redeem an invite into an account. A dict, never an exception.
+
+        {'ok', 'user', 'message'}
+
+    The invite is claimed and the account created in ONE transaction inside
+    accounts.redeem_invite(), so two people opening the same link in the same
+    second produce one account, and a typo in the username does not spend the
+    link.
+
+    A GUESSED TOKEN COUNTS AGAINST THE SOURCE. Not a short password, not a
+    taken username -- those are a real holder getting it wrong. A token that
+    matches nothing is somebody trying links, and it is the only unauthenticated
+    path here that touches the database.
+    """
+    try:
+        return _attempt_signup(token, username, password, confirm, source,
+                               now, path)
+    except Exception as e:               # noqa: BLE001 - see attempt_login
+        return {'ok': False, 'user': None,
+                'message': 'The accounts database could not be read (%s).'
+                           % (type(e).__name__,)}
+
+
+def _attempt_signup(token, username, password, confirm, source, now, path):
+    """The redemption itself. See attempt_signup() for the reasoning."""
+    p = path or _state()['db']
+    ts = int(time.time() if now is None else now)
+    st = accounts.throttle_state(source, now=ts, path=p)
+    if st['locked']:
+        return {'ok': False, 'user': None,
+                'message': 'Too many attempts from this device. Try again in '
+                           '%s.' % (_span(st['retry_after']),)}
+    if (password or '') != (confirm or ''):
+        return {'ok': False, 'user': None,
+                'message': 'The two passwords did not match.'}
+    try:
+        user = accounts.redeem_invite(token, username, password, now=ts,
+                                      path=p)
+    except accounts.AccountError as e:
+        if e.code == 'invite_unknown':
+            accounts.record_failure(source, now=ts, path=p)
+        msg = (INVITE_WORDS.get(e.code[7:], e.message)
+               if e.code.startswith('invite_') else e.message)
+        return {'ok': False, 'user': None, 'message': msg}
+    accounts.clear_failures(source, path=p)
+    return {'ok': True, 'user': user, 'message': ''}
+
+
+def do_signup(req, now=None):
+    """GET validates the link and renders the form; POST creates the account.
+
+    THE TOKEN IS IN THE URL, AND THAT IS A REAL COST. A link is the only way
+    to hand somebody an invite without giving them a password over the same
+    channel, and a link carries its token through the address bar: into
+    browser history, into whatever a phone syncs, and into the Referer header
+    of the next page the browser loads. What is done about it here:
+    Referrer-Policy: no-referrer on this page, so the token does not leave in
+    a header; no-store, so it does not sit in a disk cache; a default life of
+    48 hours; single use, enforced by a compare-and-set in the database; and
+    request lines are not logged, so it never reaches serve.log. What remains
+    is the browser history of the person who opened it and any proxy on the
+    path -- which on a tailnet is nobody, and off a tailnet this link should
+    not be sent at all.
+    """
+    token = req.one(TOKEN_FIELD) or req.arg(TOKEN_FIELD)
+    if not usable():
+        return page_reply(login_page('/', locked=gate_state()))
+    if req.method != 'POST':
+        st = peek_invite(token, now=now)
+        return page_reply(signup_page(token, st))
+    if req.oversize:
+        st = peek_invite(token, now=now)
+        return page_reply(signup_page(token, st,
+                                      error='That form was too large.'),
+                          status=413)
+    got = attempt_signup(token, req.one('username'), req.one('password'),
+                         req.one('confirm'), throttle_source(req), now=now)
+    if not got['ok']:
+        st = peek_invite(token, now=now)
+        return page_reply(signup_page(token, st, error=got['message'],
+                                      username=req.one('username')),
+                          status=400)
+    # Straight in, no second login. The invite was the proof of who they are
+    # and they have just chosen the password; making them type it again is a
+    # form for the sake of a form.
+    value, ttl = mint(got['user'], now=now, key_path=_state()['key'])
+    return redirect('/', extra=[set_cookie(value, ttl)])
+
+
+# ── the admin flow ──────────────────────────────────────────────────────────
+
+def admin_action(action, req, session, now=None, path=None):
+    """One state-changing admin request. A dict, never an exception.
+
+        {'ok', 'notice', 'message', 'invite'}
+
+    'invite' is set only by the mint action and carries the plaintext token
+    exactly once -- see do_admin_post() on why that answer is a page and not
+    a redirect.
+
+    Every branch re-checks the actor's role from the session the gate
+    resolved, which came from the users row. A member who has learned these
+    endpoint names cannot reach this function at all, and if a future route
+    ever calls it directly, it still refuses.
+    """
+    p = path or _state()['db']
+    ts = int(time.time() if now is None else now)
+    if not session or session.get('role') != 'admin' or not session.get(
+            'active'):
+        return {'ok': False, 'notice': '', 'invite': None,
+                'message': 'Only an admin can do that.'}
+    try:
+        if action == 'invite':
+            hours = req.one('hours')
+            try:
+                ttl = int(float(hours) * 3600) if hours.strip() else None
+            except ValueError:
+                return {'ok': False, 'notice': '', 'invite': None,
+                        'message': 'That is not a number of hours.'}
+            role = req.one('role') or 'member'
+            inv = accounts.create_invite(session['id'], ttl=ttl,
+                                         note=req.one('note'), role=role,
+                                         now=ts, path=p)
+            return {'ok': True, 'notice': '', 'invite': inv, 'message': ''}
+        if action == 'revoke':
+            accounts.revoke_invite(_int(req.one('id')), now=ts, path=p)
+            return {'ok': True, 'notice': 'invite_revoked', 'invite': None,
+                    'message': ''}
+        if action == 'user':
+            uid = _int(req.one('id'))
+            what = req.one('do')
+            if uid == session['id'] and what in ('disable', 'member'):
+                # Self-service lockout, refused. accounts.py stops the LAST
+                # admin from stranding the dashboard, but with two admins
+                # nothing stops one of them disabling themselves mid-click
+                # and landing on the login page wondering what happened.
+                return {'ok': False, 'notice': '', 'invite': None,
+                        'message': 'That is the account you are signed in '
+                                   'with. Ask the other admin.'}
+            if what == 'disable':
+                accounts.set_active(uid, False, path=p)
+                return {'ok': True, 'notice': 'user_disabled', 'invite': None,
+                        'message': ''}
+            if what == 'enable':
+                accounts.set_active(uid, True, path=p)
+                return {'ok': True, 'notice': 'user_enabled', 'invite': None,
+                        'message': ''}
+            if what in accounts.ROLES:
+                accounts.set_role(uid, what, path=p)
+                return {'ok': True, 'notice': 'role_' + what, 'invite': None,
+                        'message': ''}
+        return {'ok': False, 'notice': '', 'invite': None,
+                'message': 'That is not something this page can do.'}
+    except accounts.AccountError as e:
+        # The store's refusals are already sentences a person can act on
+        # ("This is the last active admin. Promote somebody else first."), so
+        # they are shown as they are rather than translated into a code.
+        return {'ok': False, 'notice': '', 'invite': None,
+                'message': e.message}
+    except Exception as e:               # noqa: BLE001 - see attempt_login
+        return {'ok': False, 'notice': '', 'invite': None,
+                'message': 'That could not be written to the accounts '
+                           'database (%s).' % (type(e).__name__,)}
+
+
+def do_admin_get(req, session, now=None):
+    """The admin page: invites, the users table, and a form to invite."""
+    return page_reply(admin_page(session, req, now=now))
+
+
+def do_admin_post(req, session, now=None):
+    """A state-changing admin action, CSRF-checked, then the page again.
+
+    A FRESH INVITE IS ANSWERED WITH A PAGE, NOT A REDIRECT. Every other
+    action here follows POST/redirect/GET so a refresh cannot repeat it, but
+    the redirect would have to carry the token in its Location header --
+    which is a URL, which is history and a Referer, which is the one thing
+    this whole flow is trying to keep the token out of. So the mint answers
+    with the page directly, and a refresh mints a second invite that the
+    admin can revoke. That is the cheaper mistake.
+    """
+    if req.oversize:
+        return page_reply(admin_page(session, req, now=now,
+                                     error='That form was too large.'),
+                          status=413)
+    if not csrf_ok(session, req.one(CSRF_FIELD), key_path=_state()['key']):
+        # A missing or stale token is usually a page left open across a
+        # sign-out, not an attack, so it says what to do rather than 403ing
+        # into a dead end. Nothing was changed either way.
+        return page_reply(
+            admin_page(session, req, now=now,
+                       error='That form had expired. It has been reloaded -- '
+                             'try again.'),
+            status=403)
+    action = req.path[len(ADMIN_PATH) + 1:] or req.one('action')
+    got = admin_action(action, req, session, now=now)
+    if got['invite']:
+        return page_reply(admin_page(session, req, now=now,
+                                     minted=got['invite']))
+    if not got['ok']:
+        return page_reply(admin_page(session, req, now=now,
+                                     error=got['message']), status=400)
+    return redirect(ADMIN_PATH + '?m=' + quote(got['notice']))
+
+
+# ── the gate itself ─────────────────────────────────────────────────────────
+
+def guard(req, now=None):
+    """None if this request may continue, or the Reply to send instead.
+
+    Sets req.session on the way through, so the router does not look the user
+    up a second time. The one exception is the locked deployment below, which
+    never reads a cookie because there is no account for one to belong to.
+
+    An /api path gets a 401 with a JSON body rather than a redirect. A page's
+    fetch() follows a 302 by itself and hands the login HTML to JSON.parse,
+    which surfaces as an unreadable console error on a dashboard that looks
+    logged in; a 401 is something the client can act on.
+    """
+    # usable() first, because it is what lazily bootstraps the module: asking
+    # it before the cookie is read means the paths below are set even if the
+    # router forgot to call bootstrap(), and it means a deployment with no
+    # store at all never reaches the database.
+    if not usable():
+        # Locked. The ONLY thing served is the login page and the sentence
+        # explaining what to set -- no page, no image, no /api answer, and no
+        # exception on the way past.
+        if req.path == LOGIN_PATH:
+            return None
+        if req.path.startswith('/api/'):
+            return json_reply({'error': 'the dashboard has no account '
+                                        'configured yet'}, status=503)
+        return redirect(LOGIN_PATH, status=302)
+    req.session = resolve(req.cookies.get(COOKIE), now=now,
+                          path=_state()['db'], key_path=_state()['key'])
+    if req.session is not None:
+        return None
+    if is_public(req.path):
+        return None
+    if req.path.startswith('/api/'):
+        return json_reply({'error': 'sign in'}, status=401)
+    where = req.path
+    if req.query:
+        # The query goes along, so a bookmark of /audit/review?country=JPN
+        # survives the detour through the login form.
+        where += '?' + '&'.join(
+            '%s=%s' % (quote(k), quote(v[0] if isinstance(v, list) and v
+                                       else ''))
+            for k, v in sorted(req.query.items()))
+    tail = '?' + NEXT_FIELD + '=' + quote(where)
+    if req.cookies.get(COOKIE):
+        # They arrived WITH a cookie and it did not resolve: expired, or ended
+        # by a password change, a disable or a sign-out-everywhere. Saying so
+        # is the difference between "sign in again" and "did this thing ever
+        # know who I was".
+        tail += '&m=session_over'
+    return redirect(LOGIN_PATH + tail, status=302)
+
+
+def serve_request(req, now=None):
+    """The whole gate in one call: None means "authenticated, carry on".
+
+    The router calls this before it looks at self.path at all. Doing it the
+    other way round -- routing first, gating the routes it recognises -- is
+    how a page added next month ships unprotected, which is the failure this
+    ordering exists to make impossible.
+    """
+    reply = guard(req, now=now)
+    if reply is not None:
+        return reply
+    if req.path == LOGIN_PATH:
+        if req.session is not None and req.method != 'POST':
+            # Already signed in. Sending them back to a login form is how you
+            # get a second account created by somebody who assumed the first
+            # one had not worked.
+            return redirect(safe_next(req.arg(NEXT_FIELD)), status=302)
+        return do_login(req, now=now)
+    if req.path == LOGOUT_PATH:
+        return do_logout(req)
+    if req.path == SIGNUP_PATH:
+        if req.session is not None:
+            # Somebody already signed in does not spend an invite. A second
+            # account for one person is how a link gets burned by accident,
+            # and signing out first is one click away.
+            return redirect('/', status=302)
+        return do_signup(req, now=now)
+    if req.path == ADMIN_PATH or req.path.startswith(ADMIN_PATH + '/'):
+        if not req.session or req.session.get('role') != 'admin':
+            # Gated on ROLE, not on being signed in, and answered with the
+            # same empty 404 an unknown path gets. A member who guesses the
+            # address learns nothing they did not already know.
+            return not_found()
+        if req.method == 'POST':
+            return do_admin_post(req, req.session, now=now)
+        if req.path != ADMIN_PATH:
+            return not_found()
+        return do_admin_get(req, req.session, now=now)
+    return None
+
+
+# ── the pages ───────────────────────────────────────────────────────────────
+# Self-contained, every one of them: inline CSS, an inline data: favicon, no
+# stylesheet, no script file, no font. The login and signup pages are the only
+# surface an unauthenticated caller can reach, and every external asset on
+# them would be one more thing served before anybody has proved who they are.
+#
+# The palette is audit.py's, restated rather than imported. These pages have
+# to render when nothing else in the process is trusted -- including, on a bad
+# day, before audit.py has loaded at all -- and a login screen that depends on
+# the audit module is a login screen that breaks when the audit module does.
+
+def esc(v):
+    return html.escape('' if v is None else str(v), quote=True)
+
+
+def _int(v, default=0):
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _span(seconds):
+    """'4 minutes', '2 hours' -- a wait a person can act on."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return '%d second%s' % (s, '' if s == 1 else 's')
+    if s < 3600:
+        m = (s + 29) // 60
+        return '%d minute%s' % (m, '' if m == 1 else 's')
+    h = (s + 1799) // 3600
+    return '%d hour%s' % (h, '' if h == 1 else 's')
+
+
+def _when(ts):
+    """A timestamp as the operator's own clock reads it, or an em dash."""
+    if not ts:
+        return '\u2014'
+    return time.strftime('%Y-%m-%d %H:%M', time.localtime(int(ts)))
+
+
+CSS = """
+:root{--bg:#13151a;--panel:#1b2027;--panel2:#21262d;--bd:rgba(130,140,150,.13);
+--tx:#eef1f4;--mut:#98a2ad;--dim:#69727d;--acc:#e8a645;--green:#43b581;
+--red:#ef5350;
+--num:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  line-height:1.5}
+a{color:inherit}
+h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
+.sub{color:var(--dim);font-size:12.5px;margin-top:3px;max-width:56ch}
+.note{font-size:12px;color:var(--dim);margin-top:14px;max-width:44ch}
+/* Fields and buttons speak the vocabulary the rest of the dashboard does --
+   the same radius, the same border, the same amber for the one control that
+   commits. A login page in a different dialect reads as a different site,
+   which is precisely the thing a person should be suspicious of. */
+label{display:block;font-size:11px;text-transform:uppercase;
+  letter-spacing:.07em;color:var(--dim);margin:0 0 5px}
+input,select,textarea{width:100%;background:var(--panel2);
+  border:1px solid var(--bd);color:var(--tx);border-radius:9px;
+  padding:9px 11px;font-size:13.5px;font-family:inherit}
+input:focus,select:focus{outline:0;border-color:rgba(232,166,69,.45)}
+.field{margin-bottom:13px}
+.btn{background:var(--panel2);border:1px solid var(--bd);color:var(--mut);
+  border-radius:9px;padding:7px 13px;font-size:12.5px;cursor:pointer;
+  font-family:inherit}
+.btn:hover:not(:disabled){color:var(--tx);border-color:rgba(130,140,150,.32)}
+.btn.go{color:var(--acc);border-color:rgba(232,166,69,.4);width:100%;
+  padding:10px 13px;font-size:13.5px;font-weight:640}
+.btn.small{padding:4px 9px;font-size:11.5px;border-radius:7px}
+.btn.warn:hover{color:var(--red);border-color:rgba(239,83,80,.4)}
+/* An error is not decoration: it is the whole answer the form came back
+   with, so it sits above the fields it is about and keeps its colour. */
+.msg{border-radius:10px;padding:10px 13px;font-size:12.5px;margin-bottom:14px}
+.msg.bad{background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.32);
+  color:#f4a9a7}
+.msg.ok{background:rgba(67,181,129,.1);border:1px solid rgba(67,181,129,.3);
+  color:#8fd8b6}
+.msg.warn{background:rgba(232,166,69,.09);
+  border:1px solid rgba(232,166,69,.3);color:var(--acc)}
+"""
+
+CENTRED_CSS = """
+body{display:flex;align-items:center;justify-content:center;min-height:100vh;
+  padding:28px 20px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:14px;
+  padding:26px 24px;width:100%;max-width:380px}
+.card h1{margin-bottom:2px}
+.card form{margin-top:20px}
+"""
+
+WIDE_CSS = """
+body{padding:0 22px 90px}
+.wrap{max-width:1180px;margin:0 auto}
+header{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;
+  padding:22px 0 16px;border-bottom:1px solid var(--bd);margin-bottom:18px}
+.back{margin-left:auto;font-size:12px;color:var(--mut);text-decoration:none;
+  border:1px solid var(--bd);border-radius:8px;padding:6px 11px}
+.back:hover{color:var(--tx);border-color:rgba(130,140,150,.3)}
+.who{font-size:12px;color:var(--dim);align-self:center}
+.who b{color:var(--mut);font-weight:640}
+/* A submit button wearing a link's clothes, and a form that takes up no room.
+   Sign-out is a POST because it ends the session on every device, and a GET
+   that does that can be fired by any page the reader happens to be on -- but
+   a <form> is a block, and left as one it drops the control onto its own
+   line under the name it belongs beside. */
+.who form{display:inline}
+.lnk{background:0;border:0;padding:0;font:inherit;color:var(--mut);
+  cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.lnk:hover{color:var(--tx)}
+section{margin-bottom:26px}
+h2{font-size:13px;font-weight:640;color:var(--mut);margin-bottom:10px;
+  text-transform:uppercase;letter-spacing:.07em}
+.panel{background:var(--panel);border:1px solid var(--bd);border-radius:12px;
+  padding:16px 18px}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.row .field{margin:0;flex:1 1 150px;min-width:120px}
+.row .field.wide{flex:2 1 260px}
+.row .go{width:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.07em;color:var(--dim);font-weight:600;padding:0 10px 7px 0}
+td{padding:8px 10px 8px 0;border-top:1px solid var(--bd);vertical-align:middle;
+  color:var(--mut)}
+td.name{color:var(--tx);font-weight:600}
+td.when,td.num{font-family:var(--num);font-variant-numeric:tabular-nums;
+  font-size:11.5px;white-space:nowrap}
+td.acts{text-align:right;white-space:nowrap}
+td.acts form{display:inline}
+.tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;
+  border:1px solid var(--bd);border-radius:6px;padding:1px 6px;color:var(--dim)}
+.tag.open{color:var(--green);border-color:rgba(67,181,129,.32)}
+.tag.used{color:var(--mut)}
+.tag.expired,.tag.revoked{color:var(--dim)}
+.tag.admin{color:var(--acc);border-color:rgba(232,166,69,.35)}
+.tag.off{color:var(--red);border-color:rgba(239,83,80,.3)}
+.empty{color:var(--dim);font-size:12.5px;padding:6px 0}
+/* The one thing on this page that is shown once. It gets the amber, the
+   monospace and the whole width -- if it is missed it cannot be recovered,
+   only reissued, and the line under it says so. */
+.minted{background:rgba(232,166,69,.07);border:1px solid rgba(232,166,69,.34);
+  border-radius:12px;padding:16px 18px;margin-bottom:20px}
+.minted .lk{display:flex;gap:8px;margin:10px 0 8px}
+.minted input{font-family:var(--num);font-size:12.5px}
+.minted .once{font-size:12px;color:var(--acc)}
+"""
+
+# A tab icon that is part of the document. dashboard.py serves the same dog at
+# /favicon.ico, but that is a route behind this gate -- a login page that
+# fetched it would either 302 into the login page again or need the icon made
+# public, and a data: URI needs neither.
+FAVICON = ("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'"
+           "%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='.9em'"
+           "%20font-size='90'%3E%F0%9F%90%95%3C/text%3E%3C/svg%3E")
+
+
+def _doc(title, css, body):
+    """The shell every page here shares."""
+    return ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">\n'
+            '<meta name="viewport" content="width=device-width,'
+            'initial-scale=1">\n'
+            '<meta name="referrer" content="no-referrer">\n'
+            '<title>%s</title>\n<link rel="icon" href="%s">\n'
+            '<style>%s</style></head>\n<body>\n%s\n</body></html>\n'
+            % (esc(title), FAVICON, CSS + css, body))
+
+
+def login_page(nxt='/', error='', username='', locked=None, notice=''):
+    """The form, or the explanation of why there is nothing to sign in to."""
+    if locked is not None:
+        # Every word of this comes from accounts.ensure_admin(), which names
+        # variables and never values. It is the only page this server will
+        # serve in that state, so it has to be enough to act on.
+        body = (
+            '<div class="card">\n'
+            '  <h1>Nobody can sign in yet</h1>\n'
+            '  <div class="sub">The dashboard is up and it is serving '
+            'nothing until there is an account.</div>\n'
+            '  <div class="msg warn" style="margin-top:18px">%s</div>\n'
+            '  <div class="note">Set it in the repository\'s .env file, then '
+            'restart the dashboard service. The password is written to the '
+            'accounts database on the next start and read from there '
+            'afterwards.</div>\n'
+            '</div>' % (esc(locked.get('detail', '')),))
+        return _doc('Sign in', CENTRED_CSS, body)
+    bits = ['<div class="card">\n  <h1>Street dogs</h1>\n'
+            '  <div class="sub">Sign in to see the dashboard.</div>\n']
+    if error:
+        bits.append('  <div class="msg bad">%s</div>\n' % (esc(error),))
+    elif notice:
+        bits.append('  <div class="msg ok">%s</div>\n' % (esc(notice),))
+    bits.append(
+        '  <form method="post" action="%s">\n'
+        '    <input type="hidden" name="%s" value="%s">\n'
+        '    <div class="field"><label for="u">username</label>\n'
+        '      <input id="u" name="username" value="%s" autocomplete="username"'
+        ' autocapitalize="none" autocorrect="off" spellcheck="false" '
+        'autofocus required></div>\n'
+        '    <div class="field"><label for="p">password</label>\n'
+        '      <input id="p" name="password" type="password" '
+        'autocomplete="current-password" required></div>\n'
+        '    <button class="btn go" type="submit">Sign in</button>\n'
+        '  </form>\n'
+        '  <div class="note">Accounts are made from an invite link. If you '
+        'need one, ask whoever runs this.</div>\n'
+        '</div>'
+        % (esc(LOGIN_PATH), esc(NEXT_FIELD), esc(nxt), esc(username)))
+    return _doc('Sign in', CENTRED_CSS, ''.join(bits))
+
+
+def logout_page(session, error=''):
+    """What a GET /logout renders: the button, not the act.
+
+    A bookmark of /logout still works -- it lands here -- and a page that
+    merely renders cannot be fired by somebody else's <img> tag. The sentence
+    is the honest one: this ends the session everywhere, because that is what
+    the POST does, and a control that quietly did more than its label said
+    would be the same defect wearing a different hat.
+    """
+    bits = ['<div class="card">\n  <h1>Sign out</h1>\n'
+            '  <div class="sub">Signed in as <b>%s</b>.</div>\n'
+            % (esc(str(session.get('username') or '')),)]
+    if error:
+        bits.append('  <div class="msg bad">%s</div>\n' % (esc(error),))
+    bits.append(
+        '  <form method="post" action="%s">\n'
+        '    <input type="hidden" name="%s" value="%s">\n'
+        '    <button class="btn go" type="submit">Sign out everywhere</button>'
+        '\n  </form>\n'
+        '  <div class="note">This ends the session on every device signed in '
+        'as this account, not only in this browser. Nothing else about the '
+        'account changes.</div>\n'
+        '  <div class="note"><a href="/">&larr; back to the dashboard</a>'
+        '</div>\n</div>'
+        % (esc(LOGOUT_PATH), esc(CSRF_FIELD),
+           esc(str(session.get('csrf') or ''))))
+    return _doc('Sign out', CENTRED_CSS, ''.join(bits))
+
+
+def signup_page(token, state, error='', username=''):
+    """The invite form, or a plain sentence about why there is no form.
+
+    A dead link gets the reason and a way out, and nothing else: no form to
+    fill in, no note, and no word about who issued it.
+    """
+    st = (state or {}).get('state', 'unknown')
+    if st != 'open':
+        body = ('<div class="card">\n  <h1>This link is closed</h1>\n'
+                '  <div class="msg warn" style="margin-top:16px">%s</div>\n'
+                '  <div class="note"><a href="%s">Sign in</a> if you already '
+                'have an account.</div>\n</div>'
+                % (esc(INVITE_WORDS.get(st, INVITE_WORDS['unknown'])),
+                   esc(LOGIN_PATH)))
+        return _doc('Invite', CENTRED_CSS, body)
+    role = (state or {}).get('role', 'member')
+    bits = ['<div class="card">\n  <h1>Choose a username</h1>\n'
+            '  <div class="sub">This invite makes %s account. It works '
+            'once, and it expires %s.</div>\n'
+            % ('an admin' if role == 'admin' else 'a member',
+               esc(_when((state or {}).get('expires_at'))))]
+    if error:
+        bits.append('  <div class="msg bad">%s</div>\n' % (esc(error),))
+    bits.append(
+        '  <form method="post" action="%s">\n'
+        '    <input type="hidden" name="%s" value="%s">\n'
+        '    <div class="field"><label for="u">username</label>\n'
+        '      <input id="u" name="username" value="%s" minlength="%d" '
+        'maxlength="%d" autocomplete="username" autocapitalize="none" '
+        'autocorrect="off" spellcheck="false" autofocus required></div>\n'
+        '    <div class="field"><label for="p">password</label>\n'
+        '      <input id="p" name="password" type="password" minlength="%d" '
+        'autocomplete="new-password" required></div>\n'
+        '    <div class="field"><label for="c">password again</label>\n'
+        '      <input id="c" name="confirm" type="password" minlength="%d" '
+        'autocomplete="new-password" required></div>\n'
+        '    <button class="btn go" type="submit">Create the account</button>\n'
+        '  </form>\n'
+        '  <div class="note">Letters, digits, dot, dash and underscore in a '
+        'username; %d characters or more in a password. Nobody can recover '
+        'it for you \u2014 an admin can only set a new one.</div>\n</div>'
+        % (esc(SIGNUP_PATH), esc(TOKEN_FIELD), esc(token), esc(username),
+           accounts.USERNAME_MIN, accounts.USERNAME_MAX,
+           accounts.PASSWORD_MIN, accounts.PASSWORD_MIN,
+           accounts.PASSWORD_MIN))
+    return _doc('Invite', CENTRED_CSS, ''.join(bits))
+
+
+def invite_link(req, token):
+    """The URL to hand somebody, built from the Host this request arrived on.
+
+    Built from the header rather than from config because this server answers
+    on two addresses at once -- the tailnet one for a phone and 127.0.0.1 for
+    the machine itself -- and the right link is the one that matches however
+    the admin got here. The value is echoed only into the admin's own page and
+    is escaped on the way; a poisoned Host header poisons nothing but the copy
+    button of the person who sent it.
+    """
+    host = (req.host or '').strip()
+    tail = '%s?%s=%s' % (SIGNUP_PATH, TOKEN_FIELD, quote(token))
+    if not host or '/' in host or ' ' in host:
+        return tail
+    return 'http://%s%s' % (host, tail)
+
+
+def admin_page(session, req, now=None, error='', minted=None):
+    """Invites and accounts, on one page, for an admin only."""
+    ts = int(time.time() if now is None else now)
+    p = _state()['db']
+    csrf = esc(session.get('csrf', ''))
+    notice = NOTICES.get(req.arg('m'), '')
+    bits = ['<div class="wrap">\n<header>\n  <div><h1>Accounts</h1>\n'
+            '    <div class="sub">Who may open this dashboard, and the '
+            'invite links that let them.</div></div>\n'
+            # A form, not a link: signing out ends the session on every
+            # device, and a state change that a GET can make is a state
+            # change somebody else's page can make for you.
+            '  <div class="who">signed in as <b>%s</b> \u00b7 '
+            '<form method="post" action="%s">'
+            '<input type="hidden" name="%s" value="%s">'
+            '<button class="lnk" type="submit" title="Ends this session on '
+            'every device">sign out</button></form></div>\n'
+            '  <a class="back" href="/">&larr; dashboard</a>\n</header>\n'
+            % (esc(session.get('username', '')), esc(LOGOUT_PATH),
+               esc(CSRF_FIELD), csrf)]
+    if error:
+        bits.append('<div class="msg bad">%s</div>\n' % (esc(error),))
+    elif notice:
+        bits.append('<div class="msg ok">%s</div>\n' % (esc(notice),))
+    if minted:
+        link = invite_link(req, minted['token'])
+        bits.append(
+            '<div class="minted">\n'
+            '  <b>A new invite link, for %s.</b>\n'
+            '  <div class="lk"><input id="lk" value="%s" readonly '
+            'onfocus="this.select()">\n'
+            '    <button class="btn" id="cp" type="button">copy</button></div>\n'
+            '  <div class="once">This is the only time it is shown. It is not '
+            'stored anywhere \u2014 if it is lost, revoke it below and issue '
+            'another. It expires %s and works once.</div>\n</div>\n'
+            % ('an admin account' if minted['role'] == 'admin'
+               else 'a member account', esc(link),
+               esc(_when(minted['expires_at']))))
+    hours_default = _int(os.environ.get(accounts.ENV_INVITE_TTL_HOURS),
+                         accounts.INVITE_TTL_DEFAULT // 3600)
+    bits.append(
+        '<section>\n<h2>Invite somebody</h2>\n<div class="panel">\n'
+        '<form method="post" action="%s/invite" class="row">\n'
+        '  <input type="hidden" name="%s" value="%s">\n'
+        '  <div class="field wide"><label for="n">what it is for</label>\n'
+        '    <input id="n" name="note" maxlength="200" placeholder="field '
+        'team, phone" autocomplete="off"></div>\n'
+        '  <div class="field"><label for="h">hours</label>\n'
+        '    <input id="h" name="hours" type="number" min="1" max="720" '
+        'step="1" value="%d"></div>\n'
+        '  <div class="field"><label for="r">role</label>\n'
+        '    <select id="r" name="role"><option value="member">member'
+        '</option><option value="admin">admin</option></select></div>\n'
+        '  <button class="btn go" type="submit">Create link</button>\n'
+        '</form>\n</div>\n</section>\n'
+        % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, hours_default))
+
+    try:
+        invites = accounts.list_invites(path=p, now=ts)
+    except Exception as e:                # noqa: BLE001 - a table, not the gate
+        # A table that will not read is a broken table, not a broken gate: the
+        # rest of the page -- and the invite form above it -- still works.
+        invites = []
+        bits.append('<div class="msg bad">%s</div>\n' % (esc(str(e)),))
+    bits.append('<section>\n<h2>Invites</h2>\n<div class="panel">\n')
+    if not invites:
+        bits.append('<div class="empty">None yet.</div>\n')
+    else:
+        bits.append('<table><tr><th>state</th><th>role</th><th>for</th>'
+                    '<th>issued by</th><th>issued</th><th>expires</th>'
+                    '<th>taken by</th><th></th></tr>\n')
+        for iv in invites:
+            act = ''
+            if iv['state'] in ('open', 'expired'):
+                act = ('<form method="post" action="%s/revoke">'
+                       '<input type="hidden" name="%s" value="%s">'
+                       '<input type="hidden" name="id" value="%d">'
+                       '<button class="btn small warn" type="submit">revoke'
+                       '</button></form>'
+                       % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id']))
+            bits.append(
+                '<tr><td><span class="tag %s">%s</span></td>'
+                '<td><span class="tag%s">%s</span></td>'
+                '<td>%s</td><td class="name">%s</td>'
+                '<td class="when">%s</td><td class="when">%s</td>'
+                '<td>%s</td><td class="acts">%s</td></tr>\n'
+                % (esc(iv['state']), esc(iv['state']),
+                   ' admin' if iv['role'] == 'admin' else '', esc(iv['role']),
+                   esc(iv['note'] or '\u2014'),
+                   esc(iv['created_by_name'] or '\u2014'),
+                   esc(_when(iv['created_at'])), esc(_when(iv['expires_at'])),
+                   esc(iv['used_by_name'] or '\u2014'), act))
+        bits.append('</table>\n')
+    bits.append('</div>\n</section>\n')
+
+    try:
+        users = accounts.list_users(path=p)
+    except Exception as e:                # noqa: BLE001
+        users = []
+        bits.append('<div class="msg bad">%s</div>' % (esc(str(e)),))
+    bits.append('<section>\n<h2>Accounts</h2>\n<div class="panel">\n'
+                '<table><tr><th>username</th><th>role</th><th>state</th>'
+                '<th>joined</th><th>last seen</th><th></th></tr>\n')
+    for u in users:
+        me = u['id'] == session.get('id')
+        acts = []
+        if not me:
+            acts.append(_useract(csrf, u['id'],
+                                 'disable' if u['active'] else 'enable',
+                                 'disable' if u['active'] else 'enable',
+                                 warn=u['active']))
+            acts.append(_useract(csrf, u['id'],
+                                 'member' if u['role'] == 'admin' else 'admin',
+                                 'make member' if u['role'] == 'admin'
+                                 else 'make admin'))
+        bits.append(
+            '<tr><td class="name">%s%s</td>'
+            '<td><span class="tag%s">%s</span></td>'
+            '<td><span class="tag%s">%s</span></td>'
+            '<td class="when">%s</td><td class="when">%s</td>'
+            '<td class="acts">%s</td></tr>\n'
+            % (esc(u['username']), ' <span class="tag">you</span>' if me else '',
+               ' admin' if u['role'] == 'admin' else '', esc(u['role']),
+               '' if u['active'] else ' off',
+               'active' if u['active'] else 'disabled',
+               esc(_when(u['created_at'])), esc(_when(u['last_login_at'])),
+               ' '.join(acts)))
+    bits.append('</table>\n<div class="note">Disabling an account ends its '
+                'open sessions immediately. Accounts are never deleted \u2014 '
+                'they issued and took the invites above, and the record of '
+                'that has to keep pointing at somebody.</div>\n'
+                '</div>\n</section>\n</div>\n')
+    if minted:
+        # execCommand, not navigator.clipboard: the clipboard API is only
+        # available in a secure context, and this page is plain HTTP on a
+        # tailnet, so on the phone the modern call is simply undefined. The
+        # field is selected either way, so the fallback is a manual copy.
+        bits.append(
+            '<script>\n'
+            "(function(){var b=document.getElementById('cp'),"
+            "f=document.getElementById('lk');if(!b||!f)return;\n"
+            "b.onclick=function(){f.focus();f.select();"
+            "f.setSelectionRange(0,f.value.length);\n"
+            "var ok=false;try{ok=document.execCommand('copy')}catch(e){}\n"
+            "b.textContent=ok?'copied':'press \\u2318C';};})();\n"
+            '</script>\n')
+    return _doc('Accounts', WIDE_CSS, ''.join(bits))
+
+
+def _useract(csrf, uid, what, label, warn=False):
+    """One button in the accounts table: a real form, so it is a POST."""
+    return ('<form method="post" action="%s/user">'
+            '<input type="hidden" name="%s" value="%s">'
+            '<input type="hidden" name="id" value="%d">'
+            '<input type="hidden" name="do" value="%s">'
+            '<button class="btn small%s" type="submit">%s</button></form>'
+            % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, uid, esc(what),
+               ' warn' if warn else '', esc(label)))

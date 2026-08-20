@@ -149,6 +149,16 @@ MODEL_OWN = ('dashboard/triage.jsonl',)
 # from the two above so that "classified" never reads as "human". What holds
 # this one apart from the human stores is tools/detect/tests/adv_llm_tier.py.
 LLM_OWN = ('llm_annotations/llm_guesses.jsonl',)
+# A FOURTH KIND, and the only thing under data/ that holds nothing about a
+# crop at all: who may open the dashboard. accounts.db carries password
+# hashes, invite tokens and failed-login counters and is written by
+# tools/dashboard/accounts.py; session.key is the secret every session cookie
+# is signed with. Named here rather than swept into MODEL_WORKING (which is a
+# model's leftovers) or waved through by suffix, because t5g's whole job is
+# that a new store gets read by somebody before it goes quiet -- and because
+# "classified" must never read as "human": nothing in this pipeline may open
+# either of them, and what guards that is tools/detect/tests/adv_accounts.py.
+ACCOUNT_STORES = ('dashboard/accounts.db', 'dashboard/session.key')
 # The two ledgers the review page's flag button writes, which is the pair a
 # promotion would aim at.
 FLAG_LEDGERS = (('hard_positives/labels.jsonl', 'true_positive'),
@@ -856,7 +866,7 @@ for _d in sorted(os.listdir(DATA) if os.path.isdir(DATA) else ()):
             _skipped += 1                 # a rotated ledger keeps its suffix
             continue
         _on_disk.append(_rel)
-_known = (HUMAN_STORES + MODEL_OWN + LLM_OWN + MODEL_WORKING
+_known = (HUMAN_STORES + MODEL_OWN + LLM_OWN + MODEL_WORKING + ACCOUNT_STORES
           + (LEASH_DB, FLAGS_DB))
 _unclassified = [s for s in _on_disk if s not in _known]
 check(f't5g all {len(_on_disk)} files under data/ that could be a store are '

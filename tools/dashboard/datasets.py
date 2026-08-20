@@ -712,13 +712,15 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
      with a name; two lines per run beats an ellipsis three glyphs in */
   .run{grid-template-columns:minmax(0,1fr) auto;row-gap:2px}
 }
+.hdrend{display:flex;align-items:center;gap:12px}
+__ACCTCSS__
 </style></head><body><div class="wrap">
 <header>
   <div><h1>Datasets</h1>
     <div class="sub">Every training set on this machine, found by walking the
       disk rather than from a list &mdash; so one built five minutes ago is
       here. Each carries the runs that trained on it.</div></div>
-  <a class="back" href="/">&larr; dashboard</a>
+  <div class="hdrend">__ACCOUNT__<a class="back" href="/">&larr; dashboard</a></div>
 </header>
 
 <div class="banner" id="banner" hidden></div>
@@ -1407,7 +1409,7 @@ loadList(false);
 """
 
 
-def page_html():
+def page_html(account=('', '')):
     """The whole /datasets page.
 
     Nothing about the datasets is baked in: the page arrives empty and asks
@@ -1420,7 +1422,10 @@ def page_html():
         f'<option value="{n}"{" selected" if n == PAGE_DEFAULT else ""}>'
         f'{n}</option>' for n in PAGE_SIZES)
     out = DATASETS_HTML
-    for k, v in (('__STATUS__', json.dumps(_status_words())),
+    acct_css, acct_html = account
+    for k, v in (('__ACCTCSS__', acct_css),
+                 ('__ACCOUNT__', acct_html),
+                 ('__STATUS__', json.dumps(_status_words())),
                  ('__DEFSIZE__', json.dumps(PAGE_DEFAULT)),
                  ('__SIZEOPTS__', opts)):
         out = out.replace(k, v)

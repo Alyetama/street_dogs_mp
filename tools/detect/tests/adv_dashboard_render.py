@@ -3018,6 +3018,530 @@ def check_map_tabs_live():
     return 0
 
 
+# ── the login gate ──────────────────────────────────────────────────────────
+# Everything this dashboard serves is behind a session: the pages, the whole
+# /api surface, every image route and the static fallback. Three things can
+# take that away and none of them look broken from the outside -- the gate
+# called after the routing instead of before it, a route added to the
+# allow-list that should not be on it, and a gate that fails open when its
+# module will not load. So the source is read for the first, and the handler
+# is driven over a real socket for the other two.
+
+# What a signed-out caller must get. Not a list of every route -- one of each
+# KIND, because the point is that the answer does not depend on the route.
+GATE_DENIED = (
+    ('/', 'redirect', 'the front page'),
+    ('/index.html', 'redirect', 'the front page by its filename'),
+    ('/audit/review', 'redirect', 'the review queue'),
+    ('/audit/gate', 'redirect', 'an audit page'),
+    ('/datasets', 'redirect', 'the datasets page'),
+    ('/nope', 'redirect', 'an address that does not exist'),
+    ('/admin', 'redirect', 'the admin page'),
+    ('/api/board', 'json401', 'the board API'),
+    ('/api/sys', 'json401', 'the machine API'),
+    ('/api/review/count', 'json401', 'the review count'),
+    ('/hq?name=x.jpg', 'json401', 'a full-size frame'),
+    ('/orig?name=x.jpg', 'json401', 'an original frame'),
+    ('/flagged', 'json401', 'the flag ledger'),
+    ('/audit/crop/gate/x.jpg', 'json401', 'an audit crop'),
+    ('/audit/frame/gate/x.jpg', 'json401', 'an audit frame'),
+    ('/datasets/thumb?key=x&rel=y', 'json401', 'a dataset thumbnail'),
+    ('/datasets/image?key=x&rel=y', 'json401', 'a dataset image'),
+    ('/recent_crops/x.jpg', 'json401', 'a crop from the rolling pool'),
+    ('/review_set/x.jpg', 'json401', 'a crop from the review set'),
+    ('/echarts.min.js', 'redirect', 'a file from the static allow-list'),
+    ('/map_points.json', 'redirect', 'the map data'),
+    ('/history.duckdb', 'redirect', 'a working file in the document root'),
+    ('/accounts.db', 'redirect', 'the accounts database'),
+    ('/session.key', 'redirect', 'the cookie signing key'),
+)
+
+
+def gate_traversal_checks():
+    """The static allow-list must hold for a signed-in MEMBER, not just a
+    stranger.
+
+    THE ALLOW-LIST IS THE BOUNDARY, and it is only a boundary if it is
+    applied to the name that gets opened. SimpleHTTPRequestHandler unquotes
+    the path and runs posixpath.normpath over it before opening anything, so
+    /recent_crops/../accounts.db starts with an allow-listed prefix -- a
+    startswith() says yes -- and then resolves to OUT/accounts.db. Everything
+    the server owns is a sibling of the page in that directory: the accounts
+    database with every scrypt hash in it, the -wal carrying recent rows in
+    the clear, session.key, serve.log. A member is the lowest-trust account
+    this dashboard issues, created by an invite, and with session.key in hand
+    they mint a cookie for the admin row and walk into the invite page.
+
+    A DECOY DOCUMENT ROOT, never data/dashboard: a guard that has to read the
+    machine's real password hashes to decide whether it can is a guard that
+    reads them every time it fails. The names are the real ones -- taken from
+    accounts.PRIVATE_FILES and auth.PRIVATE_FILES, so a private file added
+    there later is covered here without anybody remembering to add it.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+    import dashboard as dash  # noqa: E402
+    try:
+        import accounts
+        import auth
+    except Exception as e:
+        print(f'SKIP: the gate modules would not import ({e}) — nobody '
+              f'checked the static allow-list against a member')
+        return []
+
+    import functools
+    import http.client
+    from http.server import ThreadingHTTPServer
+
+    bad = []
+    tmp = tempfile.mkdtemp(prefix='gate-trav-')
+    root = os.path.join(tmp, 'out')
+    db = os.path.join(tmp, 'accounts.db')
+    key = os.path.join(tmp, 'session.key')
+    private = sorted(accounts.PRIVATE_FILES | auth.PRIVATE_FILES
+                     | {'serve.log', 'history.duckdb'})
+    for d in dash.STATIC_DIRS:
+        os.makedirs(os.path.join(root, d.strip('/')), exist_ok=True)
+    for name in private:
+        with open(os.path.join(root, name), 'wb') as f:
+            f.write(b'DECOY ' + name.encode() + b' ' + b'x' * 64)
+    crop = os.path.join(root, dash.STATIC_DIRS[0].strip('/'), 'a.jpg')
+    with open(crop, 'wb') as f:
+        f.write(b'\xff\xd8decoy-jpeg')
+    boot = auth.bootstrap(db_path=db, key_path=key, env={
+        'DASHBOARD_USER': 'admin', 'DASHBOARD_PASSWORD': 'a-password-long'})
+    if not boot.get('ok'):
+        shutil.rmtree(tmp, ignore_errors=True)
+        print(f'SKIP: the throwaway store would not bootstrap '
+              f'({boot.get("detail")}) — the allow-list was not driven')
+        return []
+    member = accounts.create_user('trav-member', 'a-password-long-enough',
+                                  role='member', path=db)
+    cookie = auth.COOKIE + '=' + auth.mint(member, key_path=key)[0]
+    srv = ThreadingHTTPServer(
+        ('127.0.0.1', 0),
+        functools.partial(dash.BoardHandler, directory=root))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def hit(path, method='GET'):
+        # A connection per request, and the path sent verbatim: http.client
+        # is happy to forward '..' unchanged, which is what a raw socket or
+        # `curl --path-as-is` does and what a browser would not.
+        c = http.client.HTTPConnection('127.0.0.1', srv.server_port,
+                                       timeout=60)
+        try:
+            c.putrequest(method, path, skip_host=False,
+                         skip_accept_encoding=True)
+            c.putheader('Cookie', cookie)
+            c.endheaders()
+            r = c.getresponse()
+            return r.status, dict(r.getheaders()), r.read()
+        finally:
+            c.close()
+
+    try:
+        # The escape, in every spelling that reaches the same file. The last
+        # two are the ones a check written against '..' alone lets through:
+        # the server cuts the request at the '?' and the '#' before it
+        # normalises, so a tail after either can steer the allow-list's
+        # reading of the path somewhere the server will never look, while the
+        # part in front of it resolves to the private file.
+        tails = ('', '#/x/../../' + dash.STATIC_DIRS[0].strip('/') + '/y',
+                 '?/../../' + dash.STATIC_DIRS[0].strip('/') + '/y')
+        shapes = [d + hop + '/' + name + tail
+                  for d in dash.STATIC_DIRS
+                  for name in private
+                  for hop in ('..', '../..', '%2e%2e', '.%2e')
+                  for tail in tails]
+        for p in shapes:
+            for method in ('GET', 'HEAD'):
+                code, head, body = hit(p, method=method)
+                if code == 200:
+                    bad.append(
+                        f'{method} {p} answered 200 (Content-Length '
+                        f'{head.get("Content-Length")}) to a signed-in '
+                        f'member — the static allow-list matched a reading '
+                        f'of the path that is not the one the server opens, '
+                        f'so every file beside the page is readable by the '
+                        f'lowest account this dashboard issues')
+        # A bare allow-listed directory is a listing of every crop in the
+        # pool, which nothing on any page asks for.
+        for d in dash.STATIC_DIRS:
+            code, head, body = hit(d)
+            if code == 200:
+                bad.append(f'GET {d} answered 200 with {len(body)} bytes — '
+                           f'the allow-list let a directory through and the '
+                           f'base class answered with an index of it')
+        # ...and the allow-list still allows what the pages actually fetch,
+        # or "deny everything" would pass every check above.
+        code, head, body = hit(dash.STATIC_DIRS[0] + 'a.jpg')
+        if code != 200 or not body:
+            bad.append(f'{dash.STATIC_DIRS[0]}a.jpg answered {code} to a '
+                       f'signed-in member — the allow-list closed the route '
+                       f'the review grid loads every crop through')
+        code, head, body = hit(dash.STATIC_DIRS[0] + './a.jpg')
+        if code != 200:
+            bad.append(f'{dash.STATIC_DIRS[0]}./a.jpg answered {code} — a '
+                       f'./ that resolves inside the allow-listed directory '
+                       f'is not an escape from it')
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return bad
+
+
+def gate_source_checks(src):
+    """The gate runs BEFORE the routing, in every verb, and stays wired.
+
+    Read out of the source because it is an ordering, and an ordering is
+    invisible from outside until the route that got past it exists. The rule
+    is that nothing may look at self.path before self._gate() has had it:
+    gating the routes we recognise, after we have recognised them, is exactly
+    how the page added next month ships unprotected.
+    """
+    bad = []
+    for verb in ('do_GET', 'do_POST', 'do_HEAD'):
+        m = re.search(r'\n    def %s\(self\):\n(.*?)(?=\n    def )'
+                      % verb, src, re.S)
+        if not m:
+            bad.append(f'BoardHandler.{verb} is gone — every verb has to be '
+                       f'gated, and the one that is missing is the one the '
+                       f'base class answers out of the document root '
+                       f'unchecked')
+            continue
+        body = m.group(1)
+        if 'self._gate()' not in body:
+            bad.append(f'BoardHandler.{verb} never calls self._gate(), so '
+                       f'everything it serves is served to anybody')
+            continue
+        before = body.split('self._gate()', 1)[0]
+        # comments and the docstring say nothing to the router
+        code = '\n'.join(ln for ln in before.split('\n')
+                         if not ln.strip().startswith(('#', '"""', "'''")))
+        for token in ('self.path', 'send_response', 'send_error', 'self._json',
+                      'self._html'):
+            if token in code:
+                bad.append(f'BoardHandler.{verb} touches {token} BEFORE '
+                           f'self._gate() — the gate is being asked about '
+                           f'requests the router has already begun to '
+                           f'answer, which is how a new route ships '
+                           f'unprotected')
+                break
+    m = re.search(r'AUTH_FREE = frozenset\(\{([^}]*)\}\)', src)
+    if not m:
+        bad.append('BoardHandler.AUTH_FREE is gone — the one path an '
+                   'unauthenticated caller may reach is no longer written '
+                   'down anywhere a reader can check it')
+    else:
+        allowed = set(re.findall(r"'([^']+)'", m.group(1)))
+        if allowed != {'/favicon.ico'}:
+            bad.append(f'AUTH_FREE is {sorted(allowed)} — the public surface '
+                       f'is exactly the tab icon plus what auth.py owns, and '
+                       f'anything else on it is served before anybody has '
+                       f'proved who they are')
+    watched = re.search(r'for _m in \(([^)]*)\)', src)
+    names = watched.group(1) if watched else ''
+    for mod in ('auth.py', 'accounts.py'):
+        if mod not in names:
+            bad.append(f"{mod} is not in serve()'s watch list, so an edit to "
+                       f'the lock sits invisible behind a healthy-looking '
+                       f'server until somebody restarts it by hand')
+    serve = re.search(r'\ndef serve\(args\):\n(.*?)(?=\ndef )', src, re.S)
+    if serve:
+        # comments stripped first: this file explains bootstrap() in prose
+        # right above the call, and a check that greps for the word passed a
+        # serve() from which the call itself had been deleted.
+        code = '\n'.join(ln for ln in serve.group(1).split('\n')
+                         if not ln.lstrip().startswith('#'))
+        if not re.search(r'\.bootstrap\(', code):
+            bad.append("serve() never calls the gate's bootstrap(), so .env "
+                       'is never read and DASHBOARD_PASSWORD never becomes '
+                       'an account — the first request pays for it or nobody '
+                       'does')
+    if not re.search(r'def log_message\(self, \*a\):\s*\n\s*pass', src):
+        bad.append('BoardHandler.log_message is no longer a no-op, so every '
+                   'request line is written down — including /signup?t=, '
+                   'which carries an invite token in its query string')
+    return bad
+
+
+def gate_live_checks():
+    """Drive the real handler over a socket, signed out and signed in.
+
+    A THROWAWAY store in a temp directory, never data/dashboard/accounts.db:
+    this must not create an account on the machine it runs on, and it must
+    not care whether one already exists.
+
+    ONE keep-alive connection for the whole run, the way a browser does it.
+    A fresh connection per request lands each one on a new server thread, and
+    a duckdb read that crosses threads takes this process down with a
+    segfault -- a defect that predates the gate and has nothing to do with
+    what is being measured here.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+    import dashboard as dash  # noqa: E402
+    try:
+        import accounts
+        import auth
+    except Exception as e:
+        print(f'SKIP: the gate modules would not import ({e}) — nobody '
+              f'checked that a signed-out caller is served nothing')
+        return []
+
+    import functools
+    import http.client
+    import urllib.parse
+    from http.server import ThreadingHTTPServer
+
+    bad = []
+    tmp = tempfile.mkdtemp(prefix='gate-')
+    db = os.path.join(tmp, 'accounts.db')
+    key = os.path.join(tmp, 'session.key')
+    pw = 'a-password-long-enough'
+    boot = auth.bootstrap(db_path=db, key_path=key, env={
+        'DASHBOARD_USER': 'admin', 'DASHBOARD_PASSWORD': pw})
+    if not boot.get('ok'):
+        print(f'SKIP: the throwaway store would not bootstrap '
+              f'({boot.get("detail")}) — nobody checked the gate over HTTP')
+        return []
+    srv = ThreadingHTTPServer(
+        ('127.0.0.1', 0),
+        functools.partial(dash.BoardHandler, directory=dash.OUT))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    conn = http.client.HTTPConnection('127.0.0.1', srv.server_port,
+                                      timeout=120)
+
+    def hit(path, cookie=None, method='GET', body=None, ctype=None):
+        head = {}
+        if cookie:
+            head['Cookie'] = cookie
+        if ctype:
+            head['Content-Type'] = ctype
+        conn.request(method, path, body=body, headers=head)
+        r = conn.getresponse()
+        return r.status, dict(r.getheaders()), r.read()
+
+    try:
+        # ── signed out: nothing, in every shape ─────────────────────────
+        for path, want, what in GATE_DENIED:
+            code, head, body = hit(path)
+            if code == 200:
+                bad.append(f'{path} answered 200 with {len(body)} bytes to a '
+                           f'caller with no session — {what} is being served '
+                           f'to anybody who knows the address')
+                continue
+            if want == 'redirect':
+                if code not in (301, 302, 303) or not head.get(
+                        'Location', '').startswith('/login'):
+                    bad.append(f'{path} answered {code} '
+                               f'({head.get("Location", "no Location")}) to a '
+                               f'signed-out caller, not a redirect to the '
+                               f'login form')
+                elif body:
+                    bad.append(f'the gate redirect for {path} carries a '
+                               f'{len(body)} byte body — a bounce to the '
+                               f'login form has nothing to say about {what}')
+            elif code != 401:
+                bad.append(f'{path} answered {code} to a signed-out caller '
+                           f'and should have answered 401: {what} is fetched '
+                           f'by script or by <img>, and neither follows a '
+                           f'redirect into a login form usefully')
+        # HEAD is a verb too, and the base class answers it out of the
+        # document root without passing through this class at all.
+        for path in ('/', '/index.html', '/history.duckdb', '/echarts.min.js'):
+            code, head, body = hit(path, method='HEAD')
+            if code == 200:
+                bad.append(f'HEAD {path} answered 200 (Content-Length '
+                           f'{head.get("Content-Length")}) to a signed-out '
+                           f'caller — HEAD names the file and gives its size')
+        # A POST is not a way round it either.
+        for path in ('/api/audit/verdict', '/api/board', '/api/refresh'):
+            code, head, body = hit(path, method='POST', body='{}',
+                                   ctype='application/json')
+            if code != 401:
+                bad.append(f'POST {path} answered {code} to a signed-out '
+                           f'caller, not 401')
+        # The answer for a crop that exists and a name somebody made up has
+        # to be the same bytes. Anything else is a lookup service for what
+        # this dashboard holds, open to whoever asks.
+        a = hit('/audit/crop/gate/1785663300000_1606751523958968_073.jpg')
+        b = hit('/audit/crop/gate/there-is-no-such-crop.jpg')
+        if (a[0], a[2]) != (b[0], b[2]):
+            bad.append(f'a real-looking crop name answers {a[0]}/{len(a[2])} '
+                       f'bytes and an invented one {b[0]}/{len(b[2])} — the '
+                       f'refusal tells a stranger which crops exist')
+        # The tab icon is the one exception, and it is a constant in the
+        # source rather than anything read off the disk.
+        code, head, body = hit('/favicon.ico')
+        if code != 200 or body != dash.FAVICON_SVG:
+            bad.append(f'/favicon.ico answered {code} with {len(body)} bytes '
+                       f'to a signed-out caller — it is on AUTH_FREE so that '
+                       f'the login page has a tab icon, and it must serve '
+                       f'exactly FAVICON_SVG')
+
+        # ── signed in: the same routes answer ───────────────────────────
+        code, head, body = hit(
+            '/login?next=/audit/review', method='POST',
+            body='username=admin&password=' + urllib.parse.quote(pw),
+            ctype='application/x-www-form-urlencoded')
+        cookie = head.get('Set-Cookie', '').split(';', 1)[0]
+        if code not in (302, 303) or auth.COOKIE not in cookie:
+            bad.append(f'signing in with the .env credential answered {code} '
+                       f'and set no session cookie — the gate cannot be let '
+                       f'through by the account it just created')
+            return bad
+        for path in ('/', '/audit/review', '/api/sys', '/echarts.min.js',
+                     '/favicon.ico'):
+            code, head, body = hit(path, cookie=cookie)
+            if code != 200 or not body:
+                bad.append(f'{path} answered {code} with {len(body)} bytes to '
+                           f'a signed-in admin — the cookie does not open '
+                           f'what the gate closed')
+        # The header says who is reading, and offers an admin the way to the
+        # accounts page. It is spliced per request: built into the page it
+        # would name whoever rebuilt it last.
+        code, head, page = hit('/', cookie=cookie)
+        page = page.decode('utf-8', 'replace')
+        # A POST form, never an <a href>. Signing out ends the session on
+        # every device, and a state change a GET can make is one that any
+        # page the reader happens to be on can make for them: an
+        # <img src="/logout"> would sign an annotator out of their phone and
+        # their laptop from across the internet, on a loop.
+        if 'action="%s"' % (auth.LOGOUT_PATH,) not in page:
+            bad.append('the front page carries no sign-out control, so a '
+                       'dashboard left open on a phone stays signed in with '
+                       'nothing on screen to end it')
+        elif ('name="%s"' % (auth.CSRF_FIELD,)) not in page:
+            bad.append('the front page\'s sign-out form carries no '
+                       f'{auth.CSRF_FIELD} field, so submitting it is '
+                       f'refused and the only way out of the dashboard is to '
+                       f'wait seven days')
+        if 'href="%s"' % (auth.LOGOUT_PATH,) in page:
+            bad.append(f'the front page links to {auth.LOGOUT_PATH} with an '
+                       f'<a href>, and signing out now ends the session on '
+                       f'every device — as a GET, any page the reader visits '
+                       f'can fire it for them with one <img src>')
+        if 'href="/admin"' not in page:
+            bad.append('the front page offers an admin no link to /admin — '
+                       'the accounts page exists and nothing on the '
+                       'dashboard says so')
+        if 'admin</span>' not in page and '>admin<' not in page:
+            bad.append('the front page does not name the account reading it, '
+                       'so nobody can tell which of two accounts a browser '
+                       'is holding')
+
+        # ── a member is not an admin ────────────────────────────────────
+        member = accounts.create_user('member-guard', 'a-password-long-enough',
+                                      role='member', path=db)
+        mval, _ = auth.mint(member, key_path=key)
+        mcookie = auth.COOKIE + '=' + mval
+        code, head, body = hit('/admin', cookie=mcookie)
+        if code != 404 or len(body) > 600:
+            bad.append(f'/admin answered {code} ({len(body)} bytes) to a '
+                       f'member — it has to be the same empty 404 an address '
+                       f'that does not exist gets, or a member learns the '
+                       f'page is there and worth attacking')
+        code, head, mpage = hit('/', cookie=mcookie)
+        mpage = mpage.decode('utf-8', 'replace')
+        if code != 200:
+            bad.append(f'the front page answered {code} to a member — a '
+                       f'member reviews crops like anybody else')
+        elif 'href="/admin"' in mpage:
+            bad.append('the front page offers a MEMBER a link to /admin, '
+                       'which answers them with a 404 — the link undoes the '
+                       'silence the 404 exists for')
+        # One UPDATE ends every session for an account. It is the whole
+        # revocation story, so it is checked over the wire and not in unit.
+        accounts.bump_session_epoch('member-guard', path=db)
+        code, head, body = hit('/', cookie=mcookie)
+        if code == 200:
+            bad.append('a session survived bump_session_epoch() — signing an '
+                       'account out everywhere does nothing, and a stolen '
+                       'cookie cannot be taken back')
+
+        # ── the gate itself will not load ───────────────────────────────
+        # Fail closed on data, fail open on uptime: no module, no data, but
+        # also no traceback and no exit. The dashboard re-execs itself
+        # unattended, so this state has to be survivable and legible.
+        keep = dict(dash._AUTH)
+        dash._AUTH.update({'mod': None, 'tried': True,
+                           'why': 'ImportError: no auth for you'})
+        # The handler says so once on stderr, which is right of it and wrong
+        # here: an alarming line above a run of ok lines reads as a fault in
+        # the run rather than as the state this block is asking for.
+        import contextlib
+        import io
+        try:
+            stack = contextlib.redirect_stderr(io.StringIO())
+            stack.__enter__()
+            code, head, body = hit('/')
+            if code != 503 or b'<h1' in body or len(body) > 2000:
+                bad.append(f'with the gate module missing, / answered {code} '
+                           f'with {len(body)} bytes — a gate that cannot run '
+                           f'must serve the explanation and nothing else')
+            code, head, body = hit('/api/board')
+            if code != 503:
+                bad.append(f'with the gate module missing, /api/board '
+                           f'answered {code} — a gate that cannot run must '
+                           f'not answer with data')
+            code, head, body = hit('/audit/crop/gate/x.jpg')
+            if code == 200:
+                bad.append('with the gate module missing, an audit crop was '
+                           'served — the failure opened the door instead of '
+                           'closing it')
+        finally:
+            stack.__exit__(None, None, None)
+            dash._AUTH.clear()
+            dash._AUTH.update(keep)
+    finally:
+        conn.close()
+        srv.shutdown()
+        srv.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return bad
+
+
+def check_login_gate():
+    """Nothing is served to a caller with no session. Anything else is a leak.
+
+    First of all the checks in this file, and deliberately: a CSS collision
+    is a page that looks wrong, and this is the harvest, the review queue and
+    every frame in the store being handed to whoever finds the address.
+    """
+    try:
+        src = open(os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py'),
+                   encoding='utf-8').read()
+    except OSError as e:
+        print(f'FAIL could not read dashboard.py: {e}')
+        return 1
+    bad = gate_source_checks(src)
+    bad += gate_live_checks()
+    bad += gate_traversal_checks()
+    # The strip is spliced between two sentinels on the way out, so a build
+    # that lost them renders no account, no sign-out and no way to the
+    # accounts page -- and looks exactly like a build that has them.
+    try:
+        page = open(INDEX, encoding='utf-8').read()
+        if '<!--ACCT-->' not in page or '<!--/ACCT-->' not in page:
+            bad.append('the built page carries no <!--ACCT--> sentinels, so '
+                       'the header cannot be told who is reading it and the '
+                       'sign-out link never appears')
+    except OSError as e:
+        bad.append(f'could not read the built page: {e}')
+    if bad:
+        for b in bad:
+            print('FAIL ' + b)
+        return 1
+    print('ok   the gate runs before every route in every verb: signed out '
+          'is a redirect for a page, a 401 for an API or an image and the '
+          'same bytes for a crop that exists as for one that does not; '
+          'signed in opens all of it; a member gets the empty 404 at /admin '
+          'and cannot walk out of the static allow-list to the accounts '
+          'database or the signing key; a missing gate module serves an '
+          'explanation, not the data')
+    return 0
+
+
 def main():
     if shutil.which('node') is None:
         print('SKIP: node not on PATH — client render test not run')
@@ -3043,6 +3567,14 @@ def main():
             f'  {INDEX}\n'
             'so this run would grade the previous build. Rebuild first:\n'
             '  python tools/dashboard/dashboard.py build --no-refresh')
+
+    # Before every other check in this file. A CSS collision is a page that
+    # looks wrong; this one is the harvest, the review queue and every frame
+    # in the store being handed to whoever finds the address, and a reader
+    # who has to scroll past forty ok lines to find that out is a reader who
+    # finds it out later than they should.
+    if check_login_gate():
+        return 1
 
     stray = css_collisions(INDEX)
     if stray:

@@ -13,8 +13,13 @@ local history DB so the trend charts grow over time.
     # serve + auto-refresh every hour:
     python tools/dashboard/dashboard.py serve --host <bind-addr> --port 8050
 
-There is no authentication. Bind it to a private interface (a Tailscale or LAN
-address), never to a public one.
+Everything it serves is behind a login (tools/dashboard/auth.py over the
+accounts store in tools/dashboard/accounts.py): every page, every /api answer,
+every image and the static fallback. The first admin comes from
+DASHBOARD_PASSWORD in the repo-root .env -- see .env.example -- and everybody
+else signs up through an invite an admin issues at /admin. Bind it to a
+private interface (a Tailscale or LAN address) all the same: the login is a
+gate, not a wire, and this server speaks plain HTTP.
 
 Read-only on the data. Writes only data/dashboard/ (index.html + history.duckdb)
 and refreshes the catalog.
@@ -30,9 +35,12 @@ import argparse
 import atexit
 import collections
 import functools
+import getpass
 import glob
+import html
 import json
 import os
+import posixpath
 import random
 import re
 import shutil
@@ -42,7 +50,7 @@ import signal
 import threading
 import time
 from datetime import datetime
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import duckdb
@@ -2385,6 +2393,33 @@ function leashNote(msg){
   clearTimeout(toastT);
   toastT=setTimeout(function(){lastUndo=null;hideToast()},4000);
 }
+function took(r){
+  /* Did the server actually take it? The body, or null with the reader told.
+
+     THE GUARD USED TO BE `j.ok===false`, AND THAT IS NOT THE SAME QUESTION.
+     A body with no `ok` key at all answers false to it, so the success
+     branch ran: the counters moved, the toast said "Flagged as not a dog"
+     and the ledger never gained a line. Before the login gate no such body
+     could reach here -- every answer /api/detect/flag has ever produced
+     carries `ok` -- but the gate refuses with {"error":"sign in"}, on every
+     request, from the moment a session ends. Fifty crops can go that way
+     with the strip counting up. The leash path above has always asked
+     `!j.ok`, which is the question; this is the rest of the page asking it.
+
+     And it says so, because a 401 is the one refusal a reviewer can act on:
+     nothing else in this client reads r.status, so an ended session looked
+     exactly like a saved crop. */
+  var st=r.status;
+  return r.json().then(function(j){return j},function(){return null})
+   .then(function(j){
+      if(j&&j.ok)return j;
+      leashNote(st===401
+        ?'Not recorded \u2014 that session has ended. Reload the page to '+
+         'sign in again.'
+        :('Not recorded'+((j&&j.error)?(': '+j.error):'.')));
+      return null;
+   });
+}
 function paintLeash(name){
   var card=document.querySelector('.card[data-name="'+name.replace(/"/g,'\\"')+'"]');
   if(!card)return;
@@ -3009,9 +3044,9 @@ function flag(i,viaKey,label){
     return fetch('/api/detect/flag',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({name:c.name,label:label,undo:undo})})
-     .then(function(r){return r.json()}).then(function(j){
+     .then(took).then(function(j){
         delete busy[c.name];
-        if(!j||j.ok===false)return;
+        if(!j)return;
         c.label=undo?null:label;
         var el=cardAt(i);
         if(el){
@@ -3046,9 +3081,9 @@ function flag(i,viaKey,label){
   return fetch('/api/detect/flag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name:c.name,label:label})})
-   .then(function(r){return r.json()}).then(function(j){
+   .then(took).then(function(j){
       delete busy[c.name];
-      if(!j||j.ok===false){if(card)card.classList.remove('go');return}
+      if(!j){if(card)card.classList.remove('go');return}
       session++;
       todoN=Math.max(0,todoN-1);
       if(label==='true_positive')posN++;else flaggedN++;
@@ -3115,8 +3150,8 @@ function undo(){
   return fetch('/api/detect/flag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name:u.crop.name,label:u.label,undo:true})})
-   .then(function(r){return r.json()}).then(function(j){
-      if(!j||j.ok===false)return;
+   .then(took).then(function(j){
+      if(!j)return;
       var g=$('grid');
       /* give the backfill back FIRST, then re-insert -- doing it in this
          order there is no edge case where the popped tile is the one we are
@@ -3620,14 +3655,23 @@ $('unkeep').onclick=function(){
       ' back into the review queue?\n\nThese are the ones you already judged '+
       'to be dogs. You will be shown them again.\n\nYour '+n(flaggedN)+
       ' flagged false positives are NOT affected.'))return;
-  var b=$('unkeep');b.disabled=true;b.textContent='Restoring\u2026';
+  var b=$('unkeep'),st=0;b.disabled=true;b.textContent='Restoring\u2026';
   fetch('/api/review/seen',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({reset:true})})
-   .then(function(r){return r.json()}).then(function(j){
+   /* Its own alert rather than took()'s notice: this one was reached through
+      a confirm() and zeroing seenN on a refusal tells the reader the queue
+      grew by nine thousand crops that are still hidden. Same defect though
+      -- `j.ok===false` let the gate's {"error":"sign in"} through as a
+      success -- and the same 401 worth naming. */
+   .then(function(r){st=r.status;return r.json()}).then(function(j){
       b.disabled=false;b.innerHTML='\u21ba Restore kept';
-      if(!j||j.ok===false){window.alert('Could not restore: '+
-        ((j&&j.error)||'unknown error'));return}
+      /* the status is read BEFORE the body's own words: a 401 carries the
+         gate's error, not this endpoint's, and "Could not restore: sign in"
+         is not a sentence that tells anybody what to do */
+      if(!j||!j.ok){window.alert('Could not restore: '+
+        (st===401?'that session has ended \u2014 reload the page to sign in again'
+                 :((j&&j.error)||'unknown error')));return}
       seenN=0;page=0;sel=-1;load();loadBal();
    }).catch(function(){b.disabled=false;b.innerHTML='\u21ba Restore kept';});
 };
@@ -9401,6 +9445,34 @@ def _llm():
     return _LLM['mod']
 
 
+_AUTH = {'mod': None, 'tried': False, 'why': ''}
+
+
+def _auth():
+    """The login gate, imported once and held. None when it will not load.
+
+    Lazy like the three above -- it pulls in accounts.py and through it
+    sqlite3 and scrypt -- but the resemblance stops at the import. A missing
+    audit module is a page saying so; a missing GATE is the whole dashboard
+    with no lock on it, so every caller of this treats None as "serve
+    nothing", never as "carry on". _gate() is the only caller for that
+    reason, and it fails closed on the spot.
+
+    The reason it fails is kept, because "the gate would not load" with no
+    second half is a message that sends whoever reads it to the wrong file.
+    """
+    if not _AUTH['tried']:
+        _AUTH['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import auth as _g
+            _AUTH['mod'] = _g
+        except Exception as e:
+            _AUTH['mod'] = None
+            _AUTH['why'] = f'{type(e).__name__}: {e}'
+    return _AUTH['mod']
+
+
 def gate_planning():
     """True while a planner is building a work list."""
     return bool(_script_pids('gate_store.py', 'plan'))
@@ -9546,9 +9618,60 @@ STATIC_FILES = frozenset({'/', '/index.html', '/echarts.min.js',
 STATIC_DIRS = ('/recent_crops/', '/review_set/')
 
 
+def _static_name(path):
+    """The name the static fallback will actually OPEN, for a request path.
+
+    SimpleHTTPRequestHandler.translate_path cuts the query off, cuts the
+    fragment off, unquotes what is left and runs posixpath.normpath over that
+    before opening anything -- so the string a client typed and the file it
+    lands on are two different strings. This is those four steps in that
+    order, and nothing else, so the allow-list below can be applied to the
+    name rather than to the request.
+
+    THE ORDER IS THE WHOLE POINT, and the fragment is the step that is easy
+    to leave out. Drop it and /recent_crops/../accounts.db#/x/../../
+    recent_crops/y normalises, in full, to a path under an allow-listed
+    directory -- while the server, having cut at the '#' first, opens
+    OUT/accounts.db. Any step this does not copy is a pair of strings that
+    disagree, and every such pair is the same hole again.
+    """
+    path = path.split('?', 1)[0].split('#', 1)[0]
+    try:
+        # errors='surrogatepass' is translate_path's own spelling. A path
+        # this cannot decode is a path we must not guess at, so the second
+        # form matches its fallback rather than inventing a third answer.
+        path = unquote(path, errors='surrogatepass')
+    except UnicodeDecodeError:
+        path = unquote(path)
+    return posixpath.normpath(path)
+
+
 def _static_allowed(path):
-    return path in STATIC_FILES or any(
-        path.startswith(d) for d in STATIC_DIRS)
+    """May the static fallback serve this request path out of OUT?
+
+    THE ALLOW-LIST IS APPLIED TO THE RESOLVED NAME, NOT THE TYPED ONE, and
+    that is the whole point of this function. Matching the raw path is how
+    /recent_crops/../accounts.db gets served: it starts with an allow-listed
+    prefix, so a startswith() says yes, and then translate_path collapses the
+    .. and hands back OUT/accounts.db. Every file in OUT is a sibling of the
+    page -- the accounts database with every scrypt hash in it, session.key,
+    the -wal carrying recent rows in the clear, serve.log with client
+    addresses -- and a signed-in MEMBER, the lowest-trust account this server
+    issues, could read all of them by asking for a name the allow-list exists
+    to keep unreachable. With session.key in hand a member mints a cookie for
+    the admin row and the invite page opens. %2e%2e worked too, because the
+    unquote runs before the normpath.
+
+    Normalising HERE rather than at the two call sites is deliberate: a check
+    that only holds when the caller remembers to clean the path first is a
+    check that fails the day a third call site is written.
+    """
+    p = _static_name(path)
+    if '..' in p.split('/'):
+        # normpath cannot leave a .. in an absolute path, so this is a path
+        # that did not start at the root. Nothing legitimate asks that way.
+        return False
+    return p in STATIC_FILES or any(p.startswith(d) for d in STATIC_DIRS)
 
 
 class BoardHandler(SimpleHTTPRequestHandler):
@@ -9568,6 +9691,33 @@ class BoardHandler(SimpleHTTPRequestHandler):
     # divs, so "up to the next </div>" would cut it in the wrong place.
     _TRK_OPEN = b'<!--TRK-->'
     _TRK_CLOSE = b'<!--/TRK-->'
+    # The header's account strip, spliced the same way and for a related
+    # reason: one built page is read by several people and it has to say
+    # which of them this is.
+    _ACCT_OPEN = b'<!--ACCT-->'
+    _ACCT_CLOSE = b'<!--/ACCT-->'
+
+    # The ONLY address an unauthenticated caller may reach that auth.py does
+    # not own itself (it owns /login, /logout and /signup). A browser asks
+    # for /favicon.ico before anybody has typed a password -- it is the tab
+    # icon of the login page -- and bouncing that to /login answers an image
+    # request with an HTML document on every visit. What it serves is a
+    # constant in this file: an exact path, GET and HEAD only, no query, no
+    # argument, nothing read from the data. Everything else is denied by
+    # default, including every route added after this line was written.
+    AUTH_FREE = frozenset({'/favicon.ico'})
+
+    # Routes whose answer is a picture. A signed-out one is told so with a
+    # 401 rather than the redirect a document gets: an <img> does not follow
+    # a redirect into a login form in any useful way -- it renders the HTML
+    # as a broken image and the reader is left wondering which crop is
+    # missing. Every one of them answers with the same short JSON, so a crop
+    # that exists and a name somebody invented are byte for byte the same
+    # reply. Two collections because two shapes: /hq?name=... is a path with
+    # a query, /audit/crop/<key>.jpg is a path with the key IN it.
+    AUTH_IMAGE_PATHS = frozenset({'/hq', '/orig', '/flagged',
+                                  '/datasets/thumb', '/datasets/image'})
+    AUTH_IMAGE_DIRS = ('/audit/crop/', '/audit/frame/') + STATIC_DIRS
 
     def end_headers(self):
         try:
@@ -9576,6 +9726,115 @@ class BoardHandler(SimpleHTTPRequestHandler):
         except Exception:
             pass          # a header is never worth failing a response over
         SimpleHTTPRequestHandler.end_headers(self)
+
+    def _gate(self):
+        """Has the login gate already answered this request?
+
+        THE choke point. Called first in do_GET, do_HEAD and do_POST, before
+        a single path is matched, because gating the routes we recognise
+        AFTER dispatching them is how the page added next month ships
+        unprotected -- the failure mode of a deny-list is the route nobody
+        remembered to add to it. Everything is behind this: the pages, the
+        whole /api surface, /hq, /orig, /flagged, the audit crops and frames,
+        the dataset thumbnails and the static fallback.
+
+        True  -- the gate wrote the entire response; the caller returns now.
+        False -- carry on. Either the request is signed in, and self.session
+                 says by whom, or the path is on AUTH_FREE above.
+        """
+        path = self.path.split('?', 1)[0]
+        self.session = None
+        if path in self.AUTH_FREE and self.command in ('GET', 'HEAD'):
+            return False
+        g = _auth()
+        if g is None:
+            self._gate_broken(path)
+            return True
+        try:
+            req = g.Request.from_handler(self)
+            reply = g.serve_request(req)
+        except Exception as e:
+            # A gate that raises must never become a gate that is open. This
+            # is for what auth.py's own belt and braces cannot reach -- the
+            # drive holding data/dashboard unmounting between two requests,
+            # a key file that stopped being readable -- and it answers the
+            # same way a missing module does, because from out here the two
+            # are the same event: nobody can be identified, so nobody sees
+            # anything.
+            self._gate_broken(path, e)
+            return True
+        if reply is None:
+            self.session = req.session
+            return False
+        if reply.status == 404 and not reply.body:
+            # /admin to a member. send_error so it is byte-identical to every
+            # other dead address -- a 404 that looks special is a 404 that
+            # says the page is there and worth attacking.
+            self.send_error(404)
+        elif (reply.header('Location').startswith(g.LOGIN_PATH)
+                and (path in self.AUTH_IMAGE_PATHS
+                     or path.startswith(self.AUTH_IMAGE_DIRS))):
+            g.json_reply({'error': 'sign in'}, status=401).send(self)
+        else:
+            reply.send(self)
+        return True
+
+    def _gate_broken(self, path, exc=None):
+        """Serve the explanation, and only the explanation.
+
+        The gate could not run, so nothing here can tell one caller from
+        another and NOTHING is served but this: no page, no image, no /api
+        answer. 503 rather than 500 -- the dashboard is not broken, it is
+        unable to check who you are, and that is a state that ends when
+        somebody fixes the file it names.
+
+        The page names the FILE and the exception TYPE; the rest goes to
+        stderr once, for the journal. A SyntaxError's text carries the path
+        it was reading, and handing an absolute path to whoever knocked
+        without signing in is the sort of small gift this gate exists to stop
+        giving.
+        """
+        if not _AUTH.get('told'):
+            _AUTH['told'] = True
+            if exc is None:
+                # The import failed, which happened before any request was
+                # read: this message can only be about a file.
+                print(f'the login gate would not run ({_AUTH["why"]}); '
+                      f'serving nothing but the explanation', file=sys.stderr)
+            else:
+                # A request-time failure gets its TYPE and the route, never
+                # the exception's own words and never the query string. An
+                # exception raised while reading a request quotes what it was
+                # reading -- int('abc') puts 'abc' in its message -- and the
+                # request being read on /signup carries an invite token.
+                print(f'the login gate raised {type(exc).__name__} on {path}; '
+                      f'serving nothing but the explanation', file=sys.stderr)
+        kind = (type(exc).__name__ if exc is not None
+                else (_AUTH['why'].split(':', 1)[0] if _AUTH['why'] else ''))
+        # An exception class name is a Python identifier and this page has no
+        # escaper of its own -- keeping the identifier characters and dropping
+        # the rest is shorter than importing one, and leaves nothing that
+        # could close a tag if the name ever came from somewhere unexpected.
+        kind = ''.join(c for c in kind if c.isalnum() or c == '_')
+        if path.startswith('/api/'):
+            self._json({'error': 'the login gate would not run'}, 503)
+            return
+        body = ('<!doctype html><meta charset=utf-8><title>Dashboard</title>'
+                '<body style="background:#13151a;color:#98a2ad;'
+                'font:14px system-ui;padding:40px;line-height:1.6">'
+                'The login gate would not run'
+                + (f' ({kind})' if kind else '')
+                + ', so nothing is being served.<br>'
+                'Check <code>tools/dashboard/auth.py</code> and '
+                '<code>tools/dashboard/accounts.py</code>, then restart. '
+                'The reason is in the server log.</body>').encode('utf-8')
+        self.send_response(503)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -9638,7 +9897,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                      f'<code>python tools/detect/fn_audit.py build '
                      f'--stage {stage}</code></body>').encode('utf-8'))
                 return True
-            self._html(a.page_html(stage).encode('utf-8'))
+            self._html(a.page_html(stage, account=account_strip(
+                getattr(self, 'session', None))).encode('utf-8'))
             return True
         if path.startswith('/audit/crop/') and path.endswith('.jpg'):
             stage = self._audit_stage()
@@ -9744,7 +10004,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                            b'<code>tools/detect/dataset_index.py</code>.'
                            b'</body>')
                 return True
-            self._html(d.page_html().encode('utf-8'))
+            self._html(d.page_html(account=account_strip(
+                getattr(self, 'session', None))).encode('utf-8'))
             return True
         if d is None:
             return False       # the page above already said which file is out
@@ -9915,6 +10176,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        # The gate, before anything looks at the path. See _gate().
+        if self._gate():
+            return
         # split('?') so cache-busting query strings still match (§7.2 —
         # /api/board's == match 404s on ?t=1 and that bit us before). The two
         # routes the comment is ABOUT were the two it was never applied to.
@@ -10220,8 +10484,28 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def _splice(self, page, open_tag, close_tag, make):
+        """Replace what sits between two sentinels, or leave the page alone.
+
+        Byte surgery rather than parsing: the training section nests divs, so
+        "up to the next </div>" cuts it in the wrong place. Both sections
+        return the page untouched on anything unexpected -- a build made
+        before the sentinels existed, a render that raises -- because a page
+        with a stale section is a worse page and a page with none is a
+        broken one.
+        """
+        i = page.find(open_tag)
+        j = page.find(close_tag, i + 1) if i >= 0 else -1
+        if i < 0 or j < 0:
+            return page
+        try:
+            fresh = make().encode('utf-8')
+        except Exception:
+            return page
+        return page[:i + len(open_tag)] + fresh + page[j:]
+
     def _serve_index_fresh(self):
-        """index.html with the training section re-rendered for THIS request.
+        """index.html with the two per-request sections rendered for THIS one.
 
         The page is a build artefact written on an interval, so the one section
         whose entire purpose is to be current was baked stale into it. The
@@ -10231,24 +10515,30 @@ class BoardHandler(SimpleHTTPRequestHandler):
         Splicing here makes the very first paint correct, and correct without
         JavaScript.
 
+        The account strip is here for a related reason and a different one:
+        one build is read by several people, and the header has to say which
+        of them is holding this browser -- and whether to offer them the
+        accounts page at all.
+
         Returns False to fall through to the plain file whenever anything is
-        off: a page built before the sentinels existed, or a render that
-        raises. Serving the page as built is a worse page, not a broken one.
+        off: a page that will not open, or a training section whose sentinels
+        are missing. Serving the page as built is a worse page, not a broken
+        one.
         """
         try:
             with open(os.path.join(OUT, 'index.html'), 'rb') as fh:
                 page = fh.read()
         except OSError:
             return False
-        i = page.find(self._TRK_OPEN)
-        j = page.find(self._TRK_CLOSE, i + 1) if i >= 0 else -1
-        if i < 0 or j < 0:
+        if self._TRK_OPEN not in page or self._TRK_CLOSE not in page:
             return False
-        try:
-            fresh = render_training().encode('utf-8')
-        except Exception:
-            return False
-        body = page[:i + len(self._TRK_OPEN)] + fresh + page[j:]
+        body = self._splice(page, self._TRK_OPEN, self._TRK_CLOSE,
+                            render_training)
+        if body is page:
+            return False        # the training render raised; serve the file
+        body = self._splice(
+            body, self._ACCT_OPEN, self._ACCT_CLOSE,
+            lambda: render_account(getattr(self, 'session', None)))
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -10256,7 +10546,29 @@ class BoardHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
         return True
 
+    def do_HEAD(self):
+        """HEAD, gated and held to the same allow-list GET is.
+
+        SimpleHTTPRequestHandler brings its own do_HEAD and it answers out of
+        OUT without passing through this class at all -- so before the gate
+        went in, HEAD named every working file in the document root and gave
+        its size: serve.log, history.duckdb, triage.jsonl, and now the
+        accounts database and the session key. An ungated route nobody wrote.
+        """
+        if self._gate():
+            return
+        if not _static_allowed(self.path.split('?', 1)[0]):
+            self.send_error(404)
+            return
+        super().do_HEAD()
+
     def do_POST(self):
+        # The gate, before anything looks at the path. See _gate(). It reads
+        # the request body ONLY for the routes auth.py owns -- the JSON that
+        # /api/audit/verdict and its neighbours read for themselves is still
+        # sitting in rfile when they get here.
+        if self._gate():
+            return
         # The same prefix guard do_GET uses, so both verbs claim /llm the same
         # way and neither can end up owning half of it.
         _p = self.path.split('?', 1)[0]
@@ -10636,6 +10948,40 @@ def serve(args):
         if not os.path.exists(os.path.join(OUT, 'index.html')):
             raise
 
+    # The gate, before the first request rather than on it. bootstrap() reads
+    # the repo-root .env -- the systemd unit passes no Environment= beyond
+    # PYTHONUNBUFFERED, so nothing else puts it in front of this process --
+    # and turns DASHBOARD_PASSWORD into a row in the accounts store. It never
+    # raises: a store that will not open comes back as a sentence, and the
+    # gate serves that sentence instead of the harvest. Doing it lazily on
+    # the first request would work too, and would charge whoever opened the
+    # page a scrypt hash to find out.
+    #
+    # .env is read here and nowhere earlier on purpose. load_env() never
+    # overwrites a variable that is already set, and the only names in this
+    # repo's .env are MLY_KEY* and OPENCODE_API_KEY -- none of them a key
+    # cfg() reads -- so no config a build already made can change underneath
+    # it.
+    _g = _auth()
+    if _g is None:
+        # Not fatal, and deliberately so: this process re-execs itself
+        # whenever a source file changes, with nobody watching, so refusing
+        # to start over a missing module is an outage we caused ourselves.
+        # Every request will be the explanation and none of them will be data.
+        print(f'the login gate would not import ({_AUTH["why"]}); the '
+              f'dashboard will serve nothing but an explanation',
+              file=sys.stderr)
+    else:
+        _boot = _g.bootstrap()
+        if not _boot.get('ok'):
+            # The locked state: login page and this sentence, nothing else.
+            # It names variables and never values (accounts.ensure_admin's
+            # contract), so it is safe in a journal anybody can read.
+            print(f'dashboard locked: {_boot.get("detail", "")}',
+                  file=sys.stderr)
+        elif _boot.get('action') in ('created', 'updated'):
+            print(_boot.get('detail', ''), flush=True)
+
     # A serving process holds the module it imported at startup, and its
     # interval rebuild REGENERATES index.html from that copy. So editing this
     # file and rebuilding by hand looked fine, and then an hour later the page
@@ -10649,7 +10995,12 @@ def serve(args):
     # exists to close.
     _src_dir = os.path.dirname(os.path.abspath(__file__))
     _watched = {os.path.abspath(__file__)}
-    for _m in ('audit.py', 'datasets.py', 'llm_page.py'):
+    # auth.py and accounts.py are on the list for the reason everything else
+    # is -- this process holds the copy it imported -- and for one of their
+    # own: an edit to the gate that sits invisible behind a healthy-looking
+    # server is a lock somebody believes they changed and did not.
+    for _m in ('audit.py', 'datasets.py', 'llm_page.py', 'auth.py',
+               'accounts.py'):
         _q = os.path.join(_src_dir, _m)
         if os.path.exists(_q):
             _watched.add(_q)
@@ -10727,6 +11078,136 @@ def serve(args):
             srv.shutdown()
 
 
+# The account strip's own rules, named so the pages audit.py and datasets.py
+# render can borrow the ONE copy. A second spelling in each of those files
+# is two that drift, and the drift shows up as a sign-out control that is a
+# link on one page and a button on another.
+ACCOUNT_CSS = """.who{display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}
+.whon{font-weight:600;letter-spacing:.01em}
+.whof{display:flex}
+.whox{color:var(--mut);text-decoration:none;border:1px solid var(--bd);
+background:0;font:inherit;font-size:12px;cursor:pointer;
+border-radius:8px;padding:3px 9px;transition:background .12s}
+.whox:hover{background:rgba(130,140,150,.08);color:var(--fg)}
+.whox:focus-visible{outline:2px solid var(--acc);outline-offset:2px}"""
+
+
+def render_account(session):
+    """The header's account strip: who is reading, and the way back out.
+
+    Spliced into the page per request rather than built into it, the way the
+    training section is, and for the same reason: index.html is written on an
+    interval and this is the one thing on it that is not the same for
+    everybody. A build-time render would show whoever rebuilt it last.
+
+    THE ACCOUNTS LINK IS DRAWN FOR ADMINS ONLY. /admin answers a member with
+    the same empty 404 an address that does not exist gets -- deliberately,
+    so a member learns nothing about it -- and a link that 404s for half the
+    people who can see it undoes that in the header of the front page.
+
+    Nothing here is drawn for a signed-out reader, who cannot reach this page
+    at all; the empty string keeps the sentinels in place for the next
+    request.
+    """
+    if not session:
+        return ''
+    # The username is [A-Za-z0-9._-] by accounts.USERNAME_RE, so this escape
+    # has nothing to do today. It is here because the day that rule loosens
+    # is not the day anybody will remember that a name reaches the front page.
+    name = html.escape(str(session.get('username') or ''), quote=True)
+    out = ''
+    if session.get('role') == 'admin':
+        out = ('<a class="revbtn quiet" href="/admin" title="Invite someone, '
+               'or retire an account">'
+               '<span class="rvf">&#9781;</span>'
+               '<span class="rvn"><b>Accounts</b>'
+               '<em>invites &amp; people</em></span></a>')
+    # A FORM, NOT A LINK. Sign-out ends the session on every device -- it
+    # bumps the account's session_epoch, which is the only thing that takes a
+    # cookie already copied off the wire back -- and a state change that a
+    # GET can make is a state change any page the reader visits can make for
+    # them, over and over, with one <img src="/logout">. The token is the
+    # session's own, minted per request the way the rest of this strip is.
+    #
+    # The route and the field name are read from auth.py rather than spelled
+    # again here. A second spelling of either is a form that posts nowhere,
+    # or a token under a name nothing reads, on the day that module renames
+    # one -- and both of those fail as "the button did nothing", which is the
+    # failure this strip exists to prevent.
+    g = _auth()
+    if g is None:
+        return ''      # no gate, so no session and nothing to sign out of
+    csrf = html.escape(str(session.get('csrf') or ''), quote=True)
+    return (out + '<div class="who"><span class="whon" title="signed in">'
+            + name + '</span><form class="whof" method="post" action="'
+            + html.escape(g.LOGOUT_PATH, quote=True)
+            + '"><input type="hidden" name="'
+            + html.escape(g.CSRF_FIELD, quote=True) + '" value="'
+            + csrf + '"><button class="whox" type="submit" '
+            'title="Ends this session on every device">sign out</button>'
+            '</form></div>')
+
+
+def account_strip(session):
+    """The account strip AND the CSS it needs, for a page dashboard.py does not
+    render.
+
+    /audit/review, /audit/gate, /audit/leash and /datasets are built by audit.py
+    and datasets.py, which carry none of the header's stylesheet -- so the strip
+    that render_account() splices into the front page arrived on those pages as
+    unstyled text, and the only way out of a session was to go back to / first.
+    An annotator lives on those pages; the way out belongs where the reader is.
+
+    Returns (css, html). Both are empty for a signed-out reader, who cannot
+    reach those pages anyway.
+    """
+    body = render_account(session)
+    if not body:
+        return '', ''
+    return ACCOUNT_CSS, body
+
+
+def passwd(args):
+    """Print a password hash to paste into .env. Writes nothing, anywhere.
+
+    The dashboard admin's credential can be given two ways: DASHBOARD_PASSWORD,
+    which is the password itself, or DASHBOARD_PASSWORD_HASH, which is this.
+    The hash is the better one on a shared box -- .env is read by every tool
+    in this repo and backed up with the rest of it, and a hash that leaks is
+    an offline attack against scrypt rather than a login.
+
+    It does not touch .env. Editing somebody's .env from a script is how a
+    hundred Mapillary keys get rewritten by a bug in the parser, and the one
+    line this produces is a line they can paste. It does not touch the
+    accounts store either: nothing here needs to exist yet, so this works on
+    a fresh clone before the first serve.
+
+    The password is typed, twice, and never echoed and never read from argv --
+    a command line is in /proc for every account on the machine to read.
+    """
+    g = _auth()
+    if g is None:
+        raise SystemExit(f'the gate would not import ({_AUTH["why"]}); check '
+                         f'tools/dashboard/auth.py and accounts.py')
+    acc = g.accounts          # auth.py's own import of the store module
+    first = getpass.getpass('password: ')
+    again = getpass.getpass('again: ')
+    if first != again:
+        raise SystemExit('the two entries did not match; nothing was printed')
+    try:
+        acc.check_password(first)
+    except acc.AccountError as e:
+        raise SystemExit(f'refused: {e.message}')
+    # The guidance goes to stderr so that stdout is exactly the line to paste
+    # and a redirect of it carries nothing else.
+    print(f'paste this into {os.path.join(REPO, ".env")} '
+          f'(and set {acc.ENV_USER} beside it to change the name from '
+          f'"{acc.DEFAULT_ADMIN}"), then restart the dashboard:',
+          file=sys.stderr)
+    print(f'{acc.ENV_PASSWORD_HASH}={acc.hash_password(first)}')
+    return 0
+
+
 def main():
     """Parse the CLI and dispatch to build / serve."""
     p = argparse.ArgumentParser(
@@ -10767,6 +11248,11 @@ def main():
                    action='store_true',
                    help='Skip the catalog scan on the very first build.')
     s.set_defaults(func=serve)
+
+    w = sub.add_parser('passwd',
+                       help='Hash a typed password for .env (prints one '
+                            'line; writes nothing).')
+    w.set_defaults(func=passwd)
 
     args = p.parse_args()
     try:
@@ -11003,6 +11489,23 @@ body.compact h1{font-size:15px;letter-spacing:-.2px}
 h1 .o{color:var(--acc)}
 .sub{color:var(--dim);font-size:13px;margin-top:3px}
 .upd{display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12.5px}
+/* Who is reading, and the way out. Quieter than everything beside it: an
+   account is context, not an action, and the only reason it is on screen at
+   all is that a dashboard you cannot sign out of is a dashboard that stays
+   signed in on a phone somebody leaves on a table. */
+.who{display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}
+.whon{font-weight:600;letter-spacing:.01em}
+/* The control is a submit button in a form, because signing out ends the
+   session on every device and a GET that does that is one <img src> away
+   from being fired by any page the reader visits. It has to keep looking
+   exactly like the link it replaced, so the form contributes no box of its
+   own and the button inherits the page's type instead of the browser's. */
+.whof{display:flex}
+.whox{color:var(--mut);text-decoration:none;border:1px solid var(--bd);
+background:0;font:inherit;font-size:12px;cursor:pointer;
+border-radius:8px;padding:3px 9px;transition:background .12s}
+.whox:hover{background:rgba(130,140,150,.08);color:var(--fg)}
+.whox:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2.4s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(67,181,129,.5)}70%{box-shadow:0 0 0 7px rgba(67,181,129,0)}100%{box-shadow:0 0 0 0 rgba(67,181,129,0)}}
 /* The one solid-filled control on the page. Everything else is a tint or an
@@ -11985,6 +12488,11 @@ outline-offset:2px}
       <span class="rvn"><b>Datasets</b><em>what runs trained on</em>
       </span></a>
 __LLMNAV__
+    <!-- Filled per request, not at build time: who is reading is the one
+         thing on this page that differs between two people looking at the
+         same build. Empty here and empty in the file on disk; the server
+         splices between the sentinels on the way out. -->
+    <!--ACCT--><!--/ACCT-->
     <!-- The sentence is wrapped because a bare text node has nothing to
          style, and the scrolled header sheds the sentence while keeping the
          button that sits after it and the dot that says the page is live. -->
