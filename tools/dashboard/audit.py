@@ -741,14 +741,18 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
    between the surfaces reads as one product. The gate/leash cross-link that
    used to sit in the header folded into it rather than being a second copy
    of the same navigation. */
-.hdrend{display:flex;align-items:center;gap:12px}
+/* Where to GO, then a hairline, then whose session this is -- the same
+   right-hand cluster, in the same order, on every page with a header. It is
+   one flex item with an auto margin so it lands at the END of the header
+   rather than wherever the tagline beside it happens to stop wrapping. */
+.hdrend{display:flex;align-items:center;gap:12px;margin-left:auto}
 .jtabs{display:inline-flex;gap:2px;padding:2px;margin:0 0 14px;
   border:1px solid var(--bd);border-radius:10px}
 .jtab{font-size:12px;color:var(--dim);text-decoration:none;padding:5px 11px;
   border-radius:8px}
 .jtab:hover{color:var(--tx)}
 .jtab.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
-.back{margin-left:auto;font-size:12px;color:var(--mut);text-decoration:none;
+.back{font-size:12px;color:var(--mut);text-decoration:none;
   border:1px solid var(--bd);border-radius:8px;padding:6px 11px}
 .back:hover{color:var(--tx);border-color:rgba(130,140,150,.3)}
 /* ── the measurement ── */
@@ -1040,7 +1044,7 @@ __ACCTCSS__
 <header>
   <div><h1>__H1__</h1>
     <div class="sub">__SUB__</div></div>
-  <div class="hdrend">__ACCOUNT__<a class="back" href="/">&larr; dashboard</a></div>
+  <div class="hdrend"><a class="back" href="/">&larr; dashboard</a>__ACCOUNT__</div>
 </header>
 __TABS__
 

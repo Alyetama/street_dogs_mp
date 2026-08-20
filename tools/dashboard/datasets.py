@@ -426,7 +426,7 @@ header{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;
   padding:22px 0 16px;border-bottom:1px solid var(--bd);margin-bottom:16px}
 h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .sub{color:var(--dim);font-size:12.5px;margin-top:3px;max-width:62ch}
-.back{font-size:12px;color:var(--mut);text-decoration:none;margin-left:auto;
+.back{font-size:12px;color:var(--mut);text-decoration:none;
   border:1px solid var(--bd);border-radius:8px;padding:6px 11px}
 .back:hover{color:var(--tx);border-color:rgba(130,140,150,.3)}
 .banner{background:rgba(232,166,69,.09);border:1px solid rgba(232,166,69,.3);
@@ -712,7 +712,11 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
      with a name; two lines per run beats an ellipsis three glyphs in */
   .run{grid-template-columns:minmax(0,1fr) auto;row-gap:2px}
 }
-.hdrend{display:flex;align-items:center;gap:12px}
+/* Where to GO, then a hairline, then whose session this is -- the same
+   right-hand cluster, in the same order, on every page with a header. It is
+   one flex item with an auto margin so it lands at the END of the header
+   rather than wherever the tagline beside it happens to stop wrapping. */
+.hdrend{display:flex;align-items:center;gap:12px;margin-left:auto}
 __ACCTCSS__
 </style></head><body><div class="wrap">
 <header>
@@ -720,7 +724,7 @@ __ACCTCSS__
     <div class="sub">Every training set on this machine, found by walking the
       disk rather than from a list &mdash; so one built five minutes ago is
       here. Each carries the runs that trained on it.</div></div>
-  <div class="hdrend">__ACCOUNT__<a class="back" href="/">&larr; dashboard</a></div>
+  <div class="hdrend"><a class="back" href="/">&larr; dashboard</a>__ACCOUNT__</div>
 </header>
 
 <div class="banner" id="banner" hidden></div>

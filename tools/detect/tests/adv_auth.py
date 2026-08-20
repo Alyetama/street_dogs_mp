@@ -1639,6 +1639,99 @@ def reply_checks(bad, fx):
         bad.append('a reply cannot carry two Set-Cookie headers')
 
 
+def identity_checks(bad, fx):
+    """ONE identity strip, written once, on every page that has a header.
+
+    It was written twice: dashboard.py kept a copy and admin_page() wrote a
+    second one inline. They drifted exactly the way a duplicate does -- five
+    pages got a bordered button, the sixth got an underlined link in a
+    different sentence at a different height -- and the copy that mattered was
+    the one carrying the CSRF token and the logout route, both of which live
+    in this module. A second spelling is a form posting nowhere on the day
+    either is renamed, and that fails as "the button did nothing".
+
+    So: the markup comes from here, the pages splice it, and no page writes
+    its own way out.
+    """
+    session = {'username': 'admin', 'csrf': 'TOKEN-ABC', 'role': 'admin'}
+    strip = U.identity_html(session)
+    if not strip:
+        bad.append('identity_html renders nothing for a signed-in session')
+        return
+    for need, why in (
+            ('method="post"', 'sign-out is a GET again, so any page the '
+             'reader opens can end their session for them'),
+            (U.CSRF_FIELD, 'the sign-out form carries no CSRF field'),
+            ('TOKEN-ABC', "the form does not carry the session's own token"),
+            (U.LOGOUT_PATH, 'the form posts somewhere other than the logout '
+             'route this module owns'),
+            ('class="hsep"', 'the divider does not ship with the strip, so a '
+             'page draws a rule that hangs there when nobody is signed in'),
+            ('class="whoi"', 'the monogram is gone — the one place a person '
+             'appears on a page made of counts')):
+        if need not in strip:
+            bad.append('the identity strip: ' + why)
+    if strip.count('sign out') != 1:
+        bad.append('the identity strip offers the way out %d times'
+                   % (strip.count('sign out'),))
+    if U.identity_html(None) or U.identity_html({}):
+        bad.append('a signed-out reader is shown an identity strip')
+    # a name reaching the header is escaped, whatever USERNAME_RE allows today
+    nasty = U.identity_html({'username': '<img src=x>', 'csrf': 'c'})
+    if '<img' in nasty:
+        bad.append('a username reaches the header unescaped')
+
+    # THE SECOND SPELLING. Every module that renders a header must get the
+    # strip from here; none may write its own name-and-sign-out. The tokens
+    # are MARKUP, not prose -- these files explain themselves at length, and a
+    # check that fires on the word in a comment is a check nobody keeps.
+    marks = ('>sign out<', 'class="whox"', 'action="%s"' % (U.LOGOUT_PATH,))
+    for mod in ('dashboard.py', 'datasets.py', 'audit.py'):
+        try:
+            src = open(os.path.join(DASH, mod), encoding='utf-8').read()
+        except OSError as e:
+            bad.append(f'could not read {mod}: {e}')
+            continue
+        for tok in marks:
+            if tok in src:
+                bad.append(f'{mod} writes its own identity strip ({tok!r}) '
+                           'instead of asking auth.py for the one')
+    # and auth.py's own page must use the shared one, not a third copy
+    src = open(AUTH_PY, encoding='utf-8').read()
+    if src.count('>sign out<') != 1:
+        bad.append('auth.py renders a way out %d times — the Accounts page is '
+                   'writing its own again' % (src.count('>sign out<'),))
+    if 'identity_html(session)' not in src:
+        bad.append('the Accounts page does not render the shared strip')
+
+    # THE CLUSTER ORDER, one contract across the four headers: where to GO,
+    # then the hairline the strip brings, then whose session this is. The
+    # strip standing before the controls is what made a header of three kinds
+    # of thing read as a flat row of equals.
+    for mod, mark in (('datasets.py', '__ACCOUNT__'),
+                      ('audit.py', '__ACCOUNT__'),
+                      ('dashboard.py', '<!--ACCT-->')):
+        src = open(os.path.join(DASH, mod), encoding='utf-8').read()
+        # the front page names the sentinel twice: once as the bytes the
+        # handler splices at, once in the template. The template's copy is
+        # the one with a position, so anchor on the action row.
+        base = (src.index('<div class="hact">')
+                if mod == 'dashboard.py' else 0)
+        i = src.find(mark, base)
+        if i < 0:
+            bad.append(f'{mod} no longer splices the identity strip at all')
+            continue
+        if mod == 'dashboard.py':
+            if 'class="upd"' not in src[base:i]:
+                bad.append('the front page puts identity back in the middle '
+                           'of the action row, ahead of what the page knows')
+            continue
+        line = src[src.rfind('\n', 0, i) + 1:src.find('\n', i)]
+        if 'class="back"' not in line or line.index('back') > line.index(mark):
+            bad.append(f'{mod} puts the identity strip ahead of the way out, '
+                       'so the header reads as a flat row again')
+
+
 def main():
     bad = []
     armed = False
@@ -1649,6 +1742,7 @@ def main():
                        locked_checks, login_checks, logout_checks,
                        burst_checks, redirect_checks,
                        signup_checks, admin_checks, page_checks,
+                       identity_checks,
                        silence_checks, source_checks, import_checks,
                        handler_checks, reply_checks, wiring_checks):
                 try:

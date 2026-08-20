@@ -10964,7 +10964,7 @@ def render(ov, per, tr, now, locs=()):
             .replace('__LLMNAV__', LLM_NAV if LLM_PAGE else '')
             .replace('__NOW__', now.strftime('%Y-%m-%d %H:%M'))
             .replace('__CLOCK__', now.strftime('%H:%M'))
-            .replace('__ACCTCSS__', ACCOUNT_CSS)
+            .replace('__ACCTCSS__', account_css())
             .replace('__PROG__', f"{ov['pct']:.1f}")
             .replace('__LB_CSS__', LB_CSS)
             .replace('__LB_HTML__', LB_HTML)
@@ -11219,18 +11219,19 @@ def serve(args):
             srv.shutdown()
 
 
-# The account strip's own rules, named so the pages audit.py and datasets.py
-# render can borrow the ONE copy. A second spelling in each of those files
-# is two that drift, and the drift shows up as a sign-out control that is a
-# link on one page and a button on another.
-ACCOUNT_CSS = """.who{display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}
-.whon{font-weight:600;letter-spacing:.01em}
-.whof{display:flex}
-.whox{color:var(--mut);text-decoration:none;border:1px solid transparent;
-background:0;font:inherit;font-size:12px;cursor:pointer;
-border-radius:8px;padding:3px 9px;transition:background .12s}
-.whox:hover{background:rgba(130,140,150,.08);color:var(--fg)}
-.whox:focus-visible{outline:2px solid var(--acc);outline-offset:2px}"""
+def account_css():
+    """The identity strip's stylesheet, from the module that owns the strip.
+
+    A constant here was a SECOND spelling of rules auth.py also needed for its
+    own Accounts page, and the two drifted into a sign-out that was a bordered
+    button on five pages and an underlined link on the sixth. There is one
+    now, in auth.py, and every page that renders a header asks for it.
+
+    Empty when the gate will not load -- there is no session to describe, and
+    the pages that splice this in are all behind the gate anyway.
+    """
+    g = _auth()
+    return '' if g is None else g.IDENTITY_CSS
 
 
 def render_account_nav(session):
@@ -11258,46 +11259,19 @@ def render_account(session):
     interval and this is the one thing on it that is not the same for
     everybody. A build-time render would show whoever rebuilt it last.
 
-    THE ACCOUNTS LINK IS DRAWN FOR ADMINS ONLY. /admin answers a member with
-    the same empty 404 an address that does not exist gets -- deliberately,
-    so a member learns nothing about it -- and a link that 404s for half the
-    people who can see it undoes that in the header of the front page.
+    The markup itself is auth.py's. LOGOUT_PATH, CSRF_FIELD and the session
+    are all that strip is made of, and all three are that module's -- so a
+    copy here was a form posting nowhere, or a token under a name nothing
+    reads, on the day auth.py renamed one. Both of those fail as "the button
+    did nothing", which is the failure the strip exists to prevent.
 
-    Nothing here is drawn for a signed-out reader, who cannot reach this page
-    at all; the empty string keeps the sentinels in place for the next
-    request.
+    Nothing is drawn for a signed-out reader, who cannot reach this page at
+    all; the empty string keeps the sentinels in place for the next request.
     """
-    if not session:
-        return ''
-    # The username is [A-Za-z0-9._-] by accounts.USERNAME_RE, so this escape
-    # has nothing to do today. It is here because the day that rule loosens
-    # is not the day anybody will remember that a name reaches the front page.
-    name = html.escape(str(session.get('username') or ''), quote=True)
-    out = ''
-    # A FORM, NOT A LINK. Sign-out ends the session on every device -- it
-    # bumps the account's session_epoch, which is the only thing that takes a
-    # cookie already copied off the wire back -- and a state change that a
-    # GET can make is a state change any page the reader visits can make for
-    # them, over and over, with one <img src="/logout">. The token is the
-    # session's own, minted per request the way the rest of this strip is.
-    #
-    # The route and the field name are read from auth.py rather than spelled
-    # again here. A second spelling of either is a form that posts nowhere,
-    # or a token under a name nothing reads, on the day that module renames
-    # one -- and both of those fail as "the button did nothing", which is the
-    # failure this strip exists to prevent.
     g = _auth()
     if g is None:
         return ''      # no gate, so no session and nothing to sign out of
-    csrf = html.escape(str(session.get('csrf') or ''), quote=True)
-    return (out + '<div class="who"><span class="whon" title="signed in">'
-            + name + '</span><form class="whof" method="post" action="'
-            + html.escape(g.LOGOUT_PATH, quote=True)
-            + '"><input type="hidden" name="'
-            + html.escape(g.CSRF_FIELD, quote=True) + '" value="'
-            + csrf + '"><button class="whox" type="submit" '
-            'title="Ends this session on every device">sign out</button>'
-            '</form></div>')
+    return g.identity_html(session)
 
 
 def account_strip(session):
@@ -11316,7 +11290,7 @@ def account_strip(session):
     body = render_account(session)
     if not body:
         return '', ''
-    return ACCOUNT_CSS, body
+    return account_css(), body
 
 
 def passwd(args):
@@ -12661,11 +12635,17 @@ outline-offset:2px}
     <!--NAV--><!--/NAV-->
 __LLMNAV__
     <span class="hgap"></span>
-    <!--ACCT--><!--/ACCT-->
     <!-- What the page knows and when it knew it. The date is today on a page
          rebuilt hourly and the cadence never changes, so both moved into the
          title and the line says the one thing worth a glance: how old this is. -->
     <div class="upd"><span class="dot"></span><span class="updt" title="Rebuilt __NOW__ · refreshes on the hour">updated __CLOCK__</span><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
+    <!-- WHOSE SESSION THIS IS, last and behind a hairline, on this page and
+         on every other page with a header. It stood between the nav and the
+         status line before, so a name and a sign-out sat in the middle of a
+         run of controls and the row read as six equal things instead of
+         three kinds of thing. The divider arrives with the strip, so a
+         signed-out reader gets neither. -->
+    <!--ACCT--><!--/ACCT-->
   </div>
 </header>
 

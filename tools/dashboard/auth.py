@@ -1389,25 +1389,102 @@ body{display:flex;align-items:center;justify-content:center;min-height:100vh;
 .card form{margin-top:20px}
 """
 
-WIDE_CSS = """
+# ── the identity strip ──────────────────────────────────────────────────────
+# ONE spelling of "who is signed in, and the way out", for every page with a
+# header: the front page, /datasets, the three judging surfaces, and the
+# Accounts page below. It used to be written twice -- dashboard.py's copy and
+# a second one inline in admin_page() -- and the two drifted the way a
+# duplicate always does. Five pages got a bordered button; this one got an
+# underlined link, in a different sentence, floating at a different height
+# because it centred itself against a header aligned to its top.
+#
+# It lives HERE because the strip is entirely about the session, and the
+# session is this module's subject: LOGOUT_PATH and CSRF_FIELD are two feet
+# away instead of read back through an import. dashboard.py asks for it.
+#
+# ONE PILL, NOT TWO WORDS. A monogram, the name, a hairline, the way out --
+# bordered together so the eye takes the whole thing as a single object and
+# skips it, the way it skips a page number. Loose in the row, "admin" and
+# "sign out" read as two more controls standing beside the status line and
+# the refresh button, which is what made a header holding three different
+# KINDS of thing -- what to do, what the page knows, whose session this is --
+# look like a flat row of six equal ones.
+#
+# The divider ships with it. A rule drawn by the page would be a rule left
+# hanging on the day nobody is signed in.
+IDENTITY_CSS = """/* A touch stronger than --bd, which is a 13% hairline meant for a
+   BORDER -- a shape the eye completes from four sides. One free-standing
+   pixel has no shape to complete, and at 13% it was invisible: the rule was
+   drawn and the row still read as one flat run. */
+.hsep{flex:none;width:1px;height:20px;background:rgba(130,140,150,.26)}
+.who{display:inline-flex;align-items:center;flex:none;
+border:1px solid var(--bd);border-radius:999px;
+background:rgba(130,140,150,.06);overflow:hidden;
+font-size:12px;line-height:1;color:var(--mut)}
+/* The one round thing in a header of squared-off controls, and the only
+   place a PERSON appears on a page otherwise made of counts -- which is the
+   whole job: it answers "whose session is this" without being read. Muted,
+   not accented: the accent on these pages means "the thing to do", and an
+   account is context. */
+.whoi{display:flex;align-items:center;justify-content:center;flex:none;
+width:20px;height:20px;margin:3px 0 3px 3px;border-radius:50%;
+background:rgba(130,140,150,.16);color:var(--mut);
+font-size:10.5px;font-weight:700;text-transform:uppercase}
+.whon{padding:0 10px 0 7px;color:var(--tx);font-weight:620;letter-spacing:.01em;
+max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* A form that takes up no room. Sign-out is a POST because it ends the
+   session on every device by bumping session_epoch, and a state change a GET
+   can make is one that any page the reader happens to open can make for
+   them. Left as a block it drops the control onto its own line. */
+.whof{display:flex;border-left:1px solid var(--bd)}
+.whox{background:0;border:0;font:inherit;font-size:11.5px;color:var(--mut);
+cursor:pointer;padding:7px 11px;transition:background .12s,color .12s}
+.whox:hover{background:rgba(130,140,150,.12);color:var(--tx)}
+.whox:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+@media(prefers-reduced-motion:reduce){.whox{transition:none}}"""
+
+
+def identity_html(session):
+    """Who is reading, and the way out -- or nothing at all.
+
+    Empty for a signed-out reader, who cannot reach any page that renders
+    this. The empty string leaves the page's sentinels in place for the next
+    request, and takes the divider with it.
+    """
+    if not session:
+        return ''
+    # The username is [A-Za-z0-9._-] by accounts.USERNAME_RE, so this escape
+    # has nothing to do today. It is here because the day that rule loosens
+    # is not the day anybody will remember that a name reaches the header.
+    name = esc(session.get('username') or '')
+    if not name:
+        return ''
+    return ('<span class="hsep" aria-hidden="true"></span>'
+            '<div class="who"><span class="whoi" aria-hidden="true">'
+            + name[:1] + '</span>'
+            '<span class="whon" title="signed in as ' + name + '">'
+            + name + '</span>'
+            '<form class="whof" method="post" action="' + esc(LOGOUT_PATH)
+            + '"><input type="hidden" name="' + esc(CSRF_FIELD)
+            + '" value="' + esc(session.get('csrf') or '')
+            + '"><button class="whox" type="submit" '
+            'title="Ends this session on every device">sign out</button>'
+            '</form></div>')
+
+
+WIDE_CSS = IDENTITY_CSS + """
 body{padding:0 22px 90px}
 .wrap{max-width:1180px;margin:0 auto}
 header{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;
   padding:22px 0 16px;border-bottom:1px solid var(--bd);margin-bottom:18px}
-.back{margin-left:auto;font-size:12px;color:var(--mut);text-decoration:none;
+/* The same right-hand cluster the other pages carry, in the same order:
+   where to GO, then a hairline, then whose session this is. It is one flex
+   item so it lands at the end of the header instead of wherever the tagline
+   beside it happens to stop wrapping. */
+.hdrend{display:flex;align-items:center;gap:12px;margin-left:auto}
+.back{font-size:12px;color:var(--mut);text-decoration:none;
   border:1px solid var(--bd);border-radius:8px;padding:6px 11px}
 .back:hover{color:var(--tx);border-color:rgba(130,140,150,.3)}
-.who{font-size:12px;color:var(--dim);align-self:center}
-.who b{color:var(--mut);font-weight:640}
-/* A submit button wearing a link's clothes, and a form that takes up no room.
-   Sign-out is a POST because it ends the session on every device, and a GET
-   that does that can be fired by any page the reader happens to be on -- but
-   a <form> is a block, and left as one it drops the control onto its own
-   line under the name it belongs beside. */
-.who form{display:inline}
-.lnk{background:0;border:0;padding:0;font:inherit;color:var(--mut);
-  cursor:pointer;text-decoration:underline;text-underline-offset:2px}
-.lnk:hover{color:var(--tx)}
 section{margin-bottom:26px}
 h2{font-size:13px;font-weight:640;color:var(--mut);margin-bottom:10px;
   text-transform:uppercase;letter-spacing:.07em}
@@ -1611,17 +1688,8 @@ def admin_page(session, req, now=None, error='', minted=None):
     bits = ['<div class="wrap">\n<header>\n  <div><h1>Accounts</h1>\n'
             '    <div class="sub">Who may open this dashboard, and the '
             'invite links that let them.</div></div>\n'
-            # A form, not a link: signing out ends the session on every
-            # device, and a state change that a GET can make is a state
-            # change somebody else's page can make for you.
-            '  <div class="who">signed in as <b>%s</b> \u00b7 '
-            '<form method="post" action="%s">'
-            '<input type="hidden" name="%s" value="%s">'
-            '<button class="lnk" type="submit" title="Ends this session on '
-            'every device">sign out</button></form></div>\n'
-            '  <a class="back" href="/">&larr; dashboard</a>\n</header>\n'
-            % (esc(session.get('username', '')), esc(LOGOUT_PATH),
-               esc(CSRF_FIELD), csrf)]
+            '  <div class="hdrend"><a class="back" href="/">&larr; dashboard'
+            '</a>%s</div>\n</header>\n' % (identity_html(session),)]
     if error:
         bits.append('<div class="msg bad">%s</div>\n' % (esc(error),))
     elif notice:
