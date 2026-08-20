@@ -24,6 +24,7 @@ Run: python tools/detect/tests/adv_delegation.py
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -344,6 +345,41 @@ def stamp_checks(bad, d, A, auth):
             bad.append('looking at the roster finished somebody\'s target — '
                        'when they reached it is now when an admin opened a '
                        'page')
+        # A GATE THAT CANNOT NAME ITS STORE DOES NOT WRITE ONE. Passing no
+        # path falls through to the DEFAULT accounts.db, so a request served
+        # while the gate is half-loaded would write to the live file -- and
+        # with a colliding row id it would finish the wrong person's target.
+        con = A.connect(p)
+        con.execute('UPDATE assignments SET done_at = NULL WHERE id = ?',
+                    (row['id'],))
+        con.commit()
+        con.close()
+        # Watched at the SOURCE rather than by looking for damage: a stamp
+        # aimed at the default store lands on whatever row happens to hold
+        # that id there, which on this machine is usually none -- so "the
+        # live file did not change" would pass a build that is one colliding
+        # id away from finishing a stranger's target.
+        calls = []
+        real_stamp = A.complete_assignment
+        A.complete_assignment = lambda *a, **k: calls.append(k.get('path'))
+        real_state = auth._state
+        auth._state = lambda: {}
+        try:
+            out = d.assignment_progress(A.get_assignment(row['id'], path=p),
+                                        now=now)
+        finally:
+            auth._state = real_state
+            A.complete_assignment = real_stamp
+        if not out or out.get('done') is None:
+            bad.append('a count with no store to record it in reported '
+                       'nothing — the number is still knowable')
+        if calls:
+            bad.append('a target was stamped into %r while the gate could '
+                       'not name its own store — with no path that is the '
+                       'LIVE accounts database' % (calls[0],))
+        if A.get_assignment(row['id'], path=p)['done_at']:
+            bad.append('a target was stamped while the gate could not name '
+                       'its own store')
         # ...and a finished one lingers rather than vanishing at the moment
         # it is reached, which is the one moment it was for
         d.assignment_progress(A.get_assignment(row['id'], path=p), now=now)
@@ -448,6 +484,29 @@ def route_checks(bad, d, A, auth):
             if e.code != 404:
                 bad.append('a member asking for the roster got %d, not the '
                            'same empty 404 a dead address gets' % e.code)
+        # A ROUTE ANSWERS. Counting reads ledgers off six drives and can
+        # fail for reasons that have nothing to do with the request; every
+        # other route in that file answers as JSON, and a dropped connection
+        # reaches the page as the same nothing an empty target would.
+        real_count = d.done_by
+
+        def boom(*a, **k):
+            raise RuntimeError('a drive went away')
+        d.done_by = boom
+        try:
+            for path in ('/api/assignment', '/api/assignments'):
+                try:
+                    st, body = get(path, 'boss')
+                    if st != 200 or 'assignments' not in body:
+                        bad.append('%s answered %s %r when the count threw'
+                                   % (path, st, body))
+                except Exception as e:
+                    bad.append('%s dropped the connection when the count '
+                               'threw (%s) — every route beside it answers'
+                               % (path, type(e).__name__))
+        finally:
+            d.done_by = real_count
+
         # signed out is nothing at all
         try:
             r = urllib.request.urlopen(base + '/api/assignment', timeout=20)
@@ -564,6 +623,27 @@ def strip_checks(bad, d):
             bad.append('%s carries its own copy of the strip CSS' % (name,))
         if W.STRIP_JS not in html:
             bad.append('%s carries its own copy of the strip script' % (name,))
+    # ONE VOCABULARY. The admin page names the surfaces, the annotator's bar
+    # names them again, and the script inside the bar names them a third
+    # time. They said "any surface" and "every surface" for the same target.
+    import auth as _auth
+    if _auth.SURFACE_WORDS is not W.SURFACE_WORDS:
+        bad.append('the admin page keeps its own names for the surfaces, so '
+                   'the page that sets a target can disagree with the bar '
+                   'it is measured on')
+    got = re.search(r'var WORDS=(\{.*?\});', W.STRIP_JS)
+    if not got:
+        bad.append('the script has no surface vocabulary at all')
+    elif json.loads(got.group(1)) != W.SURFACE_WORDS:
+        bad.append('the script names the surfaces differently from the '
+                   'pages: %s' % (got.group(1),))
+    for s in W.SURFACE_WORDS:
+        if s not in __import__('accounts').SURFACES:
+            bad.append('%r is named but cannot be delegated' % (s,))
+    for s in __import__('accounts').SURFACES:
+        if s not in W.SURFACE_WORDS:
+            bad.append('%r can be delegated but has no name on the bar'
+                       % (s,))
     # hidden until something is delegated: a dashboard nobody delegates on
     # must look exactly as it did
     if 'hidden' not in W.strip_html('review'):

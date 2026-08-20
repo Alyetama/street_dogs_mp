@@ -34,6 +34,7 @@ tools/detect/tests/adv_no_hardcoded_paths.py fails the build if that changes.
 import argparse
 import atexit
 import collections
+import contextlib
 import functools
 import getpass
 import glob
@@ -10621,7 +10622,15 @@ class BoardHandler(SimpleHTTPRequestHandler):
             # session the gate resolved, never off the query string: a target
             # is a measurement of a person, and one that any signed-in reader
             # could ask about by name is a scoreboard of their colleagues.
-            self._json({'assignments': assignments_for(self.session)})
+            # Counting reads ledgers off six drives, so it can fail for
+            # reasons that have nothing to do with this request. Answered as
+            # JSON either way: every route beside this one does, and a
+            # dropped connection reaches the page as the same nothing a
+            # target that does not exist would.
+            try:
+                self._json({'assignments': assignments_for(self.session)})
+            except Exception as e:
+                self._json({'assignments': [], 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/assignments':
             # The roster. Admin only, and the same empty 404 as an address
@@ -10631,8 +10640,11 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self.send_error(404)
                 return
             q = parse_qs(urlparse(self.path).query)
-            self._json({'assignments': assignment_roster(
-                open_only=q.get('open', [''])[0] == '1')})
+            try:
+                self._json({'assignments': assignment_roster(
+                    open_only=q.get('open', [''])[0] == '1')})
+            except Exception as e:
+                self._json({'assignments': [], 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/review/count':
             # Just the queue depth. review_payload does one listdir over a
@@ -11489,9 +11501,40 @@ def render_account(session):
 # 'five hundred crops' would otherwise be met by two hundred and fifty. The
 # 'leash' surface is the leash AUDIT sheet, which is its own pile.
 
+# One ledger read serves a whole roster. Progress is counted per ROW, and a
+# roster is one row per target -- so twenty targets re-read the same three
+# ledgers twenty times. The memo is held for the length of one call by
+# _counting() and dropped after, because a cache that outlives the request is
+# a count that goes stale the moment somebody judges a crop.
+_COUNT_MEMO = threading.local()
+
+
+@contextlib.contextmanager
+def _counting():
+    """Read each ledger at most once for everything counted inside."""
+    outer = getattr(_COUNT_MEMO, 'cache', None)
+    if outer is not None:
+        yield                              # already inside one; keep its memo
+        return
+    _COUNT_MEMO.cache = {}
+    try:
+        yield
+    finally:
+        _COUNT_MEMO.cache = None
+
+
+def _memo(key, make):
+    cache = getattr(_COUNT_MEMO, 'cache', None)
+    if cache is None:
+        return make()
+    if key not in cache:
+        cache[key] = make()
+    return cache[key]
+
+
 def _done_review(user, since, until=None):
     """Dog/not-dog verdicts this person left on the review queue since then."""
-    items, _ = _review_verdicts()
+    items, _ = _memo('review', _review_verdicts)
     return sum(1 for it in items
                if it[AUTHOR_FIELD] == user
                and it['flagged_at'] >= since
@@ -11506,10 +11549,12 @@ def _done_audit(user, stage, since, until=None):
     the legacy author -- so counting its output counts verdicts rather than
     lines, which is what somebody is being asked for five hundred of.
     """
-    try:
-        rows = _fn_audit.read_verdicts(stage=stage)
-    except Exception:
-        return 0
+    def read():
+        try:
+            return _fn_audit.read_verdicts(stage=stage)
+        except Exception:
+            return []
+    rows = _memo('audit:' + str(stage), read)
     n = 0
     for v in rows:
         if not _fn_audit.verdict_of(v.get('verdict'), stage):
@@ -11559,12 +11604,14 @@ def assignment_progress(row, now=None, mark_done=True):
     if (mark_done and done >= target > 0 and not row.get('done_at')
             and not row.get('cancelled_at')):
         g, db = _accounts(), _accounts_db()
-        if g is not None:
+        # NO STORE, NO STAMP. The path is the one the GATE is using, and
+        # passing None instead falls through to the DEFAULT accounts.db --
+        # so a request served while the gate could not name its own store
+        # would write to the live file, and with a colliding row id it would
+        # finish the wrong person's target. A count that cannot be recorded
+        # is still a count; it is reported and simply not written down.
+        if g is not None and db:
             try:
-                # The path the GATE is using, never the default. Without it a
-                # stamp made while a test store is mounted lands in the real
-                # accounts.db instead -- writing to the live file is not a
-                # thing a progress read may do as a side effect.
                 fresh = g.complete_assignment(row['id'], now=ts, path=db)
                 if fresh:
                     out = dict(fresh)
@@ -11617,7 +11664,9 @@ def assignments_for(session, now=None):
             if not r.get('cancelled_at')
             and (not r.get('done_at')
                  or ts - r['done_at'] <= ASSIGN_DONE_LINGER_S)]
-    return [p for p in (assignment_progress(r, now=now) for r in keep) if p]
+    with _counting():
+        return [p for p in (assignment_progress(r, now=now) for r in keep)
+                if p]
 
 
 def assignment_roster(now=None, open_only=False):
@@ -11635,8 +11684,9 @@ def assignment_roster(now=None, open_only=False):
                                   path=_accounts_db())
     except Exception:
         return []
-    return [p for p in (assignment_progress(r, now=now, mark_done=False)
-                        for r in rows) if p]
+    with _counting():
+        return [p for p in (assignment_progress(r, now=now, mark_done=False)
+                            for r in rows) if p]
 
 
 def _accounts():

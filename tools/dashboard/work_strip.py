@@ -19,6 +19,8 @@ locks the work away would make the fastest thing to do the wrong thing --
 stop reading crops carefully and start clicking.
 """
 
+import json
+
 # The words the surfaces go by, in the reader's language rather than the
 # database's. They match the tab strip: a target on 'gate' is a target on the
 # tab the reader can see called Dog-bin audit.
@@ -86,8 +88,7 @@ var refreshWorkStrip=(function(){
   var box=document.getElementById('asg');
   if(!box)return function(){};
   var want=box.getAttribute('data-surface')||'',timer=null,busy=false;
-  var WORDS={any:'every surface',review:'the review queue',
-             gate:'the dog-bin audit',leash:'the leash audit'};
+  var WORDS=__WORDS__;
   function esc(s){var d=document.createElement('div');
     d.textContent=String(s==null?'':s);return d.innerHTML}
   function num(v){
@@ -98,7 +99,11 @@ var refreshWorkStrip=(function(){
     if(!as.length){box.hidden=true;box.innerHTML='';return}
     box.innerHTML='<span class="asgl">your target</span>'+
       as.map(function(a){
-        var pct=Math.max(0,Math.min(100,+a.pct||0)),done=pct>=100;
+        /* THE STAMP WINS. A target met and then dented by an undo shows 497
+           of 500 -- and it was still reached, on the day it was reached, so
+           it does not go back to looking unfinished. */
+        var pct=Math.max(0,Math.min(100,+a.pct||0)),
+            done=pct>=100||a.state==='done';
         return '<span class="asg1'+(done?' done':'')+
           (!done&&a.state==='overdue'?' late':'')+'">'+
           '<span class="asgs">'+esc(WORDS[a.surface]||a.surface)+'</span>'+
@@ -130,3 +135,10 @@ var refreshWorkStrip=(function(){
   };
 })();
 """
+
+# The script's copy of the vocabulary is GENERATED from the one above, not
+# typed out beside it. A browser cannot import a Python dict, so the choice
+# was between a second literal and this line -- and a second literal is how
+# the admin page came to say "any surface" over a bar that said "every
+# surface", which is the drift this whole file exists to end.
+STRIP_JS = STRIP_JS.replace('__WORDS__', json.dumps(SURFACE_WORDS))

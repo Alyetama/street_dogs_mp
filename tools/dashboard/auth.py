@@ -81,6 +81,7 @@ if _HERE not in sys.path:
     # what audit.py does for fn_audit, for the same reason.
     sys.path.insert(0, _HERE)
 import accounts                                               # noqa: E402
+import work_strip                                             # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(_HERE))
 OUT = os.path.join(REPO, 'data', 'dashboard')
@@ -1485,12 +1486,18 @@ def identity_html(session):
     # The username is [A-Za-z0-9._-] by accounts.USERNAME_RE, so this escape
     # has nothing to do today. It is here because the day that rule loosens
     # is not the day anybody will remember that a name reaches the header.
-    name = esc(session.get('username') or '')
+    raw = str(session.get('username') or '')
+    name = esc(raw)
     if not name:
         return ''
+    # THE FIRST CHARACTER OF THE NAME, escaped after it is taken. Escaping
+    # first and slicing after cuts an entity in half: '<sam>' escapes to
+    # '&lt;sam&gt;' and the monogram becomes a bare '&'. USERNAME_RE forbids
+    # that character today, which is exactly why this would go unnoticed
+    # until the day that rule loosens -- the day the comment above is about.
     return ('<span class="hsep" aria-hidden="true"></span>'
             '<div class="who"><span class="whoi" aria-hidden="true">'
-            + name[:1] + '</span>'
+            + esc(raw[:1]) + '</span>'
             '<span class="whon" title="signed in as ' + name + '">'
             + name + '</span>'
             '<form class="whof" method="post" action="' + esc(LOGOUT_PATH)
@@ -1925,12 +1932,11 @@ def admin_page(session, req, now=None, error='', minted=None):
     return _doc('Accounts', WIDE_CSS, ''.join(bits))
 
 
-SURFACE_WORDS = {
-    'any': 'any surface',
-    'review': 'the review queue',
-    'gate': 'the dog-bin audit',
-    'leash': 'the leash audit',
-}
+# The words the surfaces go by, out of the file the annotator's own strip
+# reads them from. A second copy here said "any surface" where their bar said
+# "every surface": one target, two names for it, and the page that set it
+# disagreeing with the page it is measured on.
+SURFACE_WORDS = work_strip.SURFACE_WORDS
 
 
 def _due_day(due_at):

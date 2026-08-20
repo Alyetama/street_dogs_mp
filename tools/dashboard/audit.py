@@ -2591,7 +2591,6 @@ def _judged_counts(stage=DEFAULT_STAGE, period=None):
     The window narrows this too: a button reading 356 over a list filtered
     to one day's twelve is a count of something the view no longer shows.
     """
-    sp = fa.spec(stage)
     lo, hi = period_range(period)
     vs = [v for v in fa.read_verdicts(stage=stage)
           if fa.verdict_of(v.get('verdict'), stage)]

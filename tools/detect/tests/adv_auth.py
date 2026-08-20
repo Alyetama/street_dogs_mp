@@ -1680,6 +1680,19 @@ def identity_checks(bad, fx):
     nasty = U.identity_html({'username': '<img src=x>', 'csrf': 'c'})
     if '<img' in nasty:
         bad.append('a username reaches the header unescaped')
+    # AND THE MONOGRAM IS A WHOLE CHARACTER. Slicing after escaping cuts an
+    # entity in half -- '<sam>' becomes '&lt;sam&gt;' and the disc shows a
+    # bare '&'. USERNAME_RE forbids that character today, which is exactly
+    # why nobody would see it until the day that rule loosens.
+    mark = 'class="whoi" aria-hidden="true">'
+    for raw, want in (('admin', 'a'), ('<img src=x>', '&lt;'),
+                      ('&sam', '&amp;')):
+        h = U.identity_html({'username': raw, 'csrf': 'c'})
+        i = h.find(mark)
+        got = h[i + len(mark):h.find('<', i + len(mark))] if i >= 0 else ''
+        if got != want:
+            bad.append('the monogram for %r is %r, not %r — an HTML entity '
+                       'was cut in half' % (raw, got, want))
 
     # THE SECOND SPELLING. Every module that renders a header must get the
     # strip from here; none may write its own name-and-sign-out. The tokens
