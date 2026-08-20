@@ -132,6 +132,24 @@ def tab_strip_checks(html):
                 re.sub(r'\s+', '', want.group(0)):
             bad.append('the strip is styled differently from the audit '
                        'pages: %s vs %s' % (got.group(0), want.group(0)))
+    # ...INCLUDING THE KEYBOARD RING. The audit pages ring everything
+    # focusable with one blanket :focus-visible; this page rings per class,
+    # so without a rule of its own the shared strip falls through to the
+    # browser's default outline here and one strip wears two rings across
+    # three surfaces.
+    blanket = re.search(r'(?:^|[;}])\s*:focus-visible\s*\{([^}]*)\}',
+                        audit_src, re.M)
+    ring = re.search(r'\.jtab:focus-visible\s*\{([^}]*)\}', html)
+    if blanket and not ring:
+        bad.append('the review page has no .jtab:focus-visible rule — the '
+                   'audit pages ring the same tabs with '
+                   '{%s} and this one falls through to the browser default'
+                   % re.sub(r'\s+', '', blanket.group(1)))
+    elif blanket and ring and re.sub(r'\s+', '', ring.group(1)) != \
+            re.sub(r'\s+', '', blanket.group(1)):
+        bad.append('the strip focuses differently from the audit pages: '
+                   '{%s} vs {%s}' % (re.sub(r'\s+', '', ring.group(1)),
+                                     re.sub(r'\s+', '', blanket.group(1))))
     return bad
 
 
@@ -676,6 +694,13 @@ global.localStorage = {
   getItem(k) { return k === 'sdReview' ? this._o : null; },
   setItem(k, v) { if (k === 'sdReview') this._o = v; },
 };
+// The address this page was opened at. /review answers 301 to /audit/review
+// carrying its query string, so a bookmark made on ?country=ECU arrives here
+// with one -- and it is only worth carrying if the page reads it. Seeded
+// before the script runs, because that is when restorePrefs looks.
+global.location = { search: '?country=ECU&page=2', pathname: '/audit/review',
+                    href: 'http://stub/audit/review?country=ECU&page=2' };
+global.URLSearchParams = URLSearchParams;
 let API;
 try {
   API = new Function('document','window','CSS','fetch','getComputedStyle',
@@ -693,6 +718,9 @@ try {
   console.log('FAIL: could not evaluate the review script: ' + e);
   process.exit(1);
 }
+
+// What the page asked the server for on BOOT, before any case rewrites RESP.
+const BOOT_CALLS = CALLS.slice();
 
 const FIX = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 const CROPS = FIX.crops;
@@ -2070,8 +2098,61 @@ async function t37() {
      byId['state'].innerHTML);
 }
 
+// ── 38. following a link off this page is not "I kept these" ────────────
+// The pagehide beacon banks every crop on screen as reviewed-and-kept, and
+// there is no per-crop undo: the only recovery restores the whole ledger.
+// cf1523c9 put a three-tab strip at the top of this page -- one of whose tabs
+// points at THIS page -- so a click that changes nothing at all retired fifty
+// unjudged crops, and a reader tapping over to an audit and back retired
+// fifty more. An explicit page turn still banks; so does a real departure.
+async function t38() {
+  const banked = [];
+  RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 4), []),
+           '/api/review/seen': (u, o) => { banked.push(JSON.parse(o.body));
+             return { ok: true, seen_total: 7 } } };
+  byId['mode'].value = 'queue';
+  byId['mode'].onchange.call(byId['mode']);
+  await flush(); await flush();
+  ck(API.st().items.length === 4, 't38: no queue on screen to bank');
+
+  // first, the departure that IS a decision: the tab closed, the address bar
+  beacons.length = 0;
+  for (const f of (winL['pagehide'] || [])) f({});
+  ck(beacons.some(u => /seen/.test(String(u))),
+     't38: leaving with no link clicked no longer banks the screen — that ' +
+     'is the whole "paging away IS the decision" contract');
+
+  // now a click on the strip. Every one of its three tabs is a navigation,
+  // including the one already marked aria-current.
+  for (const href of ['/audit/review', '/audit/gate', '/']) {
+    const a = new El('a');
+    a.setAttribute('href', href);
+    beacons.length = 0;
+    for (const f of (docL['click'] || [])) f({ target: a });
+    for (const f of (winL['pagehide'] || [])) f({});
+    ck(!beacons.some(u => /seen/.test(String(u))),
+       't38: clicking the link to ' + href + ' banked the fifty crops on ' +
+       'screen as judged dogs: ' + beacons.join(','));
+  }
+}
+
+// ── 39. the address the page was opened at is read ──────────────────────
+// /review answers 301 to /audit/review and carefully carries the query string
+// along -- which does nothing at all unless the destination reads one. A
+// bookmark made on ?country=ECU used to land here unfiltered, because the
+// country came from localStorage and nowhere else.
+async function t39() {
+  ck(BOOT_CALLS.some(c => /country=ECU/.test(String(c.url))),
+     't39: the first request ignored ?country=ECU from the address: ' +
+     JSON.stringify(BOOT_CALLS.map(c => String(c.url))));
+  ck(!/ECU/.test(String(global.localStorage._o)),
+     't39: the URL\'s country was written into the stored preferences — a ' +
+     'link is where you were sent, not a preference you set: ' +
+     global.localStorage._o);
+}
+
 (async () => {
-  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33,t34,t35,t36,t37];
+  const tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31,t32,t33,t34,t35,t36,t37,t38,t39];
   for (const t of tests) {
     try { await t(); console.log('ok   ' + t.name); }
     catch (e) {

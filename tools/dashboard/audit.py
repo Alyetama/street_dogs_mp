@@ -188,6 +188,13 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
         # side asked for the partition is constant and changes nothing.
         away = f"abs(p_dog - {fa.THRESHOLD})"
         direction = 'ASC' if mode == 'least' else 'DESC'
+        # Twice what is wanted, with the Python cap below taking the first n
+        # that survive. The ANTI JOIN only knows sequences, so a ledger row
+        # carrying a key and no seq -- the shape a rebuilt pool left behind
+        # once already -- is dropped by the key filter afterwards, and at
+        # LIMIT n that quietly shortened the page: 25 asked for, 24 served,
+        # 'dropped' reported as 0. The spread branch over-draws for exactly
+        # this reason.
         rows = con.execute(f"""
             WITH fresh AS (
                 SELECT p.* FROM read_parquet('{P(stage)['pool']}') p
@@ -207,7 +214,7 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
                       ORDER BY {away} {direction}, hash(seq || ? )) sn
                   FROM one_per_seq)
             ORDER BY sn, {away} {direction}
-            LIMIT {int(n)}
+            LIMIT {int(n) * 2}
         """, [salt, salt]).fetchall()
     else:
         rows = con.execute(f"""
@@ -766,7 +773,14 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   color:var(--acc)}
 .poolwarn[hidden]{display:none}
 .bands{background:var(--panel);border:1px solid var(--bd);border-radius:14px;
-  padding:14px 18px 16px;margin-bottom:16px}
+  padding:14px 18px 16px;margin-bottom:16px;
+  /* Five tracks, 470px of them fixed before the bar column gets a pixel, so
+     on a phone the table is wider than the panel. It scrolls INSIDE its own
+     box: without this, one tap on "the numbers" put the whole document into
+     horizontal scroll and pushed the flagged and answered columns off the
+     right edge of every other block on the page. */
+  overflow-x:auto}
+.bhead,.brow,.bfoot{min-width:470px}
 /* the axis runs the width of the track column, so its end labels sit under it.
    The three labels were three grid children, and two of them landed in the
    band and store columns -- so they were hidden to get them out of the way,
@@ -824,7 +838,11 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   border-radius:10px}
 /* an author display: rule beats the [hidden] attribute's UA one, so the
    toggles that hide these while the annotations are open need this said */
-.sides[hidden],.pick[hidden]{display:none}
+.sides[hidden],.pick[hidden],.drawnote[hidden]{display:none}
+/* what a targeted draw costs the measurement, beside the buttons that ask
+   for one -- the mode is remembered across sessions, so this cannot be a
+   title= a reader saw once */
+.drawnote{font-size:11px;color:var(--acc);max-width:34ch;line-height:1.35}
 .sidebtn{appearance:none;background:transparent;border:0;color:var(--dim);
   border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;
   font-family:inherit;white-space:nowrap}
@@ -1063,6 +1081,11 @@ __TABS__
     <button type="button" class="sidebtn" data-draw="least">least confident</button>
     <button type="button" class="sidebtn" data-draw="most">most confident</button>
   </span>
+  <!-- Said out loud, not in a tooltip: a targeted page is drawn at one end
+       of a band and the measurement multiplies a band's rate by the band's
+       whole population, so these answers are held out of it. They are still
+       finds, and they still go to the dataset. -->
+  <span class="drawnote" id="drawnote" hidden></span>
   <button class="btn" id="fresh">&#8635; draw a new page</button>
 </div>
 
@@ -1302,9 +1325,17 @@ function render(){
        adds unjudged crops and cannot produce an annotation, so telling the
        "my annotations" view to draw one was instructions that do not lead
        to the thing the view shows */
+    /* ...and under a filter the emptiness belongs to the SLICE, not to the
+       ledger. Pointing a reviewer who has judged 344 crops at the sheet
+       because none of them landed today is an answer to a question nobody
+       asked; the review queue says the same thing in the same words. */
+    var narrowed=(anno!=='all'?'with that verdict':'')+
+      (anno!=='all'&&period?' ':'')+(period?'in this period':'');
     empty.textContent=view!=='sheet'
-      ? 'Nothing judged at this stage yet — verdicts land here as you '+
-        'record them on the sheet.'
+      ? (narrowed
+         ? 'Nothing judged '+narrowed+' — widen the filters to see the rest.'
+         : 'Nothing judged at this stage yet — verdicts land here as you '+
+           'record them on the sheet.')
       : page&&page.exhausted
       ? 'No sequences left to draw in this band. Every one has been shown.'
       : 'Nothing here yet. Draw a page.';
@@ -1406,10 +1437,21 @@ function loadJudged(at){
     })
     .catch(function(){busy=false;toast('failed');setPos()});
 }
+/* The badge follows the VIEW. `all` is what the annotations list is showing
+   -- narrowed by the period when one is set -- and `ledger` is the whole
+   ledger; the period control is hidden on the sheet, so leaving today's
+   sixteen on the tab there is a number with nothing on screen to explain
+   it. */
+var annoN=0,ledgerN=0;
 function counts(c){
   if(!c)return;
+  annoN=c.all||0;
+  ledgerN=(c.ledger==null?c.all:c.ledger)||0;
+  paintNAll();
+}
+function paintNAll(){
   var b=document.getElementById('nAll');
-  if(b)b.textContent=fmtn(c.all||0);
+  if(b)b.textContent=fmtn(view==='sheet'?ledgerN:annoN);
 }
 function load(at){
   if(view!=='sheet')return loadJudged(at);
@@ -1444,7 +1486,10 @@ function paintStats(s){
   counts(s.counts||{all:s.judged});
   var r=document.getElementById('rate'),ci=document.getElementById('ci'),
       rej=s.rejected||{},kept=s.kept||{};
-  document.getElementById('judged').textContent=fmtn(s.judged||0);
+  /* Work done counts every answer, including the ones off a targeted sheet
+     -- those are held out of the RATES, not out of what you did. The rate
+     block below says how many, so the two numbers never disagree silently. */
+  document.getElementById('judged').textContent=fmtn((s.judged||0)+(s.aimed||0));
   /* How much of what was SHOWN came back. The sheets record every crop put in
      front of you and the ledger records the ones you answered: 63 of 1,175 the
      first time the two were compared, and between 1.7% and 10.2% band by band.
@@ -1474,20 +1519,34 @@ function paintStats(s){
       ? 'false negatives scored below '+THRESH+' and you answered '+YES+
         '; false positives scored above it and you answered '+NO
       : '';
+    /* Crops answered off a least/most-confident sheet are in none of these
+       numbers -- that draw picks one end of a band on purpose, and every
+       rate here is multiplied by its band's whole population. Saying so on
+       the same line is the difference between holding them out and hiding
+       them. */
+    var aim=s.aimed||0,
+        fn=(rej.wrong||0)+(rej.aimed_wrong||0),
+        fp=(kept.wrong||0)+(kept.aimed_wrong||0),
+        aimt=aim?' \u00b7 <b>'+fmtn(aim)+'</b> of those came off a '+
+      'targeted draw and are held out of the rates':'';
     fl.innerHTML=s.judged
-      ? '<b>'+fmtn(s.judged)+'</b> judged'+
+      ? '<b>'+fmtn(s.judged+aim)+'</b> judged'+
         (shr===null?'':', <b>'+pctTxt(shr)+'</b> of what you were shown')+
-        ' \u00b7 <b>'+fmtn(rej.wrong||0)+'</b> false negative'+
-        ((rej.wrong||0)===1?'':'s')+
-        ', <b>'+fmtn(kept.wrong||0)+'</b> false positive'+
-        ((kept.wrong||0)===1?'':'s')+
+        ' \u00b7 <b>'+fmtn(fn)+'</b> false negative'+
+        (fn===1?'':'s')+
+        ', <b>'+fmtn(fp)+'</b> false positive'+
+        (fp===1?'':'s')+
         ' \u00b7 '+(ceil?'at most ':'')+
         '<b>'+pctTxt(rej.rate||0)+
-        '</b> of what it '+(STAGE==='gate'?'rejected':'called '+NO)
-      : 'nothing judged yet \u2014 the numbers fill in as you go';
+        '</b> of what it '+(STAGE==='gate'?'rejected':'called '+NO)+aimt
+      : (aim?'<b>'+fmtn(aim)+'</b> judged on targeted draws \u2014 those are '+
+             'finds, not measurement; draw a spread to start the numbers'
+           : 'nothing judged yet \u2014 the numbers fill in as you go');
   }
+  /* and a find is a find however it was drawn: a dog pulled out of the
+     surest corner of band 0 is one the gate really threw away */
   document.getElementById('found').textContent=
-    (rej.wrong||0)+' the model got wrong below '+THRESH;
+    ((rej.wrong||0)+(rej.aimed_wrong||0))+' the model got wrong below '+THRESH;
   /* The headline is the one number the page exists to produce: how many dogs
      the gate threw away. It used to read "missed dogs 100.0% -- 3,945,390
      dogs across 3,945,390 rejected boxes", which is what a rate of 1.0 off
@@ -1554,6 +1613,11 @@ function paintStats(s){
   function ansTxt(b){return b.shown
     ? '<b>'+fmtn(b.answered)+'</b>/'+fmtn(b.shown)
     : '—'}
+  /* A targeted page lands entirely inside one band, so a band can hold a
+     pile of answers and no sample. Neither the share nor the sheet count on
+     this row includes them, and a row silent about it would read as work
+     that was never done. */
+  function aimTxt(b){return b.aimed?' · '+fmtn(b.aimed)+' aimed':''}
   /* THE SAME FIX AS THE ci SENTENCE ABOVE, WHICH REACHED ONE CALL SITE.
      Every word in this table used to be the gate's: "score the gate gave",
      "share that really are dogs", "threw away", "where the gate draws its
@@ -1579,8 +1643,11 @@ function paintStats(s){
         b.lo.toFixed(1)+'–'+b.hi.toFixed(1)+'</span>'+
         '<span class="bwhat">'+fmtn(b.boxes)+side+'</span>'+
         '<div class="btrack'+(b.kept?' kept':'')+'"></div>'+
-        '<span class="bval bnil">none seen</span>'+
-        '<span class="bans">'+ansTxt(b)+'</span></div>';
+        '<span class="bval bnil">'+(b.aimed?'targeted only':'none seen')+
+        '</span>'+
+        '<span class="bans" title="'+(b.aimed?fmtn(b.aimed)+' answered off a '+
+          'least/most-confident sheet, which is not a sample of this band':'')+
+        '">'+ansTxt(b)+aimTxt(b)+'</span></div>';
       function at(v){var x=(+v||0)*100;
         return Math.max(0,Math.min(100,x!==x?0:x))}
       var l=at(b.lo95),h=at(b.hi95),m=at(b.rate);
@@ -1595,7 +1662,10 @@ function paintStats(s){
             Math.max(0.6,h-l).toFixed(2)+'%"></div>'+
           '<div class="bdot" style="left:'+m.toFixed(2)+'%"></div></div>'+
         '<span class="bval"><b>'+b.dogs+'</b>/'+b.judged+'</span>'+
-        '<span class="bans">'+ansTxt(b)+'</span></div>';
+        '<span class="bans" title="'+(b.aimed?fmtn(b.aimed)+' more answered '+
+          'off a least/most-confident sheet — one end of this band, so in '+
+          'neither number on this row':'')+'">'+ansTxt(b)+aimTxt(b)+
+        '</span></div>';
     }).join('')+
     '<div class="bfoot"><span class="axis"><span>0%</span>'+
     '<span>50% — where the '+TITLE+' draws its line</span>'+
@@ -1649,6 +1719,15 @@ function paintFilter(){
   var ds=drawsEl.querySelectorAll('.sidebtn');
   for(var j=0;j<ds.length;j++)
     ds[j].classList.toggle('on',ds[j].getAttribute('data-draw')===mode);
+  /* and the mode is remembered across sessions, so what it costs cannot be
+     a thing you were told once when you pressed the button */
+  var dn=document.getElementById('drawnote');
+  if(dn){
+    dn.textContent=mode==='spread'?'':
+      'answers here are finds, not measurement — a page drawn from one '+
+      'end of a band is held out of the rates';
+    dn.hidden=!dn.textContent;
+  }
 }
 /* Both choices are remembered. Working through an audit is a long sitting and
    re-picking them after every reload is a tax on the only thing this page is
@@ -1762,6 +1841,9 @@ document.getElementById('views').addEventListener('click',function(e){
   document.getElementById('fresh').hidden=!sheet;
   document.getElementById('sides').hidden=!sheet;
   document.getElementById('draws').hidden=!sheet;
+  var dn=document.getElementById('drawnote');
+  if(dn)dn.hidden=!sheet||mode==='spread';
+  paintNAll();
   document.getElementById('annowrap').hidden=sheet;
   document.getElementById('periodwrap').hidden=sheet;
   idx=0;load(0);
@@ -2126,7 +2208,10 @@ BAND_GROUPS = ('rejected', 'kept', 'all')
 # string through, and everything that has to remember what a page was drawn
 # from -- the page document, the prefetch, the position line -- already
 # carries that string.
-DRAW_MODES = ('least', 'most')
+# fn_audit owns the spelling: it is what reads a page document back to tell a
+# stratified draw from a targeted one, and two lists of mode names is how the
+# control and the estimator come to disagree about which is which.
+DRAW_MODES = fa.DRAW_MODES
 
 
 def band_mode(v):
@@ -2287,12 +2372,16 @@ def _judged_counts(stage=DEFAULT_STAGE, period=None):
     """
     sp = fa.spec(stage)
     cutoff = period_cutoff(period)
-    rows = [fa.verdict_of(v.get('verdict'), stage)
-            for v in fa.read_verdicts(stage=stage)
+    vs = [v for v in fa.read_verdicts(stage=stage)
+          if fa.verdict_of(v.get('verdict'), stage)]
+    rows = [v for v in vs
             if cutoff is None or (v.get('ts') or 0) >= cutoff]
-    rows = [v for v in rows if v]
-    # only `all` is read -- the button shows one number now
-    return {'all': len(rows)}
+    # `all` is the number the annotations list is showing. `ledger` is the
+    # whole ledger whatever the period -- the tab keeps this badge when the
+    # view goes back to the sheet, where the period control is hidden, and a
+    # narrowed count under a filter nobody can see under-reports the ledger
+    # with nothing on screen to explain it.
+    return {'all': len(rows), 'ledger': len(vs)}
 
 
 def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):

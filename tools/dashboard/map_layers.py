@@ -22,12 +22,19 @@ masquerade as a human one, and a layer file found without it should be
 treated as mislabeled, not merely terse.
 
 Read-only on every store. The only thing written is the two JSONs (atomic:
-.tmp + os.replace). refresh() keys a signature on the shard lists, their
-mtimes and the catalog snapshot, stores it inside the outputs, and skips the
-32M-row manifest join entirely when nothing changed -- the cold build is
-minutes, the warm call milliseconds.
+.tmp + os.replace). refresh() keys a signature on the shard lists and on the
+manifest set the catalog names -- their recorded mtimes and sizes, not the
+snapshot file's own stat, which is rewritten every cycle whether anything
+changed or not -- stores it inside the outputs, and skips the 32M-row join
+entirely when nothing moved: the cold build is about four seconds, the warm
+call under a tenth of one.
 
-    python tools/dashboard/map_layers.py [--force]
+And it does not publish at all from a manifest set that is not all there.
+A manifest the catalog names and the disk has not got takes its images'
+crops out of the geometry join and into 'unlocated', which reads as a fact
+about those frames and is false; one unmounted drive is 40% of them.
+
+    python tools/dashboard/map_layers.py [--force] [--allow-missing]
 """
 
 import argparse
@@ -86,19 +93,59 @@ def _hide_regions():
     return frozenset(vals or ('Arctic', 'Antarctica'))
 
 
-def _signature(gate_shards, leash_shards, snapshot):
+def _manifests(snapshot, hide_regions):
+    """The ground_animals manifests this build is entitled to read.
+
+    ([(path, mtime, size), ...], whether the catalog carried the two stat
+    columns). Sorted, hidden regions already dropped -- what comes back IS
+    the manifest set, both for the join and for the signature.
+    """
+    con = duckdb.connect()
+    try:
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT path, region, mtime, size_bytes "
+                "FROM read_parquet(?) WHERE kind='ground_animals'",
+                [snapshot]).fetchall()
+            dated = True
+        except duckdb.Error:
+            # a catalog written before it recorded a file's mtime and size
+            rows = [(p, r, None, None) for p, r in con.execute(
+                "SELECT DISTINCT path, region FROM read_parquet(?) "
+                "WHERE kind='ground_animals'", [snapshot]).fetchall()]
+            dated = False
+    finally:
+        con.close()
+    return (sorted((p, m, sz) for p, r, m, sz in rows
+                   if r not in hide_regions), dated)
+
+
+def _signature(gate_shards, leash_shards, manifests, snapshot=None):
     """One hash over everything the build reads: shard names, mtimes and
-    sizes for both stores, plus the catalog snapshot -- the manifest set can
-    grow with no gate shard moving (a region consolidates), and the snapshot
-    is rewritten whenever the catalog is, so its stat is the cheap proxy for
-    the 33K parquets behind it."""
+    sizes for both stores, and the manifest set the catalog names -- each
+    with the mtime and size the catalog recorded for it.
+
+    NOT the catalog snapshot's own stat, which is what this keyed on first.
+    `catalog refresh` rewrites catalog.parquet unconditionally and the serve
+    loop runs it before every build, so that mtime moves every hour whether
+    or not one row changed: keyed on it the signature never matched twice,
+    the documented skip was dead code in production, and every cycle paid the
+    32M-row join to write a byte-identical file. The rows are what the join
+    actually reads, and an unchanged catalog hands back the same ones. (A
+    catalog too old to carry mtime and size has nothing to key on, so its
+    stat comes back as the proxy it always was -- passed in as `snapshot`.)
+    """
     ent = []
-    for p in list(gate_shards) + list(leash_shards) + [snapshot]:
+    for p in (list(gate_shards) + list(leash_shards)
+              + ([snapshot] if snapshot else [])):
         try:
             st = os.stat(p)
             ent.append((os.path.basename(p), st.st_mtime_ns, st.st_size))
         except OSError:
             ent.append((os.path.basename(p), None, None))
+    # the full path here, not the basename: cell-named manifests repeat
+    # across drives and the join reads both. Only the digest is ever stored.
+    ent.extend(list(m) for m in manifests)
     return hashlib.sha256(
         json.dumps(ent, sort_keys=False).encode()).hexdigest()
 
@@ -161,13 +208,18 @@ def _models(con, shards, where):
 
 
 def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
-            out_dir=None, hide_regions=None):
+            out_dir=None, hide_regions=None, allow_missing=False):
     """Build both layer files if anything changed; report either way.
 
     The keyword arguments exist for the guard test, which points them at a
     synthetic fixture store -- production callers pass nothing and get the
     repo paths. Returns a dict: built, reason, sig, secs, and per-layer
     totals when a build ran.
+
+    `allow_missing` publishes from a manifest set the catalog names and the
+    disk does not have. It is off by default and should stay off: those
+    crops do not vanish, they are counted as 'unlocated', which is a
+    positive claim that their frames carry no coordinates -- and it is false.
     """
     t0 = time.time()
     gate_dir = gate_dir or GATE_DIR
@@ -185,11 +237,41 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
     if not os.path.exists(snapshot):
         return {'built': False, 'reason': 'no catalog snapshot',
                 'secs': time.time() - t0}
-    sig = _signature(gate_shards, leash_shards, snapshot)
+    named, dated = _manifests(snapshot, hide_regions)
+    sig = _signature(gate_shards, leash_shards, named,
+                     None if dated else snapshot)
     if (not force and _stored_sig(dogs_path) == sig
             and _stored_sig(leash_path) == sig):
         return {'built': False, 'reason': 'signature match', 'sig': sig,
                 'secs': time.time() - t0}
+
+    # THE MANIFEST SET HAS TO BE ALL THERE, or this does not publish.
+    # Every gate crop whose image lived in a manifest that is not on disk
+    # falls out of the geometry join and is added to 'unlocated' -- so a
+    # drive that is not mounted does not produce a blank layer that reads as
+    # broken, it produces a plausible map with a fresh built_at, a wrong
+    # total, and a specific false claim about where those dogs are. The
+    # ground_animals manifests live across two removable drives, so losing
+    # one is one unplugged disk. The catalog prunes files deleted from a
+    # MOUNTED drive and leaves an offline drive's rows alone, which is
+    # exactly why a shortfall here means "a drive is missing" rather than
+    # "somebody tidied up". Refusing keeps the previous, correct layers in
+    # front of the reader.
+    found = [p for p, _, _ in named if os.path.exists(p)]
+    missing = len(named) - len(found)
+    if not found:
+        return {'built': False, 'reason': 'no ground_animals manifests',
+                'sig': sig, 'manifests_named': len(named),
+                'manifests_found': 0, 'secs': time.time() - t0}
+    if missing and not allow_missing:
+        return {'built': False,
+                'reason': f'{missing:,} of the {len(named):,} ground_animals '
+                          f'manifests the catalog names are not on disk -- '
+                          f'mount the drive, or refresh the catalog if they '
+                          f'are gone for good',
+                'sig': sig, 'manifests_named': len(named),
+                'manifests_found': len(found), 'secs': time.time() - t0}
+    paths = found
 
     con = duckdb.connect()
     try:
@@ -233,15 +315,6 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
                     'SELECT image_id FROM gate_w UNION '
                     'SELECT image_id FROM leash_w')
 
-        rows = con.execute(
-            "SELECT DISTINCT path, region FROM read_parquet(?) "
-            "WHERE kind='ground_animals'", [snapshot]).fetchall()
-        paths = sorted(p for p, r in rows
-                       if os.path.exists(p) and r not in hide_regions)
-        if not paths:
-            return {'built': False, 'reason': 'no ground_animals manifests',
-                    'sig': sig, 'secs': time.time() - t0}
-
         # One location per image. The GROUP BY is not decoration: the same
         # image can sit in manifests on two drives (cells were re-harvested
         # across drives and deduped by id downstream), and without it every
@@ -279,6 +352,11 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
             'FROM lpts').fetchone()
 
         built_at = time.strftime('%Y-%m-%d %H:%M')
+        # How much of the manifest set the geometry came from. 'unlocated'
+        # is a claim ABOUT those manifests -- these frames carry no
+        # coordinates -- so the payload states what it was read against
+        # rather than leaving the reader to assume it was everything.
+        seen = {'manifests_named': len(named), 'manifests_found': len(found)}
         dogs_doc = {
             'schema': SCHEMA, 'layer': 'dogs_gate', 'sig': sig,
             # model output feeding a picture, and it says so
@@ -286,7 +364,7 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
             'total': int(dogs_total), 'images': int(dogs_images),
             'unlocated': int(gate_total - dogs_total),
             'levels': _grid(con, 'dpts', 'crops'),
-            'built_at': built_at}
+            'built_at': built_at, **seen}
         leash_doc = {
             'schema': SCHEMA, 'layer': 'leash', 'sig': sig,
             'source': leash_source, 'split': P_LEASH_SPLIT,
@@ -296,7 +374,7 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
                              - leashed_total - loose_total),
             'leashed_levels': _grid(con, 'lpts', 'leashed'),
             'loose_levels': _grid(con, 'lpts', 'loose'),
-            'built_at': built_at}
+            'built_at': built_at, **seen}
     finally:
         con.close()
 
@@ -305,6 +383,7 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
     _atomic_write(leash_path, leash_doc)
     return {'built': True, 'reason': 'rebuilt', 'sig': sig,
             'secs': time.time() - t0,
+            'manifests_named': len(named), 'manifests_found': len(found),
             'dogs': {'total': dogs_doc['total'],
                      'images': dogs_doc['images'],
                      'unlocated': dogs_doc['unlocated'],
@@ -324,14 +403,20 @@ def main():
                     'leashed-vs-unleashed')
     ap.add_argument('--force', action='store_true',
                     help='rebuild even when the signature matches')
+    ap.add_argument('--allow-missing', action='store_true',
+                    help='publish even when the catalog names manifests that '
+                         'are not on disk -- their crops are then reported '
+                         'as having no coordinates, which is not true')
     args = ap.parse_args()
-    info = refresh(force=args.force)
+    info = refresh(force=args.force, allow_missing=args.allow_missing)
     if not info['built']:
         print(f"map_layers: skipped ({info['reason']}) "
               f"in {info['secs']:.3f}s")
         return
     d, l = info['dogs'], info['leash']
-    print(f"map_layers: built in {info['secs']:.1f}s")
+    print(f"map_layers: built in {info['secs']:.1f}s "
+          f"from {info['manifests_found']:,} of the "
+          f"{info['manifests_named']:,} manifests the catalog names")
     print(f"  dogs : {d['total']:,} crops on {d['images']:,} images "
           f"({d['unlocated']:,} unlocated), cells {d['cells']}")
     print(f"  leash: {l['leashed']:,} leashed / {l['loose']:,} unleashed "

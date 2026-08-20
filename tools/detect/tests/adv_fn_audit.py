@@ -139,11 +139,15 @@ def weighting_checks(bad):
                    "is no longer counted")
 
 
-def _sheet(pages, i, items):
+def _sheet(pages, i, items, band=None):
     """One page document, written the way draw_page writes it: under an index
-    that is the count of the pages before it, and never touched again."""
+    that is the count of the pages before it, and never touched again.
+
+    `band` is the page's own band value -- the compound 'rejected~most' when
+    the sheet was drawn by a confidence walk, which is the only record of how
+    its crops were chosen."""
     with open(os.path.join(pages, f'{i:05d}.json'), 'w') as fh:
-        json.dump({'index': i, 'band': None, 'n': len(items),
+        json.dump({'index': i, 'band': band, 'n': len(items),
                    'items': [{'key': k, 'band': b} for b, k in items]}, fh)
 
 
@@ -273,6 +277,120 @@ def sheets_checks(bad):
                        f"coarser than the document")
     finally:
         fa.paths = real_paths
+    for name in fa.STAGES:
+        hit = _leaked(fa.paths(name), mark)
+        if hit:
+            bad.append(f'this check wrote its own keys into the LIVE {name} '
+                       f'audit ({hit}) — redirecting fa.paths did not take, '
+                       f'and the fixtures went to human data')
+
+
+def targeted_draw_checks(bad):
+    """A confidence draw is a search, not a sample, and the estimate knows it.
+
+    'least/most confident' hand back one END of a band on purpose. Every rate
+    here multiplies a band's share by the band's WHOLE population, so a page
+    drawn at the edge and answered enters the estimate as though it had been
+    drawn evenly across the band: measured on the live gate store, one 'most
+    confident' page below the line came back 25 crops all scoring exactly
+    0.000 out of a band holding 3,530,147 boxes, and answering it moved the
+    headline anywhere from 52.6% to 97.3% away from 95.5%. The page prints
+    that headline as "at most", so a targeted page that drags it DOWN turns a
+    stated upper bound into a claim that is false in the unsafe direction.
+
+    The page document is the only record of how its crops were chosen, so
+    that is what this reads. The finds are still finds -- they are counted,
+    named and kept out of the shares.
+    """
+    import fn_audit as fa
+    import tempfile as _tf
+    for v, want in (('rejected~most', 'most'), ('4~least', 'least'),
+                    ('rejected~bogus', None), ('rejected', None),
+                    (9, None), (None, None)):
+        if fa.draw_mode_of(v) != want:
+            bad.append(f'draw_mode_of({v!r}) = {fa.draw_mode_of(v)!r}, want '
+                       f'{want!r} — a page whose draw cannot be read back is '
+                       f'a page the estimate cannot hold out')
+    try:
+        import audit
+        if audit.DRAW_MODES is not fa.DRAW_MODES:
+            bad.append('audit.py keeps its own list of draw modes — the '
+                       'control and the estimator must spell them the same '
+                       'way or one of them stops recognising a targeted page')
+    except Exception:
+        pass
+    mark = 'zzaim_'
+    real_paths = fa.paths
+    tmp = _tf.mkdtemp()
+    lay = dict(real_paths('gate'))
+    lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
+               verdicts=os.path.join(tmp, 'v.jsonl'),
+               drawn=os.path.join(tmp, 'drawn.jsonl'),
+               full=os.path.join(tmp, 'full'), crops=os.path.join(tmp, 'crops'),
+               dataset=os.path.join(tmp, 'ds'),
+               pool=os.path.join(tmp, 'pool.parquet'))
+    fa.paths = lambda stage='gate': lay
+    try:
+        os.makedirs(lay['pages'])
+        spread = [(0, mark + f's{i}') for i in range(4)]
+        aimed = [(0, mark + f'm{i}') for i in range(4)]
+        _sheet(lay['pages'], 0, spread, band='rejected')
+        _sheet(lay['pages'], 1, aimed, band='rejected~most')
+        with open(lay['verdicts'], 'w') as fh:
+            for _, key in spread:
+                fh.write(json.dumps(
+                    {'key': key, 'band': 0,
+                     'verdict': 'dog' if key.endswith('s0') else 'not_dog'})
+                    + '\n')
+            for _, key in aimed:          # a targeted page, every one a dog
+                fh.write(json.dumps({'key': key, 'band': 0,
+                                     'verdict': 'dog'}) + '\n')
+        totals = [(lo, hi, 1000 if i == 0 else 10)
+                  for i, (lo, hi) in enumerate(fa.BANDS)]
+        fa._SHEETS.clear()
+        s = fa.summarise(totals=totals)
+        b0 = s['bands'][0]
+        if (b0['judged'], b0['dogs']) != (4, 1) or abs(b0['rate'] - .25) > 1e-9:
+            bad.append(f"band 0 reads {b0['dogs']}/{b0['judged']} = "
+                       f"{b0['rate']} — the four answers off the targeted "
+                       f"sheet are in the share, and that share is "
+                       f"multiplied by all 1,000 boxes in the band")
+        if (b0['aimed'], b0['aimed_dogs'], b0['aimed_wrong']) != (4, 4, 4):
+            bad.append(f"the targeted answers are not counted at all: "
+                       f"aimed={b0['aimed']} dogs={b0['aimed_dogs']} "
+                       f"wrong={b0['aimed_wrong']} — held out of the rate is "
+                       f"not the same as thrown away")
+        if b0['shown'] != 4 or b0['answered'] != 4:
+            bad.append(f"band 0 counts {b0['shown']} crops shown and "
+                       f"{b0['answered']} answered — a targeted sheet is not "
+                       f"a denominator for the share it is held out of")
+        if s['aimed'] != 4 or s['rejected']['aimed'] != 4:
+            bad.append(f"nothing says how many answers were held out: "
+                       f"aimed={s['aimed']}, below the line "
+                       f"{s['rejected'].get('aimed')} — a page that holds "
+                       f"answers out has to say how many")
+        if abs(s['rejected']['rate'] - .25) > 1e-6:
+            bad.append(f"the headline is {s['rejected']['rate']}, not the "
+                       f"0.25 the spread sheet measured — a targeted page "
+                       f"moved the population-weighted estimate")
+        # THE CONTROL: the same eight answers, with the second sheet drawn
+        # the ordinary way, must ALL count. Without this the check passes
+        # just as well against a summarise() that counts nothing.
+        _sheet(lay['pages'], 1, aimed, band='rejected')
+        fa._SHEETS.clear()
+        s2 = fa.summarise(totals=totals)
+        c0 = s2['bands'][0]
+        if (c0['judged'], c0['dogs'], c0['aimed']) != (8, 5, 0):
+            bad.append(f"a SPREAD sheet's answers are being held out too: "
+                       f"{c0['dogs']}/{c0['judged']}, aimed {c0['aimed']} — "
+                       f"the even draw is the measurement, not an exception "
+                       f"to it")
+        if abs(s2['rejected']['rate'] - .625) > 1e-9:
+            bad.append(f"the headline off two spread sheets is "
+                       f"{s2['rejected']['rate']}, not 0.625")
+    finally:
+        fa.paths = real_paths
+        fa._SHEETS.clear()
     for name in fa.STAGES:
         hit = _leaked(fa.paths(name), mark)
         if hit:
@@ -1048,6 +1166,27 @@ def draw_filter_checks(bad):
                        f'least-confident walk ({ps(got)}) — a deterministic '
                        f'order that ignores the record is the same page for '
                        f'ever')
+        # A LEDGER ROW WITH A KEY AND NO SEQ. The pool was rebuilt once and
+        # the log went with it, so this shape has existed here. The ANTI JOIN
+        # only knows sequences, so such a row is dropped by the key filter in
+        # Python afterwards -- and while the SQL fetched exactly n, that came
+        # back as a short page reporting dropped=0, which reads as nothing at
+        # all. The spread branch over-draws and absorbs it; the walk must too.
+        with open(lay['drawn'], 'w') as fh:
+            fh.write(json.dumps({'key': f'{mark}2#0'}) + '\n')
+        got = audit.sample(n=3, band='rejected~least', stage='gate')
+        if len(got) != 3:
+            bad.append(f'a least-confident page came back {len(got)} of 3 '
+                       f'after one key-only ledger row ({ps(got)}) — the '
+                       f'walk must draw past a row the key filter removes, '
+                       f'or a short page is served as a full one')
+        if any(c['key'] == f'{mark}2#0' for c in got):
+            bad.append('a key already in the ledger was drawn again')
+        # and it replaces the dropped crop with the NEXT one on the walk,
+        # rather than with whatever the order happened to reach
+        if len(got) == 3 and ps(got) != [0.3, 0.48, 0.49]:
+            bad.append(f'the walk filled the gap with {ps(got)}, not the '
+                       f'next scores along from the threshold')
         os.remove(lay['drawn'])
         # the page document keeps the compound value, so a page read back
         # says how it was chosen, not only where from
@@ -1230,6 +1369,89 @@ def tab_checks(bad):
                 bad.append(f'{stage}: /audit/{k} is linked {n} times — the '
                            f'old cross-link folds into the strip, it does '
                            f'not ride beside it')
+
+
+def mobile_checks(bad):
+    """The page on a phone, measured rather than read off the sheet.
+
+    The band table is five tracks, 470px of them fixed before the bar column
+    gets a pixel, and it sits in a panel that is shut by default -- so the
+    sheet looks fine and one tap on "the numbers" used to put the whole
+    DOCUMENT into horizontal scroll at 390px, carrying the flagged and
+    answered columns off the right edge of every other block on the page.
+    A table wider than a phone has to scroll inside its own box.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        print('SKIP: playwright is not in this interpreter — the audit page '
+              'was never measured at phone width')
+        return
+    try:
+        import audit
+    except Exception:
+        return
+    import fn_audit as _fa
+
+    def serve(stage, html):
+        def handler(route, request):
+            u = request.url
+            if u.endswith('/audit/' + stage):
+                route.fulfill(status=200,
+                              content_type='text/html; charset=utf-8',
+                              body=html)
+            elif '/api/' in u:
+                route.fulfill(status=200, content_type='application/json',
+                              body=json.dumps({'page': {'index': 0,
+                                                        'items': [],
+                                                        'band': 'rejected'},
+                                               'index': 0, 'total': 1,
+                                               'bands': [], 'judged': 0,
+                                               'counts': {'all': 0,
+                                                          'ledger': 0}}))
+            else:
+                route.abort()
+        return handler
+
+    try:
+        with sync_playwright() as p:
+            br = p.chromium.launch()
+            for stage in _fa.STAGES:
+                html = audit.page_html(stage)
+                ctx = br.new_context(viewport={'width': 390, 'height': 844},
+                                     is_mobile=True, has_touch=True)
+                pg = ctx.new_page()
+                pg.route('**/*', serve(stage, html))
+                pg.goto(f'http://audit.fixture/audit/{stage}',
+                        wait_until='domcontentloaded', timeout=30000)
+                pg.wait_for_timeout(400)
+                shut = pg.evaluate(
+                    '()=>[document.documentElement.scrollWidth,'
+                    'document.documentElement.clientWidth]')
+                pg.evaluate("()=>{document.getElementById('figures')"
+                            ".open=true}")
+                pg.wait_for_timeout(300)
+                open_ = pg.evaluate(
+                    '()=>[document.documentElement.scrollWidth,'
+                    'document.documentElement.clientWidth,'
+                    "getComputedStyle(document.getElementById('bands'))"
+                    '.overflowX]')
+                ctx.close()
+                if shut[0] > shut[1]:
+                    bad.append(f'/audit/{stage} scrolls sideways at 390px '
+                               f'with the numbers shut: {shut[0]} > {shut[1]}')
+                if open_[0] > open_[1]:
+                    bad.append(f'/audit/{stage} puts the whole document into '
+                               f'horizontal scroll at 390px as soon as "the '
+                               f'numbers" is opened: scrollWidth {open_[0]} '
+                               f'against clientWidth {open_[1]} — the band '
+                               f'table has to scroll inside its own panel '
+                               f'(overflow-x is {open_[2]})')
+            br.close()
+    except Exception as e:                 # noqa: BLE001
+        print(f'SKIP: playwright would not run a browser here '
+              f'({type(e).__name__}: {str(e).splitlines()[0][:100]}) — the '
+              f'audit page was never measured at phone width')
 
 
 def prefetch_checks(bad):
@@ -1929,6 +2151,80 @@ chk(FETCHES.some(function (u) { return /judged\?[^"]*which=all~7d/.test(u) }),
   'choosing a period did not reach the server: ' + JSON.stringify(FETCHES));
 setTimeout = _setT; fetch = _oldFetch;
 view = 'sheet'; period = ''; els.period.value = ''; mode = 'spread';
+
+// ── an empty SLICE is not an empty ledger ──
+// The sentence a reader gets when a filter matches nothing used to be
+// "nothing judged at this stage yet -- verdicts land here as you record them
+// on the sheet", which is instructions for a ledger that is empty, handed to
+// someone with 344 verdicts who asked for today's. The review queue says the
+// same thing in the same words next door.
+view = 'judged'; anno = 'all'; period = 'today';
+page = {index:0, items:[], dropped:0}; render();
+chk(/period/.test(els.empty.textContent) &&
+    !/land here as you record/.test(els.empty.textContent),
+  'an empty PERIOD reads as an empty ledger: ' + els.empty.textContent);
+anno = 'unsure';
+render();
+chk(/verdict/.test(els.empty.textContent) &&
+    /period/.test(els.empty.textContent),
+  'an empty verdict-and-period slice does not name both filters: ' +
+  els.empty.textContent);
+anno = 'all'; period = '';
+render();
+chk(/land here as you record/.test(els.empty.textContent),
+  'a genuinely empty ledger lost its own sentence: ' + els.empty.textContent);
+
+// ── the tab's count follows the view ──
+// The period narrows what judged() counts, and the period control is hidden
+// on the sheet: leaving today's sixteen on the tab there under-reports the
+// ledger with nothing on screen to explain it.
+view = 'judged';
+counts({all:16, ledger:344});
+chk(els.nAll.textContent === '16',
+  'the annotations tab does not count the slice it is showing: ' +
+  els.nAll.textContent);
+view = 'sheet'; paintNAll();
+chk(els.nAll.textContent === '344',
+  'back on the sheet the tab still reads the period-narrowed count: ' +
+  els.nAll.textContent);
+counts({all:344});                      // an older server, no ledger field
+chk(els.nAll.textContent === '344',
+  'a payload without the ledger count zeroed the tab: ' +
+  els.nAll.textContent);
+
+// ── a targeted draw says what it costs, and where it went ──
+// 'least/most confident' draw one END of a band; every rate on this page
+// multiplies a band's share by the band's whole population, so those answers
+// are held out of the rates -- and a page that holds answers out has to say
+// so where the button is and where the number is.
+mode = 'most'; paintFilter();
+var _dn = document.getElementById('drawnote');
+chk(!!_dn && _dn.hidden === false &&
+    /held out|not measurement/.test(String(_dn.textContent)),
+  'nothing beside the confidence buttons says the answers do not feed the ' +
+  'measurement: ' + JSON.stringify(_dn && _dn.textContent));
+mode = 'spread'; paintFilter();
+chk(!!_dn && _dn.hidden === true,
+  'the spread draw is warned about as though it were targeted');
+STATS.aimed = 25; STATS.aimed_dogs = 24; STATS.aimed_wrong = 24;
+STATS.rejected.aimed = 25; STATS.rejected.aimed_wrong = 24;
+paintStats(STATS);
+chk(/held out/.test(els.figline.innerHTML) && /25/.test(els.figline.innerHTML),
+  'the headline does not say how many of its answers came off a targeted ' +
+  'draw: ' + els.figline.innerHTML);
+chk(els.judged.textContent === '37',
+  'the work done does not count the targeted answers (12 + 25): ' +
+  els.judged.textContent);
+chk(/^25 /.test(els.found.textContent),
+  'a find drawn by a confidence walk is not counted as a find: ' +
+  els.found.textContent);
+STATS.aimed = 0; STATS.aimed_dogs = 0; STATS.aimed_wrong = 0;
+delete STATS.rejected.aimed; delete STATS.rejected.aimed_wrong;
+paintStats(STATS);
+chk(!/held out/.test(els.figline.innerHTML),
+  'the headline claims answers were held out when none were: ' +
+  els.figline.innerHTML);
+view = 'sheet'; anno = 'all'; period = ''; mode = 'spread';
 """
 
 
@@ -2032,12 +2328,12 @@ def main():
     bad = []
     stage_checks(bad)
     for fn in (band_checks, wilson_checks, weighting_checks, sheets_checks,
-               legacy_checks, ledger_checks,
+               targeted_draw_checks, legacy_checks, ledger_checks,
                serving_checks, isolation_checks, correction_checks,
                concurrency_checks,
                persistence_checks, selection_checks, passive_load_checks,
                draw_filter_checks, period_filter_checks, tab_checks,
-               prefetch_checks, page_checks):
+               prefetch_checks, page_checks, mobile_checks):
         try:
             fn(bad)
         except Exception as e:                 # noqa: BLE001 - report, not die

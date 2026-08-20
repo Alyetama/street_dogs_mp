@@ -1761,6 +1761,11 @@ border-radius:8px;padding:4px 10px;transition:color .12s,border-color .12s}
   border-radius:8px}
 .jtab:hover{color:var(--tx)}
 .jtab.on{background:rgba(232,166,69,.15);color:var(--acc);font-weight:640}
+/* the audit pages ring every focusable thing with one blanket
+   :focus-visible; this page rings per class, so the shared strip needs its
+   own rule or it falls through to the browser's default ring here and the
+   one strip wears two different rings across the three surfaces */
+.jtab:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 /* The headline and the tally are different KINDS of number, so they are set
    as different kinds: one is what is left to do, the rest are what has been
    done. Ranking them by size in one row made six numbers of similar weight
@@ -3559,9 +3564,27 @@ function markSeen(){
    .then(function(j){if(j&&j.seen_total!=null)seenN=j.seen_total})
    .catch(function(){});
 }
+/* FOLLOWING A LINK OFF THIS PAGE IS NOT THE DECISION.
+   The judging tab strip sits at the top of all three judging surfaces so a
+   reviewer can cross between them mid-screen -- and one of its three tabs
+   points at THIS page, where a click changes nothing at all. Banking on it
+   retires fifty unjudged crops as "looked at and kept", and the only undo
+   restores the whole 8,000-record ledger. So a click on any link here arms
+   this flag and the beacon below stands down: banking is what an explicit
+   page turn does (nav()/go(), which call markSeen), and what a real
+   departure does -- the tab closed, the address bar, Back. */
+var leavingByLink=false;
+document.addEventListener('click',function(e){
+  var t=e&&e.target,a=t&&t.closest?t.closest('a'):null;
+  if(!a)return;
+  var h=a.getAttribute('href')||'';
+  /* an in-page jump and a new tab both leave this page where it is */
+  if(!h||h.charAt(0)==='#'||a.getAttribute('target')==='_blank')return;
+  leavingByLink=true;
+},true);
 /* leaving the tab counts too -- sendBeacon survives unload where fetch does not */
 window.addEventListener('pagehide',function(){
-  if(mode==='audit'||!items.length||!navigator.sendBeacon)return;
+  if(leavingByLink||mode==='audit'||!items.length||!navigator.sendBeacon)return;
   try{
     navigator.sendBeacon('/api/review/seen',
       new Blob([JSON.stringify({names:items.map(function(c){return c.name})})],
@@ -3661,6 +3684,18 @@ function restorePrefs(){
      paintCountries either select it or, if the pool no longer holds that
      country, clear it -- see the self-heal there. */
   if(o.country)country=o.country;
+  /* AND THE ADDRESS BEATS THE STORED PREFERENCE. /review answers 301 to
+     /audit/review carrying its query string, which is only worth carrying if
+     something reads it: a bookmark made on ?country=ECU used to land here
+     unfiltered, because the filter came from localStorage and nothing else.
+     Applied for this visit and NOT saved -- a link is where you were sent,
+     not a preference you set -- and an ISO the pool no longer holds is
+     cleared by the same self-heal that clears a stale stored one. */
+  try{
+    var qs=new URLSearchParams(location.search||'');
+    if(qs.has('country'))
+      country=String(qs.get('country')||'').trim().toUpperCase();
+  }catch(_){}
 }
 /* CHANGING THE VIEW IS NOT REVIEWING.
    markSeen() banks every crop on screen -- it is how "I am done with these"
@@ -10553,7 +10588,16 @@ def build(args):
     ml = _map_layers()
     if ml:
         try:
-            ml.refresh()
+            info = ml.refresh()
+            # Two of refresh()'s exits are returns, not raises -- no catalog
+            # snapshot, and a manifest set with files missing off it (which
+            # is what an unmounted drive looks like, and is refused rather
+            # than published as a wrong 'unlocated' count). Thrown away here,
+            # the layers simply stopped advancing while the page rebuilt
+            # around them every hour, and nothing said why. 'signature match'
+            # is the normal quiet answer and stays quiet.
+            if not info.get('built') and info.get('reason') != 'signature match':
+                print('map layers not rebuilt:', info.get('reason'))
         except Exception as e:
             print('map layers refresh error:', e)
     os.makedirs(OUT, exist_ok=True)

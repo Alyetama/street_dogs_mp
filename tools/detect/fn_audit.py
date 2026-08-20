@@ -24,6 +24,15 @@ evenly; each band's rate is reported on its own, and the headline weights
 those bands by how many boxes each really holds. That is the difference
 between "we looked at 500 crops" and a number.
 
+AND WHAT IS NOT PART OF THAT SAMPLE. The sheet can also be drawn at one END
+of a band -- the dashboard's 'least confident' and 'most confident' walks --
+which is a good way to FIND errors and not a way to measure them: those crops
+are chosen on the very property being estimated, and every rate here is
+multiplied by its band's whole population. Each page document records how it
+was drawn, so summarise() holds those answers out of the rates and reports
+them separately as `aimed`. The finds are kept; only the arithmetic refuses
+them.
+
 AND WHY IT IS STILL A CEILING. Which crops are DRAWN is even; which of them
 get answered is not. A sheet of twenty-five can be scrolled past as easily as
 it can be clicked, and the one worth stopping on is the one that already looks
@@ -311,17 +320,33 @@ def band_totals(stage=DEFAULT_STAGE):
 _SHEETS = {}
 
 
-def sheets(stage=DEFAULT_STAGE):
-    """{band: {key, ...}} -- what was actually put in front of a person.
+# How a sheet was drawn, written into the page document's own band value as
+# '<band>~<mode>'. The vocabulary lives HERE because this file is what has to
+# tell a stratified draw from a targeted one; audit.py, which serves the
+# control, reads it back off this constant so there is one spelling of it.
+DRAW_MODES = ('least', 'most')
 
-    Every draw is written to pages/ before it is served and the document names
-    its crops, so the sheets are the record of what was SHOWN and the ledger is
-    the record of what came back. Without them a band's answers were counted as
-    a sample OF the band, when they are a sample of what someone chose to click
-    on a sheet where every other tile could be scrolled past.
+
+def draw_mode_of(band):
+    """The draw mode a page document's band value carries, or None.
+
+    A spread draw -- 'rejected', 9, None -- has no mode and IS the sample the
+    estimator assumes. Anything else was aimed somewhere.
+    """
+    if isinstance(band, str) and '~' in band:
+        m = band.partition('~')[2]
+        return m if m in DRAW_MODES else None
+    return None
+
+
+def _read_pages(stage=DEFAULT_STAGE):
+    """[(draw mode or None, [(band, key), ...]), ...] -- one entry per sheet.
+
+    Every reader of pages/ comes through here so a page document is parsed
+    once per (path, mtime) however many questions are asked of it.
     """
     P = paths(stage)
-    out = {}
+    out = []
     for f in glob.glob(os.path.join(P['pages'], '*.json')):
         try:
             ck = (f, os.path.getmtime(f))
@@ -334,11 +359,45 @@ def sheets(stage=DEFAULT_STAGE):
                     doc = json.load(fh)
             except (OSError, ValueError):
                 doc = {}
-            got = [(it.get('band'), it['key'])
-                   for it in (doc.get('items') or []) if it.get('key')]
+            got = (draw_mode_of(doc.get('band')),
+                   [(it.get('band'), it['key'])
+                    for it in (doc.get('items') or []) if it.get('key')])
             _SHEETS[ck] = got
-        for band, key in got:
+        out.append(got)
+    return out
+
+
+def sheets(stage=DEFAULT_STAGE):
+    """{band: {key, ...}} -- what was actually put in front of a person.
+
+    Every draw is written to pages/ before it is served and the document names
+    its crops, so the sheets are the record of what was SHOWN and the ledger is
+    the record of what came back. Without them a band's answers were counted as
+    a sample OF the band, when they are a sample of what someone chose to click
+    on a sheet where every other tile could be scrolled past.
+    """
+    out = {}
+    for _, items in _read_pages(stage):
+        for band, key in items:
             out.setdefault(band, set()).add(key)
+    return out
+
+
+def targeted(stage=DEFAULT_STAGE):
+    """{key, ...} -- every crop handed out by a TARGETED draw.
+
+    'least confident' and 'most confident' hand back one end of a band on
+    purpose: measured on the live gate store, a 'most confident' page below
+    the line came back 25 crops all scoring exactly 0.000, out of a band
+    holding 3,530,147 boxes. Those are finds, and worth drawing -- but they
+    are not a sample of the band, and summarise() multiplies a band's rate by
+    the band's whole population. So they are held out of the rate, and the
+    page says how many were held.
+    """
+    out = set()
+    for mode, items in _read_pages(stage):
+        if mode:
+            out.update(k for _, k in items)
     return out
 
 
@@ -404,7 +463,8 @@ def verdict_of(v, stage=DEFAULT_STAGE):
     return v if v in sp['answers'] else None
 
 
-def summarise(verdicts=None, totals=None, shown=None, stage=DEFAULT_STAGE):
+def summarise(verdicts=None, totals=None, shown=None, stage=DEFAULT_STAGE,
+              aimed=None):
     """Per band and overall.
 
     Each band reports the share of its crops a person called a dog. Below the
@@ -425,23 +485,50 @@ def summarise(verdicts=None, totals=None, shown=None, stage=DEFAULT_STAGE):
     real share until its sheets are answered in full, the bias does not cancel
     across bands because the answer rate is not the same in any two of them,
     and the answer rate travels beside every rate here for that reason.
+
+    AND WHAT IS NOT IN IT AT ALL. A sheet can also be drawn at one END of a
+    band -- 'least confident' walks out from the threshold, 'most confident'
+    in from the edges -- which selects crops on exactly the property being
+    measured. Every rate here is multiplied by its band's whole population,
+    so folding a targeted page in would state the surest corner of a band as
+    the band: measured on the live gate store, one 'most confident' page
+    below the line moved the headline from 95.5% to anywhere between 52.6%
+    and 97.3% depending on the answers. Those crops are held out of the rates
+    and counted on their own as `aimed` -- the finds are still finds, and
+    still land in the dataset.
     """
     sp = spec(stage)
     vs = read_verdicts(stage=stage) if verdicts is None else verdicts
     totals = band_totals(stage) if totals is None else totals
     shown = sheets(stage) if shown is None else shown
+    aimed = targeted(stage) if aimed is None else set(aimed)
     pos, neg = sp['positive'], sp['negative']
     back = {v.get('key') for v in vs}
     per = []
     for i, (lo, hi) in enumerate(BANDS):
-        seen = [v for v in vs if v.get('band') == i
-                and verdict_of(v.get('verdict'), stage) in (pos, neg)]
+        answered = [v for v in vs if v.get('band') == i
+                    and verdict_of(v.get('verdict'), stage) in (pos, neg)]
+        # the targeted ones are answers, and they are not the sample
+        seen = [v for v in answered if v.get('key') not in aimed]
+        aim = [v for v in answered if v.get('key') in aimed]
         k = sum(1 for v in seen if verdict_of(v['verdict'], stage) == pos)
+        ak = sum(1 for v in aim if verdict_of(v['verdict'], stage) == pos)
         p, a, b = wilson(k, len(seen))
         boxes = totals[i][2] if i < len(totals) else 0
-        put = shown.get(i) or ()
+        # the sheets those crops came off are not a denominator for the rate
+        # above either -- a targeted page answered in full would otherwise
+        # read as this band's ceiling being reached
+        put = [key for key in (shown.get(i) or ()) if key not in aimed]
         per.append({'lo': lo, 'hi': hi, 'judged': len(seen), 'dogs': k,
                     'rate': p, 'lo95': a, 'hi95': b, 'boxes': boxes,
+                    # answered off a least/most-confident sheet: held out of
+                    # every number on this row, and stated so it is not lost
+                    'aimed': len(aim), 'aimed_dogs': ak,
+                    # the errors those crops turned up. They are real finds
+                    # and the page counts them as finds -- what they are not
+                    # is a share of anything, which is why they sit in their
+                    # own field rather than in 'wrong'.
+                    'aimed_wrong': (len(aim) - ak) if lo >= THRESHOLD else ak,
                     # the denominator the rate above is missing: crops served
                     # on a sheet, and how many of them anyone answered
                     'shown': len(put),
@@ -465,13 +552,19 @@ def summarise(verdicts=None, totals=None, shown=None, stage=DEFAULT_STAGE):
             # waiting is still a fact, and reporting it as zero read as "the
             # gate kept nothing"
             return {'rate': 0.0, 'judged': 0, 'wrong': 0, 'boxes': allpop,
-                    'covered': 0.0, 'shown': put, 'answered': got}
+                    'covered': 0.0, 'shown': put, 'answered': got,
+                    'aimed': sum(b['aimed'] for b in was),
+                    'aimed_wrong': sum(b['aimed_wrong'] for b in was)}
         rate = sum((b['wrong'] / b['judged']) * b['boxes']
                    for b in rows) / pop
         return {'rate': rate, 'judged': sum(b['judged'] for b in rows),
                 'wrong': sum(b['wrong'] for b in rows), 'boxes': allpop,
                 'covered': pop / allpop if allpop else 0.0,
-                'shown': put, 'answered': got}
+                'shown': put, 'answered': got,
+                # answered on this side off a targeted sheet, and therefore
+                # in none of the rates beside it
+                'aimed': sum(b['aimed'] for b in was),
+                'aimed_wrong': sum(b['aimed_wrong'] for b in was)}
     pop = sum(b['boxes'] for b in per) or 1
     seen_pop = sum(b['boxes'] for b in per if b['judged'])
     # 'unrecorded' is the ledger's own past: the first sessions were served
@@ -490,6 +583,12 @@ def summarise(verdicts=None, totals=None, shown=None, stage=DEFAULT_STAGE):
             'covered': seen_pop / pop if pop else 0.0,
             'judged': sum(b['judged'] for b in per),
             'wrong': sum(b['wrong'] for b in per),
+            # answered off a least/most-confident sheet: in no rate above,
+            # and never silently -- a page that holds answers out has to say
+            # how many it is holding
+            'aimed': sum(b['aimed'] for b in per),
+            'aimed_dogs': sum(b['aimed_dogs'] for b in per),
+            'aimed_wrong': sum(b['aimed_wrong'] for b in per),
             'threshold': THRESHOLD, 'pool': pop, 'stage': stage,
             'pool_info': pool_info(stage),
             'asymmetric': sp['asymmetric'], 'title': sp['title'],
@@ -700,6 +799,12 @@ def stats(args):
     if sh['unrecorded']:
         print(f"  {sh['unrecorded']:,} more verdicts predate pages/ and have "
               f"no sheet to be a share of")
+    if s['aimed']:
+        print(f"\n{s['aimed']:,} more were answered off a least/most-confident "
+              f"sheet ({s['aimed_dogs']:,} called {sp['positive']})")
+        print('  those sheets are drawn at one END of a band, so they are '
+              'finds and not a\n  sample of it -- they are in none of the '
+              'shares above')
     return 0
 
 

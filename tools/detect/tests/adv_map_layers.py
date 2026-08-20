@@ -106,13 +106,10 @@ def build_fixture(tmp):
                         [(i, geo(i)) for i in ids])
         con.execute(f"COPY m TO '{path}' (FORMAT PARQUET)")
     snap = os.path.join(tmp, 'catalog.parquet')
-    con.execute('CREATE OR REPLACE TEMP TABLE snap'
-                '(path VARCHAR, region VARCHAR, kind VARCHAR)')
-    con.executemany(
-        'INSERT INTO snap VALUES (?, ?, ?)',
-        [(p, r, 'ground_animals') for p, r, _ in mans]
-        + [(os.path.join(man_dir, 'nope.parquet'), 'Testland', 'other')])
-    con.execute(f"COPY snap TO '{snap}' (FORMAT PARQUET)")
+    # mtime and size_bytes as the real catalog records them: the signature
+    # reads the manifest set out of these columns rather than off the
+    # snapshot's own stat, which `catalog refresh` moves every hour.
+    write_snapshot(con, snap, mans, man_dir)
 
     con.execute('CREATE OR REPLACE TEMP TABLE g(image_id VARCHAR, '
                 'det_idx INTEGER, p_dog FLOAT, model VARCHAR)')
@@ -136,6 +133,27 @@ def build_fixture(tmp):
     con.close()
     return dict(gate_dir=gate_dir, leash_dir=leash_dir, snapshot=snap,
                 out_dir=out_dir, hide_regions=frozenset({'Hiddenia'}))
+
+
+def write_snapshot(con, snap, mans, man_dir, drop=()):
+    """The catalog snapshot for a manifest list. `drop` names manifests to
+    keep in the catalog with their stats FROZEN -- which is what an unmounted
+    drive looks like: the rows stay, the files do not."""
+    rows = []
+    for path, region, _ in mans:
+        try:
+            st = os.stat(path)
+            mtime, size = float(st.st_mtime), int(st.st_size)
+        except OSError:
+            mtime, size = 0.0, 0
+        rows.append((path, region, 'ground_animals', mtime, size))
+    rows.append((os.path.join(man_dir, 'nope.parquet'), 'Testland', 'other',
+                 0.0, 0))
+    con.execute('CREATE OR REPLACE TEMP TABLE snap'
+                '(path VARCHAR, region VARCHAR, kind VARCHAR, '
+                'mtime DOUBLE, size_bytes BIGINT)')
+    con.executemany('INSERT INTO snap VALUES (?, ?, ?, ?, ?)', rows)
+    con.execute(f"COPY snap TO '{snap}' (FORMAT PARQUET)")
 
 
 def count_checks(bad, fx):
@@ -316,6 +334,198 @@ def atomicity_checks(bad, dogs_p):
                        'is not atomic, whatever the name says')
 
 
+def manifest_checks(bad, fx, dogs_p, leash_p):
+    """A manifest the catalog names and the disk has not got is not a small
+    hole in the picture: every crop whose image lived in it drops out of the
+    geometry join and is added to 'unlocated', which is a positive claim
+    about those frames -- they have no coordinates -- and it is false. The
+    ground_animals manifests live across two removable drives, so this is one
+    unplugged disk, and the result is a plausible map with a fresh built_at
+    and a wrong total. It must not publish.
+    """
+    man_dir = os.path.join(os.path.dirname(fx['snapshot']), 'grid_runs')
+    mans = [(os.path.join(man_dir, 'm1.parquet'), 'Testland', None),
+            (os.path.join(man_dir, 'm2.parquet'), 'Testland', None),
+            (os.path.join(man_dir, 'm3.parquet'), 'Hiddenia', None)]
+
+    def stamps():
+        return (os.stat(dogs_p).st_mtime_ns, os.stat(leash_p).st_mtime_ns)
+
+    good = ml.refresh(force=True, **fx)
+    if not good.get('built'):
+        bad.append(f'the complete fixture did not build: {good}')
+        return
+    if good.get('manifests_named') != 2 or good.get('manifests_found') != 2:
+        bad.append(f"a build does not say what manifest set it read: "
+                   f"named={good.get('manifests_named')} "
+                   f"found={good.get('manifests_found')} (the third manifest "
+                   f"is in a hidden region and is not part of the set)")
+    doc = json.load(open(dogs_p))
+    if (doc.get('manifests_named'), doc.get('manifests_found')) != (2, 2):
+        bad.append(f"the published layer does not carry the manifest set its "
+                   f"geometry came from: {doc.get('manifests_named')} / "
+                   f"{doc.get('manifests_found')} -- 'unlocated' is a claim "
+                   f"about exactly that set")
+
+    # the drive goes away: the catalog keeps its rows, the files are gone
+    gone = os.path.join(man_dir, 'm2.parquet')
+    kept = gone + '.unmounted'
+    os.rename(gone, kept)
+    before = stamps()
+    # With nothing else moved the signature still matches and the layers are
+    # simply left alone -- which is the right answer, and is why the refusal
+    # below has to be provoked by a build that would otherwise run.
+    quiet = ml.refresh(**fx)
+    if quiet.get('built'):
+        bad.append(f'a missing manifest rebuilt the layers on its own: '
+                   f'{quiet}')
+    r = ml.refresh(force=True, **fx)
+    if r.get('built'):
+        bad.append(f'a manifest the catalog names and the disk has not got '
+                   f'was published anyway: {r.get("dogs")} -- those crops '
+                   f'are counted as having no coordinates, which is not true')
+    if '1 of the 2' not in str(r.get('reason', '')):
+        bad.append(f"the refusal does not say how much is missing: "
+                   f"{r.get('reason')!r}")
+    if stamps() != before:
+        bad.append('the refusal still rewrote the layer files -- the point '
+                   'of refusing is that the last correct build stays served')
+    if (r.get('manifests_named'), r.get('manifests_found')) != (2, 1):
+        bad.append(f"the refusal does not count the set: "
+                   f"{r.get('manifests_named')} / {r.get('manifests_found')}")
+    # ...and an operator who knows the drive is gone for good can still say so
+    forced = ml.refresh(force=True, allow_missing=True, **fx)
+    if not forced.get('built') or forced.get('manifests_found') != 1:
+        bad.append(f'allow_missing did not publish the partial build: '
+                   f'{forced}')
+    os.rename(kept, gone)
+
+    # A HIDDEN region is not part of the set, so losing it changes nothing.
+    hid = os.path.join(man_dir, 'm3.parquet')
+    os.rename(hid, hid + '.unmounted')
+    r = ml.refresh(force=True, **fx)
+    if not r.get('built'):
+        bad.append(f'a missing manifest from a HIDDEN region blocked the '
+                   f'build: {r.get("reason")!r} -- it was never read')
+    os.rename(hid + '.unmounted', hid)
+    ml.refresh(force=True, **fx)
+
+
+def signature_checks(bad, fx):
+    """The skip has to survive `catalog refresh`.
+
+    catalog.parquet is rewritten unconditionally before every dashboard
+    build, so a signature keyed on the snapshot's own mtime never matched
+    twice: the documented "an unchanged store never rebuilds it" was dead
+    code in production and every cycle paid the 32M-row join to write a
+    byte-identical file. The signature is over what the join READS.
+    """
+    import duckdb as _dd
+    man_dir = os.path.join(os.path.dirname(fx['snapshot']), 'grid_runs')
+    mans = [(os.path.join(man_dir, 'm1.parquet'), 'Testland', None),
+            (os.path.join(man_dir, 'm2.parquet'), 'Testland', None),
+            (os.path.join(man_dir, 'm3.parquet'), 'Hiddenia', None)]
+    if not ml.refresh(force=True, **fx).get('built'):
+        bad.append('the fixture would not build before the signature check')
+        return
+    sig = ml.refresh(**fx).get('sig')
+    con = _dd.connect()
+    try:
+        write_snapshot(con, fx['snapshot'], mans, man_dir)   # same rows again
+    finally:
+        con.close()
+    st = os.stat(fx['snapshot'])
+    os.utime(fx['snapshot'], ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+    r = ml.refresh(**fx)
+    if r.get('built'):
+        bad.append('a catalog snapshot rewritten with the same rows forced a '
+                   'full rebuild -- keyed on the file\'s stat, the skip can '
+                   'never happen in production, where the catalog is '
+                   'rewritten every cycle')
+    if r.get('sig') != sig:
+        bad.append('the signature moved with the snapshot\'s mtime')
+    # ...but a manifest that really changed still invalidates it. Rewritten
+    # rather than corrupted: the rebuild this must trigger has to be able to
+    # READ the file, or the check passes on an exception.
+    m1 = os.path.join(man_dir, 'm1.parquet')
+    con = _dd.connect()
+    try:
+        con.execute(f"COPY (SELECT * FROM read_parquet('{m1}')) "
+                    f"TO '{m1}.new' (FORMAT PARQUET)")
+        os.replace(m1 + '.new', m1)
+        write_snapshot(con, fx['snapshot'], mans, man_dir)
+    finally:
+        con.close()
+    if not ml.refresh(**fx).get('built'):
+        bad.append('a manifest whose size and mtime moved did not rebuild -- '
+                   'the signature is blind to the files the join reads')
+
+
+def build_call_checks(bad):
+    """The dashboard's build() must not throw refresh()'s answer away.
+
+    Two of its exits are returns rather than raises -- no catalog snapshot,
+    and a manifest set with files missing off it -- so a discarded result
+    means the layers quietly stop advancing while the page rebuilds around
+    them every hour, and nothing anywhere says why. Only the raising paths
+    ever reached the operator.
+    """
+    import ast as _ast
+    import re as _re
+    src_path = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
+    try:
+        with open(src_path) as fh:
+            src = fh.read()
+        tree = _ast.parse(src)
+    except (OSError, SyntaxError) as e:
+        bad.append(f'could not read dashboard.py: {e}')
+        return
+
+    def is_refresh(node):
+        f = getattr(node, 'func', None)
+        return (isinstance(node, _ast.Call)
+                and isinstance(f, _ast.Attribute) and f.attr == 'refresh'
+                and isinstance(f.value, _ast.Name) and f.value.id == 'ml')
+
+    calls, kept = 0, None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Expr) and is_refresh(node.value):
+            calls += 1
+            bad.append('dashboard.py calls ml.refresh() as a bare statement '
+                       '-- the reason a layer did not rebuild is thrown '
+                       'away, and a stalled layer looks exactly like a '
+                       'skipped one')
+        elif isinstance(node, _ast.Assign) and is_refresh(node.value):
+            calls += 1
+            if isinstance(node.targets[0], _ast.Name):
+                kept = node.targets[0].id
+    if not calls:
+        bad.append('dashboard.py no longer refreshes the map layers')
+        return
+    if kept is None:
+        return
+    # ...and the reason has to reach a human. Read off the function that
+    # holds the call, so a print somewhere else in the file cannot stand in
+    # for one here.
+    holder = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef):
+            seg = _ast.get_source_segment(src, node) or ''
+            if 'ml.refresh(' in seg and (holder is None
+                                         or len(seg) < len(holder)):
+                holder = seg
+    if holder is None:
+        return
+    if not _re.search(r'print\([^\n]*' + _re.escape(kept), holder):
+        bad.append(f'nothing prints the reason {kept}.refresh() gave for not '
+                   f'building -- a layer that has stopped advancing has to '
+                   f'look different from one that had nothing to do')
+    if 'signature match' not in _re.sub(r'#[^\n]*', '', holder):
+        bad.append('the normal quiet skip is not told apart from a refusal, '
+                   'so either every cycle prints a line nobody reads or none '
+                   'of them do')
+
+
 def empty_store_checks(bad, fx):
     """No shards at all is a state, not a crash: first boot on a fresh
     clone runs the refresher before any classifier has written a row."""
@@ -348,6 +558,9 @@ def main():
     if paths:
         skip_checks(bad, fx, *paths)
         atomicity_checks(bad, paths[0])
+        manifest_checks(bad, fx, *paths)
+        signature_checks(bad, fx)
+    build_call_checks(bad)
     empty_store_checks(bad, fx)
     if bad:
         for b in bad:
