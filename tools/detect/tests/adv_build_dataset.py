@@ -241,6 +241,30 @@ def remove_checks(bad, bd):
         if got['ok'] or not os.path.isdir(moved):
             bad.append('a symlinked dataset was followed and the original on '
                        'the other drive was deleted')
+        # ...and a link pointing at something INSIDE the root passed every
+        # other check here: the name checked is the link's, and the resolved
+        # path is still under the training root. It deleted the base.
+        inside = os.path.join(tmp, 'dogdet_20260821_111111')
+        os.symlink(base, inside)
+        got = bd.remove('dogdet_20260821_111111')
+        keeper = os.path.join(base, 'images', 'train', 'a.jpg')
+        if got['ok'] or not os.path.isfile(keeper):
+            bad.append('A LINK TO THE BASE DATASET WAS FOLLOWED AND THE BASE '
+                       'WAS DELETED: %r' % (got,))
+        # a finished dataset with a damaged record is not an unfinished build:
+        # one is gigabytes that were fine, the other is wreckage
+        hurt = make('dogdet_20260821_222222', bundle=False)
+        os.makedirs(os.path.join(hurt, 'bundle'))
+        with open(os.path.join(hurt, 'bundle', 'manifest.json'), 'w') as fh:
+            fh.write('{"family": "dogd')
+        row = [r for r in bd.catalogue()
+               if r['id'] == 'dogdet_20260821_222222'][0]
+        if row.get('unfinished'):
+            bad.append('a finished dataset whose manifest is damaged is '
+                       'offered as an unfinished build, safe to delete')
+        if not row.get('damaged'):
+            bad.append('a damaged manifest is not reported as damaged, so '
+                       'nothing tells anybody the record is unreadable')
         # A BUILD IN PROGRESS looks exactly like a dead one from outside:
         # both are a generated name with no bundle. Its staging directory is
         # the difference, and it exists only while the build is running.

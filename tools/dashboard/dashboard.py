@@ -40,6 +40,7 @@ import getpass
 import glob
 import html
 import json
+import math
 import os
 import posixpath
 import random
@@ -10103,8 +10104,28 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if self.command != 'HEAD':
             self.wfile.write(body)
 
+    @staticmethod
+    def _finite(obj):
+        """The same data with NaN and Infinity replaced by null.
+
+        Python writes them as bare NaN and Infinity, which no browser will
+        parse -- one such number anywhere in a payload and the page's whole
+        poll dies on JSON.parse. ultralytics produces them: a metric for a
+        class with no instances in val is NaN.
+        """
+        if isinstance(obj, float):
+            return obj if math.isfinite(obj) else None
+        if isinstance(obj, dict):
+            return {k: BoardHandler._finite(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [BoardHandler._finite(v) for v in obj]
+        return obj
+
     def _json(self, obj, code=200):
-        body = json.dumps(obj).encode()
+        try:
+            body = json.dumps(obj, allow_nan=False).encode()
+        except ValueError:
+            body = json.dumps(self._finite(obj), allow_nan=False).encode()
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
@@ -11527,12 +11548,35 @@ def _train_resume(j, data, who):
     name = str(data.get('run') or '')
     if not name or '/' in name or name.startswith('.'):
         return {'error': 'that is not a run'}
+    t = _train_page()
+    tm = getattr(t, 'tm', None) if t is not None else None
+    if tm is None:
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+            import train_model as tm
+        except Exception as e:            # noqa: BLE001 - a page, not a tool
+            return {'error': 'the trainer would not load: %s' % (e,)}
+    # Refuse here rather than letting a doomed job be recorded: a run with no
+    # weights/last.pt beside its args.yaml has nothing to continue from.
+    if not tm.resumable(family, name):
+        return {'error': '%s cannot be resumed -- it has no weights/last.pt '
+                         'beside its args.yaml' % (name,)}
+    # ...and the dataset it will read is locked for as long as it runs, the
+    # same way a fresh run's is. Without this the delete button would happily
+    # remove the dataset out from under it -- and ultralytics answers a
+    # missing dataset by quietly substituting its own.
+    dataset = ''
+    data = tm.recorded_data(os.path.join(tm.runs_root(family), name))
+    if data:
+        dataset = os.path.basename(os.path.dirname(data)) \
+            if data.endswith('.yaml') else os.path.basename(data)
     argv = [train_python(),
             os.path.join(REPO, 'tools', 'detect', 'train_model.py'),
             '--family', family, '--resume', name, '--by', str(who or '')]
     got = j.submit('train', argv, lane='train',
                    label='resuming %s' % (name,), by=who,
-                   meta={'family': family, 'run': name, 'resumed': True})
+                   meta={'family': family, 'run': name, 'resumed': True,
+                         'dataset': dataset})
     if not got['ok']:
         return {'error': got['message']}
     return {'ok': True, 'job': {'id': got['job']['id']}}
@@ -11591,12 +11635,29 @@ def _train_start(j, data, who):
     params = data.get('params') or {}
     if not isinstance(params, dict):
         return {'error': 'the parameters must be an object'}
+    # The dataset has to exist, and be this model's, BEFORE a job is recorded.
+    # Left to the launcher the answer was the same, one second later, as a
+    # failed job on the page that somebody then has to read and clear.
+    t = _train_page()
+    tm = getattr(t, 'tm', None) if t is not None else None
+    if tm is None:
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+            import train_model as tm
+        except Exception as e:            # noqa: BLE001 - a page, not a tool
+            return {'error': 'the trainer would not load: %s' % (e,)}
+    try:
+        tm.find_dataset(family, dataset)
+    except SystemExit as e:
+        return {'error': str(e)}
     # THE RUN IS NAMED HERE, not by the launcher, so the job knows from the
     # start which directory it is producing. Left to the launcher, the only
     # place the run's name ever appeared was a line in the log -- and a
     # finished run then reported as 'done, exit 0' with no way to reach its
     # score, its weights, or itself.
-    name = '%s_%s' % (dataset, time.strftime('%Y%m%d-%H%M'))
+    # to the second: a run refused because a name from the same minute is
+    # already taken is a confusing way to lose a click
+    name = '%s_%s' % (dataset, time.strftime('%Y%m%d-%H%M%S'))
     argv = [train_python(),
             os.path.join(REPO, 'tools', 'detect', 'train_model.py'),
             '--family', family, '--dataset', dataset,

@@ -366,6 +366,36 @@ def forget_checks(bad, jobs):
     finally:
         jobs.cancel(live['id'], grace=0.5)
 
+    # ...and a job whose recorded process was killed but whose WORK carries
+    # on -- the trainer reparents and keeps the GPU -- is not clearable
+    # either. The record is the only way back to it.
+    orphan = jobs.submit('probe', ['/bin/sh', '-c', 'sleep 25 & wait'],
+                         lane='build')['job']
+    time.sleep(1)
+    rec = jobs.read(orphan['id'])
+    if not rec.get('pgid'):
+        bad.append('a job does not record its process group, so nothing can '
+                   'tell work that is still running from work that is over')
+    else:
+        try:
+            os.kill(rec['pid'], 9)
+            time.sleep(1)
+            after = jobs.read(orphan['id'])
+            if not jobs.group_alive(after.get('pgid')):
+                bad.append('the probe could not keep the group alive, so this '
+                           'check proves nothing')
+            elif jobs.forget(orphan['id'])['ok']:
+                bad.append('A JOB WAS CLEARED WHILE ITS WORK WAS STILL '
+                           'RUNNING -- the GPU is busy and nothing on the '
+                           'page can reach it any more')
+        finally:
+            try:
+                os.killpg(rec['pgid'], 9)
+            except OSError:
+                pass
+            time.sleep(0.4)
+            jobs.forget(orphan['id'])
+
     for bogus, why in (('../../etc', 'a path'), ('', 'nothing'),
                        ('no-such-job-at-all', 'a name that is not a job')):
         got = jobs.forget(bogus)

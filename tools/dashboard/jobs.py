@@ -359,13 +359,21 @@ def submit(kind, argv, lane, label='', by='', cwd=None, env=None, meta=None,
         pid = int((out or b'').strip() or 0)
         if pid <= 0:
             raise OSError('the shell did not report a pid')
+        # The group, recorded now while there is certainly something to ask.
+        # Later it is the only way to tell a job whose shell was killed from
+        # one whose work is really over: the trainer under it carries on,
+        # reparented, with the GPU still busy.
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:                   # it finished before we looked
+            pgid = None
     except Exception as e:                # noqa: BLE001 - report, never raise
         job.update(state='failed', ended_at=ts, exit_code=None,
                    error='%s: %s' % (type(e).__name__, e))
         _write(path, job)
         return {'ok': False, 'job': job,
                 'message': 'That would not start (%s).' % (type(e).__name__,)}
-    job.update(pid=pid, pid_start=_proc_start(pid),
+    job.update(pid=pid, pid_start=_proc_start(pid), pgid=pgid,
                started_at=int(time.time()))
     _write(path, job)
     return {'ok': True, 'job': job, 'message': ''}
@@ -485,6 +493,14 @@ def forget(job_id):
     if job.get('state') == 'running':
         return {'ok': False, 'message': 'that job is still running -- stop it '
                                         'first'}
+    # ...and a job whose recorded process is gone is not necessarily a job
+    # whose WORK is gone: kill the shell and the trainer under it carries on,
+    # reparented, with the GPU still busy. Clearing the record there leaves
+    # work nothing on the page can reach.
+    if job.get('pgid') and group_alive(job['pgid']):
+        return {'ok': False,
+                'message': 'the work this job started is still running -- '
+                           'stop it first'}
     import shutil
     try:
         shutil.rmtree(job_dir(job_id))

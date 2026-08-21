@@ -365,8 +365,47 @@ def resumable(family, name):
         return None
     run = os.path.join(runs_root(family), str(name))
     last = os.path.join(run, 'weights', 'last.pt')
-    if os.path.isfile(last) and os.path.isfile(os.path.join(run, 'args.yaml')):
-        return last
+    if not os.path.isfile(last) or \
+            not os.path.isfile(os.path.join(run, 'args.yaml')):
+        return None
+    # A RUN THAT REACHED ITS LAST EPOCH HAS NOTHING TO CONTINUE. This is
+    # ultralytics' own condition (start_epoch < epochs, trainer.py) worked out
+    # from the two files that are readable without torch -- otherwise a resume
+    # spends a minute scanning the dataset and then aborts on an assertion.
+    want = None
+    try:
+        with open(os.path.join(run, 'args.yaml')) as fh:
+            for line in fh:
+                key, _, raw = line.partition(': ')
+                if key.strip() == 'epochs' and not line.startswith(' '):
+                    want = int(float(raw.strip()))
+                    break
+    except (OSError, ValueError):
+        want = None
+    done = 0
+    try:
+        with open(os.path.join(run, 'results.csv')) as fh:
+            fh.readline()
+            done = sum(1 for line in fh if line.strip())
+    except OSError:
+        done = 0
+    if want and done >= want:
+        return None
+    return last
+
+
+def recorded_data(run_dir):
+    """The dataset a run was launched against, out of its own args.yaml."""
+    path = os.path.join(run_dir, 'args.yaml')
+    try:
+        with open(path) as fh:
+            for line in fh:
+                key, _, raw = line.partition(': ')
+                if key.strip() == 'data' and not line.startswith(' '):
+                    got = raw.strip().strip("'\"")
+                    return got or None
+    except OSError:
+        pass
     return None
 
 
@@ -384,16 +423,32 @@ def resume(family, name, by=''):
                          'args.yaml, so there is nothing to continue from'
                          % (name,))
     save_dir = os.path.dirname(os.path.dirname(last))
+    # THE DATASET IS PINNED, AND HAS TO STILL BE THERE. ultralytics quietly
+    # swaps in its own default when the dataset a checkpoint names has gone
+    # (trainer.py check_resume), and an unset default resolves to coco8.yaml
+    # for a detector, imagenet10 for a classifier -- so a resume after the
+    # dataset was deleted would train on somebody else's toy dataset and
+    # write the result over this run's weights.
+    data = recorded_data(save_dir)
+    if not data:
+        raise SystemExit('%s does not record which dataset it trained on, so '
+                         'it cannot be safely resumed' % (name,))
+    if not os.path.exists(data):
+        raise SystemExit('the dataset %s trained on is gone (%s) -- resuming '
+                         'now would train on ultralytics\' default dataset '
+                         'and write it over this run. Build it again and '
+                         'start a new run.' % (name, data))
     started = int(time.time())
     head = bd.git_head()
     print('resuming %s' % (save_dir,), flush=True)
     print('  from      %s' % (last,), flush=True)
+    print('  data      %s' % (data,), flush=True)
     os.environ.setdefault('COMET_PROJECT_NAME', PROJECTS[family]['project'])
     from ultralytics import YOLO
     err = None
     metrics = None
     try:
-        results = YOLO(last).train(resume=True)
+        results = YOLO(last).train(resume=True, data=data)
         metrics = _metrics_of(results)
     except BaseException as e:            # noqa: BLE001 - recorded, re-raised
         err = '%s: %s' % (type(e).__name__, e)
@@ -403,7 +458,7 @@ def resume(family, name, by=''):
                'run_dir': save_dir, 'resumed_at': started,
                'resumed_at_iso': time.strftime('%Y-%m-%dT%H:%M:%S',
                                                time.localtime(started)),
-               'resumed_from': weights_record(last),
+               'resumed_from': weights_record(last), 'data': data,
                'by': str(by or ''), 'error': err, 'metrics': metrics,
                'command': {'argv': list(sys.argv), 'cwd': os.getcwd(),
                            'python': sys.executable},
@@ -478,14 +533,14 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
     # passes project= straight through as the Comet workspace name, and an
     # absolute path there creates a junk project named after a directory.
     os.environ.setdefault('COMET_PROJECT_NAME', spec['project'])
-    # Taken before the first epoch: a run that falls over is still a run whose
-    # inputs somebody has to identify, and by the time the bundle is written
-    # the dataset may already be the thing that caused the failure.
-    try:
-        kept = _keep_dataset_record(os.path.join(save_dir, 'bundle'), ds)
-    except Exception:                     # noqa: BLE001 - provenance, not flow
-        kept = {}
+    # NOTHING MAY CREATE save_dir BEFORE ULTRALYTICS DOES. It is handed
+    # exist_ok=False and increments the name when the directory is already
+    # there, so a bundle copied in early sent the whole run to `<name>-2`
+    # while the record sat in `<name>` -- and the page, which looks up the
+    # name the dashboard chose, then found a directory with no weights, no
+    # score and nothing to resume, for a run that was training normally.
     from ultralytics import YOLO
+    kept = {}
     err = None
     metrics = None
     try:
@@ -497,6 +552,13 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
         err = '%s: %s' % (type(e).__name__, e)
         raise
     finally:
+        # ...so the dataset's record is copied here instead, once the run
+        # directory exists. A run killed outright loses it, which is the same
+        # deal the manifest itself has always had.
+        try:
+            kept = _keep_dataset_record(os.path.join(save_dir, 'bundle'), ds)
+        except Exception:                 # noqa: BLE001 - provenance, not flow
+            kept = {}
         _write_bundle(save_dir, {
             'bundle_version': 1,
             'family': family, 'task': spec['task'], 'project': spec['project'],

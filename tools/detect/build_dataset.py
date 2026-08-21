@@ -820,12 +820,17 @@ def catalogue(family=None):
             continue
         man_path = os.path.join(path, 'bundle', 'manifest.json')
         man = None
+        # A MANIFEST WE CANNOT READ IS NOT THE SAME AS NO MANIFEST. One is a
+        # build that never got that far; the other is a finished dataset with
+        # a damaged record, and calling that one 'unfinished, safe to delete'
+        # invites somebody to throw away gigabytes that were fine.
+        damaged = False
         if os.path.isfile(man_path):
             try:
                 with open(man_path) as fh:
                     man = json.load(fh)
             except (OSError, ValueError):
-                man = None
+                man, damaged = None, True
         if man:
             row = {'id': name, 'path': path, 'family': man.get('family'),
                    'kind': man.get('kind'),
@@ -840,7 +845,8 @@ def catalogue(family=None):
                    # everything EXCEPT the boxes somebody drew by hand.
                    'label_studio': ((man.get('label_studio') or {})
                                     .get('counts') or {}).get('tasks'),
-                   'seconds': man.get('seconds'), 'unfinished': False}
+                   'seconds': man.get('seconds'), 'unfinished': False,
+                   'damaged': False}
         else:
             kind, classes = _shape_of(path)
             if not kind:
@@ -877,7 +883,8 @@ def catalogue(family=None):
                    # images had been copied when it died. Named rather than
                    # hidden, because it is also gigabytes somebody has to
                    # delete, but never offered as something to train on.
-                   'unfinished': bool(BUILT_RE.match(name))}
+                   'damaged': damaged,
+                   'unfinished': bool(BUILT_RE.match(name)) and not damaged}
         if family and row['family'] != family:
             continue
         out.append(row)
@@ -913,6 +920,15 @@ def remove(dataset_id, in_use=()):
     if row is None:
         return {'ok': False, 'message': 'no such dataset'}
     root = os.path.realpath(training_root())
+    # A LINK IS NOT THE THING IT POINTS AT. Following one deleted whatever was
+    # on the other end -- and a link inside the training root pointing at a
+    # base dataset passed every other check here, because the name checked is
+    # the link's and the resolved path is still inside the root.
+    if os.path.islink(row['path']):
+        return {'ok': False,
+                'message': '%s is a link to %s -- delete it where it actually '
+                           'lives, or remove the link by hand'
+                           % (name, os.path.realpath(row['path']))}
     path = os.path.realpath(row['path'])
     # belt and braces on top of the name check: whatever the catalogue said,
     # what is about to be removed has to live under the training root

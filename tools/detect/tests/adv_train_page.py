@@ -85,6 +85,7 @@ def page_checks(bad):
         bad.append('the identity strip was never substituted')
     _script_checks(bad, html)
     _overrides_checks(bad, html)
+    _selector_checks(bad, html)
 
 
 def _script_checks(bad, html):
@@ -126,26 +127,52 @@ def _overrides_checks(bad, html):
     if shutil.which('node') is None:
         return
     script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
-    m = re.search(r'^function overrides\(', script, re.M)
-    if not m:
-        bad.append('overrides() is not a top-level function of the page')
-        return
-    end = script.index('\n}', m.start()) + 2
+    fns = []
+    for name in ('harvest', 'overrides'):
+        m = re.search(r'^function %s\(' % name, script, re.M)
+        if not m:
+            bad.append('%s() is not a top-level function of the page'
+                       % (name,))
+            return
+        fns.append(script[m.start():script.index('\n}', m.start()) + 2])
     drive = r"""
 'use strict';
 var FIELDS = [{key: 'epochs', value: '100'}, {key: 'imgsz', value: '640'}];
+var EDITS = {};                 // the page's own store of what was typed
 var TYPED = ['device=0', 'save_period=10', '', 'not a parameter line',
              'lr0: 0.002', '=orphan value'].join(String.fromCharCode(10));
 global.document = {};
-function $(id) {
-  if (id === 'params') return {querySelector: function (sel) {
+// one object per id, because the code under test assigns to what it gets back
+var NODES = {
+  params: {querySelector: function (sel) {
     if (sel.indexOf('epochs') >= 0) return {value: ' 50 '};   // changed
     if (sel.indexOf('imgsz') >= 0) return {value: '640'};     // left alone
-    return null }};
-  if (id === 'pextra') return {value: TYPED};
-  return null;
-}
+    return null }},
+  pextra: {get value() { return TYPED }},
+};
+function $(id) { return NODES[id] || null; }
 __FN__
+// TYPED VALUES SURVIVE THE FORM BEING REBUILT. The list is rebuilt whenever
+// it is expanded, and rebuilding it from the inherited values alone threw the
+// edit away -- silently, so the run started with the inherited number.
+FIELDS = [{key: 'epochs', value: '100', from: 'the last run'},
+          {key: 'imgsz', value: '640', from: 'the last run'}];
+var TYPED_IN = {epochs: ' 50 ', imgsz: '640'};
+NODES.params.querySelector = function (sel) {
+  var k = /data-k="([^"]+)"/.exec(sel);
+  return (k && k[1] in TYPED_IN) ? {value: TYPED_IN[k[1]]} : null;
+};
+harvest();                                   // what a repaint does first
+TYPED_IN = {};                               // ...and the controls are gone
+if (EDITS.epochs !== '50')
+  console.log('FAIL a typed parameter did not survive the form being rebuilt: '
+              + JSON.stringify(EDITS));
+if ('imgsz' in EDITS)
+  console.log('FAIL an untouched field was remembered as an edit');
+EDITS = {};
+NODES.params.querySelector = function (sel) {
+  return sel.indexOf('epochs') >= 0 ? {value: ' 50 '}
+       : sel.indexOf('imgsz') >= 0 ? {value: '640'} : null };
 var got = overrides();
 var bad = [];
 function want(key, value) {
@@ -163,7 +190,7 @@ if ('' in got) bad.push('a line starting with = became a nameless parameter');
 if (bad.length) { bad.forEach(function (b) { console.log('FAIL ' + b) });
                   process.exit(1) }
 console.log('ok');
-""".replace('__FN__', script[m.start():end])
+""".replace('__FN__', '\n'.join(fns))
     with tempfile.TemporaryDirectory() as tmp:
         js = os.path.join(tmp, 'ov.js')
         with open(js, 'w', encoding='utf-8') as fh:
@@ -175,6 +202,102 @@ console.log('ok');
                 bad.append('the parameter form: ' + line[5:])
         if not (got.stdout or '').strip():
             bad.append('the override probe died: %s'
+                       % ((got.stderr or '').strip()[:300],))
+
+
+def _selector_checks(bad, html):
+    """What the dataset selector does to a choice somebody made.
+
+    Nothing may be auto-selected onto an unfinished build -- step 4 would post
+    a dataset that was never finished. But an explicit pick has to survive the
+    poll: the page labels an unfinished build 'safe to delete', and snapping
+    the selection away every few seconds put the delete button permanently out
+    of reach of the only thing it is meant for.
+    """
+    if shutil.which('node') is None:
+        return
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    drive = r"""
+'use strict';
+var SEEN = {};
+function mkEl(id) { return SEEN[id] || (SEEN[id] = {value: '', textContent: '',
+  innerHTML: '', disabled: false, options: [], selectedIndex: 0, hidden: false,
+  className: '', title: '', addEventListener: function () {},
+  querySelector: function () { return null },
+  querySelectorAll: function () { return [] },
+  getAttribute: function () { return null }, setAttribute: function () {} }); }
+global.window = {confirm: function () { return true },
+                 addEventListener: function () {},
+                 location: {reload: function () {}}};
+global.document = {getElementById: mkEl, addEventListener: function () {},
+  createElement: function () { return {textContent: '',
+    get innerHTML() { return String(this.textContent).replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;') }} },
+  querySelector: function () { return mkEl('q') },
+  querySelectorAll: function () { return [] }};
+global.fetch = function () { return Promise.resolve({ok: true, status: 200,
+  json: function () { return Promise.resolve({families: [{key: 'dogdet',
+    title: 'D', what: '', kind: 'detect', base: 'b', stores: {}}],
+    datasets: [], jobs: [], lanes: {}}) }}) };
+global.setTimeout = function () { return 0 };
+global.clearTimeout = function () {};
+global.setInterval = function () { return 0 };
+__SCRIPT__
+var bad = [];
+STATE = {datasets: [
+  {id: 'good', family: 'dogdet', bundle: true, label_studio: 5,
+   built_at_iso: '2026-08-20T10:00:00',
+   counts: {total: 10, splits: {train: {total: 8, share: 0.8, classes: {d: 8}},
+                                val: {total: 2, share: 0.2, classes: {d: 2}}}}},
+  {id: 'half', family: 'dogdet', counts: null, bundle: false,
+   unfinished: true}], jobs: [], lanes: {},
+  families: [{key: 'dogdet', title: 'D'}]};
+FAM = 'dogdet';
+paintDatasets();
+if (SEEN['dataset'].value !== 'good')
+  bad.push('nothing usable was selected on the first paint: '
+           + JSON.stringify(SEEN['dataset'].value));
+SEEN['dataset'].value = 'half';           // the person picks it to delete it
+paintDatasets();                          // ...and the next poll repaints
+if (SEEN['dataset'].value !== 'half')
+  bad.push('the poll snapped the selection off the unfinished build to '
+           + JSON.stringify(SEEN['dataset'].value)
+           + ', so the delete button can never reach it');
+// an unfinished build must still never be the automatic choice
+STATE.datasets = [{id: 'half', family: 'dogdet', counts: null, bundle: false,
+                   unfinished: true}];
+SEEN['dataset'].value = '';
+paintDatasets();
+if (SEEN['dataset'].value === 'half')
+  bad.push('an unfinished build was selected automatically');
+// resume is offered on a run that stopped, never on one that finished
+function rowFor(state) {
+  STATE.jobs = [{id: 'j', state: state, meta: {family: 'dogdet'}, argv: [],
+                 run: {name: 'r', resumable: true, metrics: null, epochs: 3}}];
+  paintJobs();
+  return SEEN['jobs'].innerHTML || '';
+}
+if (rowFor('failed').indexOf('data-resume') < 0)
+  bad.push('a run that fell over is not offered a resume');
+if (rowFor('done').indexOf('data-resume') >= 0)
+  bad.push('a run that finished cleanly is offered a resume -- ultralytics '
+           + 'answers that with "nothing to resume" after a job is recorded');
+if (bad.length) { bad.forEach(function (b) { console.log('FAIL ' + b) });
+                  process.exit(1) }
+console.log('ok');
+""".replace('__SCRIPT__', script)
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'sel.js')
+        with open(js, 'w', encoding='utf-8') as fh:
+            fh.write(drive)
+        got = subprocess.run(['node', js], capture_output=True, text=True,
+                             timeout=90)
+    if got.returncode:
+        for line in (got.stdout or '').splitlines():
+            if line.startswith('FAIL '):
+                bad.append('the dataset selector: ' + line[5:])
+        if not (got.stdout or '').strip():
+            bad.append('the selector probe died: %s'
                        % ((got.stderr or '').strip()[:300],))
 
 
@@ -225,6 +348,26 @@ def outcome_checks(bad):
         if (live.get('metrics') or {}).get('metrics/mAP50-95(B)') != 0.22:
             bad.append('a run in progress reports nothing about itself: %r'
                        % (live,))
+        # A SUCCESSFUL RESUME IS THE RUN'S LATEST WORD ABOUT ITSELF. The
+        # first manifest still holds the error that interrupted it, and
+        # reading only that reported a finished run as still broken.
+        again = os.path.join(tmp, 'runs', 'detect', 'dogdetection', 'again')
+        os.makedirs(os.path.join(again, 'bundle'))
+        with open(os.path.join(again, 'bundle', 'manifest.json'), 'w') as fh:
+            json.dump({'error': 'KeyboardInterrupt: stopped',
+                       'metrics': None}, fh)
+        with open(os.path.join(again, 'bundle', 'resume.json'), 'w') as fh:
+            json.dump({'error': None,
+                       'metrics': {'metrics/mAP50-95(B)': 0.71}}, fh)
+        back = tp._run_state('dogdet', 'again')
+        if back.get('error'):
+            bad.append('a run that was resumed and finished still reports the '
+                       'error that interrupted it: %r' % (back.get('error'),))
+        if (back.get('metrics') or {}).get('metrics/mAP50-95(B)') != 0.71:
+            bad.append('the score the resume produced is never read: %r'
+                       % (back.get('metrics'),))
+        if not back.get('resumed'):
+            bad.append('nothing says the run was resumed')
         if tp._run_state('dogdet', 'never_existed') is not None:
             bad.append('a run directory that is not there reports as a run')
         if tp._run_state('dogdet', None) is not None:
@@ -337,7 +480,8 @@ def route_checks(bad, d):
 
             def submit(self, kind, argv, lane, label='', by='', meta=None,
                        **kw):
-                submitted.append({'kind': kind, 'argv': argv, 'lane': lane})
+                submitted.append({'kind': kind, 'argv': argv, 'lane': lane,
+                                  'meta': meta})
                 return {'ok': True, 'job': {'id': 'stub'}, 'message': ''}
 
             def cancel(self, job_id, **kw):
@@ -361,6 +505,7 @@ def route_checks(bad, d):
         d._JOBS.update(mod=FakeJobs(), tried=True)
         try:
             _button_checks(bad, hit, submitted)
+            _nan_checks(bad, hit, FakeJobs)
         finally:
             d._JOBS.clear()
             d._JOBS.update(real_jobs)
@@ -371,6 +516,76 @@ def route_checks(bad, d):
         if srv is not None:
             srv.shutdown()
             srv.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _nan_checks(bad, hit, FakeJobs):
+    """A metric that is not a number must not take the page down with it.
+
+    ultralytics produces NaN -- a metric for a class with no instances in val
+    is one -- and Python writes NaN and Infinity into JSON as bare words that
+    no browser will parse. One of them anywhere in the payload and the page's
+    poll dies on JSON.parse, which stops everything, not just that row.
+    """
+    tmp = tempfile.mkdtemp(prefix='adv_tp_nan_')
+    old_root = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        run = os.path.join(tmp, 'runs', 'detect', 'dogdetection', 'nanrun')
+        os.makedirs(os.path.join(run, 'bundle'))
+        with open(os.path.join(run, 'bundle', 'manifest.json'), 'w') as fh:
+            fh.write('{"metrics": {"metrics/mAP50-95(B)": NaN, '
+                     '"fitness": Infinity}, "error": null}')
+
+        # THE PAGE HAS ITS OWN HANDLE ON THE JOB RUNNER. Stubbing the
+        # dashboard's does nothing for /api/train/overview, which asks
+        # train_page, which asks the jobs module it imported itself.
+        import train_page as tp
+        real_jobs = tp.jobs
+
+        class WithRun(object):
+            LANES = ('build', 'train')
+
+            def listing(self, **kw):
+                return [{'id': '20260821-000000-train-aaaaaa', 'kind': 'train',
+                         'lane': 'train', 'label': 'probe', 'by': 'guard',
+                         'state': 'done', 'created_at': 1, 'started_at': 1,
+                         'ended_at': 2, 'exit_code': 0, 'argv': [],
+                         'meta': {'family': 'dogdet', 'run': 'nanrun'}}]
+
+            def lane_holder(self, lane):
+                return None
+
+            def progress(self, job_id):
+                return None
+
+        tp.jobs = WithRun()
+        try:
+            st, body = hit('/api/train/overview', 'boss')
+        finally:
+            tp.jobs = real_jobs
+        if b'nanrun' not in body:
+            bad.append('the NaN probe never reached the payload, so it '
+                       'proves nothing: %r' % (body[:200],))
+
+        def strict(text):
+            def boom(word):
+                raise ValueError(word)
+            return json.loads(text, parse_constant=boom)
+
+        try:
+            strict(body.decode())
+        except ValueError as e:
+            bad.append('THE OVERVIEW ANSWERED WITH %s, WHICH NO BROWSER WILL '
+                       'PARSE -- one metric that is not a number and the whole '
+                       'page stops updating' % (e,))
+    except Exception as e:                # noqa: BLE001
+        bad.append('the NaN checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        if old_root is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old_root
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -398,17 +613,84 @@ def _button_checks(bad, hit, submitted):
         if submitted:
             bad.append('%d job(s) were submitted for requests that should '
                        'have been refused: %r'
-                       % (len(submitted), [s['argv'][:3] for s in submitted]))
+                       % (len(submitted), [x['argv'][:3] for x in submitted]))
+        # A RESUME LOCKS THE DATASET IT WILL READ, the same way a fresh run
+        # does. Without it the delete button removes the dataset out from
+        # under a live resume -- and ultralytics answers a missing dataset by
+        # quietly substituting its own, so the run would carry on training on
+        # coco8 and write that over these weights.
+        tmp = tempfile.mkdtemp(prefix='adv_tp_res_')
+        old_root = os.environ.get('TRAINING_ROOT')
+        os.environ['TRAINING_ROOT'] = tmp
+        try:
+            run = os.path.join(tmp, 'runs', 'detect', 'dogdetection', 'halted')
+            os.makedirs(os.path.join(run, 'weights'))
+            open(os.path.join(run, 'weights', 'last.pt'), 'w').close()
+            data = os.path.join(tmp, 'dogdet_20260821_aaaaaa', 'dataset.yaml')
+            os.makedirs(os.path.dirname(data))
+            open(data, 'w').close()
+            with open(os.path.join(run, 'args.yaml'), 'w') as fh:
+                fh.write('epochs: 100\ndata: %s\n' % (data,))
+            was = len(submitted)
+            st, body = hit('/api/train/resume', 'boss',
+                           body={'family': 'dogdet', 'run': 'halted'})
+            got = json.loads(body)
+            if got.get('error') or len(submitted) != was + 1:
+                bad.append('a run that can be continued was not resumed: %r'
+                           % (got,))
+            else:
+                meta = submitted[-1].get('meta') or {}
+                if meta.get('dataset') != 'dogdet_20260821_aaaaaa':
+                    bad.append('A RESUMED RUN DOES NOT LOCK ITS DATASET (%r) '
+                               '-- the delete button will take it out from '
+                               'under the run' % (meta,))
+        finally:
+            if old_root is None:
+                os.environ.pop('TRAINING_ROOT', None)
+            else:
+                os.environ['TRAINING_ROOT'] = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+        # A RUN THAT CANNOT BE CONTINUED NEVER BECOMES A JOB. Left to the
+        # launcher the answer is the same one second later, as a failed job
+        # on the page that somebody has to read and then clear.
+        before = len(submitted)
+        st, body = hit('/api/train/resume',
+                       'boss', body={'family': 'dogdet', 'run': 'no_such_run'})
+        got = json.loads(body)
+        if not got.get('error'):
+            bad.append('a resume was accepted for a run that does not exist: '
+                       '%r' % (got,))
+        if len(submitted) != before:
+            bad.append('a job was recorded for a run that cannot be resumed')
         # ...and a good one does submit, exactly once
+        was = len(submitted)
         st, body = hit('/api/train/build', 'boss', body={'family': 'dogdet'})
-        if json.loads(body).get('error') or len(submitted) != 1:
+        if json.loads(body).get('error') or len(submitted) != was + 1:
             bad.append('a valid build was not submitted: %r %r'
-                       % (json.loads(body), submitted))
+                       % (json.loads(body), submitted[was:]))
+        elif submitted[-1]['kind'] != 'build':
+            bad.append('the build button submitted a %r'
+                       % (submitted[-1]['kind'],))
 
 
 def argv_checks(bad, d):
-    """The command a button submits is a list, and it is the one shown."""
+    """The command a button submits is a list, and it is the one shown.
+
+    In a temporary training root holding one real dogbin dataset: the start
+    route resolves the dataset before it records a job, so a made-up name
+    here would grade the refusal rather than the command.
+    """
     made = []
+    tmp = tempfile.mkdtemp(prefix='adv_tp_argv_')
+    old_root = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    ds = os.path.join(tmp, 'dogbin_x')
+    for split in ('train', 'val'):
+        for klass in ('dog', 'not_dog'):
+            os.makedirs(os.path.join(ds, split, klass))
+    os.makedirs(os.path.join(ds, 'bundle'))
+    with open(os.path.join(ds, 'bundle', 'manifest.json'), 'w') as fh:
+        json.dump({'family': 'dogbin', 'counts': {'total': 0}}, fh)
 
     class FakeJobs:
         LANES = ('build', 'train')
@@ -459,6 +741,11 @@ def argv_checks(bad, d):
                            % (blob,))
             if any(a.startswith('rm') for a in argv):
                 bad.append('a parameter value became its own argument')
+        if 'S' not in ''.join(argv[argv.index('--name') + 1:][:1]) and \
+                len(argv[argv.index('--name') + 1].split('-')[-1]) != 6:
+            bad.append('the run name is only minute-resolution, so two runs '
+                       'on one dataset in the same minute collide: %r'
+                       % (argv[argv.index('--name') + 1],))
         if not any('dogbin_x' == a for a in argv):
             bad.append('the run does not name the dataset: %r' % (argv,))
         # THE RUN IS NAMED HERE, NOT BY THE LAUNCHER. Left to the launcher the
@@ -475,6 +762,11 @@ def argv_checks(bad, d):
             if made[0]['meta'].get('run') != name:
                 bad.append('the job does not record the run it produced: %r'
                            % (made[0]['meta'],))
+    if old_root is None:
+        os.environ.pop('TRAINING_ROOT', None)
+    else:
+        os.environ['TRAINING_ROOT'] = old_root
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main():

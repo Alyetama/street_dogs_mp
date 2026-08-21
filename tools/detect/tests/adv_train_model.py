@@ -384,6 +384,23 @@ def resume_checks(bad, tm, py):
             bad.append('a run with weights/last.pt beside its args.yaml is '
                        'reported as unresumable -- half a day of GPU thrown '
                        'away')
+        # A RUN THAT REACHED ITS LAST EPOCH HAS NOTHING TO CONTINUE either.
+        # ultralytics asserts on it, but only after a minute of scanning the
+        # dataset, and only after a job has been recorded for it.
+        with open(os.path.join(good, 'results.csv'), 'w') as fh:
+            fh.write('epoch,x\n' + ''.join('%d,0.1\n' % (i + 1)
+                                           for i in range(100)))
+        if tm.resumable('dogdet', 'stopped_halfway'):
+            bad.append('a run that reached its last epoch is offered as '
+                       'resumable')
+        # ...and one that stopped early is
+        with open(os.path.join(good, 'results.csv'), 'w') as fh:
+            fh.write('epoch,x\n' + ''.join('%d,0.1\n' % (i + 1)
+                                           for i in range(40)))
+        if not tm.resumable('dogdet', 'stopped_halfway'):
+            bad.append('a run that stopped at 40 of 100 epochs is not offered '
+                       'as resumable')
+        os.remove(os.path.join(good, 'results.csv'))
         # a run that never finished an epoch has nothing to continue from
         nothing = os.path.join(proj, 'died_at_once')
         os.makedirs(nothing)
@@ -410,6 +427,26 @@ def resume_checks(bad, tm, py):
             bad.append('a run with nothing to continue from was resumed')
         except SystemExit:
             pass
+        # THE DATASET IT WILL READ HAS TO STILL BE THERE. ultralytics answers
+        # a checkpoint whose dataset has gone by quietly substituting its own
+        # default -- coco8.yaml for a detector, imagenet10 for a classifier --
+        # so a resume after the dataset was deleted trains on somebody else's
+        # toy data and writes the result over this run's weights.
+        with open(os.path.join(good, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 100\ndata: %s\n'
+                     % (os.path.join(tmp, 'gone', 'dataset.yaml'),))
+        if tm.recorded_data(good) is None:
+            bad.append('the dataset a run trained on is not readable from the '
+                       'run, so a resume cannot pin it')
+        try:
+            tm.resume('dogdet', 'stopped_halfway')
+            bad.append('A RESUME RAN WITH ITS DATASET MISSING -- ultralytics '
+                       'substitutes its own default and the result lands on '
+                       'top of this run')
+        except SystemExit as e:
+            if 'gone' not in str(e) and 'is gone' not in str(e):
+                bad.append('a resume with a missing dataset failed for the '
+                           'wrong reason: %s' % (e,))
         # A RESUME TAKES NOTHING. ultralytics continues from what the run
         # recorded, and epochs trained on two different settings would land
         # in one results.csv.
@@ -470,6 +507,74 @@ def weights_record_checks(bad, tm):
             bad.append('an unresolvable checkpoint loses even its name')
     except Exception as e:                # noqa: BLE001
         bad.append('the weights checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def save_dir_checks(bad, py):
+    """NOTHING may create the run directory before ultralytics does.
+
+    ultralytics is handed exist_ok=False and increments the name when the
+    directory is already there. A bundle copied in before the first epoch sent
+    the entire run to `<name>-2` -- weights, results.csv, args.yaml -- while
+    the record sat in `<name>`, and the page, which looks up the name the
+    dashboard chose, showed a run with no score and nothing to resume while it
+    was training normally.
+    """
+    tmp = tempfile.mkdtemp(prefix='adv_tm_dir_')
+    root = os.path.join(tmp, 'root')
+    ds = os.path.join(root, 'dogbin_probe')
+    for split in ('train', 'val'):
+        for klass in ('dog', 'not_dog'):
+            os.makedirs(os.path.join(ds, split, klass))
+    os.makedirs(os.path.join(ds, 'bundle'))
+    with open(os.path.join(ds, 'bundle', 'manifest.json'), 'w') as fh:
+        json.dump({'family': 'dogbin', 'counts': {'total': 0}}, fh)
+    probe = (
+        'import json,os,sys; sys.path.insert(0, %r)\n'
+        'import train_model as t, ultralytics\n'
+        'from ultralytics.utils.files import increment_path\n'
+        'seen = {}\n'
+        'class Boom:\n'
+        '    def __init__(self, *a, **k):\n'
+        '        pass\n'
+        '    def train(self, **kw):\n'
+        # exactly what ultralytics does with project/name/exist_ok
+        '        p = str(increment_path(os.path.join(kw["project"], '
+        'kw["name"]), exist_ok=kw["exist_ok"]))\n'
+        '        seen["dir"] = os.path.basename(p)\n'
+        '        os.makedirs(p, exist_ok=True)\n'
+        '        raise RuntimeError("probe")\n'
+        'ultralytics.YOLO = Boom\n'
+        'try:\n'
+        '    t.launch("dogbin", %r, overrides={"epochs": 1}, name="myrun",\n'
+        '             weights="x.pt", by="guard")\n'
+        'except BaseException:\n'
+        '    pass\n'
+        'print(json.dumps({"chose": seen.get("dir"), "dirs": sorted(\n'
+        '    os.listdir(os.path.join(%r, "runs", "classify", "dog-bin")))}))\n'
+        % (DETECT, ds, root))
+    try:
+        got = subprocess.run([py, '-c', probe], capture_output=True, text=True,
+                             timeout=300, env=dict(os.environ,
+                                                   TRAINING_ROOT=root))
+        line = [x for x in (got.stdout or '').splitlines()
+                if x.startswith('{')]
+        if not line:
+            bad.append('the run-directory probe said nothing: %r'
+                       % ((got.stderr or '')[-300:],))
+            return
+        doc = json.loads(line[-1])
+        if doc.get('chose') != 'myrun':
+            bad.append('ULTRALYTICS PUT THE RUN IN %r, NOT THE DIRECTORY THE '
+                       'DASHBOARD NAMED -- something created it first, so the '
+                       'weights and the score land somewhere the page never '
+                       'looks' % (doc.get('chose'),))
+        if doc.get('dirs') != ['myrun']:
+            bad.append('one run left %d directories behind: %r'
+                       % (len(doc.get('dirs') or []), doc.get('dirs')))
+    except subprocess.TimeoutExpired:
+        bad.append('the run-directory probe never returned')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -677,6 +782,7 @@ def main():
             resume_checks(bad, tm, py)
             for fn in (refusal_checks, bundle_checks):
                 fn(bad, py, dataset)
+            save_dir_checks(bad, py)
             git_stamp_checks(bad, py)
         except Exception as e:            # noqa: BLE001
             bad.append('a parameter check threw %s: %s'

@@ -94,16 +94,24 @@ def _run_state(family, name):
     if not os.path.isdir(path):
         return None
     out = {'name': str(name), 'path': path, 'metrics': None, 'error': None,
-           'epochs': None, 'weights': None}
-    man = os.path.join(path, 'bundle', 'manifest.json')
-    if os.path.isfile(man):
+           'epochs': None, 'weights': None, 'resumed': False}
+    # The run's own record, and then whatever a resume wrote after it: the
+    # first manifest still holds the error that interrupted the run, and a
+    # resume that then succeeded left its outcome in resume.json. Reading only
+    # the first one reported a finished run as still broken.
+    for who in ('manifest.json', 'resume.json'):
+        man = os.path.join(path, 'bundle', who)
+        if not os.path.isfile(man):
+            continue
         try:
             with open(man) as fh:
                 doc = json.load(fh)
-            out['metrics'] = doc.get('metrics')
-            out['error'] = doc.get('error')
         except (OSError, ValueError):
-            pass
+            continue
+        out['metrics'] = doc.get('metrics') or out['metrics']
+        out['error'] = doc.get('error')
+        if who == 'resume.json':
+            out['resumed'] = True
     csv = os.path.join(path, 'results.csv')
     if os.path.isfile(csv):
         try:
@@ -367,6 +375,11 @@ option.dead{color:var(--dim)}
 
 <script>
 var FAM=null, STATE=null, FIELDS=[], OPEN={}, ALL=false, POLL=null;
+/* What has been typed, kept apart from what was inherited. The form is
+   rebuilt whenever the list is expanded, and rebuilding it from FIELDS
+   alone threw away every edit made before the click -- silently, so the
+   run then started with the inherited value instead of the typed one. */
+var EDITS={};
 function $(id){return document.getElementById(id)}
 function esc(s){var d=document.createElement('div');
   d.textContent=(s==null?'':String(s));return d.innerHTML}
@@ -435,11 +448,14 @@ function paintDatasets(){
                               :' · built before bundles')+'</option>';
   }).join(''):'<option value="">nothing built for this model yet</option>';
   if(keep&&rows.some(function(d){return d.id===keep}))sel.value=keep;
-  /* a disabled option can still be the browser's first choice, and step 4
-     would then post a dataset that was never finished */
+  /* Nothing is auto-selected onto an unfinished build -- step 4 would post a
+     dataset that was never finished. But a pick the person made themselves
+     stands, including an unfinished one they are about to delete: snapping it
+     away on the next poll put the delete button out of reach of the only
+     thing the page labels safe to delete. */
   var pick=null; rows.forEach(function(d){if(!pick&&!d.unfinished)pick=d.id});
-  if(!sel.value||rows.some(function(d){return d.id===sel.value&&d.unfinished}))
-    sel.value=pick||'';
+  if(!sel.value||!rows.some(function(d){return d.id===sel.value}))
+    sel.value=(keep&&rows.some(function(d){return d.id===keep}))?keep:(pick||'');
   $('dssub').textContent=rows.length?(rows.length+' available'):'';
   paintDsNote();
 }
@@ -447,10 +463,18 @@ function paintDsNote(){
   var id=$('dataset').value, d=null;
   STATE.datasets.forEach(function(x){if(x.id===id)d=x});
   if(!d){$('dsnote').textContent='';return}
+  if(d.unfinished){
+    $('dsnote').innerHTML='<span class="warnnote">An unfinished build: the '+
+      'bundle is the last thing a build writes and this has none, so what is '+
+      'here is however much was copied before the build stopped. It cannot '+
+      'be trained on.</span>';
+    return;
+  }
   if(!d.counts){
     $('dsnote').innerHTML='Built before this page existed, so it carries no '+
       'bundle: it can be trained on, but there is no record of which '+
-      'annotations went into it.';
+      'annotations went into it.'+
+      (d.damaged?' Its bundle is there but unreadable.':'');
     return;
   }
   var c=d.counts, parts=[];
@@ -474,7 +498,7 @@ var HEADLINE=['epochs','batch','imgsz','optimizer','patience','lr0'];
 function loadParams(){
   $('params').innerHTML='<span class="empty">reading what the last run used…</span>';
   api('/api/train/params?family='+encodeURIComponent(FAM)).then(function(j){
-    FIELDS=j.fields||[]; OPEN={};
+    FIELDS=j.fields||[]; OPEN={}; EDITS={};
     $('psub').textContent=j.inherited_from
       ? 'inherited from '+j.inherited_from.split('/').slice(-2)[0]+
         ' · ultralytics '+j.ultralytics
@@ -486,20 +510,31 @@ function loadParams(){
       'parameters: '+esc(e.message)+'</span>';
   });
 }
+function harvest(){
+  FIELDS.forEach(function(f){
+    var el=$('params').querySelector('[data-k="'+f.key+'"]');
+    if(!el)return;                       /* not on screen: leave the edit be */
+    var v=el.value.trim();
+    if(v===''||v===String(f.value))delete EDITS[f.key]; else EDITS[f.key]=v;
+  });
+}
 function paintParams(){
+  harvest();
   var show=FIELDS.filter(function(f){
-    return ALL||HEADLINE.indexOf(f.key)>=0||f.from==='the last run'});
+    return ALL||HEADLINE.indexOf(f.key)>=0||f.from==='the last run'
+      ||(f.key in EDITS)});
   $('params').innerHTML=show.map(function(f){
     var inh=f.from==='the last run';
+    var shown=(f.key in EDITS)?EDITS[f.key]:f.value;
     var ctl;
     if(f.type==='bool'){
       ctl='<select data-k="'+esc(f.key)+'">'+
         ['true','false'].map(function(v){
           return '<option value="'+v+'"'+
-            ((String(f.value)==='true')===(v==='true')?' selected':'')+
+            ((String(shown)==='true')===(v==='true')?' selected':'')+
             '>'+v+'</option>'}).join('')+'</select>';
     }else{
-      ctl='<input data-k="'+esc(f.key)+'" value="'+esc(f.value)+'">';
+      ctl='<input data-k="'+esc(f.key)+'" value="'+esc(shown)+'">';
     }
     return '<span class="p'+(inh?' inherited':'')+'" title="'+esc(f.why)+
       ' — '+esc(f.from)+'">'+
@@ -509,14 +544,9 @@ function paintParams(){
     Math.max(0,FIELDS.length-show.length)+' common parameters';
 }
 function overrides(){
+  harvest();
   var out={};
-  FIELDS.forEach(function(f){
-    var el=$('params').querySelector('[data-k="'+f.key+'"]');
-    if(!el)return;
-    var v=el.value.trim();
-    if(v===''||v===String(f.value))return;
-    out[f.key]=v;
-  });
+  Object.keys(EDITS).forEach(function(k){out[k]=EDITS[k]});
   /* the escape hatch, last so it wins: somebody who typed a key meant it.
      Nothing is validated here -- train_model checks every key against
      ultralytics' own table, in the environment that has ultralytics, and a
@@ -579,7 +609,9 @@ function paintJobs(){
           :(j.ended_at?ago(j.ended_at)+' ago':''))+'</span>'+
         '<button class="btn" data-log="'+esc(j.id)+'">'+
           (OPEN[j.id]?'hide log':'log')+'</button>'+
-        (!run&&j.run&&j.run.resumable
+        /* a run that finished has nothing to continue: ultralytics answers
+           resume with "nothing to resume", after a job record was made */
+        (!run&&j.run&&j.run.resumable&&j.state!=='done'
           ? '<button class="btn" data-resume="'+esc(j.id)+
             '" title="continue from weights/last.pt, with the arguments this '+
             'run recorded">resume</button>':'')+
@@ -715,7 +747,7 @@ $('train').addEventListener('click',function(){
     .catch(fail).then(function(){$('train').disabled=false});
 });
 $('pmore').addEventListener('click',function(){ALL=!ALL;paintParams()});
-$('preset').addEventListener('click',loadParams);
+$('preset').addEventListener('click',function(){EDITS={};loadParams()});
 $('dataset').addEventListener('change',paintDsNote);
 document.addEventListener('visibilitychange',function(){
   if(!document.hidden)refresh()});
