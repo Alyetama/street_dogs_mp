@@ -1191,11 +1191,23 @@ for (const [name, p] of Object.entries(payloads)) {
         failures.push(name + ': junk in headline: ' + head);
       if (!els['detDrives']._innerHTML)
         failures.push(name + ': drives empty');
+      // A SECTION WITH NOTHING TO REPORT IS NOT SHOWN. It used to spend two
+      // lines saying so -- a heading, and a sentence under it explaining the
+      // absence -- and both appear with the first measurement instead.
       if ((p.crops_classified || 0) > 0) {
         if (!els['detHealth']._innerHTML.includes('dband'))
           failures.push(name + ': health gauge missing');
-      } else if (!els['detHealth']._innerHTML.includes('classifier not wired'))
-        failures.push(name + ': classifier-absent line missing');
+        if (els['detHealthHead'].hidden || els['detHealth'].hidden)
+          failures.push(name + ': the classifier section is hidden though '
+            + p.crops_classified + ' crops were classified');
+      } else {
+        if (els['detHealth']._innerHTML)
+          failures.push(name + ': the classifier section says '
+            + JSON.stringify(els['detHealth']._innerHTML)
+            + ' with nothing classified');
+        if (!els['detHealthHead'].hidden)
+          failures.push(name + ': a Classifier heading is shown over nothing');
+      }
       if (!els['detErrs']._innerHTML)
         failures.push(name + ': errors line empty');
       // the headline % / bar track the GLOBAL imgs_done, never the per-process
@@ -1297,8 +1309,10 @@ for (const [name, p] of Object.entries(payloads)) {
       if (!errN && !/0 errors/.test(er))
         failures.push(name + ': a stopped run with no errors does not say so: '
           + JSON.stringify(er));
-      if (!(p.crops_classified || 0)
-          && !els['detHealth']._innerHTML.includes('classifier not wired'))
+      // ...and a measurement OUTLIVES the run that made it: a stopped run
+      // that classified crops still reports the share it measured.
+      if ((p.crops_classified || 0)
+          && !els['detHealth']._innerHTML.includes('dband'))
         failures.push(name + ': the classifier line reads '
           + JSON.stringify(els['detHealth']._innerHTML) + ' on a stopped run '
           + '— what share of crops were classified outlives the run that '
@@ -1320,7 +1334,7 @@ for (const [name, p] of Object.entries(payloads)) {
       if (els['dhFill'].style.width !== '0.00%')
         failures.push(name + ': progress bar not zeroed when idle');
       // the per-drive / per-region rows stay put (dashed), they do not vanish
-      for (const id of ['detDrives', 'detRegions', 'detHealth', 'detErrs'])
+      for (const id of ['detDrives', 'detRegions', 'detErrs'])
         if (!els[id]._innerHTML)
           failures.push(name + ': ' + id + ' emptied out when idle');
       if (!els['detDrives']._innerHTML.includes('lynx'))

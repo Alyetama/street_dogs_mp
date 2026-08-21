@@ -1064,8 +1064,12 @@ __DATECSS__
    labels were unreadable on exactly the tiles that most need looking at. The
    buttons are solid, the gaps are dark rather than light, and a short scrim
    above them keeps the row from looking pasted onto the frame. */
+/* THE SAME BUTTONS AS THE DETECTIONS QUEUE. Two surfaces asking a person to
+   judge a crop should not offer two different-looking controls to do it: the
+   queue's outlined pills are the shape, and each stage keeps its own colours
+   because the words they carry mean different things. */
 .acts{position:absolute;left:0;right:0;bottom:0;display:grid;
-  grid-template-columns:1fr 1fr auto;gap:1px;background:#05070a;
+  grid-template-columns:1fr 1fr auto;gap:5px;padding:0 6px 6px;
   opacity:0;transform:translateY(4px);pointer-events:none;
   transition:opacity .13s ease,transform .13s ease}
 .acts::before{content:'';position:absolute;left:0;right:0;bottom:100%;
@@ -1073,18 +1077,32 @@ __DATECSS__
   background:linear-gradient(to top,rgba(5,7,10,.92),rgba(5,7,10,0))}
 .card:hover .acts,.card:focus-within .acts,.card.cur .acts{opacity:1;
   transform:none;pointer-events:auto}
-.act{background:#12151b;border:0;color:var(--tx);font-family:inherit;
-  font-size:11.5px;font-weight:560;padding:9px 4px;cursor:pointer;
-  letter-spacing:.01em}
-.act:hover{background:#1a1f27}
-.act.m:hover,.act.m.on{background:rgba(232,166,69,.2);color:var(--acc)}
-.act.c:hover,.act.c.on{background:rgba(67,181,129,.18);color:var(--green)}
+/* OPAQUE, unlike the queue's. There the buttons sit on a gradient scrim; here
+   they ride directly over the photograph, and a 72%-opaque button means the
+   label is read against whatever the crop shows -- which is a bright cobbled
+   street often enough to matter. Same shape, same type, solid ground. */
+.act{border:1px solid rgba(130,140,150,.22);border-radius:7px;
+  background:#12151b;color:var(--mut);font-family:inherit;
+  font-size:11px;font-weight:600;padding:6px 4px;cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:background .12s,color .12s,border-color .12s}
+.act:hover{color:var(--tx);border-color:rgba(130,140,150,.4)}
+.act.m:hover{background:#3d3223;color:var(--acc)}
+.act.c:hover{background:#1b322d;color:var(--green)}
+/* a verdict already recorded keeps its colour without hover, the way the
+   queue's does -- hiding it until hover reads as "nothing judged here" */
+.act.m.on{background:#40341f;color:var(--acc);
+  border-color:rgba(232,166,69,.55)}
+.act.c.on{background:#1d3630;color:var(--green);
+  border-color:rgba(67,181,129,.5)}
 /* the crop mark, in line with the two verdicts: redrawing a box is something
    you do to a tile, so it belongs on the tile rather than two clicks deep in
    a lightbox */
-.act.e{padding:9px 11px;display:flex;align-items:center;justify-content:center}
+.act.e{padding:6px 10px;display:flex;align-items:center;
+  justify-content:center}
 .act.e:hover{color:var(--acc)}
-.act.e.on{color:var(--acc)}
+.act.e.on{color:var(--acc);border-color:rgba(232,166,69,.55);
+  background:#332a1c}
 .empty{color:var(--dim);font-size:13px;padding:40px 0;text-align:center}
 /* ── lightbox ── */
 .lb{position:fixed;inset:0;background:rgba(0,0,0,.9);display:flex;
@@ -2333,7 +2351,7 @@ def page_html(stage=DEFAULT_STAGE, account=('', '')):
                 f'{label}</a>' if key == stage else
                 f'<a href="{href}" class="jtab">{label}</a>'
                 for href, label, key in (
-                    ('/audit/review', 'Review queue', 'review'),
+                    ('/audit/review', 'Detections audit', 'review'),
                     ('/audit/gate', 'Dog-bin audit', 'gate'),
                     ('/audit/leash', 'Leash audit', 'leash')))
             + '</nav>')

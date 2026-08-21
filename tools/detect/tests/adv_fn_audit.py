@@ -1476,7 +1476,7 @@ def tab_checks(bad):
         return
     import fn_audit as fa
     import re as _re
-    labels = {'review': 'Review queue', 'gate': 'Dog-bin audit',
+    labels = {'review': 'Detections audit', 'gate': 'Dog-bin audit',
               'leash': 'Leash audit'}
     order = ('review', 'gate', 'leash')
     for stage in fa.STAGES:

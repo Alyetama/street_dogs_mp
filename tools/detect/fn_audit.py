@@ -93,7 +93,9 @@ STAGES = {
         'audit_dir': 'leash_audit', 'dataset': 'audit_finds_leash',
         'title': 'leash model', 'model': 'leash_v2_001',
         'asks': 'Is this dog on a leash?',
-        'yes': 'on a leash', 'no': 'unleashed',
+        # the two words the model itself uses, so the button, the store and
+        # every count on the page say the same thing
+        'yes': 'leashed', 'no': 'unleashed',
         'asymmetric': False,
         'below': 'called it unleashed', 'above': 'called it leashed',
         'miss': 'leashed dogs called unleashed',
