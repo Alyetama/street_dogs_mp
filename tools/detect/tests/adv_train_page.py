@@ -284,7 +284,8 @@ def route_checks(bad, d):
                                         'dataset': 'dogdet_v3'}),
                   ('/api/train/cancel', {'job': 'x'}),
                   ('/api/train/forget', {'job': 'x'}),
-                  ('/api/train/dataset-delete', {'dataset': 'x'}))
+                  ('/api/train/dataset-delete', {'dataset': 'x'}),
+                  ('/api/train/resume', {'family': 'dogdet', 'run': 'x'}))
         # ── the admin ──
         st, body = hit('/train', 'boss')
         if st != 200 or b'id="models"' not in body:

@@ -368,6 +368,79 @@ def unfinished_checks(bad, tm):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def resume_checks(bad, tm, py):
+    """Continuing a stopped run, and every way that must not be one."""
+    tmp = tempfile.mkdtemp(prefix='adv_tm_res_')
+    old = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        proj = os.path.join(tmp, 'runs', 'detect', 'dogdetection')
+        good = os.path.join(proj, 'stopped_halfway')
+        os.makedirs(os.path.join(good, 'weights'))
+        open(os.path.join(good, 'weights', 'last.pt'), 'w').close()
+        with open(os.path.join(good, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 100\n')
+        if not tm.resumable('dogdet', 'stopped_halfway'):
+            bad.append('a run with weights/last.pt beside its args.yaml is '
+                       'reported as unresumable -- half a day of GPU thrown '
+                       'away')
+        # a run that never finished an epoch has nothing to continue from
+        nothing = os.path.join(proj, 'died_at_once')
+        os.makedirs(nothing)
+        with open(os.path.join(nothing, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 100\n')
+        if tm.resumable('dogdet', 'died_at_once'):
+            bad.append('a run with no weights is offered as resumable')
+        # a real run belonging to ANOTHER model, reachable only by walking
+        # out of this family's project directory: resumed as a detector, a
+        # classifier run is a different task on a different dataset shape
+        other = os.path.join(tmp, 'runs', 'classify', 'dog-bin', 'someone_else')
+        os.makedirs(os.path.join(other, 'weights'))
+        open(os.path.join(other, 'weights', 'last.pt'), 'w').close()
+        with open(os.path.join(other, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 100\n')
+        for bogus in ('../../etc', '', None, 'never_ran',
+                      os.path.join('..', '..', 'classify', 'dog-bin',
+                                   'someone_else')):
+            if tm.resumable('dogdet', bogus):
+                bad.append('resuming accepted %r -- a run belonging to '
+                           'another model, or no run at all' % (bogus,))
+        try:
+            tm.resume('dogdet', 'died_at_once')
+            bad.append('a run with nothing to continue from was resumed')
+        except SystemExit:
+            pass
+        # A RESUME TAKES NOTHING. ultralytics continues from what the run
+        # recorded, and epochs trained on two different settings would land
+        # in one results.csv.
+        for extra, why in ((['--set', 'epochs=5'], 'parameters'),
+                           (['--weights', 'x.pt'], 'other weights'),
+                           (['--dataset', 'other_v1'], 'another dataset')):
+            got = subprocess.run(
+                [py, os.path.join(DETECT, 'train_model.py'),
+                 '--family', 'dogdet', '--resume', 'stopped_halfway'] + extra,
+                capture_output=True, text=True, timeout=120,
+                env=dict(os.environ, TRAINING_ROOT=tmp))
+            # on the message, not the exit code: with the refusal gone this
+            # still fails, just later and for an unrelated reason
+            said = (got.stderr or '') + (got.stdout or '')
+            if 'a resume takes no' not in said:
+                bad.append('a resume accepted %s, so the epochs after the '
+                           'interruption would train on different settings '
+                           'than the ones before it: %r'
+                           % (why, said[-160:]))
+    except subprocess.TimeoutExpired:
+        bad.append('the resume probe never returned')
+    except Exception as e:                # noqa: BLE001
+        bad.append('the resume checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        if old is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def weights_record_checks(bad, tm):
     """A checkpoint identified by its content, not by what it was called."""
     tmp = tempfile.mkdtemp(prefix='adv_tm_w_')
@@ -601,6 +674,7 @@ def main():
                 fn(bad, py)
             unfinished_checks(bad, tm)
             weights_record_checks(bad, tm)
+            resume_checks(bad, tm, py)
             for fn in (refusal_checks, bundle_checks):
                 fn(bad, py, dataset)
             git_stamp_checks(bad, py)

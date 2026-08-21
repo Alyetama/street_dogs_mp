@@ -9956,6 +9956,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             if path == '/api/train/start':
                 self._json(_train_start(j, data, who))
                 return True
+            if path == '/api/train/resume':
+                self._json(_train_resume(j, data, who))
+                return True
             if path == '/api/train/dataset-delete':
                 self._json(_train_dataset_delete(j, data.get('dataset')))
                 return True
@@ -11511,6 +11514,25 @@ def _train_build(j, family, who):
     got = j.submit('build', argv, lane='build',
                    label='%s dataset' % (family,), by=who,
                    meta={'family': family})
+    if not got['ok']:
+        return {'error': got['message']}
+    return {'ok': True, 'job': {'id': got['job']['id']}}
+
+
+def _train_resume(j, data, who):
+    """Continue a run that was stopped, in the directory it already has."""
+    family = data.get('family')
+    if family not in ('dogdet', 'dogbin', 'leash'):
+        return {'error': 'no such model'}
+    name = str(data.get('run') or '')
+    if not name or '/' in name or name.startswith('.'):
+        return {'error': 'that is not a run'}
+    argv = [train_python(),
+            os.path.join(REPO, 'tools', 'detect', 'train_model.py'),
+            '--family', family, '--resume', name, '--by', str(who or '')]
+    got = j.submit('train', argv, lane='train',
+                   label='resuming %s' % (name,), by=who,
+                   meta={'family': family, 'run': name, 'resumed': True})
     if not got['ok']:
         return {'error': got['message']}
     return {'ok': True, 'job': {'id': got['job']['id']}}

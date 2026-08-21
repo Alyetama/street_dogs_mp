@@ -353,6 +353,87 @@ def run_name(family, dataset_id, now=None):
     return '%s_%s' % (dataset_id, stamp)
 
 
+def resumable(family, name):
+    """The checkpoint a stopped run can be continued from, or None.
+
+    ultralytics writes weights/last.pt every epoch and can pick a run up from
+    it, reading back the arguments it was launched with -- but only while the
+    run directory it wrote them into is still there. A run that never finished
+    an epoch has nothing to continue from and is a fresh start, not a resume.
+    """
+    if not family or not name or os.sep in str(name):
+        return None
+    run = os.path.join(runs_root(family), str(name))
+    last = os.path.join(run, 'weights', 'last.pt')
+    if os.path.isfile(last) and os.path.isfile(os.path.join(run, 'args.yaml')):
+        return last
+    return None
+
+
+def resume(family, name, by=''):
+    """Continue a run that was stopped, in the directory it already has.
+
+    Deliberately takes no parameters. ultralytics resumes from the arguments
+    recorded in the run itself, and a resume that quietly trained on different
+    settings than the epochs before it would produce one results.csv covering
+    two different runs.
+    """
+    last = resumable(family, name)
+    if last is None:
+        raise SystemExit('%s cannot be resumed: no weights/last.pt beside an '
+                         'args.yaml, so there is nothing to continue from'
+                         % (name,))
+    save_dir = os.path.dirname(os.path.dirname(last))
+    started = int(time.time())
+    head = bd.git_head()
+    print('resuming %s' % (save_dir,), flush=True)
+    print('  from      %s' % (last,), flush=True)
+    os.environ.setdefault('COMET_PROJECT_NAME', PROJECTS[family]['project'])
+    from ultralytics import YOLO
+    err = None
+    metrics = None
+    try:
+        results = YOLO(last).train(resume=True)
+        metrics = _metrics_of(results)
+    except BaseException as e:            # noqa: BLE001 - recorded, re-raised
+        err = '%s: %s' % (type(e).__name__, e)
+        raise
+    finally:
+        doc = {'bundle_version': 1, 'family': family, 'name': str(name),
+               'run_dir': save_dir, 'resumed_at': started,
+               'resumed_at_iso': time.strftime('%Y-%m-%dT%H:%M:%S',
+                                               time.localtime(started)),
+               'resumed_from': weights_record(last),
+               'by': str(by or ''), 'error': err, 'metrics': metrics,
+               'command': {'argv': list(sys.argv), 'cwd': os.getcwd(),
+                           'python': sys.executable},
+               'versions': {'ultralytics': _version(),
+                            'torch': _torch_version(),
+                            'python': sys.version.split()[0]},
+               'git': head}
+        # BESIDE the original record, never over it: the first bundle says
+        # what this run was launched with, and that is what the epochs before
+        # the interruption actually trained on.
+        _write_bundle_as(save_dir, 'resume.json', doc)
+    print('\ndone: %s' % (save_dir,), flush=True)
+    return {'ok': True, 'save_dir': save_dir, 'metrics': metrics}
+
+
+def _write_bundle_as(save_dir, name, doc):
+    try:
+        bundle = os.path.join(save_dir, 'bundle')
+        os.makedirs(bundle, exist_ok=True)
+        tmp = os.path.join(bundle, name + '.tmp')
+        with open(tmp, 'w') as fh:
+            json.dump(doc, fh, indent=1, sort_keys=True)
+        os.replace(tmp, os.path.join(bundle, name))
+        src = os.path.join(save_dir, 'results.csv')
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(bundle, 'results.csv'))
+    except OSError:
+        pass
+
+
 def launch(family, dataset, overrides=None, weights=None, name=None,
            by='', dry_run=False):
     """Resolve everything, refuse anything wrong, then train."""
@@ -595,6 +676,9 @@ def main(argv=None):
     ap.add_argument('--weights', help='starting weights (default: whatever '
                                       'the last run in this project used)')
     ap.add_argument('--name', help='the run directory name')
+    ap.add_argument('--resume', metavar='RUN',
+                    help='continue a run that was stopped, from its own '
+                         'weights/last.pt and its own recorded arguments')
     ap.add_argument('--by', default='')
     ap.add_argument('--show-defaults', action='store_true',
                     help='print the form the dashboard draws, as JSON')
@@ -604,8 +688,8 @@ def main(argv=None):
     if a.show_defaults:
         print(json.dumps(show_defaults(a.family), indent=1, sort_keys=True))
         return 0
-    if not a.dataset:
-        ap.error('--dataset is required unless --show-defaults')
+    if not a.dataset and not a.resume:
+        ap.error('--dataset is required unless --show-defaults or --resume')
     over = {}
     if a.params_json:
         try:
@@ -620,6 +704,15 @@ def main(argv=None):
         if not sep:
             raise SystemExit('--set wants KEY=VALUE, got %r' % (item,))
         over[key.strip()] = value
+    if a.resume:
+        if over or a.weights or a.dataset:
+            raise SystemExit('a resume takes no dataset, no weights and no '
+                             'parameters: it continues from what the run '
+                             'itself recorded, and epochs trained on two '
+                             'different settings would land in one '
+                             'results.csv')
+        resume(a.family, a.resume, by=a.by)
+        return 0
     launch(a.family, a.dataset, overrides=over, weights=a.weights,
            name=a.name, by=a.by, dry_run=a.dry_run)
     return 0

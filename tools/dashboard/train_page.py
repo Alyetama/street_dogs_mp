@@ -124,6 +124,11 @@ def _run_state(family, name):
                 out['metrics'] = got or None
         except OSError:
             pass
+    try:
+        import train_model as tm2
+        out['resumable'] = bool(tm2.resumable(family, name))
+    except Exception:                     # noqa: BLE001
+        out['resumable'] = False
     best = os.path.join(path, 'weights', 'best.pt')
     last = os.path.join(path, 'weights', 'last.pt')
     for cand in (best, last):
@@ -574,6 +579,10 @@ function paintJobs(){
           :(j.ended_at?ago(j.ended_at)+' ago':''))+'</span>'+
         '<button class="btn" data-log="'+esc(j.id)+'">'+
           (OPEN[j.id]?'hide log':'log')+'</button>'+
+        (!run&&j.run&&j.run.resumable
+          ? '<button class="btn" data-resume="'+esc(j.id)+
+            '" title="continue from weights/last.pt, with the arguments this '+
+            'run recorded">resume</button>':'')+
         (run?'<button class="btn warn" data-stop="'+esc(j.id)+
              '">stop</button>'
             :'<button class="btn" data-forget="'+esc(j.id)+
@@ -625,6 +634,19 @@ document.addEventListener('click',function(e){
   if(lg){ if(OPEN[lg]){delete OPEN[lg];var el=$('log-'+lg);if(el)el.hidden=true;
             t.textContent='log';}
           else {OPEN[lg]=true;t.textContent='hide log';pullLog(lg);} return }
+  var rs=t.getAttribute('data-resume');
+  if(rs){
+    var job=null; STATE.jobs.forEach(function(x){if(x.id===rs)job=x});
+    if(!job||!job.run){fail(new Error('there is no run to resume'));return}
+    if(!window.confirm('Resume '+job.run.name+' from epoch '+
+       (job.run.epochs||0)+'? It continues with the arguments that run '+
+       'recorded, not with anything set above.'))return;
+    t.disabled=true;
+    api('/api/train/resume',{family:(job.meta||{}).family,run:job.run.name})
+      .then(function(r){say('say','resuming — '+r.job.id,8000);return refresh()})
+      .catch(fail).then(function(){t.disabled=false});
+    return;
+  }
   var fg=t.getAttribute('data-forget');
   if(fg){
     if(!window.confirm('Clear this record? The log goes with it. Whatever it '+
