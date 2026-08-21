@@ -266,7 +266,27 @@ def composition_checks(bad, bd):
     calls = []
 
     def fake_run(self, name, argv, cwd=None, env=None):
-        calls.append({'name': name, 'argv': argv, 'env': env or {}})
+        calls.append({'name': name, 'argv': argv, 'env': env or {},
+                      'cwd': cwd})
+        if name == 'label studio export':
+            # stand in for the real script: write the file it would have
+            import subprocess as _sp
+            _sp.run(['/bin/bash', argv[1]], cwd=cwd, capture_output=True)
+            self.steps.append({'name': name, 'argv': argv, 'exit_code': 0,
+                               'seconds': 0.0})
+            return 0
+        if name == 'prepare_detection_yolo_dataset':
+            # it names its output after the export file, in the cwd
+            stem = os.path.splitext(os.path.basename(
+                argv[argv.index('-f') + 1]))[0]
+            for split in ('train', 'val'):
+                os.makedirs(os.path.join(cwd, stem, 'images', split),
+                            exist_ok=True)
+                open(os.path.join(cwd, stem, 'images', split, 'a.jpg'),
+                     'w').close()
+            self.steps.append({'name': name, 'argv': argv, 'exit_code': 0,
+                               'seconds': 0.0})
+            return 0
         # leave behind whatever the real builder would have, so the composer's
         # own measuring and manifest work has something to read
         out = argv[argv.index('--out') + 1] if '--out' in argv else None
@@ -297,22 +317,86 @@ def composition_checks(bad, bd):
                            'seconds': 0.0})
         return 0
 
+    # AN EXPORT SCRIPT THAT WORKS, so the chain under test is the whole one.
+    # Without it ls_export finds nothing, the preparation step is skipped and
+    # the ordering check grades a shorter chain than the real build runs.
+    export = os.path.join(root, 'export_annotations.sh')
+    with open(export, 'w') as fh:
+        fh.write('#!/bin/bash\n'
+                 'echo \'[{"image":"https://x/y/z.jpg","label":['
+                 '{"x":10,"y":10,"width":10,"height":10,'
+                 '"rectanglelabels":["unleashed dog"]}]}]\' > probe.json\n'
+                 'echo probe.json\n')
+    os.chmod(export, 0o755)
     try:
         bd.Runner.run = fake_run
         bd.stage_extras = lambda *a, **k: {'dog': 1, 'not_dog': 2}
         man = bd.build('dogdet', by='admin')
         names = [c['name'] for c in calls]
+        # THE EXPORT IS FETCHED FIRST, AND PREPARED BEFORE ANYTHING ELSE
+        if 'label studio export' not in names:
+            bad.append('the build does not export the hand-drawn boxes: %r'
+                       % (names,))
+        if 'prepare_detection_yolo_dataset' not in names:
+            bad.append('the exported boxes are never prepared into a '
+                       'detector set, so the detector is built from whatever '
+                       'its base was cut from months ago: %r' % (names,))
+        elif names.index('prepare_detection_yolo_dataset') > \
+                names.index('build_dogdet_v3'):
+            bad.append('the export is prepared AFTER the set is built from '
+                       'it: %r' % (names,))
+        else:
+            prep = calls[names.index('prepare_detection_yolo_dataset')]
+            argv = prep['argv']
+            if '--single-class' not in argv:
+                bad.append('the detector set is not built single-class -- it '
+                           'finds dogs and nothing else')
+            if '--background' not in argv:
+                bad.append('the tasks marked background are dropped')
+            if '-e' not in argv or 'other animal' not in \
+                    argv[argv.index('-e') + 1]:
+                bad.append('the other animals are not excluded from the '
+                           'detector: %r' % (argv,))
+            if '--tracker-file' not in argv:
+                bad.append('the split tracker is not passed, so train and '
+                           'val move between rebuilds')
+            if prep.get('cwd') != os.path.dirname(
+                    calls[0].get('cwd') or '') and not str(
+                    prep.get('cwd') or '').endswith('.stage'):
+                bad.append('the preparation does not run in the staging '
+                           'directory -- it names its output after the cwd '
+                           'and writes dataset.yaml into it, so run anywhere '
+                           'else it overwrites the one already there')
+        names = [n for n in names
+                 if n not in ('label studio export',
+                              'prepare_detection_yolo_dataset')]
         if names != ['build_dogdet_v3', 'build_detector_negatives']:
             bad.append('the detector build ran %r -- the backgrounds pass '
                        'is what puts the false positives in, and it runs on '
                        'the OUTPUT of the first step' % (names,))
         else:
-            first_out = calls[0]['argv'][calls[0]['argv'].index('--out') + 1]
-            second_src = calls[1]['argv'][calls[1]['argv'].index('--src') + 1]
+            # BY NAME, not by position. The export and the preparation run
+            # first now, so calls[0] is no longer the first builder -- and
+            # indexing by position quietly asked the export script for a
+            # --out it does not have.
+            def argv_of(want):
+                for c in calls:
+                    if c['name'] == want:
+                        return c['argv']
+                return []
+            a1, a2 = argv_of('build_dogdet_v3'), \
+                argv_of('build_detector_negatives')
+            first_out = a1[a1.index('--out') + 1]
+            second_src = a2[a2.index('--src') + 1]
+            # ...and the set it builds from is the one prepared from the
+            # export, not the base it would have used without one
+            if '--src' not in a1 or '.stage' not in a1[a1.index('--src') + 1]:
+                bad.append('build_dogdet_v3 was not pointed at the prepared '
+                           'export: %r' % (a1,))
             if first_out != second_src:
                 bad.append('the backgrounds pass does not read what the first '
                            'step wrote: %r vs %r' % (first_out, second_src))
-            if '--execute' not in calls[1]['argv']:
+            if '--execute' not in a2:
                 bad.append('build_detector_negatives ran without --execute, '
                            'so it printed what it would add and added '
                            'nothing')
@@ -408,9 +492,16 @@ def composition_checks(bad, bd):
 
         calls[:] = []
         man = bd.build('dogbin')
-        argv = calls[0]['argv']
-        if calls[0]['name'] != 'rebuild_crop_dataset':
-            bad.append('a crop build ran %r' % (calls[0]['name'],))
+
+        def argv_named(want):
+            for c in calls:
+                if c['name'] == want:
+                    return c['argv']
+            return []
+        argv = argv_named('rebuild_crop_dataset')
+        if not argv:
+            bad.append('a crop build never ran the crop builder: %r'
+                       % ([c['name'] for c in calls],))
         elif '--execute' not in argv:
             bad.append('rebuild_crop_dataset ran without --execute')
         else:
@@ -423,7 +514,10 @@ def composition_checks(bad, bd):
                 bad.append('the dog-bin build derives from the wrong base')
         calls[:] = []
         man = bd.build('leash')
-        argv = calls[0]['argv']
+        argv = argv_named('rebuild_crop_dataset')
+        if not argv:
+            bad.append('the leash build never ran the crop builder')
+            argv = ['--pos-class', '?', '--neg-class', '?', '--src', '?']
         if argv[argv.index('--pos-class') + 1] != 'leashed' or \
                 argv[argv.index('--neg-class') + 1] != 'unleashed':
             bad.append('the leash build names the wrong classes: %r' % (argv,))

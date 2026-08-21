@@ -863,7 +863,7 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     inputs = {k: store_state(k) for k, v in STORES.items()
               if family in v['for']}
 
-    steps_total = 3 if family == 'dogdet' else 4
+    steps_total = 4
     run = Runner(os.path.join(stage, 'build_log.txt'), steps_total)
     extras = {}
     try:
@@ -886,11 +886,43 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         run.progress(0, 'reading the annotations')
         if family == 'dogdet':
             mid = os.path.join(stage, 'detect')
+            src = base
+            if ls_path:
+                # THE HAND-DRAWN BOXES BECOME THE BASE, rather than whatever
+                # dogdet_v2 was cut from months ago. The project's own
+                # preparation script does it: it knows the bucket, the label
+                # group and the split tracker that keeps train and val stable
+                # across rebuilds.
+                #
+                # Run with the STAGE as its working directory, because it
+                # names its output after the export file relative to the cwd
+                # AND writes dataset.yaml into the cwd -- run from the
+                # training root it would overwrite the one that is there.
+                run.progress(1, 'preparing the exported boxes')
+                run.run('prepare_detection_yolo_dataset',
+                        [crop_python,
+                         os.path.join(root, 'prepare_detection_yolo_dataset.py'),
+                         '-f', ls_path, '-l', LS_GROUP,
+                         '--single-class',
+                         '-e', ','.join(LS_NOT_DOG),
+                         '--background', '--compress',
+                         '--tracker-file',
+                         os.path.join(root, 'split_tracker.json')],
+                        cwd=stage)
+                made = os.path.join(stage,
+                                    os.path.splitext(
+                                        os.path.basename(ls_path))[0])
+                if os.path.isdir(os.path.join(made, 'images', 'train')):
+                    src = made
+                    run.say('prepared %s from the export' % (made,))
+                else:
+                    run.say('the export prepared nothing usable — building '
+                            'from %s instead' % (base,))
             run.progress(1, 'boxes, split by sequence')
             run.run('build_dogdet_v3',
                     [sys.executable, os.path.join(DETECT,
                                                   'build_dogdet_v3.py'),
-                     '--out', mid])
+                     '--src', src, '--out', mid])
             run.progress(2, 'backgrounds from the false positives')
             run.run('build_detector_negatives',
                     [sys.executable,

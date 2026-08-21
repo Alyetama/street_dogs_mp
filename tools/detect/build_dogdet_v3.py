@@ -67,6 +67,10 @@ def _training_root():
     return got or os.path.dirname(os.path.dirname(REPO))
 
 TRAINING_ROOT = _training_root()
+# The set this build starts from. A default rather than a constant now: the
+# composed build hands it a set prepared from a fresh Label Studio export, so
+# the hand-drawn boxes are in every rebuild rather than only in whatever
+# dogdet_v2 happened to be cut from.
 V2 = os.path.join(TRAINING_ROOT, 'dogdet_v2')
 HARD_POS = os.path.join(REPO, 'data', 'hard_positives', 'labels.jsonl')
 AUDIT_VERDICTS = os.path.join(REPO, 'data', 'fn_audit', 'verdicts.jsonl')
@@ -190,12 +194,27 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--out', default=os.path.join(TRAINING_ROOT,
                                                   'dogdet_v3'))
+    ap.add_argument('--src', default=None,
+                    help='the detector set to start from (default: '
+                         'dogdet_v2 at the training root). The composed '
+                         'build passes one prepared from a fresh Label '
+                         'Studio export.')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--val-target', type=int, default=480,
                     help='promote whole train sequences to val until val '
                          'reaches roughly this many frames')
     ap.add_argument('--memory', default='6GB')
     a = ap.parse_args()
+    if a.src:
+        # Module-level because the reading and writing below reach for it by
+        # name in half a dozen places; rebinding it here is what makes one
+        # source swappable without threading it through all of them.
+        global V2
+        V2 = a.src
+    for split in ('train', 'val'):
+        if not os.path.isdir(os.path.join(V2, 'images', split)):
+            raise SystemExit('%s has no images/%s — it is not a detector '
+                             'dataset to build from' % (V2, split))
     import duckdb
     rng = random.Random(a.seed)
 
