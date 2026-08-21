@@ -263,9 +263,16 @@ def composition_checks(bad, bd):
     os.environ['TRAINING_ROOT'] = root
     real_run = bd.Runner.run
     real_stage = bd.stage_extras
+    real_head = bd.git_head
     calls = []
+    # A detector build spends twenty-five minutes fetching frames, and work
+    # carries on in the repo while it does. This stands in for a commit landing
+    # mid-build: the manifest has to name the code that STARTED the build, or
+    # it names a commit that had nothing to do with this dataset.
+    head_now = ['the-commit-the-build-started-from']
 
     def fake_run(self, name, argv, cwd=None, env=None):
+        head_now[0] = 'a-commit-somebody-made-during-the-build'
         calls.append({'name': name, 'argv': argv, 'env': env or {},
                       'cwd': cwd})
         if name == 'label studio export':
@@ -330,8 +337,14 @@ def composition_checks(bad, bd):
     os.chmod(export, 0o755)
     try:
         bd.Runner.run = fake_run
+        bd.git_head = lambda: {'commit': head_now[0], 'dirty': False}
         bd.stage_extras = lambda *a, **k: {'dog': 1, 'not_dog': 2}
         man = bd.build('dogdet', by='admin')
+        got = (man.get('git') or {}).get('commit')
+        if got != 'the-commit-the-build-started-from':
+            bad.append('the manifest names %r as the code that built this '
+                       'dataset -- read at the end, so a commit made while '
+                       'the build ran renames what produced it' % (got,))
         names = [c['name'] for c in calls]
         # THE EXPORT IS FETCHED FIRST, AND PREPARED BEFORE ANYTHING ELSE
         if 'label studio export' not in names:
@@ -528,6 +541,7 @@ def composition_checks(bad, bd):
     finally:
         bd.Runner.run = real_run
         bd.stage_extras = real_stage
+        bd.git_head = real_head
         if old_env is None:
             os.environ.pop('TRAINING_ROOT', None)
         else:

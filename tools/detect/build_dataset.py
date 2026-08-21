@@ -885,6 +885,12 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     stage = out + '.stage'
     os.makedirs(stage, exist_ok=True)
     started = int(time.time() if now is None else now)
+    # ...and the code as it is right now. Taken at the end, this recorded
+    # whichever commit happened to be checked out when the build finished:
+    # a detector build spends twenty-five minutes fetching frames, and a
+    # commit made in that window renamed the code the manifest claims built
+    # this dataset.
+    head = git_head()
 
     # the ledgers as they are RIGHT NOW, before anything reads them
     inputs = {k: store_state(k) for k, v in STORES.items()
@@ -1045,7 +1051,7 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                            'sha256': sha256(files_path)},
             'inputs_json': {'path': 'bundle/inputs.json',
                             'sha256': sha256(inputs_path)},
-            'git': git_head(),
+            'git': head,
             'python': sys.version.split()[0],
             'versions': _versions(),
             'builder_manifests': {},

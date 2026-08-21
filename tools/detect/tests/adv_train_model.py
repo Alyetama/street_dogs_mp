@@ -282,6 +282,72 @@ def refusal_checks(bad, py, dataset):
                        'they are about to run' % (line,))
 
 
+def git_stamp_checks(bad, py):
+    """The bundle names the code that STARTED the run.
+
+    Read at the end -- which is where the bundle is written -- this recorded
+    whichever commit happened to be checked out hours later, so a run trained
+    on Tuesday's code was filed under Thursday's. ultralytics' own YOLO is
+    replaced here by one that makes a commit and then falls over, which is the
+    whole event in one line. The attribute is patched rather than the module:
+    the parameter schema is read out of ultralytics.cfg before a run starts,
+    so a stand-in module kills the run before there is a bundle to grade.
+    """
+    tmp = tempfile.mkdtemp(prefix='adv_tm_git_')
+    root = os.path.join(tmp, 'root')
+    ds = os.path.join(root, 'dogbin_probe')
+    for split in ('train', 'val'):
+        for klass in ('dog', 'not_dog'):
+            os.makedirs(os.path.join(ds, split, klass))
+    os.makedirs(os.path.join(ds, 'bundle'))
+    with open(os.path.join(ds, 'bundle', 'manifest.json'), 'w') as fh:
+        json.dump({'family': 'dogbin', 'counts': {'total': 0},
+                   'built_at_iso': 'probe'}, fh)
+    probe = (
+        'import json,sys; sys.path.insert(0, %r)\n'
+        'import train_model as t\n'
+        'import ultralytics\n'
+        'holder = ["the-commit-the-run-started-from"]\n'
+        't.bd.git_head = lambda: {"commit": holder[0], "dirty": False}\n'
+        'class Boom:\n'
+        '    def __init__(self, *a, **k):\n'
+        '        holder[0] = "a-commit-made-while-it-trained"\n'
+        '        raise RuntimeError("probe")\n'
+        'ultralytics.YOLO = Boom\n'
+        'try:\n'
+        '    t.launch("dogbin", %r, overrides={"epochs": 1},\n'
+        '             weights="/definitely/not/a/model.pt", by="guard")\n'
+        'except BaseException as e:\n'
+        '    print("THREW", type(e).__name__)\n'
+        % (DETECT, ds))
+    try:
+        got = subprocess.run([py, '-c', probe], capture_output=True,
+                             text=True, timeout=300,
+                             env=dict(os.environ, TRAINING_ROOT=root))
+        if 'THREW' not in (got.stdout or ''):
+            bad.append('the git-stamp probe did not reach the bundle: %r %r'
+                       % ((got.stdout or '')[-200:],
+                          (got.stderr or '')[-300:]))
+            return
+        proj = os.path.join(root, 'runs', 'classify', 'dog-bin')
+        made = sorted(os.listdir(proj)) if os.path.isdir(proj) else []
+        if not made:
+            bad.append('the git-stamp probe left no run directory')
+            return
+        with open(os.path.join(proj, made[0], 'bundle',
+                               'manifest.json')) as fh:
+            doc = json.load(fh)
+        stamp = (doc.get('git') or {}).get('commit')
+        if stamp != 'the-commit-the-run-started-from':
+            bad.append('the run bundle names %r as the code that trained '
+                       'these weights -- read when the run ended, so a commit '
+                       'made meanwhile takes the credit' % (stamp,))
+    except subprocess.TimeoutExpired:
+        bad.append('the git-stamp probe never returned')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def bundle_checks(bad, py, _dataset):
     """The run's own record -- written even when the run falls over.
 
@@ -387,6 +453,7 @@ def main():
                 fn(bad, py)
             for fn in (refusal_checks, bundle_checks):
                 fn(bad, py, dataset)
+            git_stamp_checks(bad, py)
         except Exception as e:            # noqa: BLE001
             bad.append('a parameter check threw %s: %s'
                        % (type(e).__name__, e))

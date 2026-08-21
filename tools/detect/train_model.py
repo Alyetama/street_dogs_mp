@@ -333,6 +333,10 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
         raise SystemExit('%s already exists' % (save_dir,))
     model = weights or _inherited_weights(family) or spec['weights']
     started = int(time.time())
+    # Taken now, not when the run ends: a training run is hours long, and the
+    # manifest is written at the end, so this recorded whatever was checked
+    # out by then rather than the code that trained the weights.
+    head = bd.git_head()
 
     print('training %s on %s' % (family, ds['id']), flush=True)
     print('  weights   %s' % (model,), flush=True)
@@ -391,7 +395,7 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
             'versions': {'ultralytics': _version(),
                          'torch': _torch_version(),
                          'python': sys.version.split()[0]},
-            'git': bd.git_head(),
+            'git': head,
         })
     print('\ndone: %s' % (save_dir,), flush=True)
     return {'ok': True, 'save_dir': save_dir, 'params': params,
