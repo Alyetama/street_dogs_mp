@@ -606,6 +606,14 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                      os.path.join(DETECT, 'build_detector_negatives.py'),
                      '--src', mid, '--out', out,
                      '--duckdb-python', duckdb_python, '--execute'])
+            # The first step writes its record into the STAGE directory,
+            # which is about to be deleted -- and that record holds the
+            # holdout ids, the resolved sequences and which val frames were
+            # moved for leaking. It is the answer to "why is this frame in
+            # val", so it is carried across rather than thrown away.
+            first = os.path.join(mid, 'manifest.json')
+            if os.path.isfile(first):
+                shutil.copy2(first, os.path.join(out, 'split_manifest.json'))
         else:
             run.progress(1, 'gathering new crops')
             extras = stage_extras(family, stage, run,
@@ -684,7 +692,12 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         # whatever the builders wrote about their own decisions, kept rather
         # than summarised: they record the holdout ids, the sequences and the
         # crops they dropped, and none of that is worth paraphrasing
-        for who in ('manifest.json', 'rebuild_manifest.json'):
+        # Every record a builder leaves, under whichever name it uses. The
+        # detector's two use three different ones between them, and a list
+        # that named only the crop builder's quietly kept nothing at all for
+        # the detector.
+        for who in ('manifest.json', 'rebuild_manifest.json',
+                    'negatives_manifest.json', 'split_manifest.json'):
             got = os.path.join(out, who)
             if os.path.isfile(got):
                 try:

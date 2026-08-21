@@ -332,10 +332,18 @@ def composition_checks(bad, bd):
                 continue
             if st['sha256'] is None:
                 bad.append('%s is recorded without a digest' % (name,))
-        # the builder's own record is kept rather than paraphrased
-        if 'manifest.json' not in man.get('builder_manifests', {}):
-            bad.append("the builder's own manifest is not kept -- it holds "
-                       'the holdout ids and the sequences')
+        # THE BUILDERS' OWN RECORDS ARE KEPT, under whichever names they
+        # use. The detector's first step writes its into the staging
+        # directory that is about to be deleted, and its second uses a name
+        # of its own -- so a list naming only the crop builder's file kept
+        # nothing at all for the detector, silently.
+        kept = man.get('builder_manifests', {})
+        if not kept:
+            bad.append('no builder record was kept -- they hold the holdout '
+                       'ids, the sequences and which frames were moved')
+        elif 'split_manifest.json' not in kept:
+            bad.append('the split record was lost with the staging '
+                       'directory: kept %r' % (sorted(kept),))
         # ── THE BUNDLE ──
         bundle = os.path.join(man['out'], 'bundle')
         for who in ('manifest.json', 'files.json', 'inputs.json',
