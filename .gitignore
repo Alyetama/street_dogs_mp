@@ -246,3 +246,7 @@ fix_lynx_spindown.sh
 # regenerable from tools/detect/triage_crops.py
 data/dashboard/triage.jsonl
 data/labelstudio_frames/
+
+# The built dashboard page. Generated, and it embeds absolute paths
+# from whichever machine built it.
+data/dashboard/index.html
