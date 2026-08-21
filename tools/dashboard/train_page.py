@@ -440,7 +440,9 @@ function paintJobs(){
         '<button class="btn" data-log="'+esc(j.id)+'">'+
           (OPEN[j.id]?'hide log':'log')+'</button>'+
         (run?'<button class="btn warn" data-stop="'+esc(j.id)+
-             '">stop</button>':'')+
+             '">stop</button>'
+            :'<button class="btn" data-forget="'+esc(j.id)+
+             '" title="remove this record">clear</button>')+
       '</div>'+
       (pct!=null?'<div class="bar"><i style="width:'+pct+'%"></i></div>'+
         '<div class="jid">'+esc(p.what)+' — '+p.done+' of '+p.total+'</div>':'')+
@@ -487,6 +489,15 @@ document.addEventListener('click',function(e){
   if(lg){ if(OPEN[lg]){delete OPEN[lg];var el=$('log-'+lg);if(el)el.hidden=true;
             t.textContent='log';}
           else {OPEN[lg]=true;t.textContent='hide log';pullLog(lg);} return }
+  var fg=t.getAttribute('data-forget');
+  if(fg){
+    if(!window.confirm('Clear this record? The log goes with it. Whatever it '+
+       'built stays on disk.'))return;
+    t.disabled=true;
+    delete OPEN[fg];
+    api('/api/train/forget',{job:fg}).then(refresh).catch(fail);
+    return;
+  }
   var stop=t.getAttribute('data-stop');
   if(stop){
     if(!window.confirm('Stop this? Whatever it has written stays where it is.'))

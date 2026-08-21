@@ -126,7 +126,8 @@ def route_checks(bad, d):
         WRITES = (('/api/train/build', {'family': 'dogdet'}),
                   ('/api/train/start', {'family': 'dogdet',
                                         'dataset': 'dogdet_v3'}),
-                  ('/api/train/cancel', {'job': 'x'}))
+                  ('/api/train/cancel', {'job': 'x'}),
+                  ('/api/train/forget', {'job': 'x'}))
         # ── the admin ──
         st, body = hit('/train', 'boss')
         if st != 200 or b'id="models"' not in body:

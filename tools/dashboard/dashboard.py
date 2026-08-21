@@ -9956,6 +9956,11 @@ class BoardHandler(SimpleHTTPRequestHandler):
             if path == '/api/train/start':
                 self._json(_train_start(j, data, who))
                 return True
+            if path == '/api/train/forget':
+                got = j.forget(str(data.get('job') or ''))
+                self._json({'ok': got['ok'],
+                            'error': got['message'] or None})
+                return True
             if path == '/api/train/cancel':
                 got = j.cancel(str(data.get('job') or ''))
                 self._json({'ok': got['ok'], 'error': got['message'] or None,

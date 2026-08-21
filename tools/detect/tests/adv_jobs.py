@@ -337,6 +337,42 @@ def progress_checks(bad, jobs):
         bad.append('a job that says nothing is reported as having progress')
 
 
+def forget_checks(bad, jobs):
+    """Clearing a record, and the one record that may not be cleared."""
+    done = jobs.submit('probe', ['/bin/echo', 'over'], lane='build')['job']
+    _settle(jobs, done['id'])
+    got = jobs.forget(done['id'])
+    if not got['ok']:
+        bad.append('a finished job could not be cleared: %r' % (got,))
+    if jobs.read(done['id']) is not None:
+        bad.append('a cleared job is still on record')
+    if os.path.isdir(jobs.job_dir(done['id'])):
+        bad.append('a cleared job still has its directory, so its log is '
+                   'still on disk')
+    if any(x['id'] == done['id'] for x in jobs.listing(limit=200)):
+        bad.append('a cleared job is still in the listing')
+
+    # ...and the live one is not clearable, because the directory it would
+    # take with it is where the shell writes how the job ended
+    live = jobs.submit('probe', ['/bin/sh', '-c', 'sleep 30'],
+                       lane='build')['job']
+    try:
+        got = jobs.forget(live['id'])
+        if got['ok']:
+            bad.append('A RUNNING JOB WAS CLEARED -- its work is still on the '
+                       'GPU and nothing can reach it now')
+        if jobs.read(live['id']) is None:
+            bad.append('a running job lost its record')
+    finally:
+        jobs.cancel(live['id'], grace=0.5)
+
+    for bogus, why in (('../../etc', 'a path'), ('', 'nothing'),
+                       ('no-such-job-at-all', 'a name that is not a job')):
+        got = jobs.forget(bogus)
+        if got['ok']:
+            bad.append('clearing accepted %s' % (why,))
+
+
 def main():
     import jobs
     tmp = tempfile.mkdtemp(prefix='adv_jobs_')
@@ -346,6 +382,7 @@ def main():
         for fn, args in ((basic_checks, (jobs,)), (cancel_checks, (jobs,)),
                          (lane_checks, (jobs,)), (refusal_checks, (jobs,)),
                          (progress_checks, (jobs,)),
+                         (forget_checks, (jobs,)),
                          (survives_its_parent, (tmp,))):
             try:
                 fn(bad, *args)

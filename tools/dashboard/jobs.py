@@ -470,6 +470,29 @@ def progress(job_id):
 
 # ── housekeeping ────────────────────────────────────────────────────────────
 
+def forget(job_id):
+    """Drop one finished job's record, log and all.
+
+    Refuses a running one: the directory is where the shell writes its exit
+    status, so deleting it under a live job loses the only evidence of how it
+    ended and leaves work running that nothing on the page can still reach.
+    """
+    if not isinstance(job_id, str) or not ID_RE.match(job_id):
+        return {'ok': False, 'message': 'that is not a job id'}
+    job = read(job_id)
+    if job is None:
+        return {'ok': False, 'message': 'no such job'}
+    if job.get('state') == 'running':
+        return {'ok': False, 'message': 'that job is still running -- stop it '
+                                        'first'}
+    import shutil
+    try:
+        shutil.rmtree(job_dir(job_id))
+    except OSError as e:
+        return {'ok': False, 'message': 'could not remove it: %s' % (e,)}
+    return {'ok': True, 'message': ''}
+
+
 def prune(keep=200, older_than_s=30 * 86400, now=None):
     """Drop the records of finished jobs nobody will read again.
 
@@ -497,7 +520,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('list')
-    for name in ('show', 'tail', 'cancel'):
+    for name in ('show', 'tail', 'cancel', 'forget'):
         p = sub.add_parser(name)
         p.add_argument('job_id')
     a = ap.parse_args(argv)
@@ -516,6 +539,13 @@ def main(argv=None):
         return 0
     if a.cmd == 'tail':
         sys.stdout.write(tail(a.job_id, 64000))
+        return 0
+    if a.cmd == 'forget':
+        got = forget(a.job_id)
+        if not got['ok']:
+            print(got['message'], file=sys.stderr)
+            return 1
+        print('forgotten')
         return 0
     got = cancel(a.job_id)
     print(got['message'] or (got['job'] or {}).get('state', ''))
