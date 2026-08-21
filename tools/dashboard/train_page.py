@@ -74,6 +74,65 @@ def overview(family=None):
     }
 
 
+def _run_state(family, name):
+    """What became of the run a job produced: the score, and the weights.
+
+    Read from the run's own bundle, which is written even when the run falls
+    over, with results.csv behind it for a run still going. Without this a
+    training job that somebody waited hours for reported 'done, exit 0' and
+    nothing else -- the score was in ultralytics' last screenful of log, and
+    the weights were wherever the reader could work out they had gone.
+    """
+    if not family or not name:
+        return None
+    try:
+        import train_model as tm
+        root = tm.runs_root(family)
+    except Exception:                     # noqa: BLE001 - a page, not a tool
+        return None
+    path = os.path.join(root, str(name))
+    if not os.path.isdir(path):
+        return None
+    out = {'name': str(name), 'path': path, 'metrics': None, 'error': None,
+           'epochs': None, 'weights': None}
+    man = os.path.join(path, 'bundle', 'manifest.json')
+    if os.path.isfile(man):
+        try:
+            with open(man) as fh:
+                doc = json.load(fh)
+            out['metrics'] = doc.get('metrics')
+            out['error'] = doc.get('error')
+        except (OSError, ValueError):
+            pass
+    csv = os.path.join(path, 'results.csv')
+    if os.path.isfile(csv):
+        try:
+            with open(csv) as fh:
+                head = fh.readline().strip().split(',')
+                rows = [ln for ln in fh.read().splitlines() if ln.strip()]
+            out['epochs'] = len(rows)
+            if rows and not out['metrics']:
+                # a run still going has no bundle metrics yet, and its last
+                # written epoch is the only honest answer to "how is it doing"
+                last = rows[-1].split(',')
+                got = {}
+                for key, value in zip(head, last):
+                    try:
+                        got[key.strip()] = float(value)
+                    except ValueError:
+                        pass
+                out['metrics'] = got or None
+        except OSError:
+            pass
+    best = os.path.join(path, 'weights', 'best.pt')
+    last = os.path.join(path, 'weights', 'last.pt')
+    for cand in (best, last):
+        if os.path.isfile(cand):
+            out['weights'] = cand
+            break
+    return out
+
+
 def _job_row(job):
     """One job as the page needs it -- never the environment, and never more
     of the record than a page has any use for."""
@@ -86,6 +145,8 @@ def _job_row(job):
             'exit_code': job.get('exit_code'),
             'argv': job.get('argv'),
             'progress': jobs.progress(job.get('id') or ''),
+            'run': _run_state((job.get('meta') or {}).get('family'),
+                              (job.get('meta') or {}).get('run')),
             'meta': job.get('meta') or {}}
 
 
@@ -434,6 +495,32 @@ function overrides(){
 }
 
 /* ── the work ── */
+/* The headline number for each task. A detector is judged on mAP, a
+   classifier on top-1, and reporting six ultralytics keys instead would be
+   the same as reporting none. */
+var SCORE={detect:['metrics/mAP50-95(B)','metrics/mAP50(B)'],
+           classify:['metrics/accuracy_top1']};
+function score(run,family){
+  var m=run&&run.metrics; if(!m)return null;
+  var keys=SCORE[family==='dogdet'?'detect':'classify'];
+  for(var i=0;i<keys.length;i++)
+    if(typeof m[keys[i]]==='number')
+      return keys[i].replace('metrics/','').replace('(B)','')+' '+
+             m[keys[i]].toFixed(3);
+  return null;
+}
+/* What became of the run: the thing somebody waited hours for. */
+function outcome(j){
+  var r=j.run; if(!r)return '';
+  var fam=(j.meta||{}).family, bits=[];
+  var s=score(r,fam); if(s)bits.push('<b>'+esc(s)+'</b>');
+  if(r.epochs)bits.push(r.epochs+(j.state==='running'?' epochs so far'
+                                                     :' epochs'));
+  if(r.error)bits.push('<span class="warnnote">'+esc(r.error)+'</span>');
+  if(!bits.length&&j.state!=='running')bits.push('no result recorded');
+  return '<div class="jid">'+bits.join(' &nbsp;·&nbsp; ')+'</div>'+
+    (r.weights?'<div class="cmd">'+esc(r.weights)+'</div>':'');
+}
 function paintJobs(){
   var rows=STATE.jobs;
   $('jobsub').textContent=STATE.lanes.build||STATE.lanes.train
@@ -463,6 +550,7 @@ function paintJobs(){
       '</div>'+
       (pct!=null?'<div class="bar"><i style="width:'+pct+'%"></i></div>'+
         '<div class="jid">'+esc(p.what)+' — '+p.done+' of '+p.total+'</div>':'')+
+      outcome(j)+
       '<div class="cmd">'+esc((j.argv||[]).join(' '))+'</div>'+
       '<div class="log" id="log-'+esc(j.id)+'"'+(OPEN[j.id]?'':' hidden')+
         '>'+(OPEN[j.id]===true?'loading…':esc(OPEN[j.id]||''))+'</div>'+

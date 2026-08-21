@@ -112,6 +112,67 @@ def _script_checks(bad, html):
                    % ((got.stderr or '').strip()[:400],))
 
 
+def outcome_checks(bad):
+    """A finished run is reachable from the job that produced it.
+
+    A training job that somebody waited hours for reported 'done, exit 0' and
+    an argv line: the score was in ultralytics' last screenful of log and the
+    weights were wherever the reader could work out they had gone. The run is
+    named by the dashboard at submit time so the job knows from the start
+    which directory it is producing.
+    """
+    import train_page as tp
+    tmp = tempfile.mkdtemp(prefix='adv_tp_run_')
+    old = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        run = os.path.join(tmp, 'runs', 'detect', 'dogdetection',
+                           'dogdet_20260820_b58be7_20260821-0100')
+        os.makedirs(os.path.join(run, 'bundle'))
+        os.makedirs(os.path.join(run, 'weights'))
+        with open(os.path.join(run, 'bundle', 'manifest.json'), 'w') as fh:
+            json.dump({'metrics': {'metrics/mAP50-95(B)': 0.612},
+                       'error': None}, fh)
+        with open(os.path.join(run, 'results.csv'), 'w') as fh:
+            fh.write('epoch,metrics/mAP50-95(B)\n1,0.4\n2,0.61\n')
+        open(os.path.join(run, 'weights', 'best.pt'), 'w').close()
+
+        got = tp._run_state('dogdet', os.path.basename(run))
+        if not got:
+            bad.append('the run a job produced cannot be found from the job')
+            return
+        if (got.get('metrics') or {}).get('metrics/mAP50-95(B)') != 0.612:
+            bad.append('the score is not reported: %r' % (got.get('metrics'),))
+        if got.get('epochs') != 2:
+            bad.append('how far the run got is not reported: %r'
+                       % (got.get('epochs'),))
+        if not (got.get('weights') or '').endswith('best.pt'):
+            bad.append('the weights the run produced are not named: %r'
+                       % (got.get('weights'),))
+        # a run still going has no bundle metrics, and the last written epoch
+        # is the only honest answer to how it is doing
+        going = os.path.join(tmp, 'runs', 'detect', 'dogdetection', 'live')
+        os.makedirs(going)
+        with open(os.path.join(going, 'results.csv'), 'w') as fh:
+            fh.write('epoch,metrics/mAP50-95(B)\n1,0.22\n')
+        live = tp._run_state('dogdet', 'live')
+        if (live.get('metrics') or {}).get('metrics/mAP50-95(B)') != 0.22:
+            bad.append('a run in progress reports nothing about itself: %r'
+                       % (live,))
+        if tp._run_state('dogdet', 'never_existed') is not None:
+            bad.append('a run directory that is not there reports as a run')
+        if tp._run_state('dogdet', None) is not None:
+            bad.append('a job with no run recorded invents one')
+    except Exception as e:                # noqa: BLE001
+        bad.append('the outcome checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        if old is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def route_checks(bad, d):
     """Who may reach it, over real HTTP, as two real people."""
     import accounts as A
@@ -332,6 +393,20 @@ def argv_checks(bad, d):
                 bad.append('a parameter value became its own argument')
         if not any('dogbin_x' == a for a in argv):
             bad.append('the run does not name the dataset: %r' % (argv,))
+        # THE RUN IS NAMED HERE, NOT BY THE LAUNCHER. Left to the launcher the
+        # only place the name ever appeared was a line in the log, so a job
+        # that finished could not reach the run it had just produced.
+        if '--name' not in argv:
+            bad.append('the run is not named at submit time, so the job has '
+                       'no way to reach what it produced: %r' % (argv,))
+        else:
+            name = argv[argv.index('--name') + 1]
+            if not name.startswith('dogbin_x'):
+                bad.append('the run name does not say what it trained on: %r'
+                           % (name,))
+            if made[0]['meta'].get('run') != name:
+                bad.append('the job does not record the run it produced: %r'
+                           % (made[0]['meta'],))
 
 
 def main():
@@ -342,8 +417,8 @@ def main():
         print('FAIL could not load dashboard.py: %s: %s'
               % (type(e).__name__, e))
         return 1
-    for fn, args in ((page_checks, ()), (route_checks, (d,)),
-                     (argv_checks, (d,))):
+    for fn, args in ((page_checks, ()), (outcome_checks, ()),
+                     (route_checks, (d,)), (argv_checks, (d,))):
         try:
             fn(bad, *args)
         except Exception as e:            # noqa: BLE001

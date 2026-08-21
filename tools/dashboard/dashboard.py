@@ -11531,16 +11531,22 @@ def _train_start(j, data, who):
     params = data.get('params') or {}
     if not isinstance(params, dict):
         return {'error': 'the parameters must be an object'}
+    # THE RUN IS NAMED HERE, not by the launcher, so the job knows from the
+    # start which directory it is producing. Left to the launcher, the only
+    # place the run's name ever appeared was a line in the log -- and a
+    # finished run then reported as 'done, exit 0' with no way to reach its
+    # score, its weights, or itself.
+    name = '%s_%s' % (dataset, time.strftime('%Y%m%d-%H%M'))
     argv = [train_python(),
             os.path.join(REPO, 'tools', 'detect', 'train_model.py'),
             '--family', family, '--dataset', dataset,
-            '--by', str(who or '')]
+            '--name', name, '--by', str(who or '')]
     if params:
         argv += ['--params-json', json.dumps(params, sort_keys=True)]
     got = j.submit('train', argv, lane='train',
                    label='%s on %s' % (family, dataset), by=who,
                    meta={'family': family, 'dataset': dataset,
-                         'params': params})
+                         'run': name, 'params': params})
     if not got['ok']:
         return {'error': got['message']}
     return {'ok': True, 'job': {'id': got['job']['id']}}
