@@ -2046,20 +2046,22 @@ render();
 chk(/\.acts\{[^}]*position:absolute/.test(PAGE_CSS),
   'the action row is still stacked under every tile rather than riding over '
   + 'it — seventy-five buttons where the photographs should be');
-// THE DOG QUESTION IS ANSWERED IN THE SAME COLOURS ON BOTH SHEETS: green for
-// yes, red for no, here and on the detections queue. And ONLY for that
-// question -- the leash sheet's two answers are leashed and unleashed, and
-// painting one green and the other red would call a loose dog a mistake
-// rather than the finding this project exists to count.
-var yesHov = /\[data-stage="gate"\]\s*\.act\.m:hover\{[^}]*\}/.exec(PAGE_CSS);
-var noHov = /\[data-stage="gate"\]\s*\.act\.c:hover\{[^}]*\}/.exec(PAGE_CSS);
+// THE COLOUR FOLLOWS THE ANSWER, on every sheet: green for the first answer,
+// red for the second, hovered or recorded, here and on the detections queue.
+// It used to follow whether the MODEL had been wrong, which is a different
+// question from the one the person is answering.
+var yesHov = /\.act\.m:hover\{[^}]*\}/.exec(PAGE_CSS);
+var noHov = /\.act\.c:hover\{[^}]*\}/.exec(PAGE_CSS);
+var yesOn = /\.act\.m\.on\{[^}]*\}/.exec(PAGE_CSS);
+var noOn = /\.act\.c\.on\{[^}]*\}/.exec(PAGE_CSS);
+chk(yesOn && /5ec89a|var\(--green\)/.test(yesOn[0]),
+  'a recorded yes is not green, though hovering it is: ' + (yesOn && yesOn[0]));
+chk(noOn && /f0736a|var\(--no\)/.test(noOn[0]),
+  'a recorded no is not red, though hovering it is: ' + (noOn && noOn[0]));
 chk(yesHov && /5ec89a|var\(--green\)/.test(yesHov[0]),
   'the yes button does not go green on hover: ' + (yesHov && yesHov[0]));
 chk(noHov && /f0736a|var\(--no\)/.test(noHov[0]),
   'the no button does not go red on hover: ' + (noHov && noHov[0]));
-chk(/<body[^>]*data-stage="/.test(PAGE_HTML),
-  'the page does not say which stage it is, so a rule meant for the gate '
-  + 'lands on the leash sheet as well');
 chk(/\.card:hover \.acts/.test(PAGE_CSS),
   'the actions never appear on hover, so the mouse cannot reach them');
 // A control that rides over a PHOTOGRAPH cannot be nearly-opaque. On paper
