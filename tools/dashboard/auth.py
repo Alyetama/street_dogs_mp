@@ -2262,9 +2262,20 @@ def admin_page(session, req, now=None, error='', minted=None):
                 # to 37 hours. It sits under the date it changes, not in the
                 # actions cell, because that cell already held three buttons
                 # and this is not a fourth: it edits the value beside it.
+                # The deployment default may not be one of the spans --
+                # DASHBOARD_INVITE_TTL_HOURS=72 is a choice an operator
+                # actually makes -- and a <select> with nothing selected
+                # falls back to its FIRST option, which is the SHORTEST.
+                # An admin who clicked "set" without touching the control
+                # would then hand out less time than their own default, the
+                # opposite of what the button is for. The smallest span that
+                # covers the default is selected instead; more time than
+                # asked for beats a link that dies early.
+                mark = next((h for h, _ in _EXPIRY_SPANS
+                             if h >= hours_default), _EXPIRY_SPANS[-1][0])
                 span = ''.join(
                     '<option value="%d"%s>%s</option>'
-                    % (h, ' selected' if h == hours_default else '', w)
+                    % (h, ' selected' if h == mark else '', w)
                     for h, w in _EXPIRY_SPANS)
                 when = ('<form method="post" action="%s/invite-expiry"'
                         ' class="exp">'

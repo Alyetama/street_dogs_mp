@@ -1413,6 +1413,28 @@ def invite_expiry_checks(bad, fx):
                        % ('drawn' if offered else 'missing', m.group(1)))
     if 'invite-expiry' in html and 'name="hours"' not in html:
         bad.append('the expiry form carries no hours field')
+    # AN OFF-LIST DEFAULT MUST STILL SELECT SOMETHING SENSIBLE. A <select>
+    # with no selected option falls back to its FIRST entry -- the shortest
+    # span -- so DASHBOARD_INVITE_TTL_HOURS=72 quietly turned "set" into
+    # "give them 12 hours", less than the deployment's own default. The
+    # covering span is the honest neighbour: more time than asked beats a
+    # link that dies early.
+    kept = os.environ.get(A.ENV_INVITE_TTL_HOURS)
+    try:
+        os.environ[A.ENV_INVITE_TTL_HOURS] = '72'
+        html72 = U.admin_page(ses, fx.req(path=U.ADMIN_PATH), now=now)
+        form = re.search(r'<form[^>]*invite-expiry.*?</form>', html72, re.S)
+        got = (re.findall(r'<option value="(\d+)" selected', form.group(0))
+               if form else [])
+        if got != ['168']:
+            bad.append('with a 72h default the expiry control selects %r -- '
+                       'an untouched "set" hands out the wrong span'
+                       % (got or 'nothing, so the browser picks 12 hours',))
+    finally:
+        if kept is None:
+            os.environ.pop(A.ENV_INVITE_TTL_HOURS, None)
+        else:
+            os.environ[A.ENV_INVITE_TTL_HOURS] = kept
     # A LIST OF SPANS, NOT A SPINNER. The number box put its arrows and the
     # same default in every row, which reads as a column of data rather than
     # five copies of one control -- and every span it can be set to has to be
