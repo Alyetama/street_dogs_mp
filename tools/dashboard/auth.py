@@ -534,9 +534,16 @@ def over_https(req=None, env=None):
     got = (env if env is not None else os.environ).get('DASHBOARD_HTTPS')
     if str(got or '').strip().lower() not in ('1', 'true', 'yes', 'on'):
         return False
-    # No request to judge (a caller outside the request path) leaves the
-    # operator's word standing.
-    return True if req is None else bool(getattr(req, 'proxied', True))
+    # AND WHEN NOBODY NAMED A PROXY, THE OPERATOR'S WORD IS ALL THERE IS.
+    # DASHBOARD_TRUSTED_PROXY is what tells the two legs apart; a deployment
+    # that terminates TLS somewhere this process cannot see, and never named
+    # it, has no second leg to protect and every reply must carry the flag --
+    # which is what it did before there were legs. Splitting them on a guess
+    # would take Secure off a public HTTPS deployment whose only mistake was
+    # leaving one variable unset.
+    if req is None or not trusted_proxies(env):
+        return True
+    return bool(getattr(req, 'proxied', True))
 
 
 def _flags(req=None, env=None):
@@ -631,6 +638,14 @@ class Request:
                 try:
                     data = handler.rfile.read(n)
                 except (BrokenPipeError, ConnectionResetError, OSError):
+                    # AND THE CONNECTION IS DONE WITH. socket.timeout IS an
+                    # OSError, so a slow sender lands here on a socket that is
+                    # still open with its body unread. Nothing reuses one
+                    # today -- the handler answers HTTP/1.0 and closes after
+                    # every reply -- so this is the belt: the day somebody
+                    # sets protocol_version to HTTP/1.1, those unread bytes
+                    # would be read as the next request line on it.
+                    handler.close_connection = True
                     data = b''
                 if ctype.startswith('application/x-www-form-urlencoded'):
                     form = parse_qs(data.decode('utf-8', 'replace'),
@@ -2243,7 +2258,8 @@ def admin_page(session, req, now=None, error='', minted=None):
             acts.append(_useract(
                 csrf, u['id'], 'delete', 'remove', warn=True,
                 confirm='Remove %s? They cannot sign in again. Every crop '
-                        'they judged stays judged, under their name.'
+                        'they judged stays judged, under their name, and so '
+                        'does every invite somebody joined through.'
                         % (u['username'],)))
         bits.append(
             '<tr><td class="name">%s%s</td>'
@@ -2259,9 +2275,11 @@ def admin_page(session, req, now=None, error='', minted=None):
                esc(_when(u['created_at'])), esc(_when(u['last_login_at'])),
                ' '.join(acts)))
     bits.append('</table>\n<div class="note">Disabling an account ends its '
-                'open sessions immediately. Accounts are never deleted \u2014 '
-                'they issued and took the invites above, and the record of '
-                'that has to keep pointing at somebody.</div>\n'
+                'open sessions immediately and can be undone. Removing one '
+                'cannot: the sign-in goes, and what they judged stays judged '
+                'under their name. Invite links they issued and nobody took '
+                'go with them; the ones somebody joined through stay, so the '
+                'people they brought in still have a record of how.</div>\n'
                 '</div>\n</section>\n')
     bits.append(_delegation_section(session, csrf, users, p, ts))
     bits.append('</div>\n')

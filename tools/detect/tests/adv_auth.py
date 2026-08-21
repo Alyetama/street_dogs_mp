@@ -1543,11 +1543,23 @@ def cookie_flag_checks(bad, fx):
             # from an http:// origin, nothing comes back, and the login form
             # returns forever with nothing to read.
             ('the proxied leg', U.Request(proxied=True),
-             {'DASHBOARD_HTTPS': '1'}, True),
+             {'DASHBOARD_HTTPS': '1',
+              'DASHBOARD_TRUSTED_PROXY': '127.0.0.1'}, True),
             ('the plain origin leg', U.Request(proxied=False),
-             {'DASHBOARD_HTTPS': '1'}, False),
+             {'DASHBOARD_HTTPS': '1',
+              'DASHBOARD_TRUSTED_PROXY': '127.0.0.1'}, False),
             ('the plain origin leg, no TLS anywhere',
-             U.Request(proxied=False), {}, False)):
+             U.Request(proxied=False), {}, False),
+            # AND THE DEPLOYMENT THAT NAMED NO PROXY KEEPS WHAT IT HAD. The
+            # trusted-proxy list is what tells the two legs apart; without it
+            # there is no second leg to spare, and splitting them on a guess
+            # would take Secure off a public HTTPS deployment whose only
+            # mistake was leaving one variable unset.
+            ('TLS with no proxy named', U.Request(proxied=False),
+             {'DASHBOARD_HTTPS': '1'}, True),
+            ('TLS with an empty proxy list', U.Request(proxied=False),
+             {'DASHBOARD_HTTPS': '1', 'DASHBOARD_TRUSTED_PROXY': '  '},
+             True)):
         for what, header in (('the session cookie',
                               U.set_cookie('v', 60, req, env=env)[1]),
                              ('the expiring header',
