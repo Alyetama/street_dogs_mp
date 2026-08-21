@@ -810,6 +810,12 @@ def catalogue(family=None):
                    'built_by': man.get('built_by'),
                    'counts': man.get('counts'), 'bundle': True,
                    'base': os.path.basename(man.get('base') or ''),
+                   # Whether the hand-drawn boxes are in it. Every build makes
+                   # its own export now, but the sets built before that do not
+                   # say so anywhere -- and picking one trains a model on
+                   # everything EXCEPT the boxes somebody drew by hand.
+                   'label_studio': ((man.get('label_studio') or {})
+                                    .get('counts') or {}).get('tasks'),
                    'seconds': man.get('seconds')}
         else:
             kind, classes = _shape_of(path)
@@ -840,7 +846,7 @@ def catalogue(family=None):
                                                   time.localtime(at))
                                     if at else None),
                    'built_by': '', 'counts': None, 'bundle': False,
-                   'base': '', 'seconds': None}
+                   'base': '', 'label_studio': None, 'seconds': None}
         if family and row['family'] != family:
             continue
         out.append(row)

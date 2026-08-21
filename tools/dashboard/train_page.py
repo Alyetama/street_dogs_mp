@@ -210,6 +210,9 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
   white-space:pre-wrap;word-break:break-word}
 .log[hidden]{display:none}
 .empty{color:var(--dim);font-size:12.5px;padding:8px 0}
+/* One line in the dataset's own description, not a banner: it is a fact
+   about that dataset, and it belongs where the counts are. */
+.warnnote{color:#e8a645}
 .msg{border-radius:10px;padding:9px 13px;font-size:12.5px;margin-bottom:12px}
 .msg.bad{background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.3);
   color:#ffb4b2}
@@ -338,7 +341,8 @@ function paintDatasets(){
   sel.innerHTML=rows.length?rows.map(function(d){
     var c=d.counts, size=c?(n(c.total)+' images'):'no record';
     return '<option value="'+esc(d.id)+'">'+esc(d.id)+' — '+when(d.built_at_iso)+
-      ' · '+esc(size)+(d.bundle?'':' · built before bundles')+'</option>';
+      ' · '+esc(size)+(d.bundle?(d.label_studio?'':' · no hand-drawn boxes')
+                              :' · built before bundles')+'</option>';
   }).join(''):'<option value="">nothing built for this model yet</option>';
   if(keep&&rows.some(function(d){return d.id===keep}))sel.value=keep;
   $('dssub').textContent=rows.length?(rows.length+' available'):'';
@@ -361,8 +365,13 @@ function paintDsNote(){
     parts.push('<b>'+esc(s)+'</b> '+n(p.total)+' ('+Math.round(p.share*100)+
       '%) — '+per);
   });
+  var ls=d.label_studio
+    ? n(d.label_studio)+' hand-drawn frames from Label&nbsp;Studio'
+    : '<span class="warnnote">no Label&nbsp;Studio export — built before '+
+      'every build made one, so the hand-drawn boxes are not in it</span>';
   $('dsnote').innerHTML=n(c.total)+' images · '+parts.join(' &nbsp;·&nbsp; ')+
-    (d.built_by?' &nbsp;·&nbsp; built by '+esc(d.built_by):'');
+    (d.built_by?' &nbsp;·&nbsp; built by '+esc(d.built_by):'')+
+    '<br>'+ls;
 }
 
 /* ── step 3 ── */

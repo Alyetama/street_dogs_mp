@@ -178,6 +178,55 @@ def measure_checks(bad, bd):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def catalogue_checks(bad, bd):
+    """Which datasets carry the hand-drawn boxes, and which quietly do not.
+
+    Every build exports from Label Studio now, but the sets built before that
+    are still on the selector and nothing about them says what is missing --
+    and picking one trains the model on everything EXCEPT the boxes somebody
+    drew by hand, which is a difference no number on the page would show.
+    """
+    tmp = tempfile.mkdtemp(prefix='adv_bd_cat_')
+    old_env = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        for name, ls in (('dogdet_withls_x', 5649), ('dogdet_without_y', None)):
+            d = os.path.join(tmp, name)
+            for split in ('train', 'val'):
+                os.makedirs(os.path.join(d, 'images', split))
+            open(os.path.join(d, 'dataset.yaml'), 'w').close()
+            os.makedirs(os.path.join(d, 'bundle'))
+            man = {'family': 'dogdet', 'kind': 'detect', 'built_at': 1,
+                   'built_at_iso': 'probe', 'built_by': 'guard',
+                   'counts': {'total': 0}}
+            if ls is not None:
+                man['label_studio'] = {'file': 'bundle/x.json',
+                                       'counts': {'tasks': ls}}
+            with open(os.path.join(d, 'bundle', 'manifest.json'), 'w') as fh:
+                json.dump(man, fh)
+        rows = {r['id']: r for r in bd.catalogue('dogdet')}
+        for name in ('dogdet_withls_x', 'dogdet_without_y'):
+            if name not in rows:
+                bad.append('the catalogue lost %s' % (name,))
+                return
+        if rows['dogdet_withls_x'].get('label_studio') != 5649:
+            bad.append('a dataset built from the hand-drawn boxes does not '
+                       'say how many: %r'
+                       % (rows['dogdet_withls_x'].get('label_studio'),))
+        if rows['dogdet_without_y'].get('label_studio'):
+            bad.append('a dataset built WITHOUT the hand-drawn boxes claims '
+                       'to have them: %r'
+                       % (rows['dogdet_without_y'].get('label_studio'),))
+    except Exception as e:                # noqa: BLE001
+        bad.append('the catalogue checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        if old_env is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old_env
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def refusal_checks(bad, bd):
     """What must never happen quietly."""
     tmp = tempfile.mkdtemp(prefix='adv_bd_refuse_')
@@ -843,6 +892,7 @@ def main():
                      (composition_checks, (bd,)), (harvest_checks, (bd,)),
                      (labelstudio_checks, (bd,)),
                      (progress_checks, (bd,)),
+                     (catalogue_checks, (bd,)),
                      (cli_checks, ())):
         try:
             fn(bad, *args)

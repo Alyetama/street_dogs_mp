@@ -26,6 +26,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -81,6 +82,34 @@ def page_checks(bad):
             bad.append('the page has no %r' % (need,))
     if '__ACCT' in html:
         bad.append('the identity strip was never substituted')
+    _script_checks(bad, html)
+
+
+def _script_checks(bad, html):
+    """The page's script parses.
+
+    One syntax error anywhere in the block kills every handler on the page at
+    once -- the model picker, the build button, the job panel -- and the page
+    still renders, so it looks fine and does nothing. The trap this catches:
+    the script is inside a NON-raw Python string, so a lone backslash escape
+    written into a JS literal is eaten by Python and what ships is broken.
+    """
+    if shutil.which('node') is None:
+        print('note: node is not on PATH, so the page script was not parsed')
+        return
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as fh:
+        fh.write(script)
+        path = fh.name
+    try:
+        got = subprocess.run(['node', '--check', path], capture_output=True,
+                             text=True, timeout=60)
+    finally:
+        os.unlink(path)
+    if got.returncode:
+        bad.append('THE TRAINING PAGE SCRIPT DOES NOT PARSE -- every control '
+                   'on it is dead while the page still draws: %s'
+                   % ((got.stderr or '').strip()[:400],))
 
 
 def route_checks(bad, d):
