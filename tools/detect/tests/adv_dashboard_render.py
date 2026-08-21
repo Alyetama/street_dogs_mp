@@ -1841,6 +1841,45 @@ def check_training_tracker():
             bad.append(f't1 two unnamed live processes resolved to '
                        f'{sorted(os.path.basename(d) for d in two)}')
 
+        # t7b -- THE TRAIN PAGE'S OWN PROCESS SHAPE IS A TRAINING. The page
+        # does not run `yolo train`: it runs tools/detect/train_model.py,
+        # which imports ultralytics and trains in-process. A matcher written
+        # for the CLI form saw nothing, so a run two epochs in got no live
+        # card and the panel called it "interrupted" -- the one state a
+        # reader acts on. The argv carries --name, which is the claim.
+        page_argv = ['/x/envs/dogdet/bin/python',
+                     '/x/repo/tools/detect/train_model.py',
+                     '--family', 'dogbin', '--dataset', 'ds_1',
+                     '--name', 'run_a', '--by', 'malyeta']
+        rec = tt._train_model_live(page_argv)
+        if not rec or rec.get('name') != 'run_a':
+            bad.append('t7b a train_model.py process is not recognised as a '
+                       'training: %r' % (rec,))
+        else:
+            rec.update(pid=-9, argv=page_argv, started=None)
+            got = tt.attach_live(runs, [rec])
+            if [os.path.basename(d) for d in got] != ['run_a']:
+                bad.append('t7b the page-started training claimed %r, not '
+                           'its own run directory'
+                           % ([os.path.basename(d) for d in got],))
+        # the sh -c wrapper around the same command is the SAME training,
+        # not a second one -- it must not match at all
+        wrapper = ['/bin/sh', '-c',
+                   '{ ' + ' '.join(page_argv) + '; } >log 2>&1']
+        if tt._train_model_live(wrapper) is not None:
+            bad.append('t7b the job runner\'s sh wrapper counts as a second '
+                       'training, so exclusivity hands its claim to some '
+                       'other directory')
+        # a form render is not a training
+        if tt._train_model_live(page_argv + ['--show-defaults']) is not None:
+            bad.append('t7b --show-defaults counts as a live training')
+        # a resume names the run it re-enters
+        rec = tt._train_model_live(
+            ['/x/bin/python', '/x/tools/detect/train_model.py',
+             '--family', 'dogbin', '--resume', 'run_a'])
+        if not rec or rec.get('name') != 'run_a':
+            bad.append('t7b a resumed run is invisible again: %r' % (rec,))
+
         # t4 -- none of them wrote an epoch
         states = {r['name']: r['status']
                   for r in tt.collect(os.path.join(tmp, 'root'))}

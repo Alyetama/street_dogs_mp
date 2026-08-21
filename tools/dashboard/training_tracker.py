@@ -375,11 +375,48 @@ def proc_start(pid, boot=None):
         return None
 
 
-def live_trainings():
-    """[{pid, argv, project, name, data, started}] for running yolo trainings.
+def _train_model_live(argv):
+    """A live record for a train_model.py process, or None.
 
-    Matched on the command line rather than on a pid file, because the user
-    starts these by hand from a shell and no pid file exists.
+    The Train page does not run `yolo train`: it runs
+    tools/detect/train_model.py, which imports ultralytics and trains
+    IN-PROCESS -- so a matcher written for the CLI form saw nothing, the run
+    got no live card, and the panel called a training that was two epochs in
+    "interrupted", which is the one state a reader acts on. The script's argv
+    carries what the claim needs: --name is the run directory's name, which
+    is worth +100 to _live_score on its own, two and a half times the floor.
+
+    The match is on an argv ELEMENT ending in train_model.py, not on the
+    joined string: the job runner wraps the command in `/bin/sh -c "{ ... }"`
+    and the wrapper's single-string argv would otherwise match too -- two
+    processes, one training, and exclusivity handing the second claim to
+    whatever directory scores next.
+    """
+    if not any(a.endswith('train_model.py') for a in argv):
+        return None
+    flags = {}
+    for i, a in enumerate(argv):
+        if a.startswith('--') and i + 1 < len(argv) \
+                and not argv[i + 1].startswith('--'):
+            flags[a[2:]] = argv[i + 1]
+    # --show-defaults and --dry-run render a form; nothing is training
+    if '--show-defaults' in argv or '--dry-run' in argv:
+        return None
+    # a resume names the run directly; a start names it with --name
+    name = flags.get('resume') or flags.get('name')
+    if not (name or flags.get('dataset')):
+        return None
+    return {'project': None, 'name': name, 'data': flags.get('dataset'),
+            'epochs': None, 'patience': None}
+
+
+def live_trainings():
+    """[{pid, argv, project, name, data, started}] for running trainings.
+
+    Two shapes of process count: `yolo ... train ... k=v` (started by hand
+    from a shell) and tools/detect/train_model.py (started by hand or by the
+    dashboard's train page). Matched on the command line rather than on a pid
+    file, because neither leaves one.
 
     One training is several processes -- ultralytics forks dataloader workers
     that carry the parent's argv verbatim. Counting them separately would let
@@ -390,25 +427,27 @@ def live_trainings():
     seen = {}
     for pid, argv in _cmdlines():
         joined = ' '.join(argv)
-        if 'yolo' not in joined or ' train' not in f' {joined}':
-            continue
         if 'sweep.py' in joined:      # the detection sweep is not a training
             continue
-        kv = {}
-        for a in argv:
-            if '=' in a and not a.startswith('-'):
-                k, _, v = a.partition('=')
-                kv[k] = v
-        # `yolo train resume=path/to/last.pt` is the documented resume form
-        # and carries neither model= nor data=. Dropping it made a resumed
-        # training invisible: no live card, and the run listed as interrupted.
-        if not ({'model', 'data', 'resume'} & set(kv)):
-            continue
-        rec = {'pid': pid, 'argv': argv, 'project': kv.get('project'),
-               'name': kv.get('name'), 'data': kv.get('data'),
-               'epochs': _num(kv.get('epochs')),
-               'patience': _num(kv.get('patience')),
-               'started': proc_start(pid, boot)}
+        rec = _train_model_live(argv)
+        if rec is None:
+            if 'yolo' not in joined or ' train' not in f' {joined}':
+                continue
+            kv = {}
+            for a in argv:
+                if '=' in a and not a.startswith('-'):
+                    k, _, v = a.partition('=')
+                    kv[k] = v
+            # `yolo train resume=path/to/last.pt` is the documented resume
+            # form and carries neither model= nor data=. Dropping it made a
+            # resumed training invisible: no live card, and the run listed as
+            # interrupted.
+            if not ({'model', 'data', 'resume'} & set(kv)):
+                continue
+            rec = {'project': kv.get('project'), 'name': kv.get('name'),
+                   'data': kv.get('data'), 'epochs': _num(kv.get('epochs')),
+                   'patience': _num(kv.get('patience'))}
+        rec.update(pid=pid, argv=argv, started=proc_start(pid, boot))
         prev = seen.get(joined)
         if prev is None or (rec['started'] or 0) < (prev['started'] or 0):
             seen[joined] = rec
