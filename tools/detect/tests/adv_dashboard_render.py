@@ -295,6 +295,27 @@ const settle = () => new Promise(r => setImmediate(r));
     return r.returncode
 
 
+def check_no_host_paths(html):
+    """The page tells a stranger nothing about the operator's machine.
+
+    This dashboard is published now and its readers are volunteers. The front
+    page used to print the sweep database's absolute path -- the same string
+    the repository's own leak check refuses to let into a commit, naming the
+    account and the drive it all sits on.
+    """
+    import re as _re
+    hits = sorted(set(_re.findall(r'/(?:home|Users|media|mnt|srv)/'
+                      r'[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*', html)))
+    # a bare mount point with nothing after it is a word, not a path
+    hits = [h for h in hits if h.count('/') > 2]
+    if hits:
+        print('FAIL the page shows the operator\'s filesystem to every reader: '
+              + ', '.join(hits[:4]))
+        return 1
+    print('ok   no host paths on the page')
+    return 0
+
+
 def check_freshness(html):
     """The mark that says how current the page is, at three ages.
 
@@ -3706,6 +3727,8 @@ def main():
     check_whole_script(html)
     check_no_shadowing(html)
     if check_copy_say(html):
+        return 1
+    if check_no_host_paths(html):
         return 1
     if check_freshness(html):
         return 1

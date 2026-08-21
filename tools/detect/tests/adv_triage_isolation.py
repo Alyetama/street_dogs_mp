@@ -97,7 +97,13 @@ ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py',
            # go in NO_LEDGER for the same reason -- it names every ledger on
            # purpose, to prove each one is refused. t1d below is what pays
            # for the exemption instead.
-           'adv_llm_tier.py'}
+           'adv_llm_tier.py',
+           # The guard on who may operate the machine. /api/triage starts and
+           # stops a guesser, so it is on the admin-only list that guard
+           # checks, and the list cannot be checked without naming it. Same
+           # deal as adv_review_render above: it may name the API, and
+           # NO_LEDGER still forbids it naming a verdict store.
+           'adv_train_page.py'}
 # The allowlisted modules that have no business writing a verdict. dashboard.py
 # is not here: it owns the ledgers. triage_crops.py is covered by t2.
 NO_LEDGER = ('crop_search.py', 'adv_review_render.py',

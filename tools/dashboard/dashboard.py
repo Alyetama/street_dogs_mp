@@ -2097,6 +2097,41 @@ overflow:hidden;text-overflow:ellipsis}
 .fbtn.yes:hover{background:#1c352f;color:#5ec89a}
 .fbtn.no:focus-visible{outline:2px solid var(--no);outline-offset:-2px}
 .fbtn.yes:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
+/* THE CLASS SPLIT. One scale per scope rather than four figures: on a
+   two-class question the number that matters is where the split falls. The
+   segments carry the same pair as the buttons that made them -- green for
+   yes, red for no -- so the readout and the tile agree. */
+.split{display:grid;gap:7px;margin-bottom:14px;background:var(--panel);
+  border:1px solid var(--bd);border-radius:12px;padding:11px 16px 12px}
+.split[hidden]{display:none}
+.spax{display:flex;align-items:baseline;gap:12px;font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}
+.spxa{color:rgba(94,200,154,.9)}
+.spxb{margin-left:auto;color:rgba(240,115,106,.9)}
+/* centred by taking the same auto margin the right-hand label takes, so the
+   two split the gap between them */
+.spxn{margin-left:auto;color:var(--dim);text-transform:none;letter-spacing:0;
+  font-size:11px}
+.sprow{display:flex;align-items:center;gap:11px;font-size:12px}
+.sprl{flex:none;width:58px;color:var(--dim)}
+.spn{font-family:var(--num);font-variant-numeric:tabular-nums;font-size:13px;
+  font-weight:650;flex:none;min-width:52px}
+.spna{color:#5ec89a;text-align:right}
+.spnb{color:#f0736a}
+/* one track, three segments, no gaps between them: the segments ARE the
+   split, and a gap would read as a fourth thing */
+.spbar{flex:1;min-width:70px;display:flex;height:9px;border-radius:5px;
+  overflow:hidden;background:rgba(130,140,150,.12)}
+.spbar i{display:block;height:100%;transition:width .35s ease}
+.spbar .sa{background:rgba(67,181,129,.7)}
+.spbar .su{background:rgba(130,140,150,.34)}
+.spbar .sb{background:rgba(239,83,80,.62)}
+/* a row with nothing in it is not a row with a bar of nothing: it says so,
+   because an empty rail beside somebody else's full one reads as a fault */
+.sprow.nil .spn{color:var(--dim)}
+.sprow.nil .spbar{background:rgba(130,140,150,.07)}
+@media(prefers-reduced-motion:reduce){.spbar i{transition:none}}
+@media(max-width:640px){.sprl{width:46px}.spn{min-width:44px}}
 .fbtn.edit{padding:6px 10px;display:flex;align-items:center;
 justify-content:center;color:var(--dim)}
 .fbtn.edit:hover{color:var(--acc);border-color:rgba(232,166,69,.4)}
@@ -2383,6 +2418,12 @@ __WORKSTRIP__
   </div>
 </details>
 
+<!-- WHOSE ANSWERS, AND ALL OF THEM. The same readout the two audit sheets
+     carry, over this queue's own ledger: what this reader has decided in each
+     class, and what the queue holds in each class. Above the grid because it
+     is about the pile, not about any crop in it. -->
+<div class="split" id="split" hidden></div>
+
 <div class="grid" id="grid"></div>
 <div id="state"></div>
 <div class="foot" id="foot" hidden>
@@ -2656,7 +2697,7 @@ function loadAudit(){
     $('pg').textContent=lab;$('pg2').textContent=lab;
     $('next').disabled=$('next2').disabled=page>=pages-1;
     $('foot').hidden=pages<=1;
-    paintChips();paintCap(j);
+    paintChips();paintCap(j);paintSplit(j.split);
     if(sel>=items.length)sel=items.length-1;
     render();toTop();
   }).catch(function(){
@@ -2695,6 +2736,7 @@ function load(){
         paintCountries(j.countries,j.country,j.country_coverage);
     paintChips();
     paintCap(j);
+    paintSplit(j.split);
     trimGroups();
     paintFind(j);
     score();
@@ -2734,6 +2776,44 @@ function load(){
 }
 /* the two header numbers, from state -- never re-parsed back out of the DOM,
    so a flag and a reload can never disagree */
+/* WHOSE ANSWERS, AND ALL OF THEM. Ported from the audit sheets rather than
+   invented: the two surfaces answer the same shape of question, and a reader
+   moving between them should not have to read a second kind of readout. */
+function splitRow(label,o,pos,neg,total,words){
+  var a=+o[pos]||0,b=+o[neg]||0,u=Math.max(0,total-a-b);
+  var pc=function(v){return total?(v/total*100).toFixed(2):'0'};
+  return '<div class="sprow'+(total?'':' nil')+'">'+
+    '<span class="sprl">'+esc(label)+'</span>'+
+    '<b class="spn spna">'+n(a)+'</b>'+
+    '<span class="spbar" title="'+att(
+      n(a)+' '+(words[pos]||pos)+
+      (u?' \u00b7 '+n(u)+' other':'')+
+      ' \u00b7 '+n(b)+' '+(words[neg]||neg))+'">'+
+      '<i class="sa" style="width:'+pc(a)+'%"></i>'+
+      '<i class="su" style="width:'+pc(u)+'%"></i>'+
+      '<i class="sb" style="width:'+pc(b)+'%"></i></span>'+
+    '<b class="spn spnb">'+n(b)+'</b></div>';
+}
+function paintSplit(sp){
+  var box=$('split');
+  if(!box)return;
+  var all=(sp&&sp.all)||{},mine=(sp&&sp.mine)||{},words=(sp&&sp.words)||{};
+  var sum=function(o){var t=0;for(var k in o)t+=+o[k]||0;return t};
+  var nAll=sum(all),nMine=sum(mine);
+  if(!sp||!nAll){box.hidden=true;box.innerHTML='';return}
+  /* mine is a subset of all, so equal totals mean the two rows would be the
+     same bar drawn twice. One row and a plain sentence instead -- which is
+     also the answer to "am I the only one working on this". */
+  var alone=nMine===nAll;
+  box.innerHTML=
+    '<div class="spax"><span class="spxa">'+esc(words[sp.positive]||
+      sp.positive)+'</span>'+
+    (alone?'<span class="spxn">every answer here is yours</span>':'')+
+    '<span class="spxb">'+esc(words[sp.negative]||sp.negative)+'</span></div>'+
+    splitRow('you',mine,sp.positive,sp.negative,nMine,words)+
+    (alone?'':splitRow('everyone',all,sp.positive,sp.negative,nAll,words));
+  box.hidden=false;
+}
 function score(){
   $('left').textContent=n(todoN);
   /* 'left to review' and 'repeats hidden' are scoped to the active country
@@ -6633,10 +6713,22 @@ def render_store_path():
     It is a DERIVED file, so the line says so. A path handed over without that
     is an invitation to read a stale copy as the live one -- and this database
     is stale by design, the moment the sweep writes another part.
+
+    RELATIVE TO THE CHECKOUT, not absolute. This dashboard is on the public
+    internet now and its readers are volunteers: the absolute path told every
+    one of them the operator's account name and drive layout, which is the
+    same string the repository's own leak check refuses to let into a commit.
+    Whoever can use this path has a checkout to run it in.
     """
     db = sweep_db_path()
     if not db:
         return ''
+    try:
+        rel = os.path.relpath(db, REPO)
+        if not rel.startswith('..'):
+            db = rel
+    except ValueError:                    # a different drive on Windows
+        pass
     built, imgs = _db_facts(db)
     cmd = 'python tools/detect/build_sqldb.py build'
     if not os.path.exists(db):
@@ -7977,8 +8069,38 @@ def _review_verdicts(want=None):
             live)
 
 
+def review_split(who=''):
+    """Whose answers, and all of them, per class.
+
+    The same readout the two audit sheets carry, over this queue's own ledger:
+    what this reader has decided in each class, and what the queue holds in
+    each class. One scale per scope rather than four figures, because on a
+    two-class question the number that matters is where the split falls.
+
+    Every LIVE verdict, so it agrees with the audit list and with the count
+    behind a delegated target rather than being a fifth reading of an
+    append-only file.
+    """
+    items, _live = _review_verdicts()
+    every = {'true_positive': 0, 'false_positive': 0}
+    mine = {'true_positive': 0, 'false_positive': 0}
+    for it in items:
+        lb = it.get('label')
+        if lb not in every:
+            continue
+        every[lb] += 1
+        if who and it.get(AUTHOR_FIELD) == who:
+            mine[lb] += 1
+    return {'positive': 'true_positive', 'negative': 'false_positive',
+            # the words the buttons on THIS page use, so the readout names
+            # the classes the way the reader named them
+            'words': {'true_positive': 'it\u2019s a dog',
+                      'false_positive': 'not a dog'},
+            'who': who, 'mine': mine, 'all': every}
+
+
 def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
-                      leash='', period=''):
+                      leash='', period='', who=''):
     """Crops that already carry a verdict, for auditing the annotations.
 
     A misannotation is worse than an unjudged crop: it does not sit in a queue
@@ -8028,6 +8150,7 @@ def annotated_payload(page=0, size=REVIEW_PAGE, label='all', sort='recent',
     return {'items': shown, 'page': page, 'size': size,
             'leash': _leash_for([c['name'] for c in shown]),
             'leash_totals': _leash_counts(),
+            'split': review_split(who),
             'leash_filter': want_leash, 'leash_counts': leash_offer,
             'pages': pages, 'total': total, 'sort': sort, 'label': label,
             'period': want_period,
@@ -8722,7 +8845,8 @@ def _gate_covers(backend):
 
 
 def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
-                   suggest='', leash='', find='', backend='siglip', gate=''):
+                   suggest='', leash='', find='', backend='siglip', gate='',
+                   who=''):
     """Unflagged crops for the bulk-review page, paginated (§ bulk flagging).
 
     Flagged names are excluded server-side so a reload, a restart or a second
@@ -9077,6 +9201,7 @@ def review_payload(page=0, size=REVIEW_PAGE, sort=None, country='',
             # can be a dog and unjudged for leash, or the reverse.
             'leash': _leash_for([c['name'] for c in shown + ahead]),
             'leash_totals': _leash_counts(),
+            'split': review_split(who),
             'leash_filter': want_leash, 'leash_counts': leash_offer,
             'find': want_find, 'find_state': find_state,
             'find_hits': find_hits, 'find_terms': search_ready(),
@@ -9999,12 +10124,19 @@ class BoardHandler(SimpleHTTPRequestHandler):
             body = json.dumps(obj, allow_nan=False).encode()
         except ValueError:
             body = json.dumps(self._finite(obj), allow_nan=False).encode()
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')  # live data (§7.2)
-        self.end_headers()
-        self.wfile.write(body)
+        # A CLIENT THAT HAS GONE IS NOT AN ERROR. Refusing an oversized body
+        # is exactly the case: the answer goes out while the sender is still
+        # pushing, the socket breaks, and a public server that logged a
+        # traceback for each one would hand anybody a way to fill its log.
+        try:
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')  # live data (§7.2)
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _html(self, body):
         self.send_response(200)
@@ -10321,8 +10453,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self._json(lp.api_stop())
             return True
         try:
-            n = int(self.headers.get('Content-Length', 0) or 0)
-            data = json.loads(self.rfile.read(n) or b'{}')
+            data = self._body()
+            if data is None:
+                return
             if not isinstance(data, dict):
                 raise ValueError('body is not an object')
             # Nothing in the body reaches a path, a prompt or a command line.
@@ -10384,7 +10517,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                                           str(q.get('sort', REVIEW_SORT_DEFAULT)),
                                           str(q.get('country', '')),
                                           leash=str(q.get('leash', '')),
-                                          find=str(q.get('find', ''))))
+                                          find=str(q.get('find', '')),
+                                          who=(self.session or {}).get(
+                                              'username') or ''))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
@@ -10462,7 +10597,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     str(q.get('label', ['all'])[0]),
                     str(q.get('sort', ['recent'])[0]),
                     str(q.get('leash', [''])[0]),
-                    str(q.get('period', [''])[0])))
+                    str(q.get('period', [''])[0]),
+                    who=(self.session or {}).get('username') or ''))
             except Exception as e:
                 self._json({'items': [], 'error': str(e)})
             return
@@ -10784,12 +10920,71 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         super().do_HEAD()
 
+    # OPERATING THE MACHINE IS NOT ANNOTATING. Everything here starts, stops
+    # or resets something shared -- a six-drive rescan, the sweep, the
+    # guessers, the ledger of what everybody has already been shown. It was
+    # all reachable by anyone with a session, which was fine when the only
+    # session belonged to the person who owns the machine. The annotators are
+    # volunteers on the public internet now, and one of them idly pressing a
+    # button they were never meant to see costs the operator a rescan of
+    # 68,000 files, or hands the whole queue back to everyone.
+    #
+    # Answered with the same empty 404 a dead address gets, like /train: a
+    # member who guesses the name learns nothing they did not already know.
+    ADMIN_POST = frozenset({
+        '/api/refresh', '/api/sweep', '/api/gate', '/api/triage', '/api/board',
+    })
+
+    # A JUDGEMENT IS A FEW HUNDRED BYTES. Every POST here read
+    # Content-Length and handed exactly that many bytes to json.loads, so a
+    # member -- or anything holding a session -- could post a gigabyte and the
+    # server would try to hold all of it. /train already capped its own bodies;
+    # this is the same ceiling for the routes annotators actually use.
+    BODY_CAP = 1 << 20
+
+    def _body(self, cap=None):
+        """The request body as JSON, or None when it is too big or not JSON.
+
+        Answers the client itself when it refuses, so a caller that gets None
+        returns without writing a second reply.
+        """
+        cap = self.BODY_CAP if cap is None else cap
+        try:
+            n = int(self.headers.get('Content-Length', 0) or 0)
+        except (TypeError, ValueError):
+            n = -1
+        if n < 0:
+            self._json({'ok': False, 'error': 'that request was malformed'},
+                       400)
+            return None
+        if n > cap:
+            self._json({'ok': False,
+                        'error': 'that request was too large'}, 413)
+            return None
+        try:
+            return json.loads(self.rfile.read(n) or b'{}')
+        except ValueError:
+            self._json({'ok': False, 'error': 'that request was not JSON'},
+                       400)
+            return None
+
+    def _admin_only(self, path):
+        """True when this request may not have that route. Answers the 404."""
+        if path not in self.ADMIN_POST:
+            return False
+        if (self.session or {}).get('role') == 'admin':
+            return False
+        self.send_error(404)
+        return True
+
     def do_POST(self):
         # The gate, before anything looks at the path. See _gate(). It reads
         # the request body ONLY for the routes auth.py owns -- the JSON that
         # /api/audit/verdict and its neighbours read for themselves is still
         # sitting in rfile when they get here.
         if self._gate():
+            return
+        if self._admin_only(self.path.split('?', 1)[0]):
             return
         # The same prefix guard do_GET uses, so both verbs claim /llm the same
         # way and neither can end up owning half of it.
@@ -10803,8 +10998,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 return
         if self.path.split('?', 1)[0] == '/api/audit/box':
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 a = _audit()
                 stage = self._audit_stage(parse_qs(urlparse(self.path).query))
                 self._json(a.save_correction(
@@ -10818,8 +11014,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if self.path.split('?', 1)[0] in ('/api/audit/draw',
                                           '/api/audit/verdict'):
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 a = _audit()
                 stage = (self._audit_stage(parse_qs(urlparse(self.path).query))
                          if a else None)
@@ -10848,8 +11045,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         if self.path.split('?', 1)[0] == '/api/board':
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 ok = set_stage(data.get('region', ''), data.get('stage', ''))
                 self._json({'ok': ok}, 200 if ok else 400)
             except Exception as e:
@@ -10884,8 +11082,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         if self.path.split('?', 1)[0] == '/api/sweep':
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 self._json(sweep_control(str(data.get('action') or '')))
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)})
@@ -10894,8 +11093,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             # The argv is built here, from config. The client chooses one of
             # two words and nothing else reaches a command line.
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 stage = str(data.get('stage') or 'gate')
                 self._json(gate_control(str(data.get('action') or ''), stage))
             except Exception as e:
@@ -10905,8 +11105,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             # The argv is built here, from config -- nothing the client sends
             # reaches it. The only thing it chooses is which of two words.
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 self._json(triage_control(
                     str(data.get('action') or ''),
                     str(data.get('backend') or 'siglip')))
@@ -10922,8 +11123,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 if not mod:
                     self._json({'ok': False, 'error': 'flag store missing'})
                     return
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 f = str(data.get('file') or '')
                 if data.get('remove'):
                     body, code = mod.remove(f)
@@ -10948,8 +11150,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 if not mod:
                     self._json({'ok': False, 'error': 'leash store missing'})
                     return
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 name = str(data.get('name') or '')
                 if data.get('remove'):
                     body, code = mod.remove(name)
@@ -10970,8 +11173,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         if self.path.split('?', 1)[0] == '/api/review/box':
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                d = json.loads(self.rfile.read(n) or b'{}')
+                d = self._body()
+                if d is None:
+                    return
                 self._json(save_box(str(d.get('name') or ''),
                                     d.get('det_idx'),
                                     d.get('box') or [],
@@ -10981,9 +11185,20 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         if self.path.split('?', 1)[0] == '/api/review/seen':
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 if isinstance(data, dict) and data.get('reset'):
+                    # MARKING WHAT YOU HAVE SEEN IS ANNOTATING; HANDING THE
+                    # WHOLE QUEUE BACK TO EVERYBODY IS NOT. The same route
+                    # carries both, so the reset is checked here rather than
+                    # by path: a volunteer resetting it restores nine thousand
+                    # crops into every other annotator's queue.
+                    if (self.session or {}).get('role') != 'admin':
+                        self._json({'ok': False,
+                                    'error': 'only an admin can hand the '
+                                             'queue back to everyone'}, 403)
+                        return
                     self._json(reset_seen())
                     return
                 names = data.get('names') if isinstance(data, dict) else None
@@ -10993,8 +11208,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return
         if self.path.split('?', 1)[0] == '/api/detect/flag':
             try:
-                n = int(self.headers.get('Content-Length', 0) or 0)
-                data = json.loads(self.rfile.read(n) or b'{}')
+                data = self._body()
+                if data is None:
+                    return
                 if not isinstance(data, dict):
                     raise ValueError('body is not an object')
                 body, code = flag_crop(str(data.get('name') or ''),

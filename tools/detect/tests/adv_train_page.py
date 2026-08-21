@@ -599,6 +599,80 @@ def route_checks(bad, d):
                 if e.code != 404:
                     bad.append('a member got %d from %s, not 404'
                                % (e.code, path))
+        # ── OPERATING THE MACHINE IS NOT ANNOTATING ──
+        # These start, stop or reset something shared: a six-drive rescan, the
+        # sweep, the guessers, the ledger of what everybody has been shown.
+        # The dashboard is public now and its annotators are volunteers; one
+        # of them pressing a button they were never meant to see costs the
+        # operator a rescan of sixty-eight thousand files, or hands the whole
+        # queue back to everyone. NOT probed as the admin, deliberately: that
+        # would start the very work this is about.
+        for path in sorted(d.BoardHandler.ADMIN_POST):
+            try:
+                st, body = hit(path, 'sam', body={})
+                bad.append('A MEMBER REACHED %s (%s) -- it operates the '
+                           'machine' % (path, st))
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    bad.append('a member got %d from %s, not the same empty '
+                               '404 a dead address gets' % (e.code, path))
+        for want in ('/api/refresh', '/api/sweep', '/api/gate', '/api/triage'):
+            if want not in d.BoardHandler.ADMIN_POST:
+                bad.append('%s is not on the admin-only list, so any '
+                           'annotator can call it' % (want,))
+        # ...and the one route that carries both kinds of thing: marking what
+        # YOU have seen is annotating, handing the queue back to everybody is
+        # not, and they arrive on the same path.
+        #
+        # NOTE TO WHOEVER MUTATION-TESTS THIS LINE: the refusal is what keeps
+        # the probe harmless. Break the check and this call reaches the real
+        # seen ledger under data/, which it resets -- it leaves a .bak beside
+        # it, and restoring that is on you.
+        try:
+            st, body = hit('/api/review/seen', 'sam', body={'reset': True})
+            if json.loads(body).get('ok'):
+                bad.append('A MEMBER RESET THE SHARED SEEN LEDGER, restoring '
+                           'every judged crop into everybody else\'s queue')
+        except urllib.error.HTTPError as e:
+            if e.code != 403:
+                bad.append('a member resetting the queue got %d, which is '
+                           'neither a refusal nor a 404' % (e.code,))
+        st, body = hit('/api/review/seen', 'sam', body={'names': []})
+        if not json.loads(body).get('ok'):
+            bad.append('a member can no longer mark what they have seen: %r'
+                       % (body[:120],))
+
+        # A JUDGEMENT IS A FEW HUNDRED BYTES. Every POST used to hand
+        # Content-Length straight to json.loads, so anything holding a session
+        # could claim a gigabyte and the server would try to hold all of it.
+        # Refused on the header, before a byte of the body is read.
+        import socket as _sock
+        port = srv.server_port
+        tok = auth.mint(A.get_user('sam', path=p), key_path=key)[0]
+
+        def claim(path, length, body=b'{}'):
+            c = _sock.create_connection(('127.0.0.1', port), timeout=20)
+            try:
+                c.sendall(('POST %s HTTP/1.1\r\nHost: x\r\nCookie: %s=%s\r\n'
+                           'Content-Type: application/json\r\n'
+                           'Content-Length: %d\r\n\r\n'
+                           % (path, auth.COOKIE, tok, length)).encode() + body)
+                return c.recv(120).split(b'\r\n')[0].decode()
+            except Exception as e:            # noqa: BLE001
+                return 'closed (%s)' % (type(e).__name__,)
+            finally:
+                c.close()
+
+        for path in ('/api/detect/flag', '/api/review/box', '/api/audit/box',
+                     '/api/review/seen'):
+            got = claim(path, 2_000_000_000)
+            if '413' not in got:
+                bad.append('%s accepted a two-gigabyte body claim (%s) -- one '
+                           'annotator can take the box down with it'
+                           % (path, got.strip()))
+        if '200' not in claim('/api/review/seen', 2):
+            bad.append('an ordinary judgement no longer gets through')
+
         # ── signed out ──
         for path in READS:
             try:
