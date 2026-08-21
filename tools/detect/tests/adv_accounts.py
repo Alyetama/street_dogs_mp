@@ -287,6 +287,34 @@ def _literal(src, name):
 
 # ── the schema ──────────────────────────────────────────────────────────────
 
+def _make_it_v2(path):
+    """Turn a current store back into a v2-shaped one: the role CHECK
+    narrowed to what v2 allowed, and the header lost the way a .dump and
+    reload loses it. sqlite_sequence is put back to where it stood, because
+    the copy this does resets it exactly as the migration would."""
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    cols = [r['name'] for r in con.execute('PRAGMA table_info(users)')]
+    high = con.execute("SELECT seq FROM sqlite_sequence WHERE name = 'users'"
+                       ).fetchone()['seq']
+    sql = con.execute("SELECT sql FROM sqlite_master WHERE name = 'users'"
+                      ).fetchone()['sql']
+    old = sql.replace("'owner', 'admin'", "'admin'").replace(
+        'CREATE TABLE users', 'CREATE TABLE users_v2', 1)
+    assert "'owner'" not in old, 'the fixture did not narrow the CHECK'
+    pick = ','.join("CASE role WHEN 'owner' THEN 'admin' ELSE role END"
+                    if c == 'role' else c for c in cols)
+    con.executescript(
+        'PRAGMA foreign_keys = OFF; ' + old +
+        '; INSERT INTO users_v2 (%s) SELECT %s FROM users;'
+        % (','.join(cols), pick) +
+        ' DROP TABLE users; ALTER TABLE users_v2 RENAME TO users;'
+        " UPDATE sqlite_sequence SET seq = %d WHERE name = 'users';" % (high,) +
+        ' PRAGMA user_version = 0;')
+    con.commit()
+    con.close()
+
+
 def migrate_checks(bad, fx):
     """migrate() twice is a no-op, and it carries an existing database
     forward rather than starting again.
@@ -340,6 +368,52 @@ def migrate_checks(bad, fx):
     if A.list_users(p) != before:
         bad.append('carrying an unstamped database forward changed the users '
                    'table -- the accounts were rebuilt, not migrated')
+
+    # THE SHAPE DECIDES, NOT THE STAMP. The case above kept a current table
+    # and only lost the header. The one that bites is a v2 TABLE with a lost
+    # header: `if have and have < 3` reads that 0 as "nothing to do", stamps
+    # it v3, and leaves a CHECK that still refuses the word 'owner' -- after
+    # which ensure_admin cannot write the tier and the dashboard never starts.
+    q = fx.fresh('lostheader.db')
+    A.ensure_admin(path=q, env=dict(ADMIN_ENV))
+    A.create_user('volunteer', PW, path=q)
+    A.create_user('secondvol', PW, path=q)
+    A.delete_user('secondvol', path=q)      # id retired; high-water must stay
+    kept = len(A.list_users(q))
+    _make_it_v2(q)
+    try:
+        con = A.connect(q)
+    except A.AccountError as e:
+        bad.append('a v2 database with a lost header would not open: %s'
+                   % (e.code,))
+        return
+    try:
+        sql = con.execute("SELECT sql FROM sqlite_master WHERE name = 'users'"
+                          ).fetchone()['sql']
+        if "'owner'" not in sql:
+            bad.append('a v2 users table with a lost header was stamped v3 '
+                       'without widening the role CHECK, so the owner tier '
+                       'can never be written and the service cannot start')
+        seq = con.execute("SELECT seq FROM sqlite_sequence "
+                          "WHERE name = 'users'").fetchone()
+        if seq and seq['seq'] < 3:
+            bad.append('the rebuild reset the AUTOINCREMENT high-water to '
+                       '%d, so a removed account\'s id goes to the next '
+                       'person invited -- and an id is what a session names'
+                       % (seq['seq'],))
+    finally:
+        con.close()
+    if len(A.list_users(q)) != kept:
+        bad.append('the v2 carry-forward lost accounts')
+    try:
+        A.ensure_admin(path=q, env=dict(ADMIN_ENV))
+    except Exception as e:                       # noqa: BLE001
+        bad.append('the .env owner could not be restored after the v2 '
+                   'carry-forward: %s: %s' % (type(e).__name__, e))
+        return
+    if A.get_user(ADMIN_ENV['DASHBOARD_USER'], path=q)['role'] != 'owner':
+        bad.append('the .env account did not come back as the owner after a '
+                   'v2 database was carried forward')
 
 
 # ── passwords ───────────────────────────────────────────────────────────────
@@ -548,6 +622,214 @@ def leak_checks(bad, fx):
 
 # ── users ───────────────────────────────────────────────────────────────────
 
+def owner_tier_checks(bad, fx):
+    """The top tier is held by the .env, not by anybody who reaches the page.
+
+    A role was inserted ABOVE admin, and the whole point of it is that exactly
+    one account has it. Every route that writes a role had to learn that, or
+    an admin could simply take it: promote themselves, then demote or delete
+    the person whose machine this is. All four of those worked when the tier
+    was first added.
+    """
+    p = fx.fresh('ownertier.db')
+    A.ensure_admin(path=p, env=dict(ADMIN_ENV))
+    who = ADMIN_ENV['DASHBOARD_USER']
+    A.create_user('adm', 'correct-horse-battery-staple', role='admin', path=p)
+
+    owner = A.get_user(who, path=p)
+    if owner['role'] != 'owner':
+        bad.append('the .env account is %r, so this check grades nothing'
+                   % (owner['role'],))
+        return
+    # NOBODY IS PROMOTED INTO IT
+    for target in ('adm', who):
+        try:
+            A.set_role(target, 'owner', path=p)
+            bad.append('%r was promoted to owner from the account store; an '
+                       'admin can take the top tier' % (target,))
+        except A.AccountError as e:
+            if e.code != 'owner_not_grantable':
+                bad.append('promoting to owner was refused as %r' % (e.code,))
+    # NOR OUT OF IT
+    for role in ('admin', 'member'):
+        try:
+            A.set_role(who, role, path=p)
+            bad.append('the owner was demoted to %r, which is how an admin '
+                       'strips the person whose machine this is' % (role,))
+        except A.AccountError as e:
+            if e.code != 'owner_not_demotable':
+                bad.append('demoting the owner was refused as %r' % (e.code,))
+    # NOR REMOVED
+    try:
+        A.delete_user(who, path=p)
+        bad.append('the owner account was deleted outright')
+    except A.AccountError as e:
+        if e.code != 'owner_not_removable':
+            bad.append('deleting the owner was refused as %r' % (e.code,))
+    # NOR MINTED BY AN INVITE
+    try:
+        A.create_invite(A.get_user('adm', path=p)['id'], role='owner', path=p)
+        bad.append('an invite was issued granting the owner tier')
+    except A.AccountError as e:
+        if e.code != 'owner_not_invitable':
+            bad.append('an owner invite was refused as %r' % (e.code,))
+    # NOR WRITTEN STRAIGHT IN. set_role, delete_user and create_invite were
+    # each taught the tier; create_user and redeem_invite wrote whatever role
+    # they were handed, which is three guarded doors and two open ones.
+    try:
+        A.create_user('sneak', 'correct-horse-battery-staple', role='owner',
+                      path=p)
+        bad.append('create_user wrote the owner tier straight into the table')
+    except A.AccountError as e:
+        if e.code != 'owner_not_grantable':
+            bad.append('create_user(role=owner) was refused as %r' % (e.code,))
+    got = A.create_invite(A.get_user('adm', path=p)['id'], role='admin',
+                          path=p)
+    con = sqlite3.connect(p)
+    con.execute("UPDATE invites SET role = 'owner' WHERE id = ?",
+                (got['id'],))
+    con.commit()
+    con.close()
+    try:
+        A.redeem_invite(got['token'], 'sneaky', 'correct-horse-battery-staple',
+                        path=p)
+        bad.append('an invite row saying owner was redeemed into an owner '
+                   'account')
+    except A.AccountError as e:
+        if e.code != 'invite_owner':
+            bad.append('redeeming an owner invite was refused as %r'
+                       % (e.code,))
+    # ...and the ordinary promotions still work
+    try:
+        A.set_role('adm', 'member', path=p)
+        A.set_role('adm', 'admin', path=p)
+    except A.AccountError as e:
+        bad.append('an ordinary promotion broke: %s' % (e.code,))
+    if A.get_user(who, path=p)['role'] != 'owner':
+        bad.append('the owner did not survive this check')
+    # NOR DISABLED -- the fourth verb, and the one that was open. Demoting
+    # and removing the owner were refused; disabling reached the same end,
+    # because _would_strand only fires when NO active admin would be left and
+    # the admin doing the clicking is one.
+    solo = fx.fresh('solo.db')
+    A.ensure_admin(path=solo, env=dict(ADMIN_ENV))
+    try:
+        A.set_active(who, False, path=solo)
+        bad.append('the only admin -- the owner -- was disabled, leaving no '
+                   'way back into the dashboard')
+    except A.AccountError as e:
+        if e.code != 'owner_not_disablable':
+            bad.append('disabling the only owner was refused as %r'
+                       % (e.code,))
+    # WITH A SECOND ADMIN PRESENT, which is the case the last-admin rule does
+    # not cover and the one an annotation project is actually in: an admin
+    # the owner invited disables them, and the owner's next request lands on
+    # the login page until somebody restarts the service.
+    A.create_user('deputy', 'correct-horse-battery-staple', role='admin',
+                  path=solo)
+    try:
+        A.set_active(who, False, path=solo)
+        bad.append('an admin disabled the owner, locking the person whose '
+                   'machine this is out of their own dashboard')
+    except A.AccountError as e:
+        if e.code != 'owner_not_disablable':
+            bad.append('disabling the owner beside a second admin was '
+                       'refused as %r' % (e.code,))
+    if not A.get_user(who, path=solo)['active']:
+        bad.append('the owner ended this check disabled')
+    # ...and an ordinary admin is still disablable, or the rule is a wall
+    try:
+        A.set_active('deputy', False, path=solo)
+    except A.AccountError as e:
+        bad.append('disabling an ordinary admin was refused (%s)' % (e.code,))
+
+
+def removal_checks(bad, fx):
+    """Removing an account, by the route accounts are actually made.
+
+    A volunteer joins by REDEEMING an invite, which leaves a row pointing at
+    them -- so the ordinary case is the one that broke: remove the person you
+    invited and the foreign key refuses, with the store reporting an
+    IntegrityError the page cannot explain.
+
+    What survives is what still means something: the line about a redeemed
+    invite keeps its timing and its role and loses only a pointer to an
+    account that is gone; an invite this person ISSUED is a link nobody can
+    use now.
+    """
+    p = fx.fresh('removal.db')
+    A.ensure_admin(path=p, env=dict(ADMIN_ENV))
+    owner = A.get_user(ADMIN_ENV['DASHBOARD_USER'], path=p)
+    inv = A.create_invite(owner['id'], path=p)
+    A.redeem_invite(inv['token'], 'vol', 'correct-horse-battery-staple',
+                    path=p)
+    A.set_role('vol', 'admin', path=p)
+    inv2 = A.create_invite(A.get_user('vol', path=p)['id'], path=p)
+    A.redeem_invite(inv2['token'], 'vol2', 'tumbling-dice-in-june', path=p)
+    before = len(A.list_invites(path=p))
+    try:
+        A.delete_user('vol', path=p)
+    except Exception as e:                # noqa: BLE001
+        bad.append('removing an account that joined by invite failed with '
+                   '%s -- which is every account: they are all made that way'
+                   % (type(e).__name__,))
+        return
+    if A.get_user('vol', path=p) is not None:
+        bad.append('the account is still there after being removed')
+    if A.get_user('vol2', path=p) is None:
+        bad.append('removing an admin took the person they invited with them')
+    if len(A.list_invites(path=p)) != before - 1:
+        bad.append('the invite the removed admin issued was left behind, '
+                   'pointing at nobody')
+    con = A.connect(p)
+    try:
+        if con.execute('PRAGMA foreign_key_check').fetchall():
+            bad.append('removing an account left a dangling reference')
+        row = con.execute('SELECT used_at, used_by FROM invites').fetchone()
+        if row is None or not row['used_at']:
+            bad.append('the invite they redeemed lost the fact it was used')
+        elif row['used_by'] is not None:
+            bad.append('the invite still points at the account that is gone')
+    finally:
+        con.close()
+
+    # AND THE WORK THEY HANDED OUT. assignments.created_by is NOT NULL and
+    # points at users, so an admin who had ever given somebody a target could
+    # not be removed at all: the foreign key refused and the page said
+    # "IntegrityError" with nothing else in it. What must NOT happen instead
+    # is the volunteer's job disappearing with the admin who set it.
+    boss = A.create_user('boss', 'correct-horse-battery-staple', role='admin',
+                         path=p)
+    hand = A.create_user('hand', 'tumbling-dice-in-june', path=p)
+    made = A.create_assignment('hand', '250', created_by=boss['id'], path=p)
+    if not made['ok']:
+        bad.append('the fixture could not hand out a target (%s), so this '
+                   'check proves nothing' % (made['message'],))
+        return
+    try:
+        A.delete_user('boss', inherit_to=owner['id'], path=p)
+    except Exception as e:                # noqa: BLE001
+        bad.append('an admin who had handed somebody a target could not be '
+                   'removed: %s: %s' % (type(e).__name__, str(e)[:80]))
+        return
+    con = A.connect(p)
+    try:
+        rows = con.execute('SELECT user_id, created_by, target FROM '
+                           'assignments').fetchall()
+        if len(rows) != 1:
+            bad.append('removing the admin who set a target took the '
+                       "volunteer's job with it")
+        elif rows[0]['user_id'] != hand['id'] or rows[0]['target'] != 250:
+            bad.append('the job that survived is not the one that was set')
+        elif rows[0]['created_by'] == boss['id']:
+            bad.append('the job still names an account that no longer exists')
+        if con.execute('PRAGMA foreign_key_check').fetchall():
+            bad.append('removing a delegating admin left a dangling '
+                       'reference')
+    finally:
+        con.close()
+
+
 def strength_checks(bad, fx):
     """What a password has to be, now that the accounts belong to volunteers.
 
@@ -556,6 +838,29 @@ def strength_checks(bad, fx):
     capital and a symbol produces `Password1!`, which is one guess wearing a
     costume, and it is why the passphrases below have to keep working.
     """
+    # THE DECORATION IS THE VARIABLE, not the guess. A policy that demands a
+    # capital, a digit and a symbol produces `P@ssw0rd1234` -- which is the
+    # single most-guessed string there is, wearing exactly what the policy
+    # asked for. Each of these is one guess in a costume.
+    for pw in ('P@ssw0rd1234', 'p4ssw0rd1234', 'L3tm31n12345', 'M0nk3y123456',
+               '$unshine12345', 'tru5tn01-2026', 'ch4ngem3-2026',
+               'Dr@g0n!!12345', 'welcome-2026!', 'monkey123456'):
+        try:
+            A.check_password(pw, username='alice')
+            bad.append('%r got through: it is a word off the guessing list '
+                       'with the decoration a policy demanded' % (pw,))
+        except A.AccountError as e:
+            if e.code != 'password_common':
+                bad.append('%r was refused as %r, not as a common password'
+                           % (pw, e.code))
+    # ...and a real password that merely CONTAINS such a word is not one
+    for pw in ('masterpiece of cake', 'testing the waters daily',
+               'rootless canal work', 'winter-harbour-glass-9'):
+        try:
+            A.check_password(pw, username='alice')
+        except A.AccountError as e:
+            bad.append('%r was refused (%s) -- a common word inside a real '
+                       'passphrase is not the passphrase' % (pw, e.code))
     weak = [
         ('password1234', 'password_common'),
         ('letmein12345', 'password_common'),
@@ -638,6 +943,26 @@ def unlock_checks(bad, fx):
     # ...and it clears the named one only
     if not A.throttle_state('ip:198.51.100.2', path=p).get('fails'):
         bad.append('--unlock on one source cleared another one too')
+    # AN IPv6 ADDRESS IS AN ADDRESS. The prefix was guessed from "is there a
+    # colon in it", which every IPv6 address answers yes to -- so the key
+    # went in unprefixed, matched nothing, and printed the same sentence a
+    # successful clear prints. The operator reads "cleared" and is still out.
+    for _ in range(9):
+        A.record_failure('ip:2001:db8::1', path=p)
+    if not A.throttle_state('ip:2001:db8::1', path=p).get('retry_after'):
+        bad.append('the v6 source did not lock, so this proves nothing')
+    got = _sp.run([sys.executable, here, '--db', p, '--unlock',
+                   '2001:db8::1'], capture_output=True, text=True)
+    if A.throttle_state('ip:2001:db8::1', path=p).get('retry_after'):
+        bad.append('--unlock on an IPv6 address left it locked, and said %r'
+                   % ((got.stdout or '').strip()[:80],))
+    # ...and a miss says so rather than borrowing the success wording
+    got = _sp.run([sys.executable, here, '--db', p, '--unlock',
+                   '192.0.2.77'], capture_output=True, text=True)
+    if 'cleared' in (got.stdout or '').lower():
+        bad.append('--unlock on a source that is not locked reported a '
+                   'clear: %r' % ((got.stdout or '').strip()[:80],))
+
     got = _sp.run([sys.executable, here, '--db', p, '--unlock'],
                   capture_output=True, text=True)
     if got.returncode or A.throttle_state('ip:198.51.100.2',
@@ -728,10 +1053,18 @@ def user_checks(bad, fx):
         bad.append('a disabled account passes verification without touch')
     A.set_active('bob', True, path=p)
 
-    # The lockout guard, in both directions.
-    for call, what in ((lambda: A.set_role('admin', 'member', path=p),
+    # The lockout guard, in both directions. On an ORDINARY admin: the .env
+    # account is the owner now, and its role is immutable by design -- see
+    # owner_tier_checks -- so demoting it tests the wrong refusal.
+    # IN A STORE WITH NO OWNER IN IT. The .env account cannot step aside any
+    # more -- it is refused a demotion AND a disable, which is the point of
+    # the tier -- so a fixture holding one never reaches the refusal under
+    # test, because two active admins never strand anything.
+    q = fx.fresh('lastadmin.db')
+    A.create_user('onlyadmin', PW, role='admin', path=q)
+    for call, what in ((lambda: A.set_role('onlyadmin', 'member', path=q),
                         'demote the last admin'),
-                       (lambda: A.set_active('admin', False, path=p),
+                       (lambda: A.set_active('onlyadmin', False, path=q),
                         'disable the last admin')):
         try:
             call()
@@ -741,13 +1074,12 @@ def user_checks(bad, fx):
             if e.code != 'last_admin':
                 bad.append(f'refusing to {what} used code {e.code!r}')
     # With a second admin it must be allowed again, or the guard is a wall.
-    A.set_role('bob', 'admin', path=p)
+    A.create_user('seconds', PW, role='admin', path=q)
     try:
-        A.set_role('admin', 'member', path=p)
+        A.set_role('onlyadmin', 'member', path=q)
     except A.AccountError as e:
         bad.append(f'demoting an admin was refused ({e.code}) even though a '
                    f'second active admin exists')
-    A.set_role('admin', 'admin', path=p)
 
     if A.get_user(bob['id'], path=p) is None:
         bad.append('a user cannot be looked up by id, only by name')
@@ -1080,9 +1412,15 @@ def bootstrap_checks(bad, fx):
         bad.append('a change of case in DASHBOARD_USER created a SECOND '
                    'admin account')
 
+    # THE .env ACCOUNT IS THE OWNER, which outranks an admin rather than
+    # being one: it is the person whose machine this is.
     u = A.get_user('admin', path=p)
-    if u['role'] != 'admin' or not u['active']:
-        bad.append('the bootstrapped account is not an active admin')
+    if u['role'] != 'owner' or not u['active']:
+        bad.append('the bootstrapped account is %r/active=%s, not an active '
+                   'owner' % (u['role'], u['active']))
+    if not A.is_admin(u['role']):
+        bad.append('the owner does not carry admin rights, so the person who '
+                   'owns the machine has less than the people they invite')
     if A.verify_password('admin', PW, path=p) is None:
         bad.append('the .env admin cannot log in with the .env password')
 
@@ -1100,19 +1438,46 @@ def bootstrap_checks(bad, fx):
     if A.get_user('admin', path=p)['session_epoch'] <= e0:
         bad.append('changing the .env password left every live session valid')
 
-    # Never locked out: a demoted or disabled admin comes back.
+    # Never locked out: a demoted or disabled .env account comes back.
+    #
+    # Written straight into the table, because set_role() now REFUSES to
+    # change the owner's tier -- which is the point of that refusal. The
+    # state this restores from is one the app will not produce: an older
+    # database, a hand-edit, a restore from before the tier existed.
     A.create_user('other', PW, role='admin', path=p)
-    A.set_role('admin', 'member', path=p)
-    A.set_active('admin', False, path=p)
+    con = A.connect(p)
+    with A._tx(con):
+        con.execute("UPDATE users SET role = 'member', active = 0 "
+                    "WHERE username_norm = 'admin'")
+    con.close()
     got = A.ensure_admin(path=p, env={'DASHBOARD_USER': 'admin',
                                       'DASHBOARD_PASSWORD': PW2})
     u = A.get_user('admin', path=p)
-    if u['role'] != 'admin' or not u['active']:
-        bad.append('a demoted or disabled .env admin was NOT restored, so the '
-                   'documented way back in does not work')
+    if u['role'] != 'owner' or not u['active']:
+        bad.append('a demoted or disabled .env account was NOT restored to '
+                   'owner (%r/active=%s), so the documented way back in does '
+                   'not work' % (u['role'], u['active']))
     if 'other' not in got['others']:
         bad.append('ensure_admin did not report the other admins it left '
                    'alone')
+
+    # EXACTLY ONE OWNER, AND IT IS THE ONE .env NAMES. Pointing DASHBOARD_USER
+    # at somebody else promotes them -- and left the old account holding a
+    # tier that set_role refuses to demote and delete_user refuses to remove,
+    # so the only way to clear it was a sqlite shell. That is the remedy the
+    # refusals themselves tell an operator to use, in those words.
+    got = A.ensure_admin(path=p, env={'DASHBOARD_USER': 'nextowner',
+                                      'DASHBOARD_PASSWORD': PW2})
+    owners = [u['username'] for u in A.list_users(p) if u['role'] == 'owner']
+    if owners != ['nextowner']:
+        bad.append('after DASHBOARD_USER was pointed at somebody else the '
+                   'owners are %r -- an account nobody can demote or remove '
+                   'still holds the tier' % (owners,))
+    if 'admin' not in got.get('demoted', []):
+        bad.append('ensure_admin did not report which account stopped being '
+                   'the owner')
+    if A.get_user('admin', path=p)['role'] != 'admin':
+        bad.append('the previous owner was not left as an admin')
 
     # A hash in .env instead of a password.
     p2 = fx.fresh('boot2.db')
@@ -1298,7 +1663,9 @@ def main():
                        private_file_checks, migrate_checks, hash_checks,
                        rehash_on_login_checks, timing_checks,
                        validation_checks, leak_checks,
-                       impersonation_checks, strength_checks,
+                       impersonation_checks, owner_tier_checks,
+                       removal_checks,
+                       strength_checks,
                        unlock_checks,
                        user_checks,
                        invite_checks, race_checks, rollback_checks,
