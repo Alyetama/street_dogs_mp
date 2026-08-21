@@ -766,7 +766,12 @@ def removal_checks(bad, fx):
     A.set_role('vol', 'admin', path=p)
     inv2 = A.create_invite(A.get_user('vol', path=p)['id'], path=p)
     A.redeem_invite(inv2['token'], 'vol2', 'tumbling-dice-in-june', path=p)
+    # a THIRD one, issued by the same admin and never taken: the two have to
+    # be told apart, and only one of them is a link that leads anywhere.
+    A.create_invite(A.get_user('vol', path=p)['id'], note='still open',
+                    path=p)
     before = len(A.list_invites(path=p))
+    vol_id = A.get_user('vol', path=p)['id']
     try:
         A.delete_user('vol', path=p)
     except Exception as e:                # noqa: BLE001
@@ -778,18 +783,39 @@ def removal_checks(bad, fx):
         bad.append('the account is still there after being removed')
     if A.get_user('vol2', path=p) is None:
         bad.append('removing an admin took the person they invited with them')
-    if len(A.list_invites(path=p)) != before - 1:
-        bad.append('the invite the removed admin issued was left behind, '
-                   'pointing at nobody')
+    # THE LIVE LINK GOES, THE RECORD STAYS. An invite nobody took leads
+    # nowhere once its author is gone; an invite somebody DID take is the
+    # record of how a member who still has an account got in, and deleting
+    # every row this admin ever issued emptied the invites page on a
+    # deployment where one admin invited everybody.
+    left = A.list_invites(path=p)
+    if len(left) != before - 1:
+        bad.append('removing the admin left %d invite(s) of %d, expected the '
+                   'open one to go and the used ones to stay'
+                   % (len(left), before))
+    if any((i.get('note') or '') == 'still open' for i in left):
+        bad.append('the open invite the removed admin issued is still on the '
+                   'page, pointing at nobody')
     con = A.connect(p)
     try:
         if con.execute('PRAGMA foreign_key_check').fetchall():
             bad.append('removing an account left a dangling reference')
-        row = con.execute('SELECT used_at, used_by FROM invites').fetchone()
-        if row is None or not row['used_at']:
-            bad.append('the invite they redeemed lost the fact it was used')
-        elif row['used_by'] is not None:
-            bad.append('the invite still points at the account that is gone')
+        rows = con.execute('SELECT used_at, used_by, created_by FROM '
+                           'invites').fetchall()
+        if len(rows) != 2:
+            bad.append('the two redeemed invites did not both survive: %d'
+                       % (len(rows),))
+        for r in rows:
+            if not r['used_at']:
+                bad.append('an invite that was redeemed lost the fact it was '
+                           'used')
+            if r['created_by'] == vol_id:
+                bad.append('an invite still names the account that is gone as '
+                           'its author')
+        gone = [r for r in rows if r['used_by'] is None]
+        if not gone:
+            bad.append('the invite the removed account redeemed still points '
+                       'at it')
     finally:
         con.close()
 
@@ -812,10 +838,23 @@ def removal_checks(bad, fx):
         bad.append('an admin who had handed somebody a target could not be '
                    'removed: %s: %s' % (type(e).__name__, str(e)[:80]))
         return
+    # ...and an heir named in some other alphabet gets the default one rather
+    # than a ValueError out of a delete that half happened.
+    A.create_user('third', 'rolling-stones-gather', role='admin', path=p)
+    A.create_assignment('hand', '120', surface='gate',
+                        created_by=A.get_user('third', path=p)['id'], path=p)
+    try:
+        A.delete_user('third', inherit_to='not-a-number', path=p)
+    except A.AccountError as e:
+        bad.append('removing an account with an unusable heir was refused '
+                   '(%s) rather than falling back to the owner' % (e.code,))
+    except Exception as e:                # noqa: BLE001
+        bad.append('an heir that is not a number raised %s out of a delete '
+                   'that had already started' % (type(e).__name__,))
     con = A.connect(p)
     try:
         rows = con.execute('SELECT user_id, created_by, target FROM '
-                           'assignments').fetchall()
+                           'assignments WHERE target = 250').fetchall()
         if len(rows) != 1:
             bad.append('removing the admin who set a target took the '
                        "volunteer's job with it")

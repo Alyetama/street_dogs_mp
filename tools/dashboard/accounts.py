@@ -440,6 +440,21 @@ def _accepts_owner(con, table):
     return bool(row) and "'owner'" in (row[0] or '')
 
 
+def _restore_high(con, name, high):
+    """Put back the AUTOINCREMENT high-water mark a rebuild reset.
+
+    A fresh table with rows copied into it carries a mark of the largest id
+    copied, which is lower than the store's whenever the newest account has
+    been removed -- and sqlite would then hand that id to the next person
+    invited. An id is what a session cookie names.
+    """
+    want = high.get(name)
+    if not want:
+        return
+    con.execute('UPDATE sqlite_sequence SET seq = ? '
+                'WHERE name = ? AND seq < ?', (want, name, want))
+
+
 def _add_owner_role(con):
     """v3: let `role` be 'owner' as well.
 
@@ -482,30 +497,31 @@ def _add_owner_role(con):
         # a query assembled from a variable is how a username becomes SQL, and
         # a reader should not have to prove these particular variables held
         # literals.
+        # The high-water mark is put back INSIDE the transaction that reset
+        # it. Restoring it afterwards is a second write that a kill between
+        # the two loses for good: the table is already rebuilt, so the next
+        # start sees a v3 shape, does nothing, and hands a removed account's
+        # id to the next person invited.
         if users:
             with _tx(con):
                 con.execute(_V3_USERS)
                 con.execute(_V3_USERS_COPY)
                 con.execute(_V3_USERS_DROP)
                 con.execute(_V3_USERS_RENAME)
+                _restore_high(con, 'users', high)
         if invites:
             with _tx(con):
                 con.execute(_V3_INVITES)
                 con.execute(_V3_INVITES_COPY)
                 con.execute(_V3_INVITES_DROP)
                 con.execute(_V3_INVITES_RENAME)
+                _restore_high(con, 'invites', high)
         broken = con.execute('PRAGMA foreign_key_check').fetchall()
         if len(broken) > was:
             raise AccountError(
                 'migration_broke_references',
                 'The v3 migration left %d dangling reference(s).'
                 % (len(broken) - was,))
-        for name in ('users', 'invites'):
-            if name in high:
-                con.execute(
-                    'UPDATE sqlite_sequence SET seq = ? '
-                    'WHERE name = ? AND seq < ?',
-                    (high[name], name, high[name]))
     finally:
         con.execute('PRAGMA foreign_keys = ON')
     # the indexes named in SCHEMA went with the dropped tables
@@ -1158,9 +1174,15 @@ def _heir_for(con, want, going):
     otherwise, and the oldest remaining admin when there is no owner. Never
     the account on its way out, which is the whole point.
     """
-    if want and int(want) != int(going) and con.execute(
-            'SELECT 1 FROM users WHERE id = ?', (int(want),)).fetchone():
-        return int(want)
+    try:
+        want = int(want) if want else 0
+    except (TypeError, ValueError):
+        # A caller who names an heir in some other alphabet gets the default
+        # one rather than a ValueError out of a delete that half happened.
+        want = 0
+    if want and want != int(going) and con.execute(
+            'SELECT 1 FROM users WHERE id = ?', (want,)).fetchone():
+        return want
     row = con.execute(
         "SELECT id FROM users WHERE role IN ('owner','admin') "
         "AND active = 1 AND id != ? "
@@ -1214,9 +1236,11 @@ def delete_user(who, inherit_to=None, path=None):
             #
             # What survives is what still means something. The line about a
             # redeemed invite keeps its timing and its role and loses only the
-            # pointer to an account that no longer exists; an invite this
-            # person ISSUED is a link nobody can use now, so it goes with
-            # them, as do their open assignments.
+            # pointer to an account that no longer exists. An invite this
+            # person ISSUED and nobody took is a link that leads nowhere now,
+            # so it goes with them -- but one that was TAKEN is the record of
+            # how somebody who still has an account got in, and that is not
+            # this person's to take with them. Their own open jobs do go.
             con.execute('DELETE FROM assignments WHERE user_id = ?',
                         (row['id'],))
             # A DELEGATION OUTLIVES THE DELEGATOR. assignments.created_by is
@@ -1231,8 +1255,17 @@ def delete_user(who, inherit_to=None, path=None):
                         (_heir_for(con, inherit_to, row['id']), row['id']))
             con.execute('UPDATE invites SET used_by = NULL WHERE used_by = ?',
                         (row['id'],))
-            con.execute('DELETE FROM invites WHERE created_by = ?',
+            # THE LIVE LINKS ONLY. Deleting every invite they ever issued
+            # emptied the whole table on a deployment where one admin invited
+            # everybody -- and left the members that admin brought in with no
+            # record of how they got here, which is the one thing the invites
+            # page is for. A used or revoked row keeps its timing and its
+            # role and is re-pointed at the heir, the same as a delegation.
+            con.execute('DELETE FROM invites WHERE created_by = ? '
+                        'AND used_at IS NULL AND revoked_at IS NULL',
                         (row['id'],))
+            con.execute('UPDATE invites SET created_by = ? WHERE created_by = ?',
+                        (_heir_for(con, inherit_to, row['id']), row['id']))
             con.execute('DELETE FROM users WHERE id = ?', (row['id'],))
             return {'id': row['id'], 'username': row['username'],
                     'role': row['role']}
