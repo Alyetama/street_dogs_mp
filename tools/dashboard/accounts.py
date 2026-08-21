@@ -1839,6 +1839,74 @@ def list_invites(path=None, now=None, open_only=False):
         con.close()
 
 
+def set_invite_expiry(invite_id, ttl=None, at=None, now=None, path=None):
+    """Move when an invite link stops working. One of ttl or at, not both.
+
+    ttl is seconds FROM NOW; at is the moment itself. The window is measured
+    from now rather than from the day the link was issued, which is the whole
+    point of the call: a link that expired last week has no live window left
+    to extend, and measuring from created_at would refuse the one case that
+    sends anybody looking for this button.
+
+    OPEN AND EXPIRED ONLY. A used invite is spent -- moving its expiry would
+    read on the page as though the account it made could be taken back, and it
+    cannot. A revoked one was withdrawn on purpose; mint a new link rather
+    than quietly undoing that, so the trail keeps saying what happened.
+
+    Reviving an expired link is not a way in by itself. The plaintext token
+    was shown once, at creation, and is not stored -- so this only matters to
+    somebody who already holds the link, which is exactly the person the admin
+    is trying to let in.
+    """
+    if (ttl is None) == (at is None):
+        raise AccountError(
+            'expiry_unclear',
+            'Say either how long from now the link should last, or when it '
+            'should stop working -- not both.')
+    ts = int(time.time() if now is None else now)
+    try:
+        want = int(ts + float(ttl)) if at is None else int(at)
+    except (TypeError, ValueError):
+        raise AccountError('expiry_range', 'That is not a time.')
+    if want - ts < INVITE_TTL_MIN or want - ts > INVITE_TTL_MAX:
+        raise AccountError(
+            'expiry_range',
+            'An invite lasts between %d minutes and %d days from now. To '
+            'stop one sooner than that, withdraw it.'
+            % (INVITE_TTL_MIN // 60, INVITE_TTL_MAX // 86400))
+    con = connect(path)
+    try:
+        with _tx(con):
+            row = con.execute('SELECT * FROM invites WHERE id = ?',
+                              (invite_id,)).fetchone()
+            if row is None:
+                raise AccountError('invite_unknown', 'No such invite.')
+            state = invite_state(row, ts)
+            if state == 'used':
+                raise AccountError(
+                    'invite_used',
+                    'That invite was already redeemed, so when it expires no '
+                    'longer decides anything.')
+            if state == 'revoked':
+                raise AccountError(
+                    'invite_revoked',
+                    'That invite was withdrawn. Issue a new link rather than '
+                    'bringing this one back.')
+            # used_at IS NULL in the WHERE as well as the check above: the
+            # read and the write are one transaction, but the condition that
+            # matters is worth stating where the write happens.
+            con.execute('UPDATE invites SET expires_at = ? WHERE id = ? '
+                        'AND used_at IS NULL AND revoked_at IS NULL',
+                        (want, invite_id))
+        d = dict(con.execute('SELECT * FROM invites WHERE id = ?',
+                             (invite_id,)).fetchone())
+        d['state'] = invite_state(d, ts)
+        d.pop('token_hash', None)
+        return d
+    finally:
+        con.close()
+
+
 def revoke_invite(invite_id, now=None, path=None):
     """Withdraw an unused invite. Revoking a used one is refused, not silent.
 

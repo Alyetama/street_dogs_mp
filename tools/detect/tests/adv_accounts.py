@@ -1208,6 +1208,70 @@ def invite_checks(bad, fx):
         if e.code != 'invite_used':
             bad.append(f'revoking a spent invite refused with {e.code!r}')
 
+    # ── WHEN IT RUNS OUT, MOVED WITHOUT REISSUING THE LINK ──────────────
+    # The link went out in an email hours ago and the person it was for has
+    # not clicked it, or clicked it a day late. Minting a second one means
+    # chasing them with it and leaves the first live.
+    live = A.create_invite('admin', ttl=3600, note='live', now=now, path=p)
+    got = A.set_invite_expiry(live['id'], ttl=72 * 3600, now=now, path=p)
+    if got['expires_at'] != now + 72 * 3600:
+        bad.append('extending an open invite set %r, expected %r'
+                   % (got['expires_at'], now + 72 * 3600))
+    if got['state'] != 'open':
+        bad.append('an extended invite is %r, not open' % (got['state'],))
+    # HOURS FROM NOW, NOT FROM WHEN IT WAS ISSUED -- a link that ran out last
+    # week has no live window left to add to, and measuring from created_at
+    # would refuse the one case anybody wants this for.
+    # OLDER THAN THE LONGEST WINDOW ALLOWED, on purpose: at 45 days a rule
+    # that measured the window from the day the link was issued would refuse
+    # this, and one that measures from now allows it. A fixture an hour old
+    # cannot tell the two apart.
+    stale = A.create_invite('admin', ttl=A.INVITE_TTL_MIN,
+                            now=now - 45 * 86400, path=p)
+    if A.invite_state(stale, now) != 'expired':
+        bad.append('the fixture invite is not expired, so this proves nothing')
+    back = A.set_invite_expiry(stale['id'], ttl=24 * 3600, now=now, path=p)
+    if back['state'] != 'open':
+        bad.append('an expired invite given more time is still %r'
+                   % (back['state'],))
+    if A.redeem_invite(stale['token'], 'grace', PW, path=p) is None:
+        bad.append('an invite given more time still would not redeem, so the '
+                   'button moves a number and nothing else')
+    # ...and an absolute moment, for a caller that has one
+    at = A.set_invite_expiry(live['id'], at=now + 2 * 86400, now=now, path=p)
+    if at['expires_at'] != now + 2 * 86400:
+        bad.append('setting an absolute expiry wrote %r' % (at['expires_at'],))
+    for args, code, why in (
+            ({'ttl': 3600, 'at': now + 3600}, 'expiry_unclear', 'both at once'),
+            ({}, 'expiry_unclear', 'neither'),
+            ({'ttl': 60}, 'expiry_range', 'under the floor'),
+            ({'ttl': 365 * 86400}, 'expiry_range', 'a year out'),
+            ({'at': now - 1}, 'expiry_range', 'into the past'),
+            ({'ttl': 'soon'}, 'expiry_range', 'not a number')):
+        try:
+            A.set_invite_expiry(live['id'], now=now, path=p, **args)
+            bad.append('an expiry %s was accepted' % (why,))
+        except A.AccountError as e:
+            if e.code != code:
+                bad.append('an expiry %s refused with %r, expected %r'
+                           % (why, e.code, code))
+    # A SPENT LINK AND A WITHDRAWN ONE ARE NOT MOVED. One is redeemed and the
+    # account exists; the other was withdrawn on purpose, and quietly undoing
+    # that leaves the trail saying something that did not happen.
+    for iid, code, why in ((used[0]['id'], 'invite_used', 'a spent invite'),
+                           (gone['id'], 'invite_revoked', 'a withdrawn one'),
+                           (10 ** 6, 'invite_unknown', 'an id nobody has')):
+        try:
+            A.set_invite_expiry(iid, ttl=3600, now=now, path=p)
+            bad.append('the expiry of %s was moved' % (why,))
+        except A.AccountError as e:
+            if e.code != code:
+                bad.append('moving the expiry of %s refused with %r, expected '
+                           '%r' % (why, e.code, code))
+    if A.invite_state([r for r in A.list_invites(p)
+                       if r['id'] == gone['id']][0], now) != 'revoked':
+        bad.append('a withdrawn invite did not stay withdrawn')
+
     # Only an active admin may mint one -- checked here, not only in a route.
     for who, why in (('carol', 'a member'), ('nobody-here', 'a missing user')):
         try:

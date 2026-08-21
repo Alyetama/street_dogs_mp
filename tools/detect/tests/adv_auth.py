@@ -1195,6 +1195,8 @@ def admin_checks(bad, fx):
     for path, form in ((U.ADMIN_PATH + '/invite', {'hours': '2'}),
                        (U.ADMIN_PATH + '/user',
                         {'id': str(admin['id']), 'do': 'disable'}),
+                       (U.ADMIN_PATH + '/invite-expiry',
+                        {'id': '1', 'hours': '48'}),
                        (U.ADMIN_PATH + '/revoke', {'id': '1'})):
         form['csrf'] = mses['csrf']
         r = U.serve_request(fx.req('POST', path, cookie=mcookie, form=form))
@@ -1309,6 +1311,109 @@ def admin_checks(bad, fx):
 
 
 # ── the pages themselves ────────────────────────────────────────────────────
+
+def invite_expiry_checks(bad, fx):
+    """Moving when an already-issued link stops working.
+
+    The case this is for: the link went out in an email hours ago, and the
+    person it was for has not clicked it yet -- or clicked it a day late.
+    Issuing a second link means chasing them with it and leaves the first one
+    live, so the expiry moves instead and the link stays the link.
+    """
+    admin = fx.admin()
+    cookie = fx.cookie_for(admin)
+    ses = U.resolve(cookie, path=fx.db, key_path=fx.key)
+    now = int(time.time())
+
+    # The checks in this file share one store and the suite runs them more
+    # than once, so a fixed name is taken the second time round.
+    def spare_name(stem):
+        taken = {u['username'] for u in A.list_users(fx.db)}
+        n = 0
+        while '%s%d' % (stem, n) in taken:
+            n += 1
+        return '%s%d' % (stem, n)
+
+    live = A.create_invite(admin['id'], ttl=3600, note='live', now=now,
+                           path=fx.db)
+    # 45 days old: older than the longest window an invite may have, so a
+    # rule that measured from the issue date would refuse it and one that
+    # measures from now allows it.
+    dead = A.create_invite(admin['id'], ttl=A.INVITE_TTL_MIN,
+                           now=now - 45 * 86400, path=fx.db)
+    taken = A.create_invite(admin['id'], ttl=3600, now=now, path=fx.db)
+    A.redeem_invite(taken['token'], spare_name('joined.here'), PW2,
+                    path=fx.db)
+
+    def when(iid):
+        return [i['expires_at'] for i in A.list_invites(path=fx.db)
+                if i['id'] == iid][0]
+
+    def state(iid):
+        return [i['state'] for i in A.list_invites(path=fx.db, now=now)
+                if i['id'] == iid][0]
+
+    got = U.admin_action('invite-expiry',
+                         fx.req('POST', form={'id': str(live['id']),
+                                              'hours': '72'}),
+                         ses, now=now, path=fx.db)
+    if not got['ok'] or got['notice'] != 'invite_expiry':
+        bad.append('an admin could not move an open invite\'s expiry: %r'
+                   % (got,))
+    if when(live['id']) != now + 72 * 3600:
+        bad.append('the expiry the page asked for is not the one in the store')
+
+    # THE ONE ANYBODY REACHES FOR THIS BUTTON FOR: a link that already ran
+    # out. Measured from now rather than from the day it was issued, or the
+    # case would be the impossible one.
+    got = U.admin_action('invite-expiry',
+                         fx.req('POST', form={'id': str(dead['id']),
+                                              'hours': '24'}),
+                         ses, now=now, path=fx.db)
+    if not got['ok'] or state(dead['id']) != 'open':
+        bad.append('a link that had run out could not be given more time: '
+                   '%r, state %r' % (got, state(dead['id'])))
+    if A.redeem_invite(dead['token'], spare_name('late.arrival'), PW2,
+                       path=fx.db) is None:
+        bad.append('the revived link would not redeem, so the button moves a '
+                   'number and nothing else')
+
+    # A SPENT LINK IS NOT MOVED, and the refusal is a sentence rather than a
+    # traceback out of the store.
+    got = U.admin_action('invite-expiry',
+                         fx.req('POST', form={'id': str(taken['id']),
+                                              'hours': '24'}),
+                         ses, now=now, path=fx.db)
+    if got['ok'] or not got['message']:
+        bad.append('a spent invite had its expiry moved, or was refused with '
+                   'nothing to read: %r' % (got,))
+    for hours, why in (('soon', 'not a number'), ('', 'nothing at all'),
+                       ('0', 'no time at all'), ('99999', 'a lifetime')):
+        got = U.admin_action('invite-expiry',
+                             fx.req('POST', form={'id': str(live['id']),
+                                                  'hours': hours}),
+                             ses, now=now, path=fx.db)
+        if got['ok']:
+            bad.append('an expiry of %s was accepted' % (why,))
+        elif not got['message']:
+            bad.append('an expiry of %s was refused with nothing to read'
+                       % (why,))
+
+    # THE CONTROL IS ON THE ROWS IT CAN ACT ON, and on no others: a button
+    # that answers 400 is a button that should not have been drawn.
+    html = U.admin_page(ses, fx.req(path=U.ADMIN_PATH), now=now)
+    for row in re.findall(r'<tr>.*?</tr>', html, re.S):
+        m = re.search(r'tag (open|used|revoked|expired)', row)
+        if not m:
+            continue
+        offered = 'invite-expiry' in row
+        want = m.group(1) in ('open', 'expired')
+        if offered != want:
+            bad.append('the expiry control is %s on a %s invite'
+                       % ('drawn' if offered else 'missing', m.group(1)))
+    if 'invite-expiry' in html and 'name="hours"' not in html:
+        bad.append('the expiry form carries no hours field')
+
 
 def page_checks(bad, fx):
     """Every page is self-contained, escaped, and says nothing extra.
@@ -2140,6 +2245,7 @@ def main():
                        signup_checks, admin_checks, page_checks,
                        account_checks, identity_checks,
                        forwarded_checks, leg_checks, cookie_flag_checks,
+                       invite_expiry_checks,
                        silence_checks, source_checks, import_checks,
                        handler_checks, reply_checks, wiring_checks):
                 try:

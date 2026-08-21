@@ -155,6 +155,9 @@ PUBLIC_PATHS = frozenset({LOGIN_PATH, SIGNUP_PATH, LOGOUT_PATH})
 # put on your admin page.
 NOTICES = {
     'invite_revoked': 'That invite was withdrawn.',
+    'invite_expiry': 'That invite link now runs out at the time shown in the '
+                     'table. The link itself is unchanged \u2014 whoever '
+                     'holds it can still use it.',
     'password_changed': 'Your password is changed. Every other device signed '
                         'in as you has been signed out.',
     'assigned': 'That work is delegated. They will see it the next time they '
@@ -1420,6 +1423,20 @@ def admin_action(action, req, session, now=None, path=None):
             accounts.revoke_invite(_int(req.one('id')), now=ts, path=p)
             return {'ok': True, 'notice': 'invite_revoked', 'invite': None,
                     'message': ''}
+        if action == 'invite-expiry':
+            # HOURS FROM NOW, the same unit the link was minted in, and read
+            # the same way -- a link that ran out last week has no window left
+            # to add to, so the clock starts again rather than continuing.
+            hours = req.one('hours').strip()
+            try:
+                ttl = float(hours) * 3600
+            except ValueError:
+                return {'ok': False, 'notice': '', 'invite': None,
+                        'message': 'That is not a number of hours.'}
+            accounts.set_invite_expiry(_int(req.one('id')), ttl=ttl, now=ts,
+                                       path=p)
+            return {'ok': True, 'notice': 'invite_expiry', 'invite': None,
+                    'message': ''}
         if action == 'forget-invite':
             # revoke withdraws a link that still means something; this drops
             # the line about one that does not
@@ -1859,6 +1876,11 @@ td.when,td.num{font-family:var(--num);font-variant-numeric:tabular-nums;
   font-size:11.5px;white-space:nowrap}
 td.acts{text-align:right;white-space:nowrap}
 td.acts form{display:inline}
+/* The expiry box sits in a row of buttons, so it is sized like one rather
+   than like a form field: wide enough for three digits and no wider. */
+td.acts input.hrs{width:56px;padding:3px 6px;font-size:11.5px;
+  border-radius:7px;margin-right:4px;text-align:right;
+  font-family:var(--num);font-variant-numeric:tabular-nums}
 .tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;
   border:1px solid var(--bd);border-radius:6px;padding:1px 6px;color:var(--dim)}
 .tag.open{color:var(--green);border-color:rgba(67,181,129,.32)}
@@ -2195,12 +2217,30 @@ def admin_page(session, req, now=None, error='', minted=None):
         for iv in invites:
             act = ''
             if iv['state'] in ('open', 'expired'):
-                act = ('<form method="post" action="%s/revoke">'
+                # WHEN IT RUNS OUT, CHANGED WITHOUT REISSUING IT. The link
+                # went out in an email hours ago; the person it was for has
+                # not clicked it yet, or clicked it a day late. Minting a
+                # second link means chasing them with it, and leaves the first
+                # one live. Hours from now, so a link that is already out of
+                # time is the ordinary case rather than the impossible one.
+                act = ('<form method="post" action="%s/invite-expiry">'
                        '<input type="hidden" name="%s" value="%s">'
                        '<input type="hidden" name="id" value="%d">'
-                       '<button class="btn small warn" type="submit">revoke'
-                       '</button></form>'
-                       % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id']))
+                       '<input class="hrs" name="hours" type="number" '
+                       'min="1" max="720" step="1" value="%d" '
+                       'aria-label="hours from now" '
+                       'title="hours from now">'
+                       '<button class="btn small" type="submit" '
+                       'title="Move when this link stops working. The link '
+                       'itself does not change.">set expiry</button></form>'
+                       % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id'],
+                          hours_default))
+                act += ('<form method="post" action="%s/revoke">'
+                        '<input type="hidden" name="%s" value="%s">'
+                        '<input type="hidden" name="id" value="%d">'
+                        '<button class="btn small warn" type="submit">revoke'
+                        '</button></form>'
+                        % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id']))
             # REVOKE WITHDRAWS A LINK THAT STILL WORKS. This drops the line
             # about one that does not: taken, expired, or already withdrawn.
             act += ('<form method="post" action="%s/forget-invite"'
