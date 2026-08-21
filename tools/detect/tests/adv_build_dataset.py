@@ -624,9 +624,14 @@ def composition_checks(bad, bd):
     export = os.path.join(root, 'export_annotations.sh')
     with open(export, 'w') as fh:
         fh.write('#!/bin/bash\n'
+                 # A LABEL NOBODY HAS TAUGHT THIS PROJECT ABOUT. Somebody
+                 # adds a class in Label Studio and every build sees it the
+                 # next time it exports.
                  'echo \'[{"image":"https://x/y/z.jpg","label":['
                  '{"x":10,"y":10,"width":10,"height":10,'
-                 '"rectanglelabels":["unleashed dog"]}]}]\' > probe.json\n'
+                 '"rectanglelabels":["unleashed dog"]},'
+                 '{"x":20,"y":20,"width":10,"height":10,'
+                 '"rectanglelabels":["horse"]}]}]\' > probe.json\n'
                  'echo probe.json\n')
     os.chmod(export, 0o755)
     try:
@@ -644,6 +649,24 @@ def composition_checks(bad, bd):
         if 'label studio export' not in names:
             bad.append('the build does not export the hand-drawn boxes: %r'
                        % (names,))
+        # WHAT THE DETECTOR IS TOLD TO DROP. The preparer only takes a list
+        # of classes to exclude, so a fixed pair meant a label added later
+        # survived --single-class and became a dog: the detector taught that
+        # a horse is one, and no count on the page would look any different.
+        prep = [c for c in calls
+                if c['name'] == 'prepare_detection_yolo_dataset']
+        if prep:
+            argv = prep[0]['argv']
+            drop = (argv[argv.index('-e') + 1].split(',')
+                    if '-e' in argv else [])
+            if 'horse' not in drop:
+                bad.append('a label this model never asked for (%r) is not '
+                           'excluded, so --single-class turns it into a dog: '
+                           'dropping %r' % ('horse', drop))
+            for name in bd.LS_DOG:
+                if name in drop:
+                    bad.append('the detector drops %r, which is the only '
+                               'thing it is being trained to find' % (name,))
         if 'prepare_detection_yolo_dataset' not in names:
             bad.append('the exported boxes are never prepared into a '
                        'detector set, so the detector is built from whatever '
@@ -660,10 +683,18 @@ def composition_checks(bad, bd):
                            'finds dogs and nothing else')
             if '--background' not in argv:
                 bad.append('the tasks marked background are dropped')
-            if '-e' not in argv or 'other animal' not in \
-                    argv[argv.index('-e') + 1]:
-                bad.append('the other animals are not excluded from the '
-                           'detector: %r' % (argv,))
+            # the exclusion is DERIVED: everything the export carried that
+            # this model did not ask for, whatever it is called
+            drop = set((argv[argv.index('-e') + 1].split(',')
+                        if '-e' in argv else []))
+            if 'horse' not in drop:
+                bad.append('a label the detector never asked for survives '
+                           'into its single class: dropping %r'
+                           % (sorted(drop),))
+            for name in bd.LS_DOG:
+                if name in drop:
+                    bad.append('the detector drops %r, the only thing it is '
+                               'being trained to find' % (name,))
             if '--tracker-file' not in argv:
                 bad.append('the split tracker is not passed, so train and '
                            'val move between rebuilds')

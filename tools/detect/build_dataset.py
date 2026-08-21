@@ -1073,12 +1073,24 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                 # AND writes dataset.yaml into the cwd -- run from the
                 # training root it would overwrite the one that is there.
                 run.progress(1, 'preparing the exported boxes')
+                # THE EXCLUSION IS DERIVED FROM THE WHITELIST, not written
+                # out beside it. The preparer only takes a list of classes to
+                # drop, and a fixed list of two meant any label added in Label
+                # Studio later -- horse, goat, sheep -- was not dropped: it
+                # survived --single-class and became a dog, teaching the
+                # detector that a horse is one. Everything this model does not
+                # ask for is excluded, whatever it turns out to be called.
+                keep = ls_wanted('dogdet')
+                drop = sorted(set((ls_counts or {}).get('classes') or {})
+                              - set(keep)) or list(LS_NOT_DOG)
+                run.say('  keeping %s; dropping %s'
+                        % (', '.join(sorted(keep)), ', '.join(drop)))
                 run.run('prepare_detection_yolo_dataset',
                         [crop_python,
                          os.path.join(root, 'prepare_detection_yolo_dataset.py'),
                          '-f', ls_path, '-l', LS_GROUP,
                          '--single-class',
-                         '-e', ','.join(LS_NOT_DOG),
+                         '-e', ','.join(drop),
                          '--background', '--compress',
                          '--tracker-file',
                          os.path.join(root, 'split_tracker.json')],
