@@ -178,6 +178,57 @@ def measure_checks(bad, bd):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def stop_checks(bad, bd):
+    """A stopped build cleans up after itself.
+
+    The page's stop button signals the whole process group, and the default
+    action for a signal is to die where you stand: no unwinding, no finally,
+    no cleanup. What is left is a multi-gigabyte staging copy and a half-built
+    dataset directory. This drives the same signal at a process that has
+    called the same setup, and checks the cleanup ran.
+    """
+    tmp = tempfile.mkdtemp(prefix='adv_bd_stop_')
+    try:
+        probe = os.path.join(tmp, 'probe.py')
+        with open(probe, 'w') as fh:
+            fh.write(
+                'import os, signal, sys, time\n'
+                'sys.path.insert(0, %r)\n'
+                'import build_dataset as bd\n'
+                'bd._dying_cleans_up(is_main=True)\n'
+                'stage = %r\n'
+                'os.makedirs(stage, exist_ok=True)\n'
+                'try:\n'
+                '    os.kill(os.getpid(), signal.SIGTERM)\n'
+                '    time.sleep(5)\n'
+                'finally:\n'
+                '    import shutil; shutil.rmtree(stage, ignore_errors=True)\n'
+                '    print("CLEANED")\n'
+                % (DETECT, os.path.join(tmp, 'stage')))
+        got = subprocess.run([sys.executable, probe], capture_output=True,
+                             text=True, timeout=60)
+        if 'CLEANED' not in (got.stdout or ''):
+            bad.append('A STOPPED BUILD DIES WHERE IT STANDS -- its staging '
+                       'copy and its half-built dataset stay on disk: %r %r'
+                       % ((got.stdout or '')[-200:], (got.stderr or '')[-200:]))
+        if os.path.isdir(os.path.join(tmp, 'stage')):
+            bad.append('the staging directory survived the stop')
+        # ...and importing this into the dashboard must not touch the
+        # dashboard's own signal handlers
+        import signal as _sig
+        before = _sig.getsignal(_sig.SIGTERM)
+        bd._dying_cleans_up()
+        if _sig.getsignal(_sig.SIGTERM) is not before:
+            bad.append('importing the builder rewired the signal handlers of '
+                       'whatever is hosting it')
+    except subprocess.TimeoutExpired:
+        bad.append('the stop probe never returned, so the signal was ignored')
+    except Exception as e:                # noqa: BLE001
+        bad.append('the stop checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def catalogue_checks(bad, bd):
     """Which datasets carry the hand-drawn boxes, and which quietly do not.
 
@@ -204,7 +255,25 @@ def catalogue_checks(bad, bd):
                                        'counts': {'tasks': ls}}
             with open(os.path.join(d, 'bundle', 'manifest.json'), 'w') as fh:
                 json.dump(man, fh)
+        # a build that was killed outright: a generated name, images on disk,
+        # and no bundle, because the bundle is the last thing a build writes
+        half = os.path.join(tmp, 'dogdet_20260820_aaaaaa')
+        for split in ('train', 'val'):
+            os.makedirs(os.path.join(half, 'images', split))
+        open(os.path.join(half, 'dataset.yaml'), 'w').close()
         rows = {r['id']: r for r in bd.catalogue('dogdet')}
+        killed = rows.get('dogdet_20260820_aaaaaa')
+        if killed is None:
+            bad.append('a half-built dataset vanishes from the catalogue '
+                       'entirely, so the gigabytes it is using are invisible')
+        elif not killed.get('unfinished'):
+            bad.append('A HALF-BUILT DATASET IS OFFERED LIKE ANY OTHER -- '
+                       'training on it trains on however much was copied '
+                       'before the build was stopped')
+        for real in ('dogdet_withls_x', 'dogdet_without_y'):
+            if rows.get(real, {}).get('unfinished'):
+                bad.append('%s is a finished dataset reported as unfinished'
+                           % (real,))
         for name in ('dogdet_withls_x', 'dogdet_without_y'):
             if name not in rows:
                 bad.append('the catalogue lost %s' % (name,))
@@ -893,6 +962,7 @@ def main():
                      (labelstudio_checks, (bd,)),
                      (progress_checks, (bd,)),
                      (catalogue_checks, (bd,)),
+                     (stop_checks, (bd,)),
                      (cli_checks, ())):
         try:
             fn(bad, *args)

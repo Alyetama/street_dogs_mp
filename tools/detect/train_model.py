@@ -321,6 +321,15 @@ def find_dataset(family, want):
     if got and got.get('family') and got['family'] != family:
         raise SystemExit('%s was built for %s, not %s'
                          % (os.path.basename(path), got['family'], family))
+    # A directory carrying a generated name and no bundle is a build that was
+    # killed: the bundle is the last thing a build writes. However many images
+    # had been copied by then look exactly like a dataset from here, and
+    # training on it trains on an arbitrary fraction of one.
+    if got is None and bd.BUILT_RE.match(os.path.basename(path)):
+        raise SystemExit('%s is an unfinished build -- it has no bundle, so '
+                         'it is however much of a dataset was copied before '
+                         'the build was stopped. Delete it and build again.'
+                         % (os.path.basename(path),))
     kind = PROJECTS[family]['task']
     if kind == 'detect':
         data = os.path.join(path, 'dataset.yaml')

@@ -321,6 +321,53 @@ def refusal_checks(bad, py, dataset):
                        'they are about to run' % (line,))
 
 
+def unfinished_checks(bad, tm):
+    """A build that was killed is not a dataset, wherever it is asked from.
+
+    The page can grey it out, but the page is not the gate: the launcher takes
+    a name over HTTP and has to refuse it itself. What is on disk is however
+    many images had been copied when the build died -- a plausible-looking
+    fraction of a dataset, with no bundle, which is the last thing a build
+    writes.
+    """
+    tmp = tempfile.mkdtemp(prefix='adv_tm_unfin_')
+    old = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        half = os.path.join(tmp, 'dogdet_20260820_aaaaaa')
+        for split in ('train', 'val'):
+            os.makedirs(os.path.join(half, 'images', split))
+        open(os.path.join(half, 'dataset.yaml'), 'w').close()
+        try:
+            tm.find_dataset('dogdet', 'dogdet_20260820_aaaaaa')
+            bad.append('AN UNFINISHED BUILD WAS ACCEPTED FOR TRAINING -- '
+                       'hours of GPU on whatever fraction of a dataset was '
+                       'copied before the build was stopped')
+        except SystemExit as e:
+            if 'unfinished' not in str(e):
+                bad.append('an unfinished build was refused for the wrong '
+                           'reason: %s' % (e,))
+        # ...and a dataset from before this tool existed still trains: it has
+        # no bundle either, and it is not something this tool half-wrote
+        legacy = os.path.join(tmp, 'dogdet_v3')
+        for split in ('train', 'val'):
+            os.makedirs(os.path.join(legacy, 'images', split))
+        open(os.path.join(legacy, 'dataset.yaml'), 'w').close()
+        try:
+            tm.find_dataset('dogdet', 'dogdet_v3')
+        except SystemExit as e:
+            bad.append('a legacy dataset is refused as unfinished: %s' % (e,))
+    except Exception as e:                # noqa: BLE001
+        bad.append('the unfinished checks threw %s: %s'
+                   % (type(e).__name__, e))
+    finally:
+        if old is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def git_stamp_checks(bad, py):
     """The bundle names the code that STARTED the run.
 
@@ -490,6 +537,7 @@ def main():
         try:
             for fn in (form_checks, batch_checks):
                 fn(bad, py)
+            unfinished_checks(bad, tm)
             for fn in (refusal_checks, bundle_checks):
                 fn(bad, py, dataset)
             git_stamp_checks(bad, py)

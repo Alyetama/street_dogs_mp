@@ -340,11 +340,19 @@ function paintDatasets(){
   var keep=sel.value;
   sel.innerHTML=rows.length?rows.map(function(d){
     var c=d.counts, size=c?(n(c.total)+' images'):'no record';
+    if(d.unfinished)
+      return '<option value="'+esc(d.id)+'" disabled>'+esc(d.id)+
+        ' — unfinished build, safe to delete</option>';
     return '<option value="'+esc(d.id)+'">'+esc(d.id)+' — '+when(d.built_at_iso)+
       ' · '+esc(size)+(d.bundle?(d.label_studio?'':' · no hand-drawn boxes')
                               :' · built before bundles')+'</option>';
   }).join(''):'<option value="">nothing built for this model yet</option>';
   if(keep&&rows.some(function(d){return d.id===keep}))sel.value=keep;
+  /* a disabled option can still be the browser's first choice, and step 4
+     would then post a dataset that was never finished */
+  var pick=null; rows.forEach(function(d){if(!pick&&!d.unfinished)pick=d.id});
+  if(!sel.value||rows.some(function(d){return d.id===sel.value&&d.unfinished}))
+    sel.value=pick||'';
   $('dssub').textContent=rows.length?(rows.length+' available'):'';
   paintDsNote();
 }

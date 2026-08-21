@@ -503,6 +503,30 @@ def git_head():
         return {'commit': None, 'dirty': None}
 
 
+BUILT_RE = re.compile(r'^(%s)_\d{8}_[0-9a-f]{6}$'
+                      % '|'.join(sorted(FAMILIES)))
+
+
+def _dying_cleans_up(is_main=None):
+    """Make a stop signal something Python can unwind from.
+
+    Only in a process that owns its signals -- imported into a page, this must
+    not touch the handlers of whatever is hosting it.
+    """
+    if not (__name__ == '__main__' if is_main is None else is_main):
+        return
+    import signal
+
+    def stop(signum, _frame):
+        raise SystemExit('stopped by signal %d' % (signum,))
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(sig, stop)
+        except (OSError, ValueError):      # not ours to set
+            pass
+
+
 def new_name(family, now=None):
     """`<family>_<day>_<six hex>` -- sortable, readable, and never reused."""
     day = time.strftime('%Y%m%d', time.localtime(now or time.time()))
@@ -816,7 +840,7 @@ def catalogue(family=None):
                    # everything EXCEPT the boxes somebody drew by hand.
                    'label_studio': ((man.get('label_studio') or {})
                                     .get('counts') or {}).get('tasks'),
-                   'seconds': man.get('seconds')}
+                   'seconds': man.get('seconds'), 'unfinished': False}
         else:
             kind, classes = _shape_of(path)
             if not kind:
@@ -846,7 +870,14 @@ def catalogue(family=None):
                                                   time.localtime(at))
                                     if at else None),
                    'built_by': '', 'counts': None, 'bundle': False,
-                   'base': '', 'label_studio': None, 'seconds': None}
+                   'base': '', 'label_studio': None, 'seconds': None,
+                   # This one carries a name only this tool generates, and no
+                   # bundle -- the last thing a build writes. So it is a build
+                   # that was killed outright: a directory of however many
+                   # images had been copied when it died. Named rather than
+                   # hidden, because it is also gigabytes somebody has to
+                   # delete, but never offered as something to train on.
+                   'unfinished': bool(BUILT_RE.match(name))}
         if family and row['family'] != family:
             continue
         out.append(row)
@@ -890,6 +921,13 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     crop_python = crop_python or _cfg('dogbin_python') or sys.executable
     stage = out + '.stage'
     os.makedirs(stage, exist_ok=True)
+    # A stop from the page is a signal to the whole process group, and the
+    # default action for one is to die where you stand -- no finally, no
+    # cleanup. What is left behind is a multi-gigabyte staging copy and, once
+    # a builder has started writing, a half-copied dataset directory with no
+    # bundle in it. Turning the signal into an exception is what lets the
+    # cleanup below happen at all.
+    _dying_cleans_up()
     started = int(time.time() if now is None else now)
     # ...and the code as it is right now. Taken at the end, this recorded
     # whichever commit happened to be checked out when the build finished:
@@ -1097,6 +1135,12 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         run.close()
         if not keep_stage:
             shutil.rmtree(stage, ignore_errors=True)
+        # A dataset without a bundle is one that did not finish: the bundle is
+        # the last thing written. Left on disk it is offered in the selector
+        # beside the real ones, with a plausible size, and training on it
+        # trains on however much of it had been copied when the build died.
+        if not os.path.isfile(os.path.join(out, 'bundle', 'manifest.json')):
+            shutil.rmtree(out, ignore_errors=True)
 
 
 def main(argv=None):
