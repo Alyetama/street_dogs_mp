@@ -10465,9 +10465,11 @@ class BoardHandler(SimpleHTTPRequestHandler):
         try:
             data = self._body()
             if data is None:
-                return
-            if not isinstance(data, dict):
-                raise ValueError('body is not an object')
+                # True, not None: in THIS handler the return value means "I
+                # answered it", and a bare return sends the dispatcher on to
+                # the next handler, which writes a SECOND reply down a socket
+                # that already carries a 400.
+                return True
             # Nothing in the body reaches a path, a prompt or a command line.
             # The pool is one of four names, matched over there; the size is
             # clamped to one the interface offers, here, the way the audit and
@@ -10905,11 +10907,16 @@ class BoardHandler(SimpleHTTPRequestHandler):
         body = self._splice(
             body, self._ACCT_OPEN, self._ACCT_CLOSE,
             lambda: render_account(getattr(self, 'session', None)))
-        # Train first, then Accounts: one is where the work is done and the
-        # other is who may do it, and that is the order they are wanted in.
+        # Datasets, then Train, then Accounts: where the material is, where
+        # the work is done, and who may do it -- the order they are wanted in,
+        # and the order they stood in when Datasets was a plain anchor in the
+        # template. It is here now because it is admin-only, and a link that
+        # 404s for most of the people who can see it undoes the gate in the
+        # header.
         body = self._splice(
             body, self._NAV_OPEN, self._NAV_CLOSE,
-            lambda: (render_train_nav(getattr(self, 'session', None))
+            lambda: (render_datasets_nav(getattr(self, 'session', None))
+                     + render_train_nav(getattr(self, 'session', None))
                      + render_account_nav(getattr(self, 'session', None))))
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -10917,6 +10924,26 @@ class BoardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
         return True
+
+    def handle_one_request(self):
+        """One request, and a reader who walks away is not an error.
+
+        THE WRITERS IN THIS CLASS ARE MANY AND THE HANG-UP IS ONE. Nine
+        routes here write a body straight to the socket -- two picture
+        servers, the favicon, the boot page, the training page, a val crop,
+        the index -- and a browser that closes a tab mid-image, or a scanner
+        that opens and drops, raised out of every one of them: a traceback
+        per dropped connection, into a log a public address can fill at will.
+        Guarding it here rather than at nine call sites covers the tenth
+        somebody writes next month, and costs the same.
+
+        The reply is left half-written on purpose. There is nobody to finish
+        it for.
+        """
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def do_HEAD(self):
         """HEAD, gated and held to the same allow-list GET is.
@@ -11016,9 +11043,16 @@ class BoardHandler(SimpleHTTPRequestHandler):
     # names every root by absolute path -- the account and the drives -- and
     # hands out every image in every dataset on the box. None of that is
     # annotating, and an annotator does not need it to judge a crop.
+    #
+    # THE PICTURE ROUTES ARE THE POINT, and this set named neither of them
+    # until now: it listed /api/datasets/thumb, which no handler has ever
+    # compared against -- a route that does not exist, guarded, while the two
+    # that do serve bytes off the training drives answered anybody with a
+    # session. They are spelled correctly two hundred lines up in
+    # AUTH_IMAGE_PATHS, and are spelled the same way here.
     ADMIN_GET = frozenset({
         '/datasets', '/api/datasets', '/api/datasets/tree',
-        '/api/datasets/files', '/api/datasets/thumb',
+        '/api/datasets/files', '/datasets/thumb', '/datasets/image',
     })
 
     def send_error(self, code, message=None, explain=None):
@@ -11859,6 +11893,24 @@ def account_css():
     """
     g = _auth()
     return '' if g is None else g.IDENTITY_CSS
+
+
+def render_datasets_nav(session):
+    """The way to the datasets page, for the action row.
+
+    Admins only, for the reason /train is: /datasets walks the training tree,
+    names every root by absolute path, and hands out every image on the box,
+    so it answers a member with the same empty 404 an address that does not
+    exist gets. The link was left in the template when that gate went in,
+    which put a dead one in front of every annotator on the front page.
+    """
+    g = _auth()
+    if not session or g is None or \
+            not g.accounts.is_admin(session.get('role')):
+        return ''
+    return ('<a class="hnav" href="/datasets" title="Every dataset the '
+            'logged runs trained on \u2014 open one and look inside">'
+            '<span class="hnf">&#9638;</span>Datasets</a>')
 
 
 def render_train_nav(session):
@@ -13509,7 +13561,6 @@ outline-offset:2px}
          ("what runs trained on", "invites & people") are worth reading once
          and cost width on every visit after, so they live in the title
          attribute now, where a first-time reader still finds them. -->
-    <a class="hnav" href="/datasets" title="Every dataset the logged runs trained on — open one and look inside"><span class="hnf">&#9638;</span>Datasets</a>
     <!--NAV--><!--/NAV-->
 __LLMNAV__
     <span class="hgap"></span>

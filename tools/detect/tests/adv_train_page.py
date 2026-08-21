@@ -22,7 +22,9 @@ the dashboard would drift from the first, and the drift would be silent.
 
 Run: python tools/detect/tests/adv_train_page.py
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -31,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -661,6 +664,46 @@ def route_checks(bad, d):
                 bad.append('%s is not admin-only, so every annotator can '
                            'read the training tree' % (want,))
 
+        # A GUARD ON A NAME NOTHING SERVES IS NOT A GUARD, and the loop above
+        # cannot tell: a route that does not exist answers 404 for a member
+        # too, so a misspelled entry passes the probe while the route it MEANT
+        # to name stays open. Both halves are checked here, against the
+        # source: every path the datasets dispatcher compares must be in the
+        # set, and every entry in the set must be a path something compares.
+        import inspect as _ins
+        import re as _re
+        served = set(_re.findall(r"path == '([^']+)'",
+                                 _ins.getsource(d.BoardHandler._datasets_get)))
+        for path in sorted(served - set(d.BoardHandler.ADMIN_GET)):
+            bad.append('%s is served by the datasets page but is not in '
+                       'ADMIN_GET, so any signed-in annotator can read it'
+                       % (path,))
+        whole = _ins.getsource(d)
+        for path in sorted(d.BoardHandler.ADMIN_GET):
+            if len(_re.findall(r"'%s'" % (_re.escape(path),), whole)) < 2:
+                bad.append('ADMIN_GET names %s, which nothing in this file '
+                           'ever compares a path against -- a guarded route '
+                           'that does not exist, while the one it was meant '
+                           'to name is open' % (path,))
+        # ...and the link follows the gate. A route that 404s for members
+        # with a header link every member can see is a gate undone in the
+        # navigation.
+        for who, want in (('boss', True), ('sam', False)):
+            got = bool(d.render_datasets_nav(
+                {'role': A.get_user(who, path=p)['role']}))
+            if got != want:
+                bad.append('the Datasets link is %s for %s'
+                           % ('drawn' if got else 'not drawn', who))
+        built = os.path.join(d.OUT, 'index.html')
+        page = ''
+        if os.path.exists(built):
+            with open(built, encoding='utf-8', errors='replace') as fh:
+                page = fh.read()
+        if page and 'href="/datasets"' in page.split('<!--NAV-->')[0]:
+            bad.append('the built page carries a static Datasets link outside '
+                       'the role-gated navigation, so every member sees one '
+                       'that 404s')
+
         # A REQUEST LINE THAT IS NOT A PATH. A NUL reaches open() as an
         # embedded null and raises out of the standard library's own static
         # handler, taking the connection down with a traceback instead of an
@@ -691,6 +734,35 @@ def route_checks(bad, d):
                 bad.append('%s in the request line answered %r -- the '
                            'standard handler raises on it and takes the '
                            'connection down' % (what, got.strip()))
+        # A READER WHO WALKS AWAY IS NOT AN ERROR. Nine routes in this class
+        # write a body straight to the socket -- two picture servers, the
+        # favicon, the boot page, the index -- and a client that goes away
+        # mid-body raises out of whichever one it caught, a traceback per
+        # dropped connection into a log a public address can fill at will.
+        # Staged on the method, not over the loopback: the kernel takes a
+        # whole page into its send buffer there and the write never fails,
+        # so a socket test would pass with the guard gone.
+        import http.server as _hs
+        hung = object.__new__(d.BoardHandler)
+        hung.close_connection = False
+        _was = _hs.SimpleHTTPRequestHandler.handle_one_request
+
+        def _gone(self):
+            raise BrokenPipeError(32, 'Broken pipe')
+
+        _hs.SimpleHTTPRequestHandler.handle_one_request = _gone
+        try:
+            d.BoardHandler.handle_one_request(hung)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            bad.append('a client that hung up mid-reply raised %s out of the '
+                       'handler -- one traceback per dropped connection'
+                       % (type(e).__name__,))
+        finally:
+            _hs.SimpleHTTPRequestHandler.handle_one_request = _was
+        if not hung.close_connection:
+            bad.append('the connection was not marked closed after the '
+                       'client hung up')
+
         # HEAD IS A VERB TOO, and the one nobody types was the one that
         # skipped the check: do_GET and do_POST both refused a NUL and
         # do_HEAD went straight into the standard library with it.
@@ -726,6 +798,25 @@ def route_checks(bad, d):
                 return 'closed (%s)' % (type(e).__name__,)
             finally:
                 c.close()
+
+        # ONE REQUEST, ONE REPLY. _body() answers the refusal itself and
+        # returns None to say so; a handler that reads that None as "not
+        # mine" hands the request on to the NEXT one, which writes a second
+        # status line down a socket already carrying a 400. Driven on the
+        # method rather than over HTTP because this page is off by default
+        # (LLM_PAGE), and a route that never dispatches proves nothing.
+        fake = object.__new__(d.BoardHandler)
+        fake.path = '/api/llm/run'
+        fake._body = lambda cap=None: None
+        fake._json = lambda *a, **k: None
+        try:
+            got = d.BoardHandler._llm_post(fake)
+        except Exception as e:             # noqa: BLE001
+            got = '%s: %s' % (type(e).__name__, e)
+        if got is not True:
+            bad.append('the llm route answered a refused body with %r, so '
+                       'the dispatcher carries on to the next handler and '
+                       'writes a second reply' % (got,))
 
         # `null` IS VALID JSON, and None is _body()'s "I already answered".
         # A body of null (or a list, or a bare number) parsed to None, every
