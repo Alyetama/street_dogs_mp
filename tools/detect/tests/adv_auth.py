@@ -413,8 +413,15 @@ def epoch_checks(bad, fx):
 
 
 def cookie_checks(bad, fx):
-    """The flags, including the one that must NOT be there."""
-    header = U.set_cookie('abc', 600)
+    """The flags, including the one that must not be there by default.
+
+    Secure is not absent on principle any more -- it follows the deployment,
+    and cookie_flag_checks() below pins both directions. What is pinned HERE
+    is the default: with nothing saying the site is HTTPS, the attribute stays
+    off, because a Secure cookie on a plain-HTTP origin is withheld from every
+    request and the login loops back to the form forever.
+    """
+    header = U.set_cookie('abc', 600, env={})
     if header[0] != 'Set-Cookie':
         bad.append('set_cookie() is not producing a Set-Cookie header')
     v = header[1]
@@ -425,13 +432,14 @@ def cookie_checks(bad, fx):
         if flag not in v:
             bad.append(f'the session cookie is missing {flag}')
     if 'secure' in v.lower():
-        bad.append('the session cookie is marked Secure. This server speaks '
-                   'plain HTTP on a tailnet, so the browser would withhold it '
-                   'from every request and the login would loop forever')
+        bad.append('the session cookie is marked Secure with nothing saying '
+                   'the deployment is HTTPS. On a plain-HTTP origin the '
+                   'browser withholds it from every request and the login '
+                   'loops forever')
     if 'Max-Age=600' not in v:
         bad.append('the cookie carries no Max-Age, so it survives the browser '
                    'being closed for longer than the session it stands for')
-    gone = U.clear_cookie()[1]
+    gone = U.clear_cookie(env={})[1]
     if 'Max-Age=0' not in gone or '%s=;' % (U.COOKIE,) not in gone:
         bad.append('clear_cookie() does not actually clear it')
 
@@ -1377,6 +1385,99 @@ def page_checks(bad, fx):
         bad.append('the login page contains the admin password')
 
 
+class _Claim:
+    """A request that says it is HTTPS. Nothing in auth.py asks it."""
+    headers = {'X-Forwarded-Proto': 'https', 'Forwarded': 'proto=https'}
+
+
+def forwarded_checks(bad, fx):
+    """Whose address a failed login is counted against.
+
+    The login lockout is the only thing standing in front of the password
+    form, and it counts per client address. Behind a proxy every visitor
+    shares the proxy's address, so the count stops measuring the guesser and
+    starts measuring the tunnel: one stranger spends the budget for every
+    annotator, and ordinary typos do it without an attacker at all.
+
+    So the forwarded address is believed -- but only from a socket peer the
+    operator named. From anybody else it is what it always was: a string the
+    caller chose.
+    """
+    class H:
+        def __init__(self, peer, headers=None):
+            self.client_address = (peer, 4321)
+            self.headers = headers or {}
+
+    trust = {'DASHBOARD_TRUSTED_PROXY': '10.0.0.9,127.0.0.1'}
+    spoof = {'X-Forwarded-For': '8.8.8.8', 'CF-Connecting-IP': '8.8.8.8'}
+    for name, handler, env, want in (
+            ('a stranger spoofing both headers',
+             H('203.0.113.9', spoof), trust, '203.0.113.9'),
+            ('the named proxy, CF-Connecting-IP',
+             H('10.0.0.9', {'CF-Connecting-IP': '198.51.100.7'}), trust,
+             '198.51.100.7'),
+            ('the named proxy, a forwarded chain',
+             H('10.0.0.9', {'X-Forwarded-For': '1.2.3.4, 198.51.100.7'}),
+             trust, '198.51.100.7'),
+            ('the named proxy sending junk',
+             H('10.0.0.9', {'CF-Connecting-IP': 'not-an-ip'}), trust,
+             '10.0.0.9'),
+            ('the named proxy sending a name',
+             H('10.0.0.9', {'CF-Connecting-IP': 'localhost'}), trust,
+             '10.0.0.9'),
+            ('nothing configured, header present',
+             H('127.0.0.1', spoof), {}, '127.0.0.1')):
+        got = U.client_address(handler, env=env)
+        if got != want:
+            bad.append('%s: counted against %r, want %r'
+                       % (name, got, want))
+    # ...and the whole point: two visitors through one proxy are two sources
+    seen = {U.client_address(H('10.0.0.9', {'CF-Connecting-IP': ip}),
+                             env=trust) for ip in ('198.51.100.7',
+                                                   '198.51.100.8')}
+    if len(seen) != 2:
+        bad.append('two people behind the proxy share one lockout budget: '
+                   '%r -- one stranger guessing shuts the door on every '
+                   'annotator' % (seen,))
+
+
+def cookie_flag_checks(bad, fx):
+    """The session cookie is Secure exactly when the deployment is.
+
+    This dashboard is published over TLS now and handed to volunteers. Without
+    Secure a browser will send the session on a plain-HTTP request to the same
+    host -- a typed address, an old bookmark, anything that downgrades -- and
+    whoever is on that wifi has the account. Set unconditionally it breaks a
+    tailnet deployment instead: the browser withholds a Secure cookie from a
+    non-HTTPS origin and the login loops back to the form forever. So it has
+    to follow the deployment, and the expiring header has to match the cookie
+    it expires or a Secure cookie is never cleared.
+    """
+    always = ('HttpOnly', 'SameSite=Lax', 'Path=/')
+    for name, req, env, secure in (
+            ('a plain deployment', None, {}, False),
+            ('DASHBOARD_HTTPS=1', None, {'DASHBOARD_HTTPS': '1'}, True),
+            ('DASHBOARD_HTTPS=yes', None, {'DASHBOARD_HTTPS': 'yes'}, True),
+            ('DASHBOARD_HTTPS=true', None, {'DASHBOARD_HTTPS': 'true'}, True),
+            ('DASHBOARD_HTTPS=0', None, {'DASHBOARD_HTTPS': '0'}, False),
+            ('DASHBOARD_HTTPS empty', None, {'DASHBOARD_HTTPS': ''}, False),
+            # a request cannot talk this server into it: no forwarded header
+            # is read here, for the reason the throttle keys on the socket
+            ('a request claiming https', _Claim(), {}, False)):
+        for what, header in (('the session cookie',
+                              U.set_cookie('v', 60, req, env=env)[1]),
+                             ('the expiring header',
+                              U.clear_cookie(req, env=env)[1])):
+            got = '; Secure' in header
+            if got != secure:
+                bad.append('%s: %s %s Secure (%r)'
+                           % (name, what,
+                              'carries' if got else 'does not carry', header))
+            for flag in always:
+                if flag not in header:
+                    bad.append('%s: %s lost %s' % (name, what, flag))
+
+
 def silence_checks(bad, fx):
     """Nothing on these paths prints a secret.
 
@@ -1456,11 +1557,19 @@ def source_checks(bad, fx):
     literals = {n.value.lower() for n in ast.walk(tree)
                 if isinstance(n, ast.Constant) and isinstance(n.value, str)
                 and len(n.value) <= 32}
-    for header in ('x-forwarded-for', 'x-real-ip', 'forwarded'):
-        if any(header in s for s in literals):
-            bad.append(f'auth.py reads {header}: nothing proxies this server, '
-                       f'so that header is a string the caller chose and the '
-                       f'lockout it keys becomes somebody else\'s')
+    # A forwarded address is believed ONLY from a socket peer the operator
+    # named as a proxy. That used to be "never", on the premise that nothing
+    # was in front of this process -- true on a tailnet, false the day it was
+    # published behind a tunnel, where every visitor arrives as one address
+    # and a lockout keyed on it locks out everybody. The ban on the LITERALS
+    # is gone; what replaces it is the behaviour, checked below in
+    # forwarded_checks(): from an untrusted peer the header is still worth
+    # nothing.
+    if 'x-real-ip' in literals:
+        bad.append('auth.py reads x-real-ip: only CF-Connecting-IP and the '
+                   'last hop of X-Forwarded-For are defined for the proxy '
+                   'this deployment has, and a third spelling is a third '
+                   'thing to get wrong')
     # Cookies are parsed, not evaluated, and nothing here builds SQL.
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -1869,6 +1978,7 @@ def main():
                        burst_checks, redirect_checks,
                        signup_checks, admin_checks, page_checks,
                        account_checks, identity_checks,
+                       forwarded_checks, cookie_flag_checks,
                        silence_checks, source_checks, import_checks,
                        handler_checks, reply_checks, wiring_checks):
                 try:

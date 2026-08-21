@@ -41,14 +41,19 @@ nothing to walk. Signing out is in that list on purpose: it was the one
 revoking control that revoked nothing, which mattered because it is the one
 a person reaches for when they think somebody has read their cookie.
 
-THE COOKIE IS NOT Secure, DELIBERATELY. This server speaks plain HTTP on a
-tailnet -- the Secure attribute would tell the browser to withhold the cookie
-from a non-HTTPS origin, which is every request it will ever make, and the
-login would appear to succeed and then bounce straight back to the form. The
-honest statement of the trade: anybody who can read the wire can read the
-cookie, and on this network that is the same set of people who could read the
-images anyway. HttpOnly and SameSite=Lax are set, because they cost nothing
-and close the two holes that do not need the wire.
+THE COOKIE IS Secure WHEN THE SITE IS. Set unconditionally it would break a
+plain-HTTP deployment outright -- the browser withholds a Secure cookie from a
+non-HTTPS origin, so the login would appear to succeed and bounce straight
+back to the form -- and left off it hands the session to anybody who can read
+the wire. So it follows the deployment: DASHBOARD_HTTPS=1 in
+the environment and the attribute goes on. Unset, it stays off, which is the
+old behaviour and the right one on a tailnet.
+
+The environment, not X-Forwarded-Proto: this module reads no forwarded header
+anywhere, because nothing here can tell a proxy's word from a stranger's --
+the same reasoning that keeps the login throttle on client_address. HttpOnly
+and SameSite=Lax are always set, because they cost nothing and close the two
+holes that do not need the wire.
 
 FAIL CLOSED ON DATA, FAIL OPEN ON UPTIME. With no usable admin -- a fresh
 clone, or a DASHBOARD_PASSWORD nobody has set -- this gate serves the login
@@ -66,6 +71,7 @@ import hashlib
 import hmac
 import html
 import json
+import ipaddress
 import os
 import re
 import secrets
@@ -158,7 +164,12 @@ NOTICES = {
     'assign_deleted': 'That target is deleted. Every annotation made towards '
                       'it is untouched \u2014 verdicts live in the ledgers, '
                       'not in this record.',
+    'invite_deleted': 'That invite is off the list. Anyone who already used '
+                      'it still has their account.',
     'user_disabled': 'That account is disabled and its sessions are over.',
+    'user_deleted': 'That account is gone and cannot sign in again. Every '
+                    'crop they judged stays judged, under their name \u2014 '
+                    'verdicts live in the ledgers, not in this record.',
     'user_enabled': 'That account can sign in again.',
     'role_admin': 'That account is an admin now.',
     'role_member': 'That account is a member now.',
@@ -495,29 +506,53 @@ def parse_cookie(header):
     return out
 
 
-def set_cookie(value, max_age):
+def over_https(req=None, env=None):
+    """Is this deployment served over TLS?
+
+    THE OPERATOR SAYS SO, NOT THE REQUEST. A reverse proxy terminates the TLS
+    and what reaches this process is plain HTTP either way, so the obvious
+    signal is X-Forwarded-Proto -- and this module reads no forwarded header
+    at all, deliberately: nothing here can tell a proxy's word from a
+    stranger's, and the same reasoning that keeps the login throttle on
+    client_address keeps this on the environment. One variable, set once,
+    where the deployment is described: DASHBOARD_HTTPS=1.
+
+    Absent, no -- which is exactly how a tailnet deployment behaved before.
+    """
+    got = (env if env is not None else os.environ).get('DASHBOARD_HTTPS')
+    return str(got or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _flags(req=None, env=None):
+    """The attributes every cookie this module sets carries."""
+    return 'Path=/; HttpOnly; SameSite=Lax' + (
+        '; Secure' if over_https(req, env) else '')
+
+
+def set_cookie(value, max_age, req=None, env=None):
     """The Set-Cookie header for a fresh session.
 
     HttpOnly: the cookie is not readable from JavaScript, so an injected
     script on any page of this dashboard cannot walk off with a session.
     SameSite=Lax: a cross-site POST does not carry it, which is what stops a
     page on another origin from submitting this one's forms. Path=/: the gate
-    covers every route, so the cookie has to reach every route.
-
-    NOT Secure -- see the module docstring. On a plain-HTTP origin the browser
-    would withhold a Secure cookie from every request, and the login would
-    loop back to the form forever.
+    covers every route, so the cookie has to reach every route. Secure when
+    the deployment is -- see the module docstring.
     """
     return ('Set-Cookie',
-            '%s=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax'
-            % (COOKIE, value, int(max_age)))
+            '%s=%s; Max-Age=%d; %s'
+            % (COOKIE, value, int(max_age), _flags(req, env)))
 
 
-def clear_cookie():
+def clear_cookie(req=None, env=None):
     """Expire the cookie. Max-Age=0 and an empty value, so a client that
-    ignores one honours the other."""
+    ignores one honours the other.
+
+    Carries the SAME attributes as the cookie it is expiring: a browser
+    matches them, and a Secure cookie is not cleared by a non-Secure header.
+    """
     return ('Set-Cookie',
-            '%s=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax' % (COOKIE,))
+            '%s=; Max-Age=0; %s' % (COOKIE, _flags(req, env)))
 
 
 # ── requests and replies ────────────────────────────────────────────────────
@@ -576,13 +611,19 @@ class Request:
             query=parse_qs(qs, keep_blank_values=True),
             form=form,
             cookies=parse_cookie(handler.headers.get('Cookie')),
-            # client_address, never X-Forwarded-For. This server is bound to
-            # a tailnet address and to localhost with no proxy in front, so a
-            # forwarded header here is not a hop -- it is a string the caller
-            # chose, and trusting it would let anybody spend somebody else's
-            # lockout or evade their own.
-            remote=(handler.client_address[0]
-                    if getattr(handler, 'client_address', None) else ''),
+            # WHO IS ASKING, and it is not always the socket. This used to
+            # be client_address unconditionally, on the premise that nothing
+            # proxies this server -- true on a tailnet, false the day it was
+            # published: a tunnel now terminates the TLS and dials the origin
+            # from this same box, so every visitor on earth arrives as one
+            # address and the login lockout, which is keyed on it, stops
+            # measuring the attacker and starts measuring the tunnel. Nine
+            # volunteers with one typo each lock the tenth out.
+            #
+            # The header is read ONLY when the socket peer is a proxy the
+            # operator named. From anybody else it is still what it always
+            # was: a string the caller chose, worth nothing.
+            remote=client_address(handler),
             host=handler.headers.get('Host') or '',
             oversize=oversize)
 
@@ -791,6 +832,50 @@ def usable():
 
 # ── the login flow ──────────────────────────────────────────────────────────
 
+def trusted_proxies(env=None):
+    """The socket peers whose forwarded client address may be believed.
+
+    Named by the operator, because only they know what is in front of this
+    process: DASHBOARD_TRUSTED_PROXY=127.0.0.1,<the address the proxy dials
+    from>. Empty by default, which is a deployment with nothing in front and
+    the old behaviour exactly.
+    """
+    raw = (env if env is not None else os.environ).get(
+        'DASHBOARD_TRUSTED_PROXY') or ''
+    return {p.strip() for p in raw.replace(';', ',').split(',') if p.strip()}
+
+
+def client_address(handler, env=None):
+    """The address to hold responsible for this request.
+
+    The socket peer, unless the peer is a proxy the operator named -- then the
+    address that proxy says it is carrying, which is the client. Cloudflare
+    sends CF-Connecting-IP; the general form is the LAST hop of
+    X-Forwarded-For, the one the trusted proxy appended itself (the earlier
+    ones came from the client and are worth nothing).
+
+    An address that does not parse is refused rather than passed through: a
+    throttle key is a string, and a caller who can choose it can choose
+    somebody else's.
+    """
+    peer = ''
+    if getattr(handler, 'client_address', None):
+        peer = handler.client_address[0] or ''
+    if peer not in trusted_proxies(env):
+        return peer
+    head = getattr(handler, 'headers', None)
+    if head is None:
+        return peer
+    got = (head.get('CF-Connecting-IP') or '').strip()
+    if not got:
+        chain = (head.get('X-Forwarded-For') or '').split(',')
+        got = chain[-1].strip() if chain else ''
+    try:
+        return str(ipaddress.ip_address(got)) if got else peer
+    except ValueError:
+        return peer
+
+
 def throttle_source(req):
     """The key a failed login is counted under: the client address.
 
@@ -798,7 +883,11 @@ def throttle_source(req):
     the admin's name a way to lock the admin out of their own dashboard by
     typing a wrong password six times -- a denial of service delivered by the
     security feature. The address is the thing an attacker has to spend to
-    keep guessing, and on a tailnet it identifies a device.
+    keep guessing.
+
+    Which address that is, on a proxied deployment, is client_address()'s
+    problem -- and getting it wrong there is what turns this from a lockout on
+    one guesser into a lockout on everybody at once.
     """
     return 'ip:' + (req.remote or '?')
 
@@ -904,7 +993,7 @@ def do_login(req, now=None):
                                      username=req.one('username')),
                           status=401)
     value, ttl = mint(got['user'], now=now, key_path=_state()['key'])
-    return redirect(nxt, extra=[set_cookie(value, ttl)])
+    return redirect(nxt, extra=[set_cookie(value, ttl, req)])
 
 
 def change_password(session, current, new, confirm, now=None, path=None):
@@ -953,7 +1042,9 @@ def _change_password(session, current, new, confirm, now, path):
     if new == current:
         return {'ok': False, 'user': None, 'retry_after': 0,
                 'message': 'That is the password you already have.'}
-    accounts.check_password(new)          # raises AccountError with the reason
+    # the account's own name goes in: a password with your username in it is
+    # one a guesser already half knows
+    accounts.check_password(new, username=who)   # raises with the reason
     source = 'pw:' + accounts.normalise_username(who)
     st = accounts.reserve_attempt(source, now=ts, path=p)
     if st['was_locked']:
@@ -1000,7 +1091,7 @@ def do_account(req, now=None):
     # login form by their own success, which reads exactly like a failure.
     value, ttl = mint(got['user'], now=now, key_path=_state()['key'])
     return redirect(ACCOUNT_PATH + '?m=password_changed',
-                    extra=[set_cookie(value, ttl)])
+                    extra=[set_cookie(value, ttl, req)])
 
 
 def do_logout(req):
@@ -1033,7 +1124,7 @@ def do_logout(req):
         # There is no session to draw a token from and nothing a confirmation
         # would confirm, so the cookie goes and the form says so.
         return redirect(LOGIN_PATH + '?m=signed_out', status=302,
-                        extra=[clear_cookie()])
+                        extra=[clear_cookie(req)])
     if req.method != 'POST':
         return page_reply(logout_page(req.session))
     if not csrf_ok(req.session, req.one(CSRF_FIELD), key_path=_state()['key']):
@@ -1050,9 +1141,9 @@ def do_logout(req):
         # the other devices, and saying "signed out everywhere" here would be
         # the same lie in a new place.
         return redirect(LOGIN_PATH + '?m=signed_out_here', status=303,
-                        extra=[clear_cookie()])
+                        extra=[clear_cookie(req)])
     return redirect(LOGIN_PATH + '?m=signed_out', status=303,
-                    extra=[clear_cookie()])
+                    extra=[clear_cookie(req)])
 
 
 # ── the signup flow ─────────────────────────────────────────────────────────
@@ -1192,7 +1283,7 @@ def do_signup(req, now=None):
     # and they have just chosen the password; making them type it again is a
     # form for the sake of a form.
     value, ttl = mint(got['user'], now=now, key_path=_state()['key'])
-    return redirect('/', extra=[set_cookie(value, ttl)])
+    return redirect('/', extra=[set_cookie(value, ttl, req)])
 
 
 # ── the admin flow ──────────────────────────────────────────────────────────
@@ -1234,6 +1325,12 @@ def admin_action(action, req, session, now=None, path=None):
             accounts.revoke_invite(_int(req.one('id')), now=ts, path=p)
             return {'ok': True, 'notice': 'invite_revoked', 'invite': None,
                     'message': ''}
+        if action == 'forget-invite':
+            # revoke withdraws a link that still means something; this drops
+            # the line about one that does not
+            gone = accounts.delete_invite(_int(req.one('id')), path=p)
+            return {'ok': True, 'invite': None, 'message': '',
+                    'notice': 'invite_deleted' if gone else ''}
         if action == 'assign':
             what = req.one('do') or 'new'
             if what == 'cancel':
@@ -1267,7 +1364,8 @@ def admin_action(action, req, session, now=None, path=None):
         if action == 'user':
             uid = _int(req.one('id'))
             what = req.one('do')
-            if uid == session['id'] and what in ('disable', 'member'):
+            if uid == session['id'] and what in ('disable', 'member',
+                                                 'delete'):
                 # Self-service lockout, refused. accounts.py stops the LAST
                 # admin from stranding the dashboard, but with two admins
                 # nothing stops one of them disabling themselves mid-click
@@ -1282,6 +1380,11 @@ def admin_action(action, req, session, now=None, path=None):
             if what == 'enable':
                 accounts.set_active(uid, True, path=p)
                 return {'ok': True, 'notice': 'user_enabled', 'invite': None,
+                        'message': ''}
+            if what == 'delete':
+                # The work stays. What goes is the ability to sign in.
+                accounts.delete_user(uid, path=p)
+                return {'ok': True, 'notice': 'user_deleted', 'invite': None,
                         'message': ''}
             if what in accounts.ROLES:
                 accounts.set_role(uid, what, path=p)
@@ -2001,6 +2104,17 @@ def admin_page(session, req, now=None, error='', minted=None):
                        '<button class="btn small warn" type="submit">revoke'
                        '</button></form>'
                        % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id']))
+            # REVOKE WITHDRAWS A LINK THAT STILL WORKS. This drops the line
+            # about one that does not: taken, expired, or already withdrawn.
+            act += ('<form method="post" action="%s/forget-invite"'
+                    ' onsubmit="return confirm(&quot;Remove this invite from '
+                    'the list? Anyone who already used it keeps their '
+                    'account.&quot;)">'
+                    '<input type="hidden" name="%s" value="%s">'
+                    '<input type="hidden" name="id" value="%d">'
+                    '<button class="btn small" type="submit">remove'
+                    '</button></form>'
+                    % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id']))
             bits.append(
                 '<tr><td><span class="tag %s">%s</span></td>'
                 '<td><span class="tag%s">%s</span></td>'
@@ -2036,6 +2150,14 @@ def admin_page(session, req, now=None, error='', minted=None):
                                  'member' if u['role'] == 'admin' else 'admin',
                                  'make member' if u['role'] == 'admin'
                                  else 'make admin'))
+            # DISABLE IS THE REVERSIBLE ONE; this is not. The work they did
+            # stays where it is -- a verdict lives in a ledger, under the
+            # name that made it.
+            acts.append(_useract(
+                csrf, u['id'], 'delete', 'remove', warn=True,
+                confirm='Remove %s? They cannot sign in again. Every crop '
+                        'they judged stays judged, under their name.'
+                        % (u['username'],)))
         bits.append(
             '<tr><td class="name">%s%s</td>'
             '<td><span class="tag%s">%s</span></td>'
@@ -2245,12 +2367,20 @@ def _assignact(csrf, aid, do, label, warn=False, confirm=''):
                esc(label)))
 
 
-def _useract(csrf, uid, what, label, warn=False):
-    """One button in the accounts table: a real form, so it is a POST."""
-    return ('<form method="post" action="%s/user">'
+def _useract(csrf, uid, what, label, warn=False, confirm=''):
+    """One button in the accounts table: a real form, so it is a POST.
+
+    `confirm` puts a browser confirm in front of it, for the ones with no
+    undo. It is a convenience, not a control: the refusals that matter --
+    the last admin, your own account -- are enforced on the server.
+    """
+    return ('<form method="post" action="%s/user"%s>'
             '<input type="hidden" name="%s" value="%s">'
             '<input type="hidden" name="id" value="%d">'
             '<input type="hidden" name="do" value="%s">'
             '<button class="btn small%s" type="submit">%s</button></form>'
-            % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, uid, esc(what),
+            % (esc(ADMIN_PATH),
+               (' onsubmit="return confirm(&quot;%s&quot;)"' % (esc(confirm),))
+               if confirm else '',
+               esc(CSRF_FIELD), csrf, uid, esc(what),
                ' warn' if warn else '', esc(label)))
