@@ -295,6 +295,79 @@ const settle = () => new Promise(r => setImmediate(r));
     return r.returncode
 
 
+def check_freshness(html):
+    """The mark that says how current the page is, at three ages.
+
+    It was rendered once, at build time, as a green pulsing dot -- so a tab
+    left open overnight showed the same "live" mark as one opened a minute
+    after the rebuild, and the element whose entire job is to say how old this
+    is was the one element that could not say it. Driven here at four minutes,
+    at three hours and at a day and a half old.
+    """
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    mark = '/* \u2500\u2500 how old is what you are looking at'
+    if mark not in script:
+        print('FAIL the freshness mark is not decided in the browser at all')
+        return 1
+    s = script.index(mark)
+    iife = script[s:script.index('})();', s) + 5]
+    m = re.search(r'data-at="(\d+)"', html)
+    if not m:
+        print('FAIL the page does not carry the time it was built, so nothing '
+              'can work out how old it is')
+        return 1
+    built = int(m.group(1))
+    if abs(time.time() - built) > 6 * 3600:
+        print('FAIL the page says it was built %s, which is not when this '
+              'build ran' % (built,))
+        return 1
+
+    drive = r"""
+'use strict';
+let NOW = 0;
+const dot = {className: 'dot'};
+const txt = {textContent: 'updated 14:03', title: ''};
+const box = {getAttribute: () => String(NOW / 1000 - AGE * 60)};
+global.document = {getElementById: (id) =>
+  id === 'upd' ? box : id === 'updDot' ? dot : id === 'updT' ? txt : null};
+global.setInterval = () => 0;
+let AGE = 0;
+const realNow = Date.now;
+Date.now = () => NOW;
+const bad = [];
+function at(mins, wantClass, why) {
+  AGE = mins; NOW = 1787000000000;
+  dot.className = 'dot'; txt.textContent = 'updated 14:03'; txt.title = '';
+  __IIFE__
+  if (dot.className !== wantClass)
+    bad.push(mins + ' minutes old drew ' + JSON.stringify(dot.className) +
+             ', want ' + JSON.stringify(wantClass) + ' -- ' + why);
+  return txt.textContent;
+}
+const fresh = at(4, 'dot', 'the rebuild is hourly, so this is current');
+if (!/14:03/.test(fresh))
+  bad.push('a current page stopped naming the time it was built: ' + fresh);
+const aging = at(180, 'dot aging', 'three hours is three missed rebuilds');
+if (!/3h ago/.test(aging))
+  bad.push('a three-hour-old page reads ' + JSON.stringify(aging) +
+           ' -- the reader has to do the arithmetic');
+const stale = at(2160, 'dot stale', 'a day and a half is not live');
+if (!/1d ago|2d ago/.test(stale))
+  bad.push('a day-and-a-half-old page reads ' + JSON.stringify(stale));
+if (bad.length) { bad.forEach(b => console.log('FAIL ' + b)); process.exit(1) }
+console.log('ok   the freshness mark is decided when you look, not when it '
+            + 'was built');
+""".replace('__IIFE__', iife)
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'fresh.js')
+        with open(js, 'w', encoding='utf-8') as f:
+            f.write(drive)
+        r = subprocess.run(['node', js], capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    return r.returncode
+
+
 def check_markup(html):
     """Static assertions on the panel's hand-written HTML/CSS.
 
@@ -3619,6 +3692,8 @@ def main():
     check_whole_script(html)
     check_no_shadowing(html)
     if check_copy_say(html):
+        return 1
+    if check_freshness(html):
         return 1
     check_markup(html)
     if check_map_layers(html):

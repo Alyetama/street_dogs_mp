@@ -11156,6 +11156,7 @@ def render(ov, per, tr, now, locs=()):
             .replace('__LLMNAV__', LLM_NAV if LLM_PAGE else '')
             .replace('__NOW__', now.strftime('%Y-%m-%d %H:%M'))
             .replace('__CLOCK__', now.strftime('%H:%M'))
+            .replace('__EPOCH__', str(int(now.timestamp())))
             .replace('__ACCTCSS__', account_css())
             .replace('__PROG__', f"{ov['pct']:.1f}")
             .replace('__LB_CSS__', LB_CSS)
@@ -12179,7 +12180,14 @@ h1 .o{color:var(--acc)}
    all is that a dashboard you cannot sign out of is a dashboard that stays
    signed in on a phone somebody leaves on a table. */
 __ACCTCSS__
+/* Green and pulsing said "live" on a page that had been sitting in a tab
+   since yesterday: the mark was rendered at build time and never reconsidered,
+   so the one element whose whole job is to say how current this is was the one
+   element that could not tell. Age is decided in the browser now, against the
+   moment the page was built, and re-decided while the tab is open. */
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2.4s infinite}
+.dot.aging{background:var(--acc);animation:none}
+.dot.stale{background:var(--dim);animation:none}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(67,181,129,.5)}70%{box-shadow:0 0 0 7px rgba(67,181,129,0)}100%{box-shadow:0 0 0 0 rgba(67,181,129,0)}}
 /* The one solid-filled control on the page. Everything else is a tint or an
    outline, so filling exactly one thing makes it unambiguously THE action --
@@ -13204,7 +13212,7 @@ __LLMNAV__
     <!-- What the page knows and when it knew it. The date is today on a page
          rebuilt hourly and the cadence never changes, so both moved into the
          title and the line says the one thing worth a glance: how old this is. -->
-    <div class="upd"><span class="dot"></span><span class="updt" title="Rebuilt __NOW__ · refreshes on the hour">updated __CLOCK__</span><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
+    <div class="upd" id="upd" data-at="__EPOCH__"><span class="dot" id="updDot"></span><span class="updt" id="updT" title="Rebuilt __NOW__ · refreshes on the hour">updated __CLOCK__</span><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
     <!-- WHOSE SESSION THIS IS, last and behind a hairline, on this page and
          on every other page with a header. It stood between the nav and the
          status line before, so a name and a sign-out sat in the middle of a
@@ -13576,6 +13584,26 @@ function bmove(key,stage){
 }
 function bload(){fetch('/api/board').then(function(r){return r.json()}).then(brender).catch(function(){boardEl.innerHTML='<div style="color:#69727d;padding:18px">board API unavailable — is the server running?</div>'})}
 if(boardEl)bload();
+/* ── how old is what you are looking at ── */
+(function(){
+  var box=document.getElementById('upd'),dot=document.getElementById('updDot'),
+      txt=document.getElementById('updT');
+  if(!box||!dot||!txt)return;
+  var at=parseInt(box.getAttribute('data-at'),10);
+  if(!at)return;
+  var stamp=txt.textContent.replace('updated ','').trim();
+  function paint(){
+    var mins=Math.round((Date.now()/1000-at)/60);
+    /* the rebuild is hourly, so an hour and a bit is still on time */
+    dot.className='dot'+(mins<75?'':(mins<360?' aging':' stale'));
+    txt.textContent=mins<75?('updated '+stamp)
+      :(mins<1440?('updated '+Math.round(mins/60)+'h ago')
+                 :('updated '+Math.round(mins/1440)+'d ago'));
+    txt.title=(mins<75?'Rebuilt':'Last rebuilt')+' at '+stamp+
+      ' · refreshes on the hour';
+  }
+  paint();setInterval(paint,30000);
+})();
 /* ── force refresh ── */
 var rbtn=document.getElementById('refreshBtn');
 function refreshNow(){
