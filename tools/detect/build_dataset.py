@@ -468,6 +468,94 @@ def measure(out, family):
     return inventory(out, family)[1]
 
 
+def catalogue(family=None):
+    """Every dataset on the training root, newest first.
+
+    A SCAN, not a list. A dataset built five minutes ago has to show up
+    without anybody editing a file, and one deleted by hand has to stop
+    showing up -- so this walks the root and reads what it finds.
+
+    A build made here carries bundle/manifest.json and gets its full record.
+    The hand-built sets that came before -- dogbin_v5, dogdet_v2, leash_v2 --
+    have no bundle, and they are still real datasets somebody may want to
+    train on, so they are reported with what can be seen from their shape and
+    marked as having no record rather than being hidden.
+    """
+    try:
+        root = training_root()
+    except SystemExit:
+        return []
+    out = []
+    bases = {v['base']: k for k, v in FAMILIES.items()}
+    for name in sorted(listing(root) or [], reverse=True):
+        path = os.path.join(root, name)
+        if not os.path.isdir(path) or name.endswith('.stage'):
+            continue
+        man_path = os.path.join(path, 'bundle', 'manifest.json')
+        man = None
+        if os.path.isfile(man_path):
+            try:
+                with open(man_path) as fh:
+                    man = json.load(fh)
+            except (OSError, ValueError):
+                man = None
+        if man:
+            row = {'id': name, 'path': path, 'family': man.get('family'),
+                   'kind': man.get('kind'),
+                   'built_at': man.get('built_at'),
+                   'built_at_iso': man.get('built_at_iso'),
+                   'built_by': man.get('built_by'),
+                   'counts': man.get('counts'), 'bundle': True,
+                   'base': os.path.basename(man.get('base') or ''),
+                   'seconds': man.get('seconds')}
+        else:
+            kind, classes = _shape_of(path)
+            if not kind:
+                continue
+            # THE CLASSES, NOT THE NAME. leash_binary_v2 is called leash and
+            # holds dog/not_dog -- it was a dog-bin set renamed -- and a leash
+            # model trained on it would learn the wrong question without one
+            # error anywhere. A directory name is what somebody called it; the
+            # class directories are what is in it.
+            fam = None
+            if kind == 'detect':
+                fam = 'dogdet'
+            elif classes:
+                for key, spec in FAMILIES.items():
+                    if spec['classes'] and set(spec['classes']) <= classes:
+                        fam = key
+                        break
+            if fam is None:
+                fam = bases.get(name)
+            try:
+                at = int(os.path.getmtime(path))
+            except OSError:
+                at = None
+            row = {'id': name, 'path': path, 'family': fam, 'kind': kind,
+                   'built_at': at,
+                   'built_at_iso': (time.strftime('%Y-%m-%dT%H:%M:%S',
+                                                  time.localtime(at))
+                                    if at else None),
+                   'built_by': '', 'counts': None, 'bundle': False,
+                   'base': '', 'seconds': None}
+        if family and row['family'] != family:
+            continue
+        out.append(row)
+    out.sort(key=lambda r: r.get('built_at') or 0, reverse=True)
+    return out
+
+
+def _shape_of(path):
+    """(kind, classes) from what is on disk. (None, set()) if it is not one."""
+    if os.path.isfile(os.path.join(path, 'dataset.yaml')) and \
+            os.path.isdir(os.path.join(path, 'images')):
+        return 'detect', set()
+    train = os.path.join(path, 'train')
+    classes = {c for c in listing(train) or []
+               if os.path.isdir(os.path.join(train, c))}
+    return ('classify', classes) if classes else (None, set())
+
+
 def build(family, out=None, by='', duckdb_python=None, crop_python=None,
           keep_stage=False, now=None):
     """Build one dataset. Returns the manifest it wrote."""

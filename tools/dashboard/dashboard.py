@@ -9894,6 +9894,80 @@ class BoardHandler(SimpleHTTPRequestHandler):
             pass          # a header is never worth failing a response over
         SimpleHTTPRequestHandler.end_headers(self)
 
+    def _train_admin(self):
+        """True when this request may start work. Answers the 404 itself."""
+        if not self.session or self.session.get('role') != 'admin':
+            self.send_error(404)
+            return False
+        return True
+
+    def _train_get(self, path):
+        """The training page's read-only API. True when it answered."""
+        if not self._train_admin():
+            return True
+        t, j = _train_page(), _jobs()
+        if t is None or j is None:
+            self._json({'error': 'the training tools would not load'})
+            return True
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            if path == '/api/train/overview':
+                self._json(t.overview(q.get('family', [None])[0]))
+                return True
+            if path == '/api/train/params':
+                self._json(_train_params(q.get('family', [''])[0]))
+                return True
+            if path == '/api/train/log':
+                job_id = q.get('job', [''])[0]
+                job = j.read(job_id)
+                if job is None:
+                    self._json({'error': 'no such job'})
+                    return True
+                self._json({'id': job_id, 'state': job.get('state'),
+                            'exit_code': job.get('exit_code'),
+                            'tail': j.tail(job_id, 24000)})
+                return True
+        except Exception as e:            # noqa: BLE001 - a page, not a 500
+            self._json({'error': '%s: %s' % (type(e).__name__, e)})
+            return True
+        return False
+
+    def _train_post(self, path):
+        """Everything that starts or stops work. True when it answered."""
+        if not self._train_admin():
+            return True
+        t, j = _train_page(), _jobs()
+        if t is None or j is None:
+            self._json({'error': 'the training tools would not load'})
+            return True
+        try:
+            n = int(self.headers.get('Content-Length', 0) or 0)
+            if n > 1 << 20:
+                self._json({'error': 'that request was too large'})
+                return True
+            data = json.loads(self.rfile.read(n) or b'{}')
+            if not isinstance(data, dict):
+                self._json({'error': 'expected an object'})
+                return True
+            who = (self.session or {}).get('username') or ''
+            if path == '/api/train/build':
+                self._json(_train_build(j, data.get('family'), who))
+                return True
+            if path == '/api/train/start':
+                self._json(_train_start(j, data, who))
+                return True
+            if path == '/api/train/cancel':
+                got = j.cancel(str(data.get('job') or ''))
+                self._json({'ok': got['ok'], 'error': got['message'] or None,
+                            'job': got['job'] and {
+                                'id': got['job']['id'],
+                                'state': got['job']['state']}})
+                return True
+        except Exception as e:            # noqa: BLE001
+            self._json({'error': '%s: %s' % (type(e).__name__, e)})
+            return True
+        return False
+
     def _gate(self):
         """Has the login gate already answered this request?
 
@@ -10415,6 +10489,27 @@ class BoardHandler(SimpleHTTPRequestHandler):
         # from every judging page. Claimed BEFORE the generic /audit
         # dispatch: _audit_get owns that prefix, and the day it grows a
         # catch-all this page would silently become its 404.
+        if _p == '/train':
+            # ADMIN ONLY, and answered with the same empty 404 a dead address
+            # gets. Every button on it starts work on shared hardware, and a
+            # member who guesses the name learns nothing they did not know.
+            t = _train_page()
+            if not self.session or self.session.get('role') != 'admin' \
+                    or t is None:
+                self.send_error(404)
+                return
+            body = t.page_html(account=account_strip(self.session)) \
+                .encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if _p.startswith('/api/train/'):
+            if self._train_get(_p):
+                return
         if _p == '/audit/review':
             body = REVIEW_HTML.encode('utf-8')
             self.send_response(200)
@@ -10755,9 +10850,12 @@ class BoardHandler(SimpleHTTPRequestHandler):
         body = self._splice(
             body, self._ACCT_OPEN, self._ACCT_CLOSE,
             lambda: render_account(getattr(self, 'session', None)))
+        # Train first, then Accounts: one is where the work is done and the
+        # other is who may do it, and that is the order they are wanted in.
         body = self._splice(
             body, self._NAV_OPEN, self._NAV_CLOSE,
-            lambda: render_account_nav(getattr(self, 'session', None)))
+            lambda: (render_train_nav(getattr(self, 'session', None))
+                     + render_account_nav(getattr(self, 'session', None))))
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -10794,6 +10892,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if LLM_PAGE and (_p.startswith('/llm')
                          or _p.startswith('/api/llm')):
             if self._llm_post():
+                return
+        if self.path.split('?', 1)[0].startswith('/api/train/'):
+            if self._train_post(self.path.split('?', 1)[0]):
                 return
         if self.path.split('?', 1)[0] == '/api/audit/box':
             try:
@@ -11305,6 +11406,140 @@ def serve(args):
             srv.shutdown()
 
 
+_TRAIN = {'mod': None, 'tried': False}
+_JOBS = {'mod': None, 'tried': False}
+
+
+def _train_page():
+    """The training page, imported once and only when asked for."""
+    if not _TRAIN['tried']:
+        _TRAIN['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import train_page as _t
+            _TRAIN['mod'] = _t
+        except Exception:                 # noqa: BLE001 - a page, not the gate
+            _TRAIN['mod'] = None
+    return _TRAIN['mod']
+
+
+def _jobs():
+    """The job runner. Separate from the page above because the dashboard
+    reads job state on routes the page does not serve."""
+    if not _JOBS['tried']:
+        _JOBS['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import jobs as _j
+            _JOBS['mod'] = _j
+        except Exception:                 # noqa: BLE001
+            _JOBS['mod'] = None
+    return _JOBS['mod']
+
+
+def train_python():
+    """The interpreter that has ultralytics -- the training environment.
+
+    Its own config key so it can be moved without moving the one the gate
+    uses to score crops, and it falls back to that one because on this
+    machine they are the same environment.
+    """
+    return (cfg('train_python', env='TRAIN_PYTHON')
+            or cfg('dogbin_python', env='DOGBIN_PYTHON')
+            or sys.executable)
+
+
+def build_python():
+    """The interpreter that has duckdb -- which is this one, since the
+    dashboard cannot start without it."""
+    return cfg('build_python', env='BUILD_PYTHON') or sys.executable
+
+
+# ── the three module-level helpers the training routes lean on ─────────────
+# Outside the handler because they are the whole of what those routes DO, and
+# a route is easier to trust when its body is a call and a reply.
+
+_TRAIN_PARAMS = {}
+
+
+def _train_params(family, ttl=90.0):
+    """The parameter form, from the training environment.
+
+    Read by running train_model.py --show-defaults over there: this process
+    has no ultralytics and should not need one to draw a field. Memoed for a
+    minute and a half because the page asks on every model switch and the
+    answer only moves when somebody finishes a run.
+    """
+    if family not in ('dogdet', 'dogbin', 'leash'):
+        return {'error': 'no such model'}
+    got = _TRAIN_PARAMS.get(family)
+    if got and time.time() - got[0] < ttl:
+        return got[1]
+    out = subprocess.run(
+        [train_python(), os.path.join(REPO, 'tools', 'detect',
+                                      'train_model.py'),
+         '--family', family, '--show-defaults'],
+        capture_output=True, text=True, timeout=180)
+    if out.returncode != 0:
+        return {'error': 'could not read the parameters: %s'
+                         % ((out.stderr or '').strip()[-300:],)}
+    try:
+        doc = json.loads(out.stdout)
+    except ValueError:
+        return {'error': 'the training environment did not answer with JSON'}
+    _TRAIN_PARAMS[family] = (time.time(), doc)
+    return doc
+
+
+def _train_build(j, family, who):
+    """Submit a dataset build. The argv is what a terminal would run."""
+    if family not in ('dogdet', 'dogbin', 'leash'):
+        return {'error': 'no such model'}
+    py = build_python()
+    argv = [py, os.path.join(REPO, 'tools', 'detect', 'build_dataset.py'),
+            '--family', family, '--by', str(who or ''),
+            '--duckdb-python', py, '--crop-python', train_python()]
+    got = j.submit('build', argv, lane='build',
+                   label='%s dataset' % (family,), by=who,
+                   meta={'family': family})
+    if not got['ok']:
+        return {'error': got['message']}
+    return {'ok': True, 'job': {'id': got['job']['id']}}
+
+
+def _train_start(j, data, who):
+    """Submit a training run.
+
+    THE PARAMETERS ARE NOT VALIDATED HERE. They are handed over as JSON and
+    checked by train_model.py against ultralytics' own table, in the
+    environment that has ultralytics -- one place that can answer whether a
+    key is real, rather than a second list here that would drift from it. A
+    bad key fails the job in a second with a line saying which key.
+    """
+    family = data.get('family')
+    if family not in ('dogdet', 'dogbin', 'leash'):
+        return {'error': 'no such model'}
+    dataset = str(data.get('dataset') or '')
+    if not dataset or '/' in dataset or dataset.startswith('.'):
+        return {'error': 'that is not a dataset built here'}
+    params = data.get('params') or {}
+    if not isinstance(params, dict):
+        return {'error': 'the parameters must be an object'}
+    argv = [train_python(),
+            os.path.join(REPO, 'tools', 'detect', 'train_model.py'),
+            '--family', family, '--dataset', dataset,
+            '--by', str(who or '')]
+    if params:
+        argv += ['--params-json', json.dumps(params, sort_keys=True)]
+    got = j.submit('train', argv, lane='train',
+                   label='%s on %s' % (family, dataset), by=who,
+                   meta={'family': family, 'dataset': dataset,
+                         'params': params})
+    if not got['ok']:
+        return {'error': got['message']}
+    return {'ok': True, 'job': {'id': got['job']['id']}}
+
+
 def account_css():
     """The identity strip's stylesheet, from the module that owns the strip.
 
@@ -11318,6 +11553,20 @@ def account_css():
     """
     g = _auth()
     return '' if g is None else g.IDENTITY_CSS
+
+
+def render_train_nav(session):
+    """The way to the training page, for the action row.
+
+    Admins only, and drawn for nobody else -- /train answers a member with the
+    same empty 404 an address that does not exist gets, and a link that 404s
+    for half the people who can see it undoes that in the header.
+    """
+    if not session or session.get('role') != 'admin':
+        return ''
+    return ('<a class="hnav" href="/train" title="Build a dataset from the '
+            'annotations, and train on it">'
+            '<span class="hnf">&#9881;</span>Train</a>')
 
 
 def render_account_nav(session):

@@ -172,10 +172,23 @@ def _coerce(key, value, tables):
         if text in ('false', '0', 'no', 'off'):
             return False
         raise ValueError('%s is true or false, not %r' % (key, value))
-    if key in tables['int']:
-        # batch=-1 is ultralytics' auto-batch, and 'auto' reads better
-        if str(value).strip().lower() == 'auto' and key == 'batch':
+    if key == 'batch':
+        # BATCH IS A COUNT OR A FRACTION, and the difference is not cosmetic.
+        # ultralytics lists it as a float so that 0 < batch < 1 can mean "use
+        # that share of the card", and -1 means work it out. Anything else is
+        # a number of images -- and torch's BatchSampler raises on a float:
+        # inheriting `batch: 2` from a previous run produced 2.0 and every
+        # detector run died at the first dataloader with
+        # "batch_size should be a positive integer value, but got 2.0".
+        text = str(value).strip().lower()
+        if text == 'auto':
             return -1
+        try:
+            got = float(text)
+        except ValueError:
+            raise ValueError('batch is a number, or "auto", not %r' % (value,))
+        return got if 0.0 < got < 1.0 else int(got)
+    if key in tables['int']:
         try:
             return int(float(str(value).strip()))
         except ValueError:

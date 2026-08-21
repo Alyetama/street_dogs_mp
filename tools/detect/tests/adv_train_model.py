@@ -161,6 +161,40 @@ def dataset_checks(bad, tm):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def batch_checks(bad, py):
+    """batch is a COUNT or a FRACTION, and torch will not take a float count.
+
+    ultralytics lists batch as a float so 0 < batch < 1 can mean "use that
+    share of the card" and -1 can mean "work it out". Coerced as a plain
+    float, inheriting `batch: 2` from a previous run gave 2.0 -- and every
+    detector run then died at the first dataloader with "batch_size should be
+    a positive integer value, but got 2.0". Found by accident, when a mutation
+    test launched a real run; pinned here so it is not found that way twice.
+    """
+    probe = (
+        'import json,sys; sys.path.insert(0, %r); import train_model as t\n'
+        'tb=t._cfg_tables()\n'
+        'print(json.dumps([[repr(t._coerce("batch",v,tb)),\n'
+        '                   type(t._coerce("batch",v,tb)).__name__]\n'
+        '                  for v in ["2","2.0",2,"16","auto","-1","0.7"]]))\n'
+        % (DETECT,))
+    out = subprocess.run([py, '-c', probe], capture_output=True, text=True,
+                         timeout=180)
+    try:
+        got = json.loads((out.stdout or '').strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        bad.append('could not coerce batch at all: %s'
+                   % ((out.stderr or '').strip()[-200:],))
+        return
+    want = [('2', 'int'), ('2', 'int'), ('2', 'int'), ('16', 'int'),
+            ('-1', 'int'), ('-1', 'int'), ('0.7', 'float')]
+    for (gv, gt), (wv, wt) in zip(got, want):
+        if gt != wt or gv != wv:
+            bad.append('batch coerced to %s %s, want %s %s -- a float count '
+                       'is rejected by torch at the first dataloader'
+                       % (gv, gt, wv, wt))
+
+
 def form_checks(bad, py):
     """--show-defaults is what the dashboard draws, so it has to be usable."""
     got = _run(py, ['--family', 'dogdet', '--show-defaults'])
@@ -349,7 +383,7 @@ def main():
         # a real built dataset to point at, or one made here
         dataset, made = _a_dataset(tm)
         try:
-            for fn in (form_checks,):
+            for fn in (form_checks, batch_checks):
                 fn(bad, py)
             for fn in (refusal_checks, bundle_checks):
                 fn(bad, py, dataset)
