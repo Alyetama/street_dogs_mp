@@ -155,6 +155,9 @@ NOTICES = {
                 'open a judging page.',
     'assign_cancelled': 'That target is called off. What was judged towards '
                         'it stays judged.',
+    'assign_deleted': 'That target is deleted. Every annotation made towards '
+                      'it is untouched \u2014 verdicts live in the ledgers, '
+                      'not in this record.',
     'user_disabled': 'That account is disabled and its sessions are over.',
     'user_enabled': 'That account can sign in again.',
     'role_admin': 'That account is an admin now.',
@@ -1238,6 +1241,14 @@ def admin_action(action, req, session, now=None, path=None):
                                            path=p)
                 return {'ok': True, 'notice': 'assign_cancelled',
                         'invite': None, 'message': ''}
+            if what == 'delete':
+                gone = accounts.delete_assignment(_int(req.one('id')),
+                                                  path=p)
+                # Already gone is not a failure. Two admins on the same row,
+                # or a second click on a page that has not reloaded, is a
+                # race rather than a mistake worth a red message.
+                return {'ok': True, 'invite': None, 'message': '',
+                        'notice': 'assign_deleted' if gone else ''}
             due = _day_end(req.one('due'))
             if req.one('due').strip() and due is None:
                 return {'ok': False, 'notice': '', 'invite': None,
@@ -2065,6 +2076,16 @@ def admin_page(session, req, now=None, error='', minted=None):
     # anybody signing in.
     bits.append(
         '<script>\n'
+        # IRREVERSIBLE CONTROLS ASK FIRST. One delegated listener for every
+        # button carrying data-confirm, rather than a line of JavaScript in
+        # an attribute per row -- and it reads the question off the button,
+        # so the sentence names the person and the row it is about.
+        "document.addEventListener('click',function(e){\n"
+        "var b=e.target&&e.target.closest&&e.target.closest('[data-confirm]');\n"
+        "if(!b)return;\n"
+        "if(!window.confirm(b.getAttribute('data-confirm')))"
+        "{e.preventDefault();e.stopPropagation();}\n"
+        "},true);\n"
         "(function(){var cs=document.querySelectorAll('.prog[data-a]');\n"
         'if(!cs.length)return;\n'
         "function n(v){return String(v).replace(/\\B(?=(\\d{3})+(?!\\d))/g,',')}\n"
@@ -2165,15 +2186,19 @@ def _delegation_section(session, csrf, users, path, ts):
                    '<th>for</th><th>set by</th><th>due</th><th>state</th>'
                    '<th></th></tr>\n')
         for a in rows:
-            act = ''
-            if a['state'] in ('open', 'overdue'):
-                act = ('<form method="post" action="%s/assign">'
-                       '<input type="hidden" name="%s" value="%s">'
-                       '<input type="hidden" name="do" value="cancel">'
-                       '<input type="hidden" name="id" value="%d">'
-                       '<button class="btn small warn" type="submit">'
-                       'call off</button></form>'
-                       % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, a['id']))
+            # TWO DIFFERENT ANSWERS, so two controls rather than one that
+            # means both. "Call off" stops the work and keeps the record --
+            # what was asked for, and where it got to. "Delete" is for a row
+            # that should never have existed: the wrong person, or 5000 typed
+            # for 500. Only the second is offered on a row that is already
+            # finished or called off, because there is nothing left to stop.
+            act = _assignact(csrf, a['id'], 'cancel', 'call off', warn=True) \
+                if a['state'] in ('open', 'overdue') else ''
+            act += _assignact(
+                csrf, a['id'], 'delete', 'delete', warn=True,
+                confirm='Delete this target for %s? The record goes; every '
+                        'annotation made towards it stays exactly where it '
+                        'is.' % (a['username'] or 'them',))
             out.append(
                 '<tr><td class="name">%s</td><td>%s</td>'
                 '<td class="prog" data-a="%d" data-target="%d">'
@@ -2193,10 +2218,31 @@ def _delegation_section(session, csrf, users, path, ts):
     out.append(
         '<div class="note">A target counts only what is judged AFTER it is '
         'set \u2014 "five hundred" means five hundred more. One open target '
-        'per person per surface. Calling one off leaves every annotation '
-        'made towards it exactly where it is.</div>\n'
+        'per person per surface. <b>Call off</b> stops the work and keeps the '
+        'record of what was asked for; <b>delete</b> removes the record. '
+        'Neither touches an annotation \u2014 verdicts live in the ledgers, '
+        'and this table only ever asked for them.</div>\n'
         '</div>\n</section>\n')
     return ''.join(out)
+
+
+def _assignact(csrf, aid, do, label, warn=False, confirm=''):
+    """One button in the delegated-work table: a real form, so it is a POST.
+
+    data-confirm rather than an inline onclick, so the page has one handler
+    for every irreversible control instead of a string of JavaScript written
+    into an attribute per row.
+    """
+    return ('<form method="post" action="%s/assign">'
+            '<input type="hidden" name="%s" value="%s">'
+            '<input type="hidden" name="do" value="%s">'
+            '<input type="hidden" name="id" value="%d">'
+            '<button class="btn small%s" type="submit"%s>%s</button>'
+            '</form>'
+            % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, esc(do), aid,
+               ' warn' if warn else '',
+               (' data-confirm="%s"' % (esc(confirm),)) if confirm else '',
+               esc(label)))
 
 
 def _useract(csrf, uid, what, label, warn=False):

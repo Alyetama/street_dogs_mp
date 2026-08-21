@@ -41,6 +41,16 @@ sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
 sys.path.insert(0, DASH)
 
 
+def _md5(path):
+    """The ledger exactly as it is, so "untouched" is a fact not a hope."""
+    import hashlib
+    try:
+        with open(path, 'rb') as fh:
+            return hashlib.md5(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def load_dashboard():
     """dashboard.py as a module, without running its CLI."""
     spec = importlib.util.spec_from_file_location(
@@ -525,7 +535,7 @@ def route_checks(bad, d, A, auth):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def admin_checks(bad, A, auth):
+def admin_checks(bad, A, auth, d):
     """Delegating is an admin action, and calling work off keeps the work."""
     tmp = tempfile.mkdtemp(prefix='adv_del_admin_')
     try:
@@ -590,6 +600,79 @@ def admin_checks(bad, A, auth):
                        % (after['state'],))
         if after['target'] != 500:
             bad.append('cancelling rewrote the record of what was asked for')
+
+        # ── DELETE: the record goes, the work does not ──
+        # Calling off and deleting answer different questions. Cancelling
+        # says "we stopped wanting this" and keeps what was asked for and
+        # where it got to; deleting is for a row that should never have
+        # existed -- the wrong person, or 5000 typed for 500.
+        n_before = d.done_by('boss', 'any', 0)
+        led = [d._store_for(lb)['labels'] for lb in d.FLAG_LABELS]
+        before = [_md5(f) for f in led]
+        keep = A.create_assignment('sam', 77, surface='leash',
+                                   created_by='boss', now=now,
+                                   path=p)['assignment']
+        gone = A.create_assignment('sam', 88, surface='gate',
+                                   created_by='boss', now=now,
+                                   path=p)['assignment']
+        n_rows = len(A.list_assignments(path=p))
+        got = auth.admin_action('assign', req(do='delete',
+                                              id=str(gone['id'])),
+                                admin, now=now, path=p)
+        if not got['ok'] or got['notice'] != 'assign_deleted':
+            bad.append('an admin could not delete a target: %r' % (got,))
+        if A.get_assignment(gone['id'], path=p) is not None:
+            bad.append('a deleted target is still on record')
+        if A.get_assignment(keep['id'], path=p) is None:
+            bad.append('deleting one target took another with it')
+        # counted, not spot-checked: a DELETE with a loose WHERE takes the
+        # rows on one side of the id and leaves whichever neighbour this
+        # check happened to look at
+        if len(A.list_assignments(path=p)) != n_rows - 1:
+            bad.append('deleting one target removed %d rows'
+                       % (n_rows - len(A.list_assignments(path=p)),))
+        # ...AND NOT ONE ANNOTATION MOVED. The ledgers and this database do
+        # not point at each other: progress is counted by asking the ledgers
+        # who wrote what, so removing the asking removes no answer. Somebody
+        # who judged four hundred crops towards a target deleted by mistake
+        # has still judged four hundred crops.
+        if [_md5(f) for f in led] != before:
+            bad.append('deleting a target rewrote an annotation ledger')
+        if d.done_by('boss', 'any', 0) != n_before:
+            bad.append('deleting a target changed what somebody had judged')
+        # deleting frees the surface, because there is no row left to clash
+        if not A.create_assignment('sam', 9, surface='gate',
+                                   created_by='boss', now=now, path=p)['ok']:
+            bad.append('the surface stayed claimed by a target that is gone')
+        # a second click, or two admins on one row, is a race not a mistake
+        again = auth.admin_action('assign', req(do='delete',
+                                                id=str(gone['id'])),
+                                  admin, now=now, path=p)
+        if not again['ok'] or again['notice']:
+            bad.append('deleting an already-deleted target is reported as '
+                       'something happening: %r' % (again,))
+        for junk in ('', 'not-a-number', '-1', '999999'):
+            if not auth.admin_action('assign', req(do='delete', id=junk),
+                                     admin, now=now, path=p)['ok']:
+                bad.append('a delete of %r threw rather than doing nothing'
+                           % (junk,))
+        # A MEMBER CANNOT, even holding the endpoint name and a real id
+        left = A.create_assignment('sam', 5, surface='review',
+                                   created_by='boss', now=now,
+                                   path=p)['assignment']
+        if auth.admin_action('assign', req(do='delete', id=str(left['id'])),
+                             member, now=now, path=p)['ok']:
+            bad.append('a member deleted an admin\'s target')
+        if A.get_assignment(left['id'], path=p) is None:
+            bad.append('a member\'s refused delete removed the row anyway')
+        # and the control asks before it acts
+        page = auth.admin_page(admin, req(), now=now)
+        if 'data-confirm=' not in page:
+            bad.append('delete does not ask first — it is the one control '
+                       'here that cannot be undone')
+        if 'window.confirm' not in page:
+            bad.append('nothing on the page acts on data-confirm, so the '
+                       'attribute is decoration')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -672,7 +755,7 @@ def main():
         return 1
     for fn, args in ((schema_checks, (A,)), (validation_checks, (A,)),
                      (counting_checks, (d, A)), (stamp_checks, (d, A, auth)),
-                     (route_checks, (d, A, auth)), (admin_checks, (A, auth)),
+                     (route_checks, (d, A, auth)), (admin_checks, (A, auth, d)),
                      (strip_checks, (d,))):
         try:
             fn(bad, *args)

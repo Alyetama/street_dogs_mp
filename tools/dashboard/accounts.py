@@ -1107,6 +1107,36 @@ def complete_assignment(assignment_id, now=None, path=None):
         con.close()
 
 
+def delete_assignment(assignment_id, path=None):
+    """Remove the record of a target. Says whether there was one to remove.
+
+    CALLING OFF AND DELETING ARE DIFFERENT ANSWERS to different questions.
+    Cancelling says "we stopped wanting this", and the row stays so that
+    "we asked for five hundred and stopped it at ninety" is still answerable
+    next month. Deleting says "this should never have been asked for" -- a
+    target set on the wrong person, or a typo of 5000 for 500 -- and leaves
+    nothing behind, because a row nobody meant is worse than no row.
+
+    IT TOUCHES NO ANNOTATION. Assignments live in this database and verdicts
+    live in the ledgers, and nothing in either points at the other: progress
+    is counted by asking the ledgers who wrote what, so deleting the target
+    removes the asking and not one answer. Somebody who judged four hundred
+    crops towards a target deleted by mistake has still judged four hundred
+    crops, and re-setting the target counts them from the new start_at.
+
+    Nothing cascades onto this row either -- it is referenced by nothing --
+    so the delete is the whole operation.
+    """
+    con = connect(path)
+    try:
+        with _tx(con):
+            cur = con.execute('DELETE FROM assignments WHERE id = ?',
+                              (_int_id(assignment_id),))
+        return cur.rowcount > 0
+    finally:
+        con.close()
+
+
 def _int_id(v):
     try:
         return int(v)
