@@ -65,6 +65,16 @@ def page_checks(bad):
         if not fam['stores']:
             bad.append('%s says it reads no annotation store, so the build '
                        'button is a leap of faith' % (fam['key'],))
+    # THE HAND-DRAWN BOXES ARE PART OF WHAT A BUILD READS. They are fetched
+    # rather than sitting in data/, so they were missing from the line that
+    # lists the inputs -- the only labels in this project somebody drew from
+    # scratch, invisible next to four ledgers of corrections.
+    for fam in got['families']:
+        if 'label_studio' not in fam:
+            bad.append('%s does not say anything about the Label Studio '
+                       'export, so the hand-drawn boxes are invisible in the '
+                       'list of what a build reads' % (fam.get('key'),))
+    _labelstudio_checks(bad)
     if 'datasets' not in got or 'jobs' not in got or 'lanes' not in got:
         bad.append('the overview is missing a section: %r' % (sorted(got),))
     # NOTHING SECRET IN A JOB ROW. The record holds an argv and could hold an
@@ -86,6 +96,73 @@ def page_checks(bad):
     _script_checks(bad, html)
     _overrides_checks(bad, html)
     _selector_checks(bad, html)
+
+
+def _labelstudio_checks(bad):
+    """How much of the export the page reports, in a training root we own.
+
+    One Label Studio project feeds all three models, so a build of any of
+    them says how big the last export was -- and the two models that have not
+    been built since the export chain landed must not read as having no
+    hand-drawn boxes at all, which is the opposite of the truth.
+    """
+    import train_page as tp
+    tmp = tempfile.mkdtemp(prefix='adv_tp_ls_')
+    old_root = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        for base in ('dogdet_v2', 'dogbin_v5', 'leash_v2'):
+            os.makedirs(os.path.join(tmp, base))
+        # A DATASET THAT PREDATES THE EXPORT, and nothing else. The page says
+        # the export happens at build time and never invents a number from a
+        # build that never had one.
+        older = os.path.join(tmp, 'dogdet_v3')
+        for split in ('train', 'val'):
+            os.makedirs(os.path.join(older, 'images', split))
+        open(os.path.join(older, 'dataset.yaml'), 'w').close()
+        os.makedirs(os.path.join(older, 'bundle'))
+        with open(os.path.join(older, 'bundle', 'manifest.json'), 'w') as fh:
+            json.dump({'family': 'dogdet', 'kind': 'detect', 'built_at': 1,
+                       'built_at_iso': 'probe', 'counts': {'total': 1}}, fh)
+        blank = {f['key']: f.get('label_studio')
+                 for f in tp.overview()['families']}
+        if any(blank.values()):
+            bad.append('a training root with no builds still claims a Label '
+                       'Studio count: %r' % (blank,))
+        # one detector build, carrying an export of 5,649 frames
+        made = os.path.join(tmp, 'dogdet_20260820_aaaaaa')
+        for split in ('train', 'val'):
+            os.makedirs(os.path.join(made, 'images', split))
+        open(os.path.join(made, 'dataset.yaml'), 'w').close()
+        os.makedirs(os.path.join(made, 'bundle'))
+        with open(os.path.join(made, 'bundle', 'manifest.json'), 'w') as fh:
+            json.dump({'family': 'dogdet', 'kind': 'detect', 'built_at': 1,
+                       'built_at_iso': 'probe', 'counts': {'total': 1},
+                       'label_studio': {'counts': {'tasks': 5649}}}, fh)
+        got = {f['key']: f.get('label_studio')
+               for f in tp.overview()['families']}
+        if (got.get('dogdet') or {}).get('tasks') != 5649:
+            bad.append('the detector does not report the export its own last '
+                       'build used: %r' % (got.get('dogdet'),))
+        elif not got['dogdet'].get('mine'):
+            bad.append('a build of this very model is reported as somebody '
+                       "else's export")
+        for other in ('dogbin', 'leash'):
+            if (got.get(other) or {}).get('tasks') != 5649:
+                bad.append('%s reports no hand-drawn boxes, though one Label '
+                           'Studio project feeds all three models: %r'
+                           % (other, got.get(other)))
+            elif got[other].get('mine'):
+                bad.append('%s claims the export as its own build' % (other,))
+    except Exception as e:                # noqa: BLE001
+        bad.append('the Label Studio checks threw %s: %s'
+                   % (type(e).__name__, e))
+    finally:
+        if old_root is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old_root
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _script_checks(bad, html):

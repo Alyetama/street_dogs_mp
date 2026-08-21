@@ -62,9 +62,31 @@ def overview(family=None):
                           if isinstance(st['files'], dict)
                           else len(st['files'] or [])),
             }
+        # THE HAND-DRAWN BOXES COUNT TOO. They are not a ledger in data/ --
+        # every build fetches a fresh export from Label Studio and keeps it in
+        # the bundle -- so the line above, which lists what a build reads,
+        # was silently missing the only labels in this project a person drew
+        # rather than corrected. How many came in last time is the honest
+        # number to show before a build: the next export is fetched when the
+        # button is pressed and will be that size or larger.
+        # ONE PROJECT SERVES ALL THREE MODELS, so a build of any of them
+        # says how big the last export was. Without the fallback the two
+        # models that have not been built since the export chain landed
+        # showed nothing at all, which reads as 'no hand-drawn boxes here'
+        # -- the opposite of the truth.
+        seen = None
+        for rows in (bd.catalogue(key), bd.catalogue()):
+            for row in rows:
+                if row.get('label_studio'):
+                    seen = {'tasks': row['label_studio'], 'from': row['id'],
+                            'at': row.get('built_at_iso'),
+                            'mine': row.get('family') == key}
+                    break
+            if seen:
+                break
         fams.append({'key': key, 'title': spec['title'], 'what': spec['what'],
                      'kind': spec['kind'], 'base': spec['base'],
-                     'stores': stores})
+                     'stores': stores, 'label_studio': seen})
     return {
         'families': fams,
         'datasets': bd.catalogue(family),
@@ -233,6 +255,9 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
 .stores{display:flex;gap:8px 18px;flex-wrap:wrap;font-size:11.5px;
   color:var(--dim);margin-bottom:12px}
 .stores b{color:var(--mut);font-family:var(--num);font-weight:620}
+/* it comes off a server rather than out of data/, and the dotted rule under
+   it is the only thing that says so */
+.stores .fetched{border-bottom:1px dotted var(--bd);cursor:help}
 /* ── the parameters ──
    Two columns of label and field, dense on purpose: thirty of them stacked
    one per row is a page nobody scrolls to the bottom of. Anything inherited
@@ -423,11 +448,23 @@ function paintBuild(){
   var f=famOf(); if(!f)return;
   $('basesub').textContent='derived from '+f.base;
   var st=f.stores, keys=Object.keys(st).sort();
-  $('stores').innerHTML=keys.length?keys.map(function(k){
+  var chips=keys.map(function(k){
     var v=st[k];
     return '<span>'+esc(k.replace(/_/g,' '))+' <b>'+
       (v.lines!=null?n(v.lines)+' verdicts':n(v.files)+' crops')+'</b></span>';
-  }).join(''):'<span>no annotation stores feed this model</span>';
+  });
+  /* the hand-drawn boxes, which are fetched rather than read off disk */
+  var ls=f.label_studio;
+  chips.push('<span class="fetched" title="'+
+    (ls?(ls.mine?'The last build of this model brought in ':
+                  'The last export, taken by '+esc(ls.from)+', held ')+
+        n(ls.tasks)+' frames. One Label Studio project feeds all three '+
+        'models, and a fresh export is fetched when you press Build, so '+
+        'this is a floor rather than the exact number.'
+       :'Every build fetches the whole Label Studio project.')+
+    '">label studio <b>'+
+    (ls?n(ls.tasks)+' frames':'fetched at build')+'</b></span>');
+  $('stores').innerHTML=chips.join('');
   var busy=STATE.lanes.build;
   $('build').disabled=!!busy;
   $('buildsub').textContent=busy?'a build is already running':'';
