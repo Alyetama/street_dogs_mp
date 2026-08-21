@@ -509,6 +509,126 @@ def harvest_checks(bad, bd):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def labelstudio_checks(bad, bd):
+    """The hand-drawn boxes: read, cut, and kept.
+
+    Two bugs here produced no error and no output -- which is the worst shape
+    a bug can have in a build that takes four minutes.
+
+    THE COORDINATES ARE PERCENTAGES OF THE IMAGE IN HAND. original_width is a
+    note about the frame at annotation time; a frame found inside a built
+    detector set has been resized to 1280, so scaling 4000-pixel coordinates
+    onto it puts every box off the right edge. Clamped, that is a zero-width
+    crop -- it cut nothing from every task whose frame was already here, and
+    said so only by producing no files.
+
+    AND THE FRAME HAS TO BE THE ORIGINAL. Cutting from the resized copy gives
+    17x16 crops of a dog that was 79 pixels across, which is a classifier
+    taught from thumbnails.
+    """
+    from PIL import Image
+    tmp = tempfile.mkdtemp(prefix='adv_bd_ls_')
+    try:
+        # a frame, and a task whose box covers a known quarter of it
+        os.makedirs(os.path.join(tmp, 'frames'))
+        big = os.path.join(tmp, 'frames', 'probe.jpg')
+        Image.new('RGB', (4000, 3000), (20, 30, 40)).save(big)
+        task = {'image': 'https://example.invalid/bucket/probe.jpg',
+                'label': [{'x': 25.0, 'y': 25.0, 'width': 50.0,
+                           'height': 50.0, 'original_width': 4000,
+                           'original_height': 3000,
+                           'rectanglelabels': ['unleashed dog']}]}
+        if bd.box_width_of(task) != 4000:
+            bad.append('the recorded frame width is not read off a box')
+        if bd.box_width_of({'label': []}) is not None:
+            bad.append('a task with no box reports a frame width')
+        # cut against the ORIGINAL: half of 4000 is 2000
+        real_index = bd.ls_index
+        real_s3 = bd._s3
+        bd.ls_index = lambda: {'probe.jpg': big}
+        bd._s3 = lambda: (None, None)
+        try:
+            out = os.path.join(tmp, 'out')
+            got, missing = bd.ls_crops([task], {'unleashed dog': 'unleashed'},
+                                       out)
+            if got.get('unleashed') != 1:
+                bad.append('a plain box was not cut: %r (%d without a frame)'
+                           % (got, missing))
+            else:
+                cut = os.listdir(os.path.join(out, 'unleashed'))
+                im = Image.open(os.path.join(out, 'unleashed', cut[0]))
+                if abs(im.width - 2000) > 4 or abs(im.height - 1500) > 4:
+                    bad.append('a box covering half the frame cut to %dx%d, '
+                               'not 2000x1500' % (im.width, im.height))
+            # NOW THE RESIZED COPY. Same task, a frame at 1280: the box still
+            # covers half of it, so the crop is half of 1280 -- not a clamp to
+            # nothing, which is what reading original_width produced.
+            small = os.path.join(tmp, 'frames', 'small.jpg')
+            Image.new('RGB', (1280, 960), (20, 30, 40)).save(small)
+            task2 = json.loads(json.dumps(task))
+            task2['image'] = 'https://example.invalid/bucket/small.jpg'
+            bd.ls_index = lambda: {'small.jpg': small}
+            out2 = os.path.join(tmp, 'out2')
+            got, _ = bd.ls_crops([task2], {'unleashed dog': 'unleashed'}, out2)
+            if got.get('unleashed') != 1:
+                bad.append('a box on a resized frame cut nothing -- the '
+                           'coordinates were scaled against a size the image '
+                           'does not have')
+            else:
+                cut = os.listdir(os.path.join(out2, 'unleashed'))
+                im = Image.open(os.path.join(out2, 'unleashed', cut[0]))
+                if abs(im.width - 640) > 4:
+                    bad.append('a half-frame box on a 1280 frame cut to %dpx, '
+                               'not 640' % (im.width,))
+            # a box too small to be a crop is skipped, not saved as a sliver.
+            # The index has to hold THIS task's frame, or the check passes
+            # because nothing was cut for an unrelated reason.
+            bd.ls_index = lambda: {'probe.jpg': big, 'small.jpg': small}
+            tiny = json.loads(json.dumps(task))
+            tiny['label'][0].update(width=0.05, height=0.05)
+            out3 = os.path.join(tmp, 'out3')
+            got, _ = bd.ls_crops([tiny], {'unleashed dog': 'unleashed'}, out3)
+            if got.get('unleashed'):
+                bad.append('a box a few pixels across was cut anyway')
+        finally:
+            bd.ls_index = real_index
+            bd._s3 = real_s3
+        # ── the export is read for what it holds ──
+        export = os.path.join(tmp, 'export.json')
+        with open(export, 'w') as fh:
+            json.dump([task, {'image': 'x/y.jpg', 'background': True},
+                       {'image': 'x/z.jpg',
+                        'label': [{'x': 1, 'y': 1, 'width': 9, 'height': 9,
+                                   'rectanglelabels': ['other animal']}]}], fh)
+        tasks, counts = bd.ls_read(export)
+        if counts['tasks'] != 3 or counts['boxes'] != 2:
+            bad.append('the export was counted as %r' % (counts,))
+        if counts['background'] != 1:
+            bad.append('tasks marked background are not counted')
+        if counts['classes'].get('other animal') != 1:
+            bad.append('the classes in the export are not counted: %r'
+                       % (counts['classes'],))
+        for junk in (b'not json', b'{"not": "a list"}'):
+            bad_path = os.path.join(tmp, 'junk.json')
+            open(bad_path, 'wb').write(junk)
+            try:
+                bd.ls_read(bad_path)
+                bad.append('an export of %r was read as one' % (junk[:20],))
+            except SystemExit:
+                pass
+        # ── the vocabulary is the one the project uses ──
+        if 'other animal' not in bd.LS_NOT_DOG:
+            bad.append('other animal is not a dog-bin negative -- 1,707 boxes '
+                       'a person drew round something that is not a dog')
+        if set(bd.LS_DOG) != {'leashed dog', 'unleashed dog'}:
+            bad.append('the dog classes are %r' % (bd.LS_DOG,))
+    except Exception as e:                # noqa: BLE001
+        bad.append('the label studio checks threw %s: %s'
+                   % (type(e).__name__, e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def cli_checks(bad):
     """The two read-only modes work against the real stores on this machine."""
     for args in (['--list'], ['--family', 'dogbin', '--dry-run']):
@@ -545,6 +665,7 @@ def main():
     for fn, args in ((store_checks, (bd,)), (name_checks, (bd,)),
                      (measure_checks, (bd,)), (refusal_checks, (bd,)),
                      (composition_checks, (bd,)), (harvest_checks, (bd,)),
+                     (labelstudio_checks, (bd,)),
                      (cli_checks, ())):
         try:
             fn(bad, *args)

@@ -245,3 +245,4 @@ fix_lynx_spindown.sh
 # model suggestions for the review filter -- never training data, and
 # regenerable from tools/detect/triage_crops.py
 data/dashboard/triage.jsonl
+data/labelstudio_frames/

@@ -164,6 +164,264 @@ STORES = {
 }
 
 
+# ── Label Studio ────────────────────────────────────────────────────────────
+# The hand-drawn boxes: the only labels in this project a person sat down and
+# drew, as opposed to a detector's guess that a person then agreed with. Every
+# build fetches a fresh export and KEEPS IT, in the bundle -- so a build is
+# reproducible from its own record even though the source is a live server
+# that will have moved on by the time anybody looks.
+#
+# ONE EXPORT SERVES ALL THREE MODELS, because it is one project. Its boxes are
+# labelled `leashed dog`, `unleashed dog`, `other animal` and `cow`:
+#
+#   the detector   every dog box, as one class; the other animals excluded and
+#                  the tasks marked background kept as backgrounds
+#   the leash      each dog box cropped, leashed against unleashed
+#   the dog-bin    the same dog crops as `dog`, and every other-animal crop as
+#                  `not_dog` -- which is where its negatives should come from:
+#                  a person drew a box round a goat and said goat, rather than
+#                  a reviewer catching the detector calling one a dog
+LS_SCRIPT = 'export_annotations.sh'
+LS_GROUP = 'label'                    # the field in a task that holds boxes
+LS_DOG = ('leashed dog', 'unleashed dog')
+LS_NOT_DOG = ('other animal', 'cow')
+# Frames are fetched once and kept, because three builds of three models want
+# the same pictures and the server is on the other side of the internet.
+LS_FRAMES = os.path.join(REPO, 'data', 'labelstudio_frames')
+
+
+def ls_export(stage, run, script_dir=None):
+    """Fetch a fresh JSON_MIN export. Returns its path in the stage.
+
+    The export script is the project's own -- it holds the token and the
+    project number, and neither belongs in this repository. It prints the
+    filename it wrote, which is what is read back.
+    """
+    root = script_dir or training_root()
+    script = os.path.join(root, LS_SCRIPT)
+    if not os.path.isfile(script):
+        return None
+    before = set(listing(root) or [])
+    run.run('label studio export', ['/bin/bash', script], cwd=root)
+    made = [f for f in (listing(root) or [])
+            if f not in before and f.endswith('.json')]
+    if not made:
+        raise SystemExit('the export wrote no file — is the token still good?')
+    src = os.path.join(root, sorted(made)[-1])
+    dst = os.path.join(stage, 'label_studio_export.json')
+    shutil.move(src, dst)
+    return dst
+
+
+def ls_read(path):
+    """(tasks, counts) from a JSON_MIN export."""
+    try:
+        with open(path) as fh:
+            tasks = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise SystemExit('the export would not read: %s' % (e,))
+    if not isinstance(tasks, list):
+        raise SystemExit('the export is not a list of tasks')
+    counts = {'tasks': len(tasks), 'boxes': 0, 'classes': {},
+              'background': 0}
+    for t in tasks:
+        if t.get('background'):
+            counts['background'] += 1
+        for box in t.get(LS_GROUP) or []:
+            for name in box.get('rectanglelabels') or []:
+                counts['classes'][name] = counts['classes'].get(name, 0) + 1
+                counts['boxes'] += 1
+    return tasks, counts
+
+
+def ls_search_dirs():
+    """Where a frame might already be, before anything is fetched.
+
+    dogdet_v2 and every detector set built from it hold export frames -- the
+    same pictures, already on this machine. Searched rather than copied into a
+    cache: 2,475 of them is 1.5GB, and a second copy of a file that is already
+    there is a second copy to keep in step.
+    """
+    out = [LS_FRAMES]
+    try:
+        root = training_root()
+    except SystemExit:
+        return out
+    for name in listing(root) or []:
+        for split in ('train', 'val'):
+            d = os.path.join(root, name, 'images', split)
+            if os.path.isdir(d):
+                out.append(d)
+    return out
+
+
+def _s3():
+    """A client for the bucket the frames live in, from the project's .env.
+
+    The credentials are the training repository's, read at call time and
+    never copied anywhere -- they are not this repository's to hold.
+    """
+    import boto3
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(training_root(), '.env'))
+    if not os.getenv('BUCKET_NAME'):
+        return None, None
+    return boto3.client(
+        's3', endpoint_url=os.getenv('ENDPOINT_URL'),
+        aws_access_key_id=os.getenv('ACCESS_KEY_ID'),
+        aws_secret_access_key=os.getenv('SECRET_ACCESS_KEY'),
+        region_name=os.getenv('BUCKET_REGION')), os.getenv('BUCKET_NAME')
+
+
+def ls_frame(task, index=None, s3=None, bucket=None):
+    """The local jpg for one task, fetched from the bucket if it is not here.
+
+    NOT over the https address in the export -- that answers 403. The picture
+    lives in the project's S3 bucket and the address is how the key is
+    spelled: the parts after the host are the key, which is what the
+    project's own preparation script does.
+    """
+    url = str(task.get('image') or '')
+    name = os.path.basename(url.split('?', 1)[0])
+    if not name:
+        return None
+    if index is not None and name in index:
+        return index[name]
+    local = os.path.join(LS_FRAMES, name)
+    if os.path.isfile(local) and os.path.getsize(local) > 0:
+        return local
+    if s3 is None or not bucket:
+        return None
+    os.makedirs(LS_FRAMES, exist_ok=True)
+    key = '/'.join(url.split('://', 1)[-1].split('/')[1:])
+    tmp = local + '.part'
+    try:
+        s3.download_file(bucket, key, tmp)
+        os.replace(tmp, local)
+    except Exception:                     # noqa: BLE001 - one frame, not the run
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return None
+    return local
+
+
+def box_width_of(task):
+    """The frame width Label Studio recorded, from any box on the task."""
+    for box in task.get(LS_GROUP) or []:
+        got = box.get('original_width')
+        if got:
+            return int(got)
+    return None
+
+
+def ls_index():
+    """{filename: path} for every frame already on this machine."""
+    index = {}
+    for d in ls_search_dirs():
+        for name in listing(d) or []:
+            index.setdefault(name, os.path.join(d, name))
+    return index
+
+
+def ls_crops(tasks, want, out_dir, run=None, limit=None):
+    """Cut every box of the wanted classes into <out_dir>/<class>/.
+
+    `want` maps a Label Studio class to the class directory it becomes, so
+    one export feeds the leash model (leashed/unleashed) and the dog-bin gate
+    (dog/not_dog) without reading it twice.
+    """
+    from PIL import Image
+    got = {v: 0 for v in want.values()}
+    missing = small = failed = resized = 0
+    index = ls_index()
+    try:
+        s3, bucket = _s3()
+    except Exception as e:                # noqa: BLE001 - report and go on
+        if run is not None:
+            run.say('  no bucket (%s) — only frames already here can be cut'
+                    % (type(e).__name__,))
+        s3, bucket = None, None
+    for i, task in enumerate(tasks):
+        boxes = [b for b in (task.get(LS_GROUP) or [])
+                 if any(r in want for r in (b.get('rectanglelabels') or []))]
+        if not boxes:
+            continue
+        if limit is not None and sum(got.values()) >= limit:
+            break
+        frame = ls_frame(task, index, s3, bucket)
+        if not frame:
+            missing += 1
+            continue
+        try:
+            img = Image.open(frame)
+            img.load()
+        except Exception:                 # noqa: BLE001
+            missing += 1
+            continue
+        # ...AND IT HAS TO BE THE ORIGINAL. The frames already on this machine
+        # live inside built detector sets, where they were resized to 1280 --
+        # so a dog that was 79 pixels across in a 4000-pixel frame comes out
+        # of one at 25, and a classifier trained on 17x16 crops is being
+        # taught from thumbnails. When the local copy is not the size Label
+        # Studio was shown, the original is fetched instead.
+        want_w = box_width_of(task)
+        if want_w and img.width != want_w:
+            fresh = ls_frame(task, None, s3, bucket)
+            if fresh and fresh != frame:
+                try:
+                    img = Image.open(fresh)
+                    img.load()
+                    frame = fresh
+                except Exception:         # noqa: BLE001
+                    pass
+            if img.width != want_w:
+                resized += 1
+        stem = os.path.splitext(os.path.basename(frame))[0]
+        for k, box in enumerate(boxes):
+            name = next(r for r in box['rectanglelabels'] if r in want)
+            klass = want[name]
+            # AGAINST THE IMAGE IN HAND, not the one Label Studio was shown.
+            # A box is stored as a percentage, and original_width is only a
+            # note about the frame at annotation time -- a frame found inside
+            # a built dataset has been resized to 1280, so scaling 4000-pixel
+            # coordinates onto it puts every box off the right-hand edge.
+            # Clamped, that is a zero-width crop: this cut nothing at all from
+            # every task whose frame was already on the machine, and said so
+            # only by producing no files.
+            x1 = int(box['x'] / 100.0 * img.width)
+            y1 = int(box['y'] / 100.0 * img.height)
+            x2 = int((box['x'] + box['width']) / 100.0 * img.width)
+            y2 = int((box['y'] + box['height']) / 100.0 * img.height)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img.width, x2), min(img.height, y2)
+            if x2 - x1 < 8 or y2 - y1 < 8:
+                small += 1
+                continue                  # a box too small to be a crop
+            d = os.path.join(out_dir, klass)
+            os.makedirs(d, exist_ok=True)
+            try:
+                img.crop((x1, y1, x2, y2)).save(
+                    os.path.join(d, 'ls_%s_%d.jpg' % (stem, k)), quality=95)
+                got[klass] += 1
+            except Exception:             # noqa: BLE001
+                failed += 1
+                continue
+        if run is not None and i % 250 == 0:
+            run.say('  cut %d crops from %d/%d tasks'
+                    % (sum(got.values()), i, len(tasks)))
+    # SAID OUT LOUD. Every one of these three used to be a silent `continue`,
+    # and a run that cut nothing looked exactly like a run with nothing to cut.
+    if run is not None and (missing or small or failed):
+        run.say('  skipped: %d without a frame, %d boxes too small, '
+                '%d that would not save' % (missing, small, failed))
+    if run is not None and resized:
+        run.say('  %d frame(s) were only available resized — those crops are '
+                'smaller than they should be' % (resized,))
+    return got, missing
+
+
 def sha256(path):
     """The bytes of one file. A ledger that has changed since a build has a
     different digest, which is the whole reason this is recorded."""
@@ -323,7 +581,8 @@ def _copy_into(src_dir, dst_dir, seen):
     return n
 
 
-def stage_extras(family, stage, run, duckdb_python, crop_python):
+def stage_extras(family, stage, run, duckdb_python, crop_python,
+                 ls_tasks=None):
     """Every new crop for a classify family, staged one directory per class.
 
     rebuild_crop_dataset takes ONE directory per class, and the annotations
@@ -332,6 +591,23 @@ def stage_extras(family, stage, run, duckdb_python, crop_python):
     """
     got = {c: 0 for c in FAMILIES[family]['classes']}
     seen = {c: set() for c in got}
+    # THE HAND-DRAWN BOXES FIRST, because they are the best labels here: a
+    # person drew them, rather than agreeing with a detector that had already
+    # drawn one. For the gate that means the negatives are goats somebody
+    # boxed as goats, not only the ones the detector mistook for dogs.
+    if ls_tasks:
+        want = ({'leashed dog': 'leashed', 'unleashed dog': 'unleashed'}
+                if family == 'leash' else
+                dict([(k, 'dog') for k in LS_DOG]
+                     + [(k, 'not_dog') for k in LS_NOT_DOG]))
+        cut, _missing = ls_crops(ls_tasks, want,
+                                 os.path.join(stage, 'extras'), run=run)
+        for klass, n in cut.items():
+            got[klass] = got.get(klass, 0) + n
+            for name in listing(os.path.join(stage, 'extras', klass)) or []:
+                seen.setdefault(klass, set()).add(name)
+        run.say('label studio crops: %s'
+                % (', '.join('%s %d' % kv for kv in sorted(cut.items())),))
     if family == 'dogbin':
         # the review queue's own verdicts, cut from the original frames
         harvest = os.path.join(stage, 'harvest')
@@ -557,7 +833,7 @@ def _shape_of(path):
 
 
 def build(family, out=None, by='', duckdb_python=None, crop_python=None,
-          keep_stage=False, now=None):
+          keep_stage=False, no_export=False, now=None):
     """Build one dataset. Returns the manifest it wrote."""
     if family not in FAMILIES:
         raise SystemExit('no such model: %s (try %s)'
@@ -592,6 +868,21 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     extras = {}
     try:
         run.say('building %s (%s) from %s' % (name, spec['title'], base))
+        run.progress(0, 'exporting the hand-drawn boxes')
+        ls_path = ls_tasks = None
+        ls_counts = None
+        if not no_export:
+            ls_path = ls_export(stage, run)
+            if ls_path:
+                ls_tasks, ls_counts = ls_read(ls_path)
+                run.say('label studio: %d tasks, %d boxes (%s), %d background'
+                        % (ls_counts['tasks'], ls_counts['boxes'],
+                           ', '.join('%s %d' % kv for kv in
+                                     sorted(ls_counts['classes'].items())),
+                           ls_counts['background']))
+            else:
+                run.say('no export script at the training root — building '
+                        'without the hand-drawn boxes')
         run.progress(0, 'reading the annotations')
         if family == 'dogdet':
             mid = os.path.join(stage, 'detect')
@@ -617,7 +908,8 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         else:
             run.progress(1, 'gathering new crops')
             extras = stage_extras(family, stage, run,
-                                  duckdb_python, crop_python)
+                                  duckdb_python, crop_python,
+                                  ls_tasks=ls_tasks)
             run.say('staged extras: %s'
                     % (', '.join('%s %d' % (k, v)
                                  for k, v in sorted(extras.items())) or 'none'))
@@ -648,6 +940,12 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         files_path = os.path.join(bundle, 'files.json')
         with open(files_path, 'w') as fh:
             json.dump(files_doc, fh, indent=1, sort_keys=True)
+        # THE EXPORT ITSELF, kept beside the record of it. The server it came
+        # from is live and will have moved on; this file is what makes the
+        # build reproducible rather than merely described.
+        if ls_path and os.path.isfile(ls_path):
+            shutil.copy2(ls_path,
+                         os.path.join(bundle, 'label_studio_export.json'))
         inputs_path = os.path.join(bundle, 'inputs.json')
         with open(inputs_path, 'w') as fh:
             json.dump({'id': name, 'built_at': started, 'stores': inputs},
@@ -674,6 +972,10 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                         'python': sys.executable,
                         'duckdb_python': duckdb_python,
                         'crop_python': crop_python},
+            'label_studio': (None if not ls_path else {
+                'file': 'bundle/label_studio_export.json',
+                'sha256': sha256(ls_path),
+                'counts': ls_counts}),
             'stores': {k: {'ledger': v['ledger'], 'sha256': v['sha256'],
                            'lines': v['lines'],
                            'files': (sum(len(x) for x in v['files'].values())
@@ -742,6 +1044,12 @@ def main(argv=None):
                          'key, which is the training environment)')
     ap.add_argument('--keep-stage', action='store_true',
                     help='leave the working directory behind, to look at')
+    ap.add_argument('--no-export', action='store_true',
+                    help='skip the Label Studio export. For a rebuild that '
+                         'must match an older one exactly, or for a machine '
+                         'with no reach to the server -- and it is recorded, '
+                         'so a dataset built without the hand-drawn boxes '
+                         'says so')
     ap.add_argument('--list', action='store_true',
                     help='what can be built, and what it would read')
     ap.add_argument('--dry-run', action='store_true',
@@ -778,7 +1086,8 @@ def main(argv=None):
                       % (k, (st['sha256'] or '-')[:12], st['lines']))
         return 0
     build(a.family, out=a.out, by=a.by, duckdb_python=a.duckdb_python,
-          crop_python=a.crop_python, keep_stage=a.keep_stage)
+          crop_python=a.crop_python, keep_stage=a.keep_stage,
+          no_export=a.no_export)
     return 0
 
 
