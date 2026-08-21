@@ -368,6 +368,39 @@ def unfinished_checks(bad, tm):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def weights_record_checks(bad, tm):
+    """A checkpoint identified by its content, not by what it was called."""
+    tmp = tempfile.mkdtemp(prefix='adv_tm_w_')
+    try:
+        # a name that exists NOWHERE else: ultralytics resolves a bare name
+        # against the working directory first, and the repo root really does
+        # hold a yolo26x.pt, so using that name here would grade the wrong file
+        real = os.path.join(tmp, 'adv_probe_checkpoint.pt')
+        with open(real, 'wb') as fh:
+            fh.write(b'not a checkpoint, but it is a file')
+        got = tm.weights_record('adv_probe_checkpoint.pt', root=tmp)
+        if got.get('path') != real:
+            bad.append('a bare checkpoint name was not resolved against the '
+                       'training root: %r' % (got,))
+        if not got.get('sha256') or got.get('bytes') != 34:
+            bad.append('the checkpoint was found but not digested: %r'
+                       % (got,))
+        by_path = tm.weights_record(real, root=tmp)
+        if by_path.get('sha256') != got.get('sha256'):
+            bad.append('the same checkpoint digests differently by path and '
+                       'by name: %r %r' % (by_path, got))
+        missing = tm.weights_record('nothing_like_this.pt', root=tmp)
+        if missing.get('path') or missing.get('sha256'):
+            bad.append('a checkpoint that is not there was reported as '
+                       'found: %r' % (missing,))
+        if missing.get('name') != 'nothing_like_this.pt':
+            bad.append('an unresolvable checkpoint loses even its name')
+    except Exception as e:                # noqa: BLE001
+        bad.append('the weights checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def git_stamp_checks(bad, py):
     """The bundle names the code that STARTED the run.
 
@@ -457,6 +490,14 @@ def bundle_checks(bad, py, _dataset):
     with open(os.path.join(ds, 'bundle', 'manifest.json'), 'w') as fh:
         json.dump({'family': 'dogbin', 'counts': {'total': 0},
                    'built_at_iso': 'probe'}, fh)
+    # the rest of the dataset's record, which the run has to keep a copy of
+    for name, doc in (('files.json', {'files': {'train': {'images': ['a']}}}),
+                      ('inputs.json', {'stores': {'gate_audit': {}}}),
+                      ('label_studio_export.json', [{'image': 'x'}])):
+        with open(os.path.join(ds, 'bundle', name), 'w') as fh:
+            json.dump(doc, fh)
+    with open(os.path.join(ds, 'dataset.yaml'), 'w') as fh:
+        fh.write('names:\n  0: dog\n')
     env = dict(os.environ, TRAINING_ROOT=root)
     probe = (
         'import json,sys; sys.path.insert(0, %r)\n'
@@ -507,6 +548,27 @@ def bundle_checks(bad, py, _dataset):
                        'used: %r' % (doc.get('params'),))
         if not doc.get('versions', {}).get('ultralytics'):
             bad.append('the bundle does not say which ultralytics trained it')
+        # THE DATASET IS DELETED ONE DAY. THE RUN IS THE RESULT.
+        bundle = os.path.join(proj, made[0], 'bundle')
+        kept = doc.get('dataset_record') or {}
+        for name in ('dataset_manifest.json', 'dataset_files.json',
+                     'dataset_inputs.json', 'dataset_label_studio_export.json',
+                     'dataset.yaml'):
+            if not os.path.isfile(os.path.join(bundle, name)):
+                bad.append('the run keeps no copy of %s -- deleting the '
+                           'dataset takes the answer to "which images" with '
+                           'it, and the digest recorded here is then a hash '
+                           'of a file nobody can produce' % (name,))
+            elif name != 'dataset.yaml' and name not in kept:
+                bad.append('%s was copied but not digested' % (name,))
+        # ...and the checkpoint it started from is identified by content
+        wr = doc.get('weights_record') or {}
+        if 'name' not in wr:
+            bad.append('the run does not record which checkpoint it started '
+                       'from beyond a bare string')
+        if wr.get('path') or wr.get('sha256'):
+            bad.append('a checkpoint that does not exist was reported as '
+                       'found: %r' % (wr,))
     except subprocess.TimeoutExpired:
         bad.append('the bundle probe never returned')
     finally:
@@ -538,6 +600,7 @@ def main():
             for fn in (form_checks, batch_checks):
                 fn(bad, py)
             unfinished_checks(bad, tm)
+            weights_record_checks(bad, tm)
             for fn in (refusal_checks, bundle_checks):
                 fn(bad, py, dataset)
             git_stamp_checks(bad, py)

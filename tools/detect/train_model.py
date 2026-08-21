@@ -397,6 +397,13 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
     # passes project= straight through as the Comet workspace name, and an
     # absolute path there creates a junk project named after a directory.
     os.environ.setdefault('COMET_PROJECT_NAME', spec['project'])
+    # Taken before the first epoch: a run that falls over is still a run whose
+    # inputs somebody has to identify, and by the time the bundle is written
+    # the dataset may already be the thing that caused the failure.
+    try:
+        kept = _keep_dataset_record(os.path.join(save_dir, 'bundle'), ds)
+    except Exception:                     # noqa: BLE001 - provenance, not flow
+        kept = {}
     from ultralytics import YOLO
     err = None
     metrics = None
@@ -422,6 +429,8 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
             'error': err,
             'metrics': metrics,
             'weights': model,
+            'weights_record': weights_record(model),
+            'dataset_record': kept,
             'dataset': {'id': ds['id'], 'path': ds['path'],
                         'data': ds['data'],
                         'manifest_sha256': ds['manifest_sha256'],
@@ -441,6 +450,31 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
     print('\ndone: %s' % (save_dir,), flush=True)
     return {'ok': True, 'save_dir': save_dir, 'params': params,
             'dataset': ds['id'], 'metrics': metrics}
+
+
+def weights_record(model, root=None):
+    """The checkpoint this run started from, named so it can be found again.
+
+    `yolo26x.pt` is not a file: ultralytics resolves a bare name against the
+    working directory and its own cache, and a fine-tune from a previous run
+    records a path inside a run directory that later gets cleared. The one
+    input to a training run with no integrity record now has one.
+    """
+    out = {'name': str(model), 'path': None, 'sha256': None, 'bytes': None}
+    tries = [str(model)]
+    if not os.path.isabs(str(model)):
+        tries.append(os.path.join(root or bd.training_root(), str(model)))
+        tries.append(os.path.join(os.getcwd(), str(model)))
+    for path in tries:
+        if os.path.isfile(path):
+            out['path'] = os.path.abspath(path)
+            try:
+                out['bytes'] = os.path.getsize(path)
+                out['sha256'] = bd.sha256(path)
+            except OSError:
+                pass
+            break
+    return out
 
 
 def _inherited_weights(family):
@@ -483,6 +517,47 @@ def _write_bundle(save_dir, doc):
                 shutil.copy2(src, os.path.join(bundle, who))
     except OSError:
         pass
+
+
+def _keep_dataset_record(bundle, ds):
+    """Copy the dataset's own record into the run.
+
+    The run recorded which dataset it trained on as a path and a digest of a
+    file inside that dataset -- so deleting the dataset, which is gigabytes
+    somebody will eventually clear, takes the answer to "which images" with
+    it, and the digest is then a hash of a file nobody can produce. A dataset
+    is deleted; a run is a result. The record travels with the result.
+    """
+    try:
+        os.makedirs(bundle, exist_ok=True)
+    except OSError:
+        return {}
+    src = os.path.join(ds['path'], 'bundle')
+    want = {'manifest.json': 'dataset_manifest.json',
+            'files.json': 'dataset_files.json',
+            'inputs.json': 'dataset_inputs.json',
+            'label_studio_export.json': 'dataset_label_studio_export.json'}
+    kept = {}
+    for name, as_name in want.items():
+        path = os.path.join(src, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            shutil.copy2(path, os.path.join(bundle, as_name))
+            kept[as_name] = bd.sha256(os.path.join(bundle, as_name))
+        except OSError:
+            pass
+    # ...and the class map, which for a detector lives nowhere else: the
+    # dataset.yaml names the classes the label indices mean.
+    yaml = os.path.join(ds['path'], 'dataset.yaml')
+    if os.path.isfile(yaml):
+        try:
+            shutil.copy2(yaml, os.path.join(bundle, 'dataset.yaml'))
+            kept['dataset.yaml'] = bd.sha256(os.path.join(bundle,
+                                                          'dataset.yaml'))
+        except OSError:
+            pass
+    return kept
 
 
 def show_defaults(family):
