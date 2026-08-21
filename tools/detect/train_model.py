@@ -58,7 +58,13 @@ PROJECTS = {
                'weights': 'yolo26x.pt'},
     'dogbin': {'task': 'classify', 'project': 'dog-bin',
                'weights': 'yolo11x-cls.pt'},
-    'leash': {'task': 'classify', 'project': 'leash_models',
+    # 'leash-models', hyphen: the spelling best_models.json tracks,
+    # gate_store.STAGES runs, and the promoted run's own args.yaml carries.
+    # This file alone said leash_models -- so a new leash run inherited from
+    # a THREE-CLASS run in the underscore directory, logged to a Comet
+    # project nobody tracks, and landed in a project the dashboard config
+    # hides. One spelling, and it is the one every other record uses.
+    'leash': {'task': 'classify', 'project': 'leash-models',
               'weights': 'yolo11x-cls.pt'},
 }
 
@@ -444,6 +450,7 @@ def resume(family, name, by=''):
     print('  from      %s' % (last,), flush=True)
     print('  data      %s' % (data,), flush=True)
     os.environ.setdefault('COMET_PROJECT_NAME', PROJECTS[family]['project'])
+    comet_env()
     from ultralytics import YOLO
     err = None
     metrics = None
@@ -487,6 +494,43 @@ def _write_bundle_as(save_dir, name, doc):
             shutil.copy2(src, os.path.join(bundle, 'results.csv'))
     except OSError:
         pass
+
+
+def comet_env(env_file=None):
+    """Load the COMET_* variables from the training repo's own .env.
+
+    The names that were loaded come back; the values go only into
+    os.environ, and existing variables are never overridden -- a shell that
+    exported its own key keeps it.
+
+    WITHOUT THIS, A RUN FROM THE TRAIN PAGE NEVER REACHES COMET. The old
+    runs logged because a person's shell had the key exported; the page's
+    job runner starts from a clean environment, comet_ml finds no key, and
+    ultralytics' Comet callback silently declines -- no error, no
+    experiment, a training that looks fine everywhere except the one place
+    metrics are compared. The key lives beside the datasets it describes
+    (comet_env_file in the dashboard config, or <training_root>/.env) and
+    is read at launch time, never copied anywhere.
+    """
+    path = (env_file or os.environ.get('COMET_ENV_FILE')
+            or bd._cfg('comet_env_file')
+            or os.path.join(bd.training_root(), '.env'))
+    loaded = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, _, v = line.partition('=')
+                k = k.strip()
+                if not k.startswith('COMET_') or k in os.environ:
+                    continue
+                os.environ[k] = v.strip().strip('"').strip("'")
+                loaded.append(k)
+    except OSError:
+        pass
+    return loaded
 
 
 def launch(family, dataset, overrides=None, weights=None, name=None,
@@ -533,6 +577,15 @@ def launch(family, dataset, overrides=None, weights=None, name=None,
     # passes project= straight through as the Comet workspace name, and an
     # absolute path there creates a junk project named after a directory.
     os.environ.setdefault('COMET_PROJECT_NAME', spec['project'])
+    got = comet_env()
+    if got:
+        print('  comet     %s loaded, project %s'
+              % (', '.join(got), spec['project']), flush=True)
+    elif 'COMET_API_KEY' not in os.environ:
+        # Loud, because silence was the failure: the callback declines
+        # quietly and the run trains to completion with no experiment.
+        print('  comet     NO KEY -- this run will not reach Comet '
+              '(set comet_env_file, or COMET_API_KEY)', flush=True)
     # NOTHING MAY CREATE save_dir BEFORE ULTRALYTICS DOES. It is handed
     # exist_ok=False and increments the name when the directory is already
     # there, so a bundle copied in early sent the whole run to `<name>-2`

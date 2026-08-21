@@ -753,6 +753,85 @@ def bundle_checks(bad, py, _dataset):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def comet_checks(bad, tm):
+    """A run from the page reaches Comet, in the project everything tracks.
+
+    The old runs logged because a person's shell had the key exported; the
+    train page's job runner starts clean, comet_ml found no key, and the
+    Comet callback declined SILENTLY -- a training that looked fine
+    everywhere except the one place metrics are compared.
+    """
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='adv_tm_comet_')
+    fx = os.path.join(tmp, 'fixture.env')
+    with open(fx, 'w') as fh:
+        fh.write('# a comment\n'
+                 'COMET_API_KEY="fixture-value"\n'
+                 'COMET_WORKSPACE=fixture-ws\n'
+                 'SECRET_ACCESS_KEY=must-not-load\n'
+                 'BROKEN LINE\n')
+    kept = {k: os.environ.pop(k, None)
+            for k in ('COMET_API_KEY', 'COMET_WORKSPACE',
+                      'SECRET_ACCESS_KEY')}
+    try:
+        got = tm.comet_env(fx)
+        if sorted(got) != ['COMET_API_KEY', 'COMET_WORKSPACE']:
+            bad.append('comet_env loaded %r -- only COMET_* variables '
+                       'belong in the process, the same file holds S3 '
+                       'credentials' % (got,))
+        if os.environ.get('COMET_API_KEY') != 'fixture-value':
+            bad.append('the key did not arrive, or kept its quotes: %r'
+                       % (os.environ.get('COMET_API_KEY') is not None,))
+        if os.environ.get('SECRET_ACCESS_KEY') == 'must-not-load':
+            bad.append('comet_env leaked a NON-Comet secret into the '
+                       'environment')
+        os.environ['COMET_API_KEY'] = 'from-the-shell'
+        again = tm.comet_env(fx)
+        if os.environ['COMET_API_KEY'] != 'from-the-shell' \
+                or 'COMET_API_KEY' in again:
+            bad.append('comet_env overrides a key the shell exported')
+        if tm.comet_env(os.path.join(tmp, 'nope.env')) != []:
+            bad.append('a missing env file is not quietly empty')
+    finally:
+        for k, v in kept.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ...and launch actually calls it, before ultralytics loads. A helper
+    # nobody calls is the bug wearing a fix's name.
+    src = open(os.path.join(REPO, 'tools', 'detect',
+                            'train_model.py')).read()
+    body = src[src.index('def launch('):src.index('def main(')]
+    if 'comet_env()' not in body:
+        bad.append('launch() never loads the Comet key, so a run from the '
+                   'page trains to completion with no experiment')
+    elif body.index('comet_env()') > body.index('from ultralytics import'):
+        bad.append('the key is loaded after ultralytics, whose Comet '
+                   'callback reads the environment')
+
+    # ONE SPELLING PER PROJECT. train_model alone said leash_models; the
+    # promoted run, best_models.json and gate_store all say leash-models --
+    # so a new leash run inherited from a three-class run and logged to a
+    # Comet project nobody tracks.
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import gate_store
+    with open(os.path.join(REPO, 'data', 'best_models.json')) as fh:
+        tracked = set(json.load(fh)['projects'])
+    for family, stage in (('dogbin', 'gate'), ('leash', 'leash')):
+        ours = tm.PROJECTS[family]['project']
+        theirs = gate_store.STAGES[stage]['project']
+        if ours != theirs:
+            bad.append('%s is %r to the trainer and %r to the sweep '
+                       '-- two projects for one model' % (family, ours,
+                                                          theirs))
+        if ours not in tracked:
+            bad.append('the trainer sends %s runs to %r, a project '
+                       'best_models.json does not track' % (family, ours))
+
+
 def main():
     bad = []
     try:
@@ -761,7 +840,7 @@ def main():
         print('FAIL could not import train_model: %s: %s'
               % (type(e).__name__, e))
         return 1
-    for fn in (inherit_checks, dataset_checks):
+    for fn in (inherit_checks, dataset_checks, comet_checks):
         try:
             fn(bad, tm)
         except Exception as e:            # noqa: BLE001
