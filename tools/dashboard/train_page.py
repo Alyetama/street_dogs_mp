@@ -85,12 +85,20 @@ def overview(family=None):
                     # are not examples at all, and counting them here would
                     # promise the build twice the data it will get.
                     per = row.get('label_studio_classes') or {}
+                    if not isinstance(per, dict):
+                        per = {}          # a hand-edited or truncated record
                     want = bd.ls_wanted(key)
                     mine = sum(v for k, v in per.items() if k in want)
                     seen = {'tasks': row['label_studio'], 'from': row['id'],
                             'at': row.get('built_at_iso'),
                             'mine': row.get('family') == key,
-                            'takes': mine or None,
+                            # a number, including zero: a model that takes
+                            # nothing from an export it HAS read is not the
+                            # same as a model with no export behind it, and
+                            # both read as 'fetched at build' when this was
+                            # None -- so a class added in Label Studio and
+                            # dropped by every model looked like silence
+                            'takes': mine,
                             'unit': 'boxes' if key == 'dogdet' else 'crops',
                             'skipped': sum(v for k, v in per.items()
                                            if k not in want) or None}
@@ -474,12 +482,16 @@ function paintBuild(){
         (ls.skipped?' — '+n(ls.skipped)+' boxes in the last export carry '+
                      'labels this model has no use for':'')+
         '. Counted from the export of '+esc(ls.from)+', which held '+
-        n(ls.tasks)+' frames; a fresh one is fetched when you press Build, '+
-        'so this is a floor rather than the exact number.'
+        n(ls.tasks)+' frames, and a fresh export is taken when you press '+
+        'Build. '+
+        (ls.unit==='crops'
+          ? 'Boxes offered, not crops cut: one whose frame cannot be '+
+            'fetched is skipped.'
+          : 'The next build sees at least this many.')
        :'Every build fetches the whole Label Studio project. Each model '+
         'takes the labels it can use.')+
     '">label studio <b>'+
-    (ls&&ls.takes?n(ls.takes)+' '+esc(ls.unit):'fetched at build')+
+    (ls&&ls.tasks!=null?n(ls.takes)+' '+esc(ls.unit):'fetched at build')+
     '</b></span>');
   $('stores').innerHTML=chips.join('');
   var busy=STATE.lanes.build;

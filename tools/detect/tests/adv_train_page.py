@@ -160,6 +160,52 @@ def _labelstudio_checks(bad):
             bad.append('the detector is credited with %r boxes, though the '
                        'non-dog ones are dropped'
                        % ((got.get('dogdet') or {}).get('takes'),))
+        # AN EXPORT THIS MODEL TAKES NOTHING FROM IS NOT NO EXPORT. Somebody
+        # adds a class in Label Studio, every model drops it, and reporting
+        # that as 'fetched at build' -- the same words a training root with no
+        # export shows -- is how nobody finds out.
+        with open(os.path.join(made, 'bundle', 'manifest.json'), 'w') as fh:
+            json.dump({'family': 'dogdet', 'kind': 'detect', 'built_at': 1,
+                       'built_at_iso': 'probe', 'counts': {'total': 1},
+                       'label_studio': {'counts': {
+                           'tasks': 12, 'boxes': 42,
+                           'classes': {'horse': 40, 'tractor': 2}}}}, fh)
+        none = {f['key']: f.get('label_studio')
+                for f in tp.overview()['families']}
+        for key, row in none.items():
+            if row is None or row.get('takes') != 0:
+                bad.append('%s reports %r for an export whose labels no model '
+                           'takes -- it has to say none of it, not nothing '
+                           'at all' % (key, row and row.get('takes')))
+            elif row.get('skipped') != 42:
+                bad.append('%s does not say how much of that export it '
+                           'skipped: %r' % (key, row.get('skipped')))
+        # A RECORD THAT IS NOT SHAPED LIKE A RECORD must not take the page
+        # down: a bundle is a file on disk that somebody can edit, truncate or
+        # write with an older tool, and /train reads every one of them.
+        for junk in ('not a dict', ['a'], 42, None):
+            with open(os.path.join(made, 'bundle', 'manifest.json'), 'w') as fh:
+                json.dump({'family': 'dogdet', 'kind': 'detect',
+                           'built_at': 1, 'counts': {'total': 1},
+                           'label_studio': {'counts': {'tasks': 5,
+                                                       'classes': junk}}}, fh)
+            try:
+                tp.overview()
+            except Exception as e:          # noqa: BLE001
+                bad.append('a bundle whose classes field is %r takes the '
+                           'whole training page down: %s: %s'
+                           % (junk, type(e).__name__, e))
+        # ...and back to the real fixture for the rest of the checks
+        with open(os.path.join(made, 'bundle', 'manifest.json'), 'w') as fh:
+            json.dump({'family': 'dogdet', 'kind': 'detect', 'built_at': 1,
+                       'built_at_iso': 'probe', 'counts': {'total': 1},
+                       'label_studio': {'counts': {
+                           'tasks': 5649, 'boxes': 4322,
+                           'classes': {'leashed dog': 1224,
+                                       'unleashed dog': 1384,
+                                       'other animal': 1707, 'cow': 7}}}}, fh)
+        got = {f['key']: f.get('label_studio')
+               for f in tp.overview()['families']}
         if (got.get('leash') or {}).get('skipped') != 1707 + 7:
             bad.append('nothing says how much of the export the leash model '
                        'has no use for: %r' % (got.get('leash'),))
