@@ -921,6 +921,15 @@ def remove(dataset_id, in_use=()):
                 'message': '%s points outside the training root (%s) -- '
                            'delete it where it actually lives'
                            % (name, path)}
+    # A BUILD IN PROGRESS LOOKS EXACTLY LIKE A DEAD ONE from the outside:
+    # both are a generated name with no bundle yet, and the page offers the
+    # dead ones for deletion. The staging directory beside it is the
+    # difference -- it exists only while a build is running, and is the last
+    # thing that build removes.
+    if os.path.isdir(path + '.stage'):
+        return {'ok': False,
+                'message': '%s is being built right now -- stop the build '
+                           'first if you want it gone' % (name,)}
     freed = 0
     for here, _dirs, files in os.walk(path):
         for one in files:

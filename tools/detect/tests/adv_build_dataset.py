@@ -241,6 +241,15 @@ def remove_checks(bad, bd):
         if got['ok'] or not os.path.isdir(moved):
             bad.append('a symlinked dataset was followed and the original on '
                        'the other drive was deleted')
+        # A BUILD IN PROGRESS looks exactly like a dead one from outside:
+        # both are a generated name with no bundle. Its staging directory is
+        # the difference, and it exists only while the build is running.
+        live = make('dogdet_20260820_eeeeee', bundle=False)
+        os.makedirs(live + '.stage')
+        got = bd.remove('dogdet_20260820_eeeeee')
+        if got['ok'] or not os.path.isdir(live):
+            bad.append('A DATASET WAS DELETED OUT FROM UNDER THE BUILD THAT '
+                       'WAS WRITING IT')
         # ...and the real one goes, with what it freed reported
         got = bd.remove('dogdet_20260820_bbbbbb')
         if not got['ok']:

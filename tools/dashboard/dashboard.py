@@ -11558,6 +11558,15 @@ def _train_dataset_delete(j, dataset):
         for key in ('dataset', 'out'):
             if meta.get(key):
                 busy.append(os.path.basename(str(meta[key])))
+    # ...and a build records only which model it is building, because the
+    # name is generated inside it. While that lane is busy, an unfinished
+    # dataset is as likely to be the one being written as one left behind.
+    if j.lane_holder('build'):
+        for row in bd.catalogue():
+            if row['id'] == str(dataset or '') and row.get('unfinished'):
+                return {'error': 'a build is running, and %s has no bundle '
+                                 'yet -- wait for the build to finish or '
+                                 'stop it' % (dataset,)}
     got = bd.remove(str(dataset or ''), in_use=busy)
     if not got['ok']:
         return {'error': got['message']}
