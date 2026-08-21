@@ -723,6 +723,74 @@ def labelstudio_checks(bad, bd):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def progress_checks(bad, bd):
+    """A progress bar is one line repeated, and it must not become the log.
+
+    tqdm redraws with a carriage return, but a subprocess pipe is not a
+    terminal, so every redraw arrives as its own line. Fetching three thousand
+    frames wrote three thousand near-identical lines into the log and buried
+    everything the build actually said -- and the page, which shows the tail,
+    showed nothing but the bar.
+    """
+    for line, want in (
+            ('Fetching Images:  10%|#  | 322/3078 [01:48<41:02, 1.12it/s]',
+             ('322', '3078')),
+            ('Creating Labels: 100%|##| 5649/5649 [00:03<00:00, 1600it/s]',
+             ('5649', '5649')),
+            ('wrote 2630 train / 480 val', None),
+            ('PROGRESS 1 4 something', None),
+            ('resolved 2,644/2,644 jpgs directly from the store', None)):
+        got = bd._PROGRESS_RE.search(line)
+        if want is None:
+            if got:
+                bad.append('a plain line was swallowed as a progress bar: %r'
+                           % (line,))
+        elif not got:
+            bad.append('a tqdm line was not recognised: %r' % (line,))
+        elif got.groups() != want:
+            bad.append('a tqdm line read as %r, want %r'
+                       % (got.groups(), want))
+
+    # ...and the collapsing happens, with the count republished as this
+    # step's own progress so a twenty-five minute step does not sit at "1 of 4"
+    tmp = tempfile.mkdtemp(prefix='adv_bd_prog_')
+    try:
+        log = os.path.join(tmp, 'log.txt')
+        run = bd.Runner(log, 4)
+        run.progress(1, 'fetching frames')
+        script = ('import sys\n'
+                  'for i in range(200):\n'
+                  '    sys.stdout.write("Fetching Images: %d%%|#| %d/200 '
+                  '[00:01<00:02, 2.0it/s]\\n" % (i//2, i))\n'
+                  'sys.stdout.write("done for real\\n")\n')
+        path = os.path.join(tmp, 'noisy.py')
+        open(path, 'w').write(script)
+        run.run('noisy', [sys.executable, path])
+        run.close()
+        text = open(log).read()
+        bars = [ln for ln in text.splitlines() if 'Fetching Images' in ln]
+        if len(bars) > 20:
+            bad.append('%d progress lines reached the log out of 200 -- the '
+                       'bar is the log again' % (len(bars),))
+        if 'done for real' not in text:
+            bad.append('a real line was dropped along with the bar')
+        subs = [ln for ln in text.splitlines()
+                if ln.startswith('PROGRESS 1 4 fetching frames ')]
+        if len(subs) > 20:
+            bad.append('%d republished progress lines out of 200 -- the bar '
+                       'moved into the log under a new name' % (len(subs),))
+        if not subs:
+            bad.append('the count inside the bar is not republished, so a '
+                       'long step reports nothing while it runs')
+        elif '/200' not in subs[-1]:
+            bad.append('the republished progress carries no count: %r'
+                       % (subs[-1],))
+    except Exception as e:                # noqa: BLE001
+        bad.append('the progress checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def cli_checks(bad):
     """The two read-only modes work against the real stores on this machine."""
     for args in (['--list'], ['--family', 'dogbin', '--dry-run']):
@@ -760,6 +828,7 @@ def main():
                      (measure_checks, (bd,)), (refusal_checks, (bd,)),
                      (composition_checks, (bd,)), (harvest_checks, (bd,)),
                      (labelstudio_checks, (bd,)),
+                     (progress_checks, (bd,)),
                      (cli_checks, ())):
         try:
             fn(bad, *args)

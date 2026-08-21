@@ -64,6 +64,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -510,6 +511,10 @@ def new_name(family, now=None):
 
 # ── running the builders ────────────────────────────────────────────────────
 
+# tqdm's "  10%|█  | 322/3078 [01:48<41:02,  1.12it/s]", however it is styled.
+_PROGRESS_RE = re.compile(r'(\d+)/(\d+)\s*\[[\d:]+<')
+
+
 class Runner:
     """Runs each step, echoes it, and remembers what it did.
 
@@ -522,6 +527,9 @@ class Runner:
         self.log = open(log_path, 'a', buffering=1)
         self.steps = []
         self.total = total
+        self._at = 0                      # which step we are on
+        self._what = ''                   # and what it is doing
+        self._tick = 0.0                  # when a progress line was last kept
 
     def say(self, text):
         print(text, flush=True)
@@ -530,6 +538,7 @@ class Runner:
     def progress(self, n, what):
         # The job runner reads these. A convention, not an interface: a step
         # that never prints one is not broken, it just cannot be drawn.
+        self._at, self._what = n, what
         self.say('PROGRESS %d %d %s' % (n, self.total, what))
 
     def run(self, name, argv, cwd=None, env=None):
@@ -542,6 +551,24 @@ class Runner:
                                 bufsize=1, env=run_env)
         for line in proc.stdout:
             line = line.rstrip('\n')
+            # A PROGRESS BAR IS ONE LINE REPEATED. tqdm redraws with a
+            # carriage return, but nothing here is a terminal, so every redraw
+            # arrives as its own line: fetching three thousand frames wrote
+            # three thousand near-identical lines into the log and buried
+            # everything the build actually said. One is kept every couple of
+            # seconds, and the count in it is republished as this step's own
+            # progress -- so a step that takes twenty-five minutes says how
+            # far through it is instead of sitting at "1 of 4".
+            sub = _PROGRESS_RE.search(line)
+            if sub:
+                now = time.time()
+                if now - self._tick < 2.0:
+                    continue
+                self._tick = now
+                self.say('PROGRESS %d %d %s (%s/%s)'
+                         % (self._at, self.total, self._what,
+                            sub.group(1), sub.group(2)))
+                continue
             # a builder's own progress must not be mistaken for this build's
             print(line if not line.startswith('PROGRESS ')
                   else '| ' + line, flush=True)
