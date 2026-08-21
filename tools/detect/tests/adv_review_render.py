@@ -221,18 +221,18 @@ def split_checks(mod, html, script):
                        'says' % (key, words.get(key)))
     if 'id="split"' not in html:
         bad.append('the page has nowhere to draw the readout')
-    # THE SEGMENTS CARRY THE SAME PAIR AS THE BUTTONS: green for yes, red for
-    # no. A readout that colours the answers the other way round contradicts
-    # the tile it sits above.
+    # THE SEGMENTS MATCH THE SAME READOUT ON THE AUDIT SHEETS, so the three
+    # surfaces show one chart rather than three. (The BUTTONS on this page are
+    # green and red, by the answer -- a deliberate difference, asked for.)
     css = html[html.index('<style>'):html.index('</style>')]
-    for sel, want, what in ((r'\.spbar \.sa\{[^}]*\}', '67,181,129', 'yes'),
-                            (r'\.spbar \.sb\{[^}]*\}', '239,83,80', 'no')):
+    for sel, want, what in ((r'\.spbar \.sa\{[^}]*\}', '232,166,69', 'yes'),
+                            (r'\.spbar \.sb\{[^}]*\}', '67,181,129', 'no')):
         m = re.search(sel, css)
         if not m:
             bad.append('the readout has no %s segment' % (what,))
         elif want not in m.group(0):
-            bad.append('the %s segment is not the colour this page uses for '
-                       '%s: %s' % (what, what, m.group(0)))
+            bad.append('the %s segment does not match the audit sheets: %s'
+                       % (what, m.group(0)))
     if shutil.which('node') is None:
         return bad
     fns = []

@@ -642,6 +642,70 @@ def route_checks(bad, d):
             bad.append('a member can no longer mark what they have seen: %r'
                        % (body[:120],))
 
+        # THE OPERATOR'S OWN READING IS NOT ANNOTATING EITHER. /datasets
+        # walks the training tree: it names every root by absolute path --
+        # the account and the drives -- and hands out every image in every
+        # dataset on the box. An annotator does not need it to judge a crop.
+        for path in sorted(d.BoardHandler.ADMIN_GET):
+            probe = path + ('?key=x' if path.endswith(('tree', 'files',
+                                                       'thumb')) else '')
+            try:
+                st, body = hit(probe, 'sam')
+                bad.append('A MEMBER READ %s (%s)' % (path, st))
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    bad.append('a member got %d from %s, not the same empty '
+                               '404 a dead address gets' % (e.code, path))
+        for want in ('/datasets', '/api/datasets'):
+            if want not in d.BoardHandler.ADMIN_GET:
+                bad.append('%s is not admin-only, so every annotator can '
+                           'read the training tree' % (want,))
+
+        # A REQUEST LINE THAT IS NOT A PATH. A NUL reaches open() as an
+        # embedded null and raises out of the standard library's own static
+        # handler, taking the connection down with a traceback instead of an
+        # answer -- one request at a time, a way to fill the log.
+        import socket as _sk
+        tok2 = auth.mint(A.get_user('sam', path=p), key_path=key)[0]
+
+        def raw(line):
+            c = _sk.create_connection(('127.0.0.1', srv.server_port),
+                                      timeout=20)
+            try:
+                c.sendall(line + b'\r\nHost: x\r\nCookie: '
+                          + auth.COOKIE.encode() + b'=' + tok2.encode()
+                          + b'\r\n\r\n')
+                return c.recv(120).split(b'\r\n')[0].decode()
+            except Exception as e:        # noqa: BLE001
+                return 'closed (%s)' % (type(e).__name__,)
+            finally:
+                c.close()
+
+        for line, what in ((b'GET /recent_crops/a\x00b.jpg HTTP/1.1', 'a NUL'),
+                           (b'GET /recent_crops/a%00b.jpg HTTP/1.1',
+                            'an encoded NUL'),
+                           (b'POST /api/detect/flag\x00 HTTP/1.1',
+                            'a NUL on a POST')):
+            got = raw(line)
+            if '400' not in got:
+                bad.append('%s in the request line answered %r -- the '
+                           'standard handler raises on it and takes the '
+                           'connection down' % (what, got.strip()))
+        # HEAD IS A VERB TOO, and the one nobody types was the one that
+        # skipped the check: do_GET and do_POST both refused a NUL and
+        # do_HEAD went straight into the standard library with it.
+        for line, what in ((b'HEAD /recent_crops/a\x00b.jpg HTTP/1.1',
+                            'a NUL on a HEAD'),
+                           (b'HEAD /recent_crops/a%00b.jpg HTTP/1.1',
+                            'an encoded NUL on a HEAD')):
+            got = raw(line)
+            if '400' not in got:
+                bad.append('%s answered %r -- the standard handler raises on '
+                           'it and takes the connection down'
+                           % (what, got.strip()))
+        if '200' not in raw(b'GET / HTTP/1.1'):
+            bad.append('an ordinary request stopped working')
+
         # A JUDGEMENT IS A FEW HUNDRED BYTES. Every POST used to hand
         # Content-Length straight to json.loads, so anything holding a session
         # could claim a gigabyte and the server would try to hold all of it.
@@ -662,6 +726,17 @@ def route_checks(bad, d):
                 return 'closed (%s)' % (type(e).__name__,)
             finally:
                 c.close()
+
+        # `null` IS VALID JSON, and None is _body()'s "I already answered".
+        # A body of null (or a list, or a bare number) parsed to None, every
+        # route read that as "the reply is written, return", and the request
+        # ended with no status line at all: a hung fetch and an empty curl.
+        for body in (b'null', b'[]', b'3', b'"a string"'):
+            got = claim('/api/detect/flag', len(body), body)
+            if '400' not in got:
+                bad.append('a body of %s answered %r rather than refusing it '
+                           '-- the caller is left holding a request that was '
+                           'never answered' % (body.decode(), got.strip()))
 
         for path in ('/api/detect/flag', '/api/review/box', '/api/audit/box',
                      '/api/review/seen'):

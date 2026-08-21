@@ -2097,17 +2097,22 @@ overflow:hidden;text-overflow:ellipsis}
 .fbtn.yes:hover{background:#1c352f;color:#5ec89a}
 .fbtn.no:focus-visible{outline:2px solid var(--no);outline-offset:-2px}
 .fbtn.yes:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
-/* THE CLASS SPLIT. One scale per scope rather than four figures: on a
-   two-class question the number that matters is where the split falls. The
-   segments carry the same pair as the buttons that made them -- green for
-   yes, red for no -- so the readout and the tile agree. */
+/* THE CLASS SPLIT, in the audit sheets' colours. One scale per scope rather
+   than four figures: on a two-class question the number that matters is where
+   the split falls.
+
+   Amber and green here, matching the same readout on the two audit pages, so
+   the three surfaces show one chart rather than three. Note that the BUTTONS
+   on this page are green and red, by the answer -- so on this page amber
+   means "it's a dog" in the bar and green means it on the button. Deliberate,
+   asked for, and the alternative was three pages disagreeing instead. */
 .split{display:grid;gap:7px;margin-bottom:14px;background:var(--panel);
   border:1px solid var(--bd);border-radius:12px;padding:11px 16px 12px}
 .split[hidden]{display:none}
 .spax{display:flex;align-items:baseline;gap:12px;font-size:10.5px;
   text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}
-.spxa{color:rgba(94,200,154,.9)}
-.spxb{margin-left:auto;color:rgba(240,115,106,.9)}
+.spxa{color:rgba(232,166,69,.85)}
+.spxb{margin-left:auto;color:rgba(67,181,129,.85)}
 /* centred by taking the same auto margin the right-hand label takes, so the
    two split the gap between them */
 .spxn{margin-left:auto;color:var(--dim);text-transform:none;letter-spacing:0;
@@ -2116,16 +2121,16 @@ overflow:hidden;text-overflow:ellipsis}
 .sprl{flex:none;width:58px;color:var(--dim)}
 .spn{font-family:var(--num);font-variant-numeric:tabular-nums;font-size:13px;
   font-weight:650;flex:none;min-width:52px}
-.spna{color:#5ec89a;text-align:right}
-.spnb{color:#f0736a}
+.spna{color:var(--acc);text-align:right}
+.spnb{color:var(--green)}
 /* one track, three segments, no gaps between them: the segments ARE the
    split, and a gap would read as a fourth thing */
 .spbar{flex:1;min-width:70px;display:flex;height:9px;border-radius:5px;
   overflow:hidden;background:rgba(130,140,150,.12)}
 .spbar i{display:block;height:100%;transition:width .35s ease}
-.spbar .sa{background:rgba(67,181,129,.7)}
+.spbar .sa{background:rgba(232,166,69,.72)}
 .spbar .su{background:rgba(130,140,150,.34)}
-.spbar .sb{background:rgba(239,83,80,.62)}
+.spbar .sb{background:rgba(67,181,129,.66)}
 /* a row with nothing in it is not a row with a bar of nothing: it says so,
    because an empty rail beside somebody else's full one reads as a fault */
 .sprow.nil .spn{color:var(--dim)}
@@ -9895,7 +9900,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
 
     def _train_admin(self):
         """True when this request may start work. Answers the 404 itself."""
-        if not self.session or self.session.get('role') != 'admin':
+        if not self.session or not self._is_admin(self.session):
             self.send_error(404)
             return False
         return True
@@ -10139,12 +10144,17 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.close_connection = True
 
     def _html(self, body):
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-cache, must-revalidate')
-        self.end_headers()
-        self.wfile.write(body)
+        # A reader who closes the tab mid-page is not an error worth a
+        # traceback in the log -- the same hang-up guard _json carries.
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-cache, must-revalidate')
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _audit_stage(self, q=None):
         """Which audit a request is for. Unknown names are the default, never
@@ -10475,8 +10485,12 @@ class BoardHandler(SimpleHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        if not self._sane_path():
+            return
         # The gate, before anything looks at the path. See _gate().
         if self._gate():
+            return
+        if self._admin_only(self.path.split('?', 1)[0], self.ADMIN_GET):
             return
         # split('?') so cache-busting query strings still match (§7.2 —
         # /api/board's == match 404s on ?t=1 and that bit us before). The two
@@ -10534,7 +10548,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
             # gets. Every button on it starts work on shared hardware, and a
             # member who guesses the name learns nothing they did not know.
             t = _train_page()
-            if not self.session or self.session.get('role') != 'admin' \
+            if not self.session or not self._is_admin(self.session) \
                     or t is None:
                 self.send_error(404)
                 return
@@ -10645,7 +10659,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
             # The roster. Admin only, and the same empty 404 as an address
             # that does not exist for anybody else -- a 403 here would tell a
             # member the roster is real and worth asking about again.
-            if not self.session or self.session.get('role') != 'admin':
+            if not self.session or not self._is_admin(self.session):
                 self.send_error(404)
                 return
             q = parse_qs(urlparse(self.path).query)
@@ -10913,6 +10927,11 @@ class BoardHandler(SimpleHTTPRequestHandler):
         its size: serve.log, history.duckdb, triage.jsonl, and now the
         accounts database and the session key. An ungated route nobody wrote.
         """
+        # BEFORE the gate, the same as do_GET and do_POST: a NUL in the
+        # path raises out of the standard library's own translate_path, and
+        # the one verb that skipped this check was the one nobody types.
+        if not self._sane_path():
+            return
         if self._gate():
             return
         if not _static_allowed(self.path.split('?', 1)[0]):
@@ -10962,22 +10981,87 @@ class BoardHandler(SimpleHTTPRequestHandler):
                         'error': 'that request was too large'}, 413)
             return None
         try:
-            return json.loads(self.rfile.read(n) or b'{}')
+            got = json.loads(self.rfile.read(n) or b'{}')
         except ValueError:
             self._json({'ok': False, 'error': 'that request was not JSON'},
                        400)
             return None
+        # `null` PARSES, AND None IS THIS FUNCTION'S "I ALREADY ANSWERED".
+        # A body of null (or a list, or a number) came back as None, every
+        # caller read that as "the reply is written, return", and the request
+        # ended with no status line at all -- a hung curl and an empty fetch.
+        # Every route here reads fields off an object, so anything else is
+        # malformed and is told so.
+        if not isinstance(got, dict):
+            self._json({'ok': False,
+                        'error': 'that request was not an object'}, 400)
+            return None
+        return got
 
-    def _admin_only(self, path):
-        """True when this request may not have that route. Answers the 404."""
-        if path not in self.ADMIN_POST:
+    @staticmethod
+    def _is_admin(session):
+        """Does this session carry admin rights -- or the owner's, which
+        include them?
+
+        Through the store's ranking, never `role == 'admin'`: the owner tier
+        sits ABOVE admin, and a comparison that missed it would leave the
+        person who owns the machine with less than the people they invited.
+        """
+        g = _auth()
+        if g is None:
             return False
-        if (self.session or {}).get('role') == 'admin':
+        return g.accounts.is_admin((session or {}).get('role'))
+
+    # AND THE OPERATOR'S OWN READING. /datasets walks the training tree: it
+    # names every root by absolute path -- the account and the drives -- and
+    # hands out every image in every dataset on the box. None of that is
+    # annotating, and an annotator does not need it to judge a crop.
+    ADMIN_GET = frozenset({
+        '/datasets', '/api/datasets', '/api/datasets/tree',
+        '/api/datasets/files', '/api/datasets/thumb',
+    })
+
+    def send_error(self, code, message=None, explain=None):
+        """The standard refusal, minus the traceback when nobody is listening.
+
+        A public address is scanned constantly, and a scanner that reads the
+        status line and hangs up mid-body is the normal case, not an error --
+        but socketserver logs a stack trace for each one. Same reasoning as
+        _json(): a client that has gone is not a fault of ours.
+        """
+        try:
+            super().send_error(code, message, explain)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
+    def _sane_path(self):
+        """False when the request line is not something a path can be made of.
+
+        A NUL byte in a URL reaches open() as an embedded null and raises a
+        ValueError out of the standard library's own static handler, which
+        takes the connection down with a traceback rather than an answer. On
+        a public deployment that is a way to fill the log, one request at a
+        time. Checked here rather than in each route: it is a property of the
+        request line, and every route inherits it.
+        """
+        raw = self.path or ''
+        if '\x00' in raw or '%00' in raw.lower():
+            self.send_error(400, 'Bad Request')
+            return False
+        return True
+
+    def _admin_only(self, path, table=None):
+        """True when this request may not have that route. Answers the 404."""
+        if path not in (self.ADMIN_POST if table is None else table):
+            return False
+        if self._is_admin(self.session):
             return False
         self.send_error(404)
         return True
 
     def do_POST(self):
+        if not self._sane_path():
+            return
         # The gate, before anything looks at the path. See _gate(). It reads
         # the request body ONLY for the routes auth.py owns -- the JSON that
         # /api/audit/verdict and its neighbours read for themselves is still
@@ -11194,7 +11278,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     # carries both, so the reset is checked here rather than
                     # by path: a volunteer resetting it restores nine thousand
                     # crops into every other annotator's queue.
-                    if (self.session or {}).get('role') != 'admin':
+                    if not self._is_admin(self.session):
                         self._json({'ok': False,
                                     'error': 'only an admin can hand the '
                                              'queue back to everyone'}, 403)
@@ -11784,7 +11868,9 @@ def render_train_nav(session):
     same empty 404 an address that does not exist gets, and a link that 404s
     for half the people who can see it undoes that in the header.
     """
-    if not session or session.get('role') != 'admin':
+    g = _auth()
+    if not session or g is None or \
+            not g.accounts.is_admin(session.get('role')):
         return ''
     return ('<a class="hnav" href="/train" title="Build a dataset from the '
             'annotations, and train on it">'
@@ -11801,7 +11887,9 @@ def render_account_nav(session):
     middle of a row of controls, which is what made that row read as seven
     equal things instead of two doing something and the rest reporting.
     """
-    if not session or session.get('role') != 'admin':
+    g = _auth()
+    if not session or g is None or \
+            not g.accounts.is_admin(session.get('role')):
         return ''
     return ('<a class="hnav" href="/admin" title="Invite someone, '
             'or retire an account">'
