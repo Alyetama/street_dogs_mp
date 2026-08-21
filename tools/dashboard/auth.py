@@ -1688,6 +1688,14 @@ def _span(seconds):
     return '%d hour%s' % (h, '' if h == 1 else 's')
 
 
+# The spans an invite is ever set to, in the unit the route reads (hours).
+# A list rather than a free number because the question is "how long do they
+# get", and the answers to that are a handful of round ones -- and because
+# five spinners in five rows read as a column of data.
+_EXPIRY_SPANS = ((12, '12 hours'), (24, '1 day'), (48, '2 days'),
+                 (168, '1 week'), (720, '30 days'))
+
+
 def _when(ts):
     """A timestamp as the operator's own clock reads it, or an em dash."""
     if not ts:
@@ -1878,9 +1886,16 @@ td.acts{text-align:right;white-space:nowrap}
 td.acts form{display:inline}
 /* The expiry box sits in a row of buttons, so it is sized like one rather
    than like a form field: wide enough for three digits and no wider. */
-td.acts input.hrs{width:56px;padding:3px 6px;font-size:11.5px;
-  border-radius:7px;margin-right:4px;text-align:right;
-  font-family:var(--num);font-variant-numeric:tabular-nums}
+/* The expiry editor lives under the date it changes. Held at low contrast
+   until the row is hovered or the control is focused: every open invite
+   carries one, and five lit-up controls in five rows read as five different
+   states rather than as one repeated affordance. */
+form.exp{display:flex;gap:5px;margin-top:5px;align-items:center;
+  opacity:.55;transition:opacity .12s ease}
+tr:hover form.exp,form.exp:focus-within{opacity:1}
+form.exp select{width:auto;flex:none;padding:2px 6px;font-size:11px;
+  border-radius:7px;font-family:inherit}
+form.exp .btn.small{padding:2px 8px;font-size:11px}
 .tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;
   border:1px solid var(--bd);border-radius:6px;padding:1px 6px;color:var(--dim)}
 .tag.open{color:var(--green);border-color:rgba(67,181,129,.32)}
@@ -2215,7 +2230,7 @@ def admin_page(session, req, now=None, error='', minted=None):
                     '<th>issued by</th><th>issued</th><th>expires</th>'
                     '<th>taken by</th><th></th></tr>\n')
         for iv in invites:
-            act = ''
+            act = when = ''
             if iv['state'] in ('open', 'expired'):
                 # WHEN IT RUNS OUT, CHANGED WITHOUT REISSUING IT. The link
                 # went out in an email hours ago; the person it was for has
@@ -2223,24 +2238,35 @@ def admin_page(session, req, now=None, error='', minted=None):
                 # second link means chasing them with it, and leaves the first
                 # one live. Hours from now, so a link that is already out of
                 # time is the ordinary case rather than the impossible one.
-                act = ('<form method="post" action="%s/invite-expiry">'
-                       '<input type="hidden" name="%s" value="%s">'
-                       '<input type="hidden" name="id" value="%d">'
-                       '<input class="hrs" name="hours" type="number" '
-                       'min="1" max="720" step="1" value="%d" '
-                       'aria-label="hours from now" '
-                       'title="hours from now">'
-                       '<button class="btn small" type="submit" '
-                       'title="Move when this link stops working. The link '
-                       'itself does not change.">set expiry</button></form>'
-                       % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id'],
-                          hours_default))
-                act += ('<form method="post" action="%s/revoke">'
+                #
+                # A LIST OF SPANS, NOT A NUMBER BOX. The number box was a
+                # spinner with its arrows in every row and the same "48" in
+                # each of them, which reads as a column of data rather than
+                # as five copies of one control -- and nobody sets an invite
+                # to 37 hours. It sits under the date it changes, not in the
+                # actions cell, because that cell already held three buttons
+                # and this is not a fourth: it edits the value beside it.
+                span = ''.join(
+                    '<option value="%d"%s>%s</option>'
+                    % (h, ' selected' if h == hours_default else '', w)
+                    for h, w in _EXPIRY_SPANS)
+                when = ('<form method="post" action="%s/invite-expiry"'
+                        ' class="exp">'
                         '<input type="hidden" name="%s" value="%s">'
                         '<input type="hidden" name="id" value="%d">'
-                        '<button class="btn small warn" type="submit">revoke'
-                        '</button></form>'
-                        % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id']))
+                        '<select name="hours" aria-label="new expiry, from '
+                        'now">%s</select>'
+                        '<button class="btn small" type="submit" '
+                        'title="Move when this link stops working. The link '
+                        'itself does not change.">set</button></form>'
+                        % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id'],
+                           span))
+                act = ('<form method="post" action="%s/revoke">'
+                       '<input type="hidden" name="%s" value="%s">'
+                       '<input type="hidden" name="id" value="%d">'
+                       '<button class="btn small warn" type="submit">revoke'
+                       '</button></form>'
+                       % (esc(ADMIN_PATH), esc(CSRF_FIELD), csrf, iv['id']))
             # REVOKE WITHDRAWS A LINK THAT STILL WORKS. This drops the line
             # about one that does not: taken, expired, or already withdrawn.
             act += ('<form method="post" action="%s/forget-invite"'
@@ -2256,14 +2282,14 @@ def admin_page(session, req, now=None, error='', minted=None):
                 '<tr><td><span class="tag %s">%s</span></td>'
                 '<td><span class="tag%s">%s</span></td>'
                 '<td>%s</td><td class="name">%s</td>'
-                '<td class="when">%s</td><td class="when">%s</td>'
+                '<td class="when">%s</td><td class="when">%s%s</td>'
                 '<td>%s</td><td class="acts">%s</td></tr>\n'
                 % (esc(iv['state']), esc(iv['state']),
                    ' admin' if iv['role'] == 'admin' else '', esc(iv['role']),
                    esc(iv['note'] or '\u2014'),
                    esc(iv['created_by_name'] or '\u2014'),
                    esc(_when(iv['created_at'])), esc(_when(iv['expires_at'])),
-                   esc(iv['used_by_name'] or '\u2014'), act))
+                   when, esc(iv['used_by_name'] or '\u2014'), act))
         bits.append('</table>\n')
     bits.append('</div>\n</section>\n')
 

@@ -1413,6 +1413,33 @@ def invite_expiry_checks(bad, fx):
                        % ('drawn' if offered else 'missing', m.group(1)))
     if 'invite-expiry' in html and 'name="hours"' not in html:
         bad.append('the expiry form carries no hours field')
+    # A LIST OF SPANS, NOT A SPINNER. The number box put its arrows and the
+    # same default in every row, which reads as a column of data rather than
+    # five copies of one control -- and every span it can be set to has to be
+    # one the store will actually accept.
+    # (the "Invite somebody" form at the top of the page keeps its number
+    # box -- one control, filled in once, is not the thing that was wrong)
+    for form in re.findall(r'<form[^>]*invite-expiry.*?</form>', html, re.S):
+        if 'type="number"' in form:
+            bad.append('the per-row expiry control is a number spinner again')
+            break
+    for hours, _word in U._EXPIRY_SPANS:
+        if hours * 3600 < A.INVITE_TTL_MIN or hours * 3600 > A.INVITE_TTL_MAX:
+            bad.append('the %dh span is outside what the store accepts'
+                       % (hours,))
+    offered = re.findall(r'<option value="(\d+)"', html)
+    if offered and sorted(set(int(h) for h in offered)) != \
+            sorted(h for h, _ in U._EXPIRY_SPANS):
+        bad.append('the spans on the page are not the ones in _EXPIRY_SPANS: '
+                   '%r' % (sorted(set(offered)),))
+    # ...and it sits with the date it changes, not in the row of buttons
+    for row in re.findall(r'<tr>.*?</tr>', html, re.S):
+        if 'invite-expiry' not in row:
+            continue
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
+        if len(cells) > 7 and 'invite-expiry' in cells[7]:
+            bad.append('the expiry control is back in the actions cell, '
+                       'which already holds revoke and remove')
 
 
 def page_checks(bad, fx):
