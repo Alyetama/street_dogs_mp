@@ -83,7 +83,7 @@ def tab_strip_checks(html):
     nothing between the strip and the header.
     """
     bad = []
-    labels = {'review': 'Review queue', 'gate': 'Dog-bin audit',
+    labels = {'review': 'Detections audit', 'gate': 'Dog-bin audit',
               'leash': 'Leash audit'}
     order = ('review', 'gate', 'leash')
     nav = '<nav class="jtabs" aria-label="judging surfaces">'
@@ -400,8 +400,8 @@ def route_checks(mod):
             if '<nav class="jtabs"' not in page:
                 bad.append('/audit/review serves a page without the shared '
                            'tab strip')
-            if 'class="jtab on" aria-current="page">Review queue' not in page:
-                bad.append('/audit/review does not mark the Review queue '
+            if 'class="jtab on" aria-current="page">Detections audit' not in page:
+                bad.append('/audit/review does not mark the Detections audit '
                            'tab as current')
         except urllib.error.HTTPError as e:
             bad.append('/audit/review answered %d — the generic /audit '
@@ -2274,13 +2274,13 @@ async function t35() {
      't35: closing the tab no longer banks the queue screen');
 }
 
-// ── 36. undo after a leash-held "Is a dog" ──────────────────────────────
-// With the leash store on, "Is a dog" does NOT consume the crop: the tile is
-// held on screen because a leash call has just become askable on it. undo()
-// was written for the consuming path and re-inserts unconditionally, so taking
-// that verdict back put the crop on the grid twice, both tiles lit "Is a dog",
-// for a kept record that had just been deleted -- a tile asserting an
-// annotation that is not on disk, over a crop that is in fact unjudged.
+// ── 36. undo after "Is a dog", with the leash store present ─────────────
+// The leash question moved to its own tab, so nothing on this page is held
+// back any more: every verdict consumes its crop, including this one, even
+// when the leash store exists and the payload carries its totals. This case
+// pins that, and the undo bookkeeping around it -- taking the verdict back
+// once put the crop on the grid twice, both tiles lit "Is a dog", for a
+// record that had just been deleted.
 async function t36() {
   RESP = { '/api/review': () => payload(CROPS.normal.slice(0, 6),
              CROPS.normal.slice(6, 9),
@@ -2291,11 +2291,13 @@ async function t36() {
   const name = API.st().items[2].name;
   const n0 = API.st().items.length, r0 = API.st().reserve.length;
   await API.flag(2, false, 'true_positive'); await flush();
-  const held = document.querySelector('.card[data-name="' + name + '"]');
-  ck(!!held && held.classList.contains('awaitleash'),
-     't36: the crop was not held for a leash call, so this case tests nothing');
-  ck(API.st().items.length === n0 && API.st().reserve.length === r0,
-     't36: a held flag consumed the crop after all');
+  ck(!document.querySelector('.card[data-name="' + name + '"]'),
+     't36: the crop stayed on the grid after a verdict -- nothing is held '
+     + 'back here any more, the leash question has its own tab');
+  ck(!API.st().items.some(c => c.name === name),
+     't36: the judged crop is still in the queue');
+  ck(API.st().reserve.length === r0 - 1,
+     't36: no crop was pulled from reserve to fill the gap');
 
   await API.undo(); await flush();
   const names = API.st().items.map(c => c.name);
@@ -2319,12 +2321,9 @@ async function t36() {
                    return y && y.classList.contains('on') });
   ck(lit.length === 0, 't36: ' + lit.length + ' tile(s) still lit "Is a dog" ' +
      'for a record the undo deleted');
-  const asking = document.querySelectorAll('.card[data-name="' + name + '"]')
-    .filter(e => e.classList.contains('awaitleash'));
-  ck(asking.length === 0,
-     't36: the tile still asks for a leash call on a verdict that was undone');
-  ck(API.st().reserve.length === r0,
-     't36: reserve drifted to ' + API.st().reserve.length + ', want ' + r0);
+  ck(!/awaitleash|lbtn/.test(document.body.innerHTML || ''),
+     't36: the page still carries leash controls, which belong to the leash '
+     + 'tab now');
 }
 
 // ── 37. a zero-match FILTER does not claim the pool is judged ───────────

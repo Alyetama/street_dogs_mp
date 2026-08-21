@@ -2031,17 +2031,17 @@ background:linear-gradient(to top,rgba(10,12,15,.94) 46%,rgba(10,12,15,.72) 74%,
 rgba(10,12,15,0));opacity:0;transform:translateY(5px);pointer-events:none;
 transition:opacity .13s ease,transform .13s ease}
 .card:hover .actwrap,.card.sel .actwrap,.card:focus-within .actwrap,
-.card.awaitleash .actwrap,.card.changed .actwrap,.card.unjudged .actwrap,
+.card.changed .actwrap,.card.unjudged .actwrap,
 /* A tile that already carries a mark shows it. Hiding it until hover is right
    for a queue -- an unjudged crop has nothing to report -- and wrong the
    moment there IS something to report. */
-.card:has(.fbtn.on) .actwrap,.card:has(.lbtn.on) .actwrap,
+.card:has(.fbtn.on) .actwrap,
 /* and audit mode is nothing BUT reading the marks: every tile there carries
    one, and hiding all fifty made the mode useless */
 body.auditing .actwrap{
 opacity:1;transform:none;pointer-events:auto}
 @media(prefers-reduced-motion:reduce){.actwrap{transition:none}}
-.acts{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.acts{display:grid;grid-template-columns:1fr 1fr auto;gap:5px}
 /* AUDIT MODE. Belongs in THIS stylesheet: /review is its own document with
    its own <style>, and the same rules in the dashboard's block styled nothing
    here -- the class was on the button and the button looked untouched. */
@@ -2051,11 +2051,6 @@ font-weight:700}
 .card.changed{box-shadow:inset 0 0 0 2px var(--acc)}
 /* no verdict left on it: neither button is lit, and the tile says so rather
    than looking like a crop that was never reached */
-/* judged a dog and still owing a leash call: dimming it would read as
-   "done", so it keeps full weight and gets a rail instead */
-.card.awaitleash{box-shadow:inset 0 0 0 2px rgba(67,181,129,.45)}
-.card.awaitleash .acts.leash::before{content:'leash?';grid-column:1/-1;
-font-size:10px;color:var(--green);letter-spacing:.04em;margin-bottom:-2px}
 .card.unjudged{opacity:.62}
 .card.unjudged .meta::after{content:'no verdict';margin-left:auto;
 font-size:10px;color:var(--dim)}
@@ -2078,22 +2073,7 @@ body.auditing #periodwrap{display:inline-flex;align-items:center;gap:6px}
 .plab{color:var(--dim);font-size:11.5px}
 __DATECSS__
 
-/* The leash row. In THIS stylesheet for the reason the comment above gives:
-   /review is its own document, and these rules in the dashboard's block
-   styled nothing -- the buttons rendered as browser defaults. A second axis,
-   so it is quieter than the verdict row it sits under. */
-.acts.leash{border-top:0;padding:5px 0 0;gap:5px;display:grid;
-grid-template-columns:1fr 1fr}
-.lbtn{appearance:none;background:transparent;color:var(--dim);
-border:1px dashed var(--bd);border-radius:7px;padding:5px 4px;font-size:11px;
-font-family:inherit;cursor:pointer;white-space:nowrap;overflow:hidden;
-text-overflow:ellipsis;transition:color .12s,border-color .12s,background .12s}
-.lbtn:hover{color:var(--tx);border-color:var(--dim)}
-.lbtn:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
-.lbtn.le.on{border-style:solid;color:#5ec89a;border-color:rgba(67,181,129,.55);
-background:rgba(67,181,129,.16);font-weight:600}
-.lbtn.un.on{border-style:solid;color:var(--acc);border-color:rgba(232,166,69,.55);
-background:rgba(232,166,69,.16);font-weight:600}
+/* the header tally for the leash store, which is filled on its own tab */
 .sec.lea{color:var(--mut)}
 .fbtn{border:1px solid rgba(130,140,150,.22);border-radius:7px;
 background:rgba(20,24,30,.72);color:var(--mut);padding:6px 4px;
@@ -2106,6 +2086,9 @@ overflow:hidden;text-overflow:ellipsis}
 .fbtn.yes:hover{background:rgba(67,181,129,.2);color:#5ec89a}
 .fbtn.no:focus-visible{outline:2px solid var(--no);outline-offset:-2px}
 .fbtn.yes:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
+.fbtn.edit{padding:6px 10px;display:flex;align-items:center;
+justify-content:center;color:var(--dim)}
+.fbtn.edit:hover{color:var(--acc);border-color:rgba(232,166,69,.4)}
 @media(max-width:420px){.fbtn{font-size:11px;padding:8px 2px}}
 
 /* ── states ── */
@@ -2239,7 +2222,7 @@ background:rgba(67,181,129,.14)}
        state is two quiet lines rather than a wall of pills. -->
 </header>
 
-<nav class="jtabs" aria-label="judging surfaces"><a href="/audit/review" class="jtab on" aria-current="page">Review queue</a><a href="/audit/gate" class="jtab">Dog-bin audit</a><a href="/audit/leash" class="jtab">Leash audit</a></nav>
+<nav class="jtabs" aria-label="judging surfaces"><a href="/audit/review" class="jtab on" aria-current="page">Detections audit</a><a href="/audit/gate" class="jtab">Dog-bin audit</a><a href="/audit/leash" class="jtab">Leash audit</a></nav>
 <!-- ^ the shared tab strip, one contract across every judging page:
      identical markup on this queue and both audits, with 'jtab on' (and the
      current-page mark) on the page being read, and nothing between it and
@@ -2403,66 +2386,16 @@ __COPY_JS__
 var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],pages=1,sel=-1,
     smallN=0,minPx=0,harvestN=0,mode='queue',verdict='all',period='',find='',loading=false,
     todoN=0,flaggedN=0,posN=0,seenN=0,dupN=0,session=0,lastUndo=null,toastT=null,lb=null,busy={};
-/* leash verdicts for what is on screen, and whether the store exists at all.
-   LEASH_ON stays false on a checkout without the tool, and the two buttons
-   simply never render. */
-var LEASH={},LEASH_ON=false,leashN={leashed:0,unleashed:0};
-function leash(name,label){
-  if(!LEASH_ON)return;
-  /* clicking the label a crop already has takes it back -- the same gesture
-     the verdict buttons use, and the reason this is a database rather than an
-     append-only log */
-  var had=LEASH[name]===label;
-  var body=had?{name:name,remove:true}:{name:name,label:label};
-  if(had)delete LEASH[name]; else LEASH[name]=label;
-  paintLeash(name);
-  fetch('/api/review/leash',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)})
-    .then(function(r){return r.json()})
-    .catch(function(){return null})
-    .then(function(j){
-      if(!j||!j.ok){
-        /* put the button back where it was: an optimistic paint that the
-           server refused is a lie about what was recorded */
-        if(had)LEASH[name]=label; else delete LEASH[name];
-        paintLeash(name);
-        leashNote((j&&j.error)?('Leash verdict not saved: '+j.error)
-                              :'Leash verdict not saved.');
-        return;
-      }
-      leashN.leashed=j.leashed;leashN.unleashed=j.unleashed;
-      paintLeashCount();
-      var held=document.querySelector('.card.awaitleash[data-name="'+
-        name.replace(/"/g,'\\"')+'"]');
-      if(!held)return;
-      held.classList.remove('awaitleash');
-      /* Both axes answered, so the tile has nothing left to ask and leaves
-         like any other judged crop. It was only kept back to make the leash
-         askable; taking the leash back (had) leaves it in place, still owing
-         one. */
-      if(had){held.classList.add('awaitleash');return;}
-      releaseHeld(name);
-    });
-}
-function releaseHeld(name){
-  /* the same surgical removal flag() does: splice the item, drop the node,
-     pull one from reserve so the grid stays full, and leave the rest of the
-     DOM untouched so nothing reflows under the cursor */
-  var i=idx(name);
-  if(i<0)return;
-  var card=cardAt(i);
-  items.splice(i,1);
-  if(card&&card.parentNode)card.parentNode.removeChild(card);
-  var nx=reserve.shift();
-  if(nx){items.push(nx);$('grid').appendChild(tile(nx))}
-  /* the undo toast still on screen belongs to the DOG verdict that put this
-     tile on hold; if undoing it now has to hand a reserve crop back, its
-     bookkeeping has to know that happened here */
-  if(lastUndo&&lastUndo.crop&&lastUndo.crop.name===name&&nx)lastUndo.pulled=true;
-  if(sel>=items.length)sel=items.length-1;
-  if(!items.length)render();else mark();
-}
+/* Only the tally now: the leash question is asked on its own tab, and this
+   page keeps the number because it is a fact about the project rather than a
+   control -- the header says how many calls exist, and nothing here makes
+   one. */
+var leashN={leashed:0,unleashed:0};
+/* the crop mark, drawn the same way the dog-bin sheet draws it */
+var CROP_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" '+
+  'stroke="currentColor" stroke-width="1.9" stroke-linecap="round" '+
+  'stroke-linejoin="round" aria-hidden="true">'+
+  '<path d="M6.5 2v15.5H22"/><path d="M2 6.5h15.5V22"/></svg>';
 function leashNote(msg){
   /* the page has no general notice -- showUndo is about a verdict and offers
      to undo it, which is the wrong thing to say when nothing was recorded */
@@ -2501,13 +2434,6 @@ function took(r){
         :('Not recorded'+((j&&j.error)?(': '+j.error):'.')));
       return null;
    });
-}
-function paintLeash(name){
-  var card=document.querySelector('.card[data-name="'+name.replace(/"/g,'\\"')+'"]');
-  if(!card)return;
-  var le=card.querySelector('.lbtn.le'),un=card.querySelector('.lbtn.un');
-  if(le)le.classList.toggle('on',LEASH[name]==='leashed');
-  if(un)un.classList.toggle('on',LEASH[name]==='unleashed');
 }
 function paintFind(j){
   var el=$('find'), dl=$('findterms'), msg=$('findmsg');
@@ -2709,7 +2635,7 @@ function loadAudit(){
     loading=false;
     items=j.items||[];reserve=[];page=j.page||0;pages=j.pages||1;
     if(j.leash)LEASH=j.leash;
-    if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
+    if(j.leash_totals){leashN=j.leash_totals;paintLeashCount();}
     var only=verdict==='false_positive'?' marked not a dog':
              verdict==='true_positive'?' marked a dog':' annotated';
     /* "nothing annotated yet" is only true with nothing narrowing the list:
@@ -2761,7 +2687,7 @@ function load(){
     if(j.positive_total!=null)posN=j.positive_total;
     if(j.collapsed!=null)dupN=j.collapsed;
     if(j.leash)LEASH=j.leash;
-    if(j.leash_totals){LEASH_ON=true;leashN=j.leash_totals;paintLeashCount();}
+    if(j.leash_totals){leashN=j.leash_totals;paintLeashCount();}
     paintCountries(j.countries,j.country,j.country_coverage);
     paintChips();
     paintCap(j);
@@ -2870,30 +2796,28 @@ function tile(c){
         esc(c.by)+'</span>':'')+
       '</div>'+
     '<div class="actwrap">'+
+    /* THE ANSWER THAT IS USUALLY YES COMES FIRST. This queue exists to
+       confirm dogs the detector was unsure about, so the common gesture sits
+       where the eye lands and the reject is the deliberate second choice.
+       The leash question is not asked here at all: it has its own tab, with
+       its own crops, its own threshold and its own store. */
     '<div class="acts">'+
-      '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
-        '" type="button" title="'+(c.label==='false_positive'?
-          'click again to remove this annotation':'false positive (F)')+'">'+
-        '&#9873; Not a dog</button>'+
       '<button class="fbtn yes'+(c.label==='true_positive'?' on':'')+
         '" type="button" title="'+(c.label==='true_positive'?
           'click again to remove this annotation':
           'a real dog the detector was unsure about (D)')+
         '">&#10003; Is a dog</button>'+
+      '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
+        '" type="button" title="'+(c.label==='false_positive'?
+          'click again to remove this annotation':'false positive (F)')+'">'+
+        '&#9873; Not a dog</button>'+
+      /* Redrawing the box is something you do TO a tile, so it sits with the
+         verdicts rather than two clicks deep -- the same mark, in the same
+         place, as the one on the dog-bin sheet. */
+      '<button class="fbtn edit" type="button" title="redraw this box '+
+        '\u2014 changes the crop a future model trains on, not what this '+
+        'one was judged on">'+CROP_SVG+'</button>'+
     '</div>'+
-    /* A SECOND axis, kept visually apart from the verdict row above it. A
-       leash label says "this is a dog, and here is whether it is on a leash" --
-       it is stored on its own and never touches the dog/not-dog ledgers. */
-    (LEASH_ON?('<div class="acts leash">'+
-      '<button class="lbtn le'+(LEASH[c.name]==='leashed'?' on':'')+
-        '" type="button" title="'+(LEASH[c.name]==='leashed'?
-          'click again to remove this leash verdict':'on a leash (L)')+
-        '">Leashed</button>'+
-      '<button class="lbtn un'+(LEASH[c.name]==='unleashed'?' on':'')+
-        '" type="button" title="'+(LEASH[c.name]==='unleashed'?
-          'click again to remove this leash verdict':'no leash (N)')+
-        '">Unleashed</button>'+
-    '</div>'):'')+
     '</div>';
   var im=d.querySelector('.thumb');
   /* The upgrade starts when the PREVIEW has painted, so the lazy loader still
@@ -2908,16 +2832,12 @@ function tile(c){
       up.src=hqURL;
     },{once:true});
   im.onclick=function(){openLb(idx(c.name))};
+  var ed=d.querySelector('.fbtn.edit');
+  if(ed)ed.onclick=function(e){e.stopPropagation();openLb(idx(c.name))};
   d.querySelector('.fbtn.no').onclick=function(e){
     e.stopPropagation();flag(idx(c.name),false,'false_positive')};
   d.querySelector('.fbtn.yes').onclick=function(e){
     e.stopPropagation();flag(idx(c.name),false,'true_positive')};
-  if(LEASH_ON){
-    d.querySelector('.lbtn.le').onclick=function(e){
-      e.stopPropagation();leash(c.name,'leashed')};
-    d.querySelector('.lbtn.un').onclick=function(e){
-      e.stopPropagation();leash(c.name,'unleashed')};
-  }
   /* pressing the flag button must NOT select the tile: the tile is about to
      be removed, and selecting it means the highlight lands on whatever slides
      into that index -- an auto-advance nobody asked for */
@@ -3085,10 +3005,11 @@ function flag(i,viaKey,label){
      Only for that verdict, only while the leash store is on, and only until it
      has a leash call: everything else still leaves the queue on click, which
      is what makes the queue drain. */
-  var hold=(LEASH_ON&&label==='true_positive'&&!LEASH[c.name]);
+  /* Nothing is held back any more: the leash question moved to its own tab,
+     so a judged crop leaves the queue on click, which is what drains it. */
   busy[c.name]=1;
   var card=cardAt(i);
-  if(card&&!hold)card.classList.add('go');
+  if(card)card.classList.add('go');
   return fetch('/api/detect/flag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name:c.name,label:label})})
@@ -3102,19 +3023,6 @@ function flag(i,viaKey,label){
          one request rather than one per crop. */
       refreshWorkStrip();
       score();
-      if(hold){
-        /* judged, kept: the verdict shows on the tile and the leash row is
-           now the only thing left to answer on it */
-        c.label=label;
-        if(card){
-          var ys=card.querySelector('.fbtn.yes');
-          if(ys)ys.classList.add('on');
-          card.classList.add('awaitleash');
-        }
-        if(!viaKey)sel=-1; else mark();
-        showUndo(c,i,false,label,true);
-        return;
-      }
       /* Surgical removal + backfill: the rest of the grid does not re-render,
          so nothing reflows under the cursor and no image reloads. */
       items.splice(i,1);
@@ -3236,8 +3144,8 @@ function openLb(i){
         '</span>'+
         '<span class="bsave" id="lbstat"></span>'+
         '<button class="rbtn quiet" id="lbrst">Reset box</button>'+
-        '<button class="rbtn" id="lbf">&#9873; Not a dog</button>'+
-        '<button class="rbtn lbyes" id="lby">&#10003; Is a dog</button></div>';
+        '<button class="rbtn lbyes" id="lby">&#10003; Is a dog</button>'+
+        '<button class="rbtn" id="lbf">&#9873; Not a dog</button></div>';
     lb.onclick=function(e){if(e.target===lb)closeLb()};
     document.body.appendChild(lb);
     document.body.style.overflow='hidden';
@@ -3559,10 +3467,6 @@ document.addEventListener('keydown',function(e){
        Unlike F and D these do NOT close the lightbox: deciding the leash does
        not decide the dog, and you usually want to answer both while looking at
        the same frame. */
-    else if((e.key==='l'||e.key==='L')&&sel>=0&&LEASH_ON){
-      leash(items[sel].name,'leashed');e.preventDefault()}
-    else if((e.key==='n'||e.key==='N')&&sel>=0&&LEASH_ON){
-      leash(items[sel].name,'unleashed');e.preventDefault()}
     return;
   }
   var c=cols(),moved=true;
@@ -3577,12 +3481,6 @@ document.addEventListener('keydown',function(e){
   else if(e.key==='ArrowUp')sel=Math.max(0,sel-c);
   else moved=false;
   if(moved){mark();e.preventDefault();return}
-  if((e.key==='l'||e.key==='L')&&sel>=0&&LEASH_ON){
-    e.preventDefault();leash(items[sel].name,'leashed');return;
-  }
-  if((e.key==='n'||e.key==='N')&&sel>=0&&LEASH_ON){
-    e.preventDefault();leash(items[sel].name,'unleashed');return;
-  }
   if((e.key==='f'||e.key==='F')&&sel>=0){
     flag(sel,true,'false_positive');e.preventDefault()}
   else if((e.key==='d'||e.key==='D')&&sel>=0){
@@ -13452,7 +13350,7 @@ __LLMNAV__
       <div><div class="dsub" id="detRegHead">Per region</div>
         <div id="detRegions" class="colbody" style="max-height:300px"></div></div>
     </div>
-    <div class="dsub">Classifier</div>
+    <div class="dsub" id="detHealthHead" hidden>Classifier</div>
     <div id="detHealth"></div>
     <div id="detErrs"></div>
     <div class="dmeta" id="detMeta"></div>
@@ -15486,6 +15384,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
   var off=document.getElementById('detOff'),on=document.getElementById('detOn'),
       dEl=document.getElementById('detDrives'),rEl=document.getElementById('detRegions'),
       rHead=document.getElementById('detRegHead'),hEl=document.getElementById('detHealth'),
+      hHead=document.getElementById('detHealthHead'),
       eEl=document.getElementById('detErrs'),mEl=document.getElementById('detMeta'),
       sEl=document.getElementById('detSpark'),
       hPct=document.getElementById('dhPct'),hEta=document.getElementById('dhEta'),
@@ -15674,7 +15573,14 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
        is a share of crops already classified, so it outlives the run that
        measured it -- the gate on `live` said "unknown" about a number the
        panel was holding, which is the same mistake as the error line below. */
-    if((j.crops_classified||0)>0){
+    /* A HEADING OVER NOTHING IS NOISE. Until crops have been classified this
+       section has no number to give, and it used to take two lines to say
+       so: a title, and a sentence under it explaining the absence. The whole
+       section now appears with its first measurement. */
+    var haveClass=(j.crops_classified||0)>0;
+    if(hHead)hHead.hidden=!haveClass;
+    if(hEl)hEl.hidden=!haveClass;
+    if(haveClass){
       var band=j.not_a_dog_band||{lo:7,hi:16},nd=j.not_a_dog_rate,SCALE=30;
       var bad=band.in_band===false;
       hEl.innerHTML='<div class="drow" title="share of detected crops that aren\\u2019t dogs \\u2014 expected '+band.lo+'\\u2013'+band.hi+'% from labelled data">'+
@@ -15684,7 +15590,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         '</div><span class="dv">'+(nd!=null?nd+'%'+(bad?' \\u26a0 outside ':' \\u00b7 healthy ')+band.lo+'\\u2013'+band.hi+'%':'\\u2014')+'</span></div>'+
         '<div class="dnone">'+fmt(j.crops_classified)+' crops classified</div>';
     }else{
-      hEl.innerHTML='<div class="dnone">classifier not wired in yet</div>';
+      hEl.innerHTML='';
     }
     /* errors: one muted line; details expand on click; green zero state.
        Cumulative, like the positives above, and so NOT gated on live: these
