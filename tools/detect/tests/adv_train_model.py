@@ -66,6 +66,7 @@ def inherit_checks(bad, tm):
     proj = os.path.join(root, 'runs', 'detect', 'dogdetection')
     os.makedirs(os.path.join(proj, 'older'))
     os.makedirs(os.path.join(proj, 'newer'))
+    os.makedirs(os.path.join(proj, 'newest_but_died'))
     old = os.environ.get('TRAINING_ROOT')
     os.environ['TRAINING_ROOT'] = root
     try:
@@ -80,14 +81,52 @@ def inherit_checks(bad, tm):
                      'data: /somewhere/old/dataset.yaml\n'
                      'project: dogdetection\nname: older\n'
                      'save_dir: %s\nexist_ok: true\nresume: true\n' % (proj,))
+        # BOTH OF THOSE ACTUALLY TRAINED. ultralytics writes args.yaml before
+        # it does anything, so without this the fixture is two runs that never
+        # started and the question being asked is not the real one.
+        for name in ('older', 'newer'):
+            with open(os.path.join(proj, name, 'results.csv'), 'w') as fh:
+                fh.write('epoch,train/box_loss\n1,0.9\n')
+        # ...and the NEWEST one died on its parameters, leaving a complete
+        # args.yaml and nothing else. This is not hypothetical: a detector run
+        # died on batch_size=2.0 and every run after it was offered that same
+        # batch size as the parameters to start from.
+        with open(os.path.join(proj, 'newest_but_died', 'args.yaml'),
+                  'w') as fh:
+            fh.write('epochs: 1\nimgsz: 64\nbatch: 2.0\n')
         os.utime(os.path.join(proj, 'older', 'args.yaml'), (1, 1))
         got, where = tm.last_args('dogdet')
+        if where and 'newest_but_died' in where:
+            bad.append('THE PARAMETERS COME FROM A RUN THAT CRASHED before it '
+                       'trained a single epoch -- the page calls these the '
+                       'best parameters and hands over the ones that failed')
         if not where or 'newer' not in where:
             bad.append('the parameters were inherited from %r, not the newest '
                        'run' % (where,))
         if got.get('epochs') != '500':
             bad.append('the newest run was not the one read: %r'
                        % (got.get('epochs'),))
+        # a project where NOTHING ever trained falls back to ultralytics'
+        # own defaults rather than to the wreckage of the last attempt
+        empty = os.path.join(root, 'runs', 'classify', 'dog-bin', 'died')
+        os.makedirs(empty)
+        with open(os.path.join(empty, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 1\nbatch: 2.0\n')
+        got, where = tm.last_args('dogbin')
+        if where is not None or got:
+            bad.append('a project whose only run crashed still hands over its '
+                       'parameters: %r %r' % (where, got))
+        # ...and a results.csv with a header and no epoch is not a run either
+        head = os.path.join(root, 'runs', 'classify', 'leash_models', 'head')
+        os.makedirs(head)
+        with open(os.path.join(head, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 1\n')
+        with open(os.path.join(head, 'results.csv'), 'w') as fh:
+            fh.write('epoch,train/loss\n')
+        got, where = tm.last_args('leash')
+        if where is not None:
+            bad.append('a run whose results.csv holds only a header reads as '
+                       'having trained: %r' % (where,))
     except Exception as e:                # noqa: BLE001
         bad.append('inheriting threw %s: %s' % (type(e).__name__, e))
     finally:

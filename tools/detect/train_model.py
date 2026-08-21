@@ -126,20 +126,52 @@ def runs_root(family):
                         spec['project'])
 
 
+def trained(run_dir):
+    """Did this run get anywhere, or did it fall over at the starting line?
+
+    ultralytics writes args.yaml before it does anything else, so a run that
+    died in its first second still leaves a complete-looking record of what it
+    was launched with. An epoch in results.csv, or a weights file, is the
+    cheapest evidence that those parameters actually ran.
+    """
+    csv = os.path.join(run_dir, 'results.csv')
+    try:
+        if os.path.isfile(csv):
+            with open(csv) as fh:
+                fh.readline()             # the header is not an epoch
+                if fh.readline().strip():
+                    return True
+    except OSError:
+        pass
+    weights = os.path.join(run_dir, 'weights')
+    try:
+        return any(n.endswith('.pt') for n in os.listdir(weights))
+    except OSError:
+        return False
+
+
 def last_args(family):
-    """(params, where) from the newest run in this family's project.
+    """(params, where) from the newest run in this family's project THAT RAN.
 
     ultralytics writes args.yaml into every run directory, so the record of
     what a run was launched with is the run itself. Parsed by hand rather
     than with pyyaml: the file is flat `key: value` and the dashboard's
     environment has no yaml.
+
+    A run that crashed on its parameters is the last run somebody wants to
+    inherit from, and it is exactly the newest one: a detector run died on a
+    bad batch size and every later run was then offered that same batch size
+    as the parameters to start from. Runs that produced nothing are skipped,
+    and if none produced anything the page falls back to ultralytics' own
+    defaults rather than to the wreckage.
     """
     root = runs_root(family)
     best, best_at = None, -1
     try:
         for name in os.listdir(root):
-            path = os.path.join(root, name, 'args.yaml')
-            if not os.path.isfile(path):
+            run = os.path.join(root, name)
+            path = os.path.join(run, 'args.yaml')
+            if not os.path.isfile(path) or not trained(run):
                 continue
             at = os.path.getmtime(path)
             if at > best_at:
