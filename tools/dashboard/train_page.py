@@ -274,6 +274,7 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
 /* One line in the dataset's own description, not a banner: it is a fact
    about that dataset, and it belongs where the counts are. */
 .warnnote{color:#e8a645}
+option.dead{color:var(--dim)}
 .pextra{margin-top:9px;font-size:12px;color:var(--dim)}
 .pextra summary{cursor:pointer;padding:3px 0}
 .pextra a{color:var(--mut)}
@@ -323,6 +324,10 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
     <span class="ssub" id="dssub"></span></div>
   <select class="wide" id="dataset"></select>
   <div class="note" id="dsnote"></div>
+  <div class="row" style="margin-top:9px">
+    <button class="btn warn" id="dsdel" type="button">Delete this dataset</button>
+    <span class="ssub" id="dsdelsub"></span>
+  </div>
 </div>
 
 <div class="step">
@@ -418,7 +423,7 @@ function paintDatasets(){
   sel.innerHTML=rows.length?rows.map(function(d){
     var c=d.counts, size=c?(n(c.total)+' images'):'no record';
     if(d.unfinished)
-      return '<option value="'+esc(d.id)+'" disabled>'+esc(d.id)+
+      return '<option value="'+esc(d.id)+'" class="dead">'+esc(d.id)+
         ' — unfinished build, safe to delete</option>';
     return '<option value="'+esc(d.id)+'">'+esc(d.id)+' — '+when(d.built_at_iso)+
       ' · '+esc(size)+(d.bundle?(d.label_studio?'':' · no hand-drawn boxes')
@@ -638,6 +643,26 @@ document.addEventListener('click',function(e){
     return;
   }
 });
+/* Gigabytes, one button, no undo -- so it says what it is about to remove
+   and what that costs, and the server refuses a base or anything a running
+   job is reading whatever this asks for. */
+$('dsdel').addEventListener('click',function(){
+  var sel=$('dataset'), id=sel.value||
+    (sel.options[sel.selectedIndex]||{}).value;
+  if(!id){fail(new Error('there is no dataset selected'));return}
+  var d=null; STATE.datasets.forEach(function(x){if(x.id===id)d=x});
+  var size=d&&d.counts?n(d.counts.total)+' images':'its images';
+  if(!window.confirm('Delete '+id+'? That removes '+size+' and the bundle '+
+     'that records how it was built. Runs already trained on it keep their '+
+     'own copy of that record.'))return;
+  $('dsdel').disabled=true;
+  api('/api/train/dataset-delete',{dataset:id}).then(function(j){
+    say('say','deleted '+id+(j.freed?' — '+Math.round(j.freed/1e9*10)/10+
+        ' GB back':''),7000);
+    $('dataset').value='';
+    return refresh();
+  }).catch(fail).then(function(){$('dsdel').disabled=false});
+});
 $('build').addEventListener('click',function(){
   var f=famOf(); if(!f)return;
   if(!window.confirm('Build a '+f.title+' dataset from every annotation on '+
@@ -650,6 +675,13 @@ $('build').addEventListener('click',function(){
 $('train').addEventListener('click',function(){
   var ds=$('dataset').value;
   if(!ds){fail(new Error('there is no dataset to train on yet'));return}
+  /* selectable so it can be deleted, never trainable: the launcher refuses
+     it too, this is only so the refusal arrives before the confirm box */
+  var pick=null; STATE.datasets.forEach(function(x){if(x.id===ds)pick=x});
+  if(pick&&pick.unfinished){
+    fail(new Error(ds+' is an unfinished build — delete it and build again'));
+    return;
+  }
   var over=overrides();
   var lines=Object.keys(over).sort().map(function(k){return k+'='+over[k]});
   if(!window.confirm('Train '+(famOf()||{}).title+' on '+ds+

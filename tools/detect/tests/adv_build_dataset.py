@@ -178,6 +178,87 @@ def measure_checks(bad, bd):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def remove_checks(bad, bd):
+    """Deleting a dataset: gigabytes, one button, no undo."""
+    tmp = tempfile.mkdtemp(prefix='adv_bd_rm_')
+    old_env = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        def make(name, bundle=True):
+            d = os.path.join(tmp, name)
+            for split in ('train', 'val'):
+                os.makedirs(os.path.join(d, 'images', split))
+                open(os.path.join(d, 'images', split, 'a.jpg'), 'w').write('x')
+            open(os.path.join(d, 'dataset.yaml'), 'w').close()
+            if bundle:
+                os.makedirs(os.path.join(d, 'bundle'))
+                with open(os.path.join(d, 'bundle', 'manifest.json'),
+                          'w') as fh:
+                    json.dump({'family': 'dogdet', 'kind': 'detect',
+                               'built_at': 1, 'counts': {'total': 2}}, fh)
+            return d
+
+        make('dogdet_20260820_bbbbbb')
+        base = make(bd.FAMILIES['dogdet']['base'])
+        busy = make('dogdet_20260820_cccccc')
+        outside = os.path.join(tempfile.mkdtemp(prefix='adv_bd_rm_out_'),
+                               'elsewhere')
+        os.makedirs(outside)
+        # a directory in the training root that is NOT a dataset: notes,
+        # scratch, somebody's export. The catalogue does not list it, and
+        # that is the only thing standing between it and rmtree.
+        notes = os.path.join(tmp, 'scratch_notes')
+        os.makedirs(notes)
+        open(os.path.join(notes, 'keep.txt'), 'w').write('mine')
+        # ...and a dataset that is a symlink onto another drive, which this
+        # machine has six of: following it deletes the original
+        real = make('dogdet_20260820_dddddd')
+        moved = os.path.join(os.path.dirname(outside), 'real_dataset')
+        shutil.move(real, moved)
+        linked = os.path.join(tmp, 'dogdet_20260820_dddddd')
+        os.symlink(moved, linked)
+
+        # THE BASE IS NOT DELETABLE. Every build starts from it.
+        got = bd.remove(bd.FAMILIES['dogdet']['base'])
+        if got['ok'] or not os.path.isdir(base):
+            bad.append('A BASE DATASET WAS DELETED -- every future build for '
+                       'that model starts from it')
+        # nor is one a running job is reading
+        got = bd.remove('dogdet_20260820_cccccc',
+                        in_use=('dogdet_20260820_cccccc',))
+        if got['ok'] or not os.path.isdir(busy):
+            bad.append('a dataset was deleted out from under a running job')
+        # nor a path, a traversal, or a name nobody built
+        for bogus in ('../' + os.path.basename(tmp), '/etc', '', '.',
+                      'never_built_this', outside, 'scratch_notes'):
+            got = bd.remove(bogus)
+            if got['ok']:
+                bad.append('deleting accepted %r' % (bogus,))
+        if not os.path.isfile(os.path.join(notes, 'keep.txt')):
+            bad.append('A DIRECTORY THAT IS NOT A DATASET WAS DELETED out of '
+                       'the training root')
+        got = bd.remove('dogdet_20260820_dddddd')
+        if got['ok'] or not os.path.isdir(moved):
+            bad.append('a symlinked dataset was followed and the original on '
+                       'the other drive was deleted')
+        # ...and the real one goes, with what it freed reported
+        got = bd.remove('dogdet_20260820_bbbbbb')
+        if not got['ok']:
+            bad.append('a real dataset could not be deleted: %r' % (got,))
+        elif os.path.isdir(os.path.join(tmp, 'dogdet_20260820_bbbbbb')):
+            bad.append('a dataset reported as deleted is still on disk')
+        elif not got.get('freed'):
+            bad.append('the deletion does not say how much it freed')
+    except Exception as e:                # noqa: BLE001
+        bad.append('the remove checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        if old_env is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old_env
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def stop_checks(bad, bd):
     """A stopped build cleans up after itself.
 
@@ -963,6 +1044,7 @@ def main():
                      (progress_checks, (bd,)),
                      (catalogue_checks, (bd,)),
                      (stop_checks, (bd,)),
+                     (remove_checks, (bd,)),
                      (cli_checks, ())):
         try:
             fn(bad, *args)

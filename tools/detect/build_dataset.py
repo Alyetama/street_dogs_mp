@@ -885,6 +885,56 @@ def catalogue(family=None):
     return out
 
 
+def remove(dataset_id, in_use=()):
+    """Delete one dataset, and refuse every way that goes wrong.
+
+    Gigabytes, one button, no undo -- so the id has to be one this catalogue
+    already lists (not a path, not a name somebody typed), it must not be a
+    family's base, which every future build derives from, and it must not be
+    the dataset a job is reading right now.
+    """
+    name = str(dataset_id or '')
+    if not name or os.sep in name or name.startswith('.') or name == '..':
+        return {'ok': False, 'message': 'that is not a dataset built here'}
+    bases = {spec['base'] for spec in FAMILIES.values()}
+    if name in bases:
+        return {'ok': False,
+                'message': '%s is a base dataset -- every build starts from '
+                           'it, so deleting it breaks all of them' % (name,)}
+    if name in set(in_use or ()):
+        return {'ok': False,
+                'message': '%s is being used by something running right now'
+                           % (name,)}
+    row = None
+    for got in catalogue():
+        if got['id'] == name:
+            row = got
+            break
+    if row is None:
+        return {'ok': False, 'message': 'no such dataset'}
+    root = os.path.realpath(training_root())
+    path = os.path.realpath(row['path'])
+    # belt and braces on top of the name check: whatever the catalogue said,
+    # what is about to be removed has to live under the training root
+    if not path.startswith(root + os.sep):
+        return {'ok': False,
+                'message': '%s points outside the training root (%s) -- '
+                           'delete it where it actually lives'
+                           % (name, path)}
+    freed = 0
+    for here, _dirs, files in os.walk(path):
+        for one in files:
+            try:
+                freed += os.path.getsize(os.path.join(here, one))
+            except OSError:
+                pass
+    try:
+        shutil.rmtree(path)
+    except OSError as e:
+        return {'ok': False, 'message': 'could not remove it: %s' % (e,)}
+    return {'ok': True, 'message': '', 'freed': freed, 'path': path}
+
+
 def _shape_of(path):
     """(kind, classes) from what is on disk. (None, set()) if it is not one."""
     if os.path.isfile(os.path.join(path, 'dataset.yaml')) and \

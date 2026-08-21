@@ -9956,6 +9956,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             if path == '/api/train/start':
                 self._json(_train_start(j, data, who))
                 return True
+            if path == '/api/train/dataset-delete':
+                self._json(_train_dataset_delete(j, data.get('dataset')))
+                return True
             if path == '/api/train/forget':
                 got = j.forget(str(data.get('job') or ''))
                 self._json({'ok': got['ok'],
@@ -11511,6 +11514,32 @@ def _train_build(j, family, who):
     if not got['ok']:
         return {'error': got['message']}
     return {'ok': True, 'job': {'id': got['job']['id']}}
+
+
+def _train_dataset_delete(j, dataset):
+    """Delete a built dataset. Gigabytes, so the rails live in the builder.
+
+    Whatever any job is reading right now is off limits, and the jobs are the
+    only thing out here that knows that: a build writing a dataset and a run
+    training on one both name it in their record.
+    """
+    t = _train_page()
+    bd = getattr(t, 'bd', None) if t is not None else None
+    if bd is None:
+        return {'error': 'the training tools would not load'}
+    busy = []
+    for lane in j.LANES:
+        held = j.lane_holder(lane)
+        if not held:
+            continue
+        meta = held.get('meta') or {}
+        for key in ('dataset', 'out'):
+            if meta.get(key):
+                busy.append(os.path.basename(str(meta[key])))
+    got = bd.remove(str(dataset or ''), in_use=busy)
+    if not got['ok']:
+        return {'error': got['message']}
+    return {'ok': True, 'freed': got.get('freed'), 'dataset': str(dataset)}
 
 
 def _train_start(j, data, who):
