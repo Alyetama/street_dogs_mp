@@ -418,14 +418,18 @@ def targeted(stage=DEFAULT_STAGE):
 # every module that writes or reads one -- a second spelling is the day one
 # reader says admin and another says None, over the same 3,247 lines.
 AUTHOR_FIELD = 'by'
-LEGACY_AUTHOR = 'admin'
+LEGACY_AUTHOR = 'malyeta'
 """Who an annotation with no author on it was made by.
 
 An absent author does not mean "nobody" and it does not mean "unknown": it
 means the row was written before the dashboard had accounts, when there was
-exactly one person judging crops and that person is the admin. So it reads as
-the admin at the point of reading, everywhere, and it reads that way from the
-file exactly as it stands.
+exactly one person judging crops and that person is the person who runs this
+deployment. So it reads as them at the point of reading, everywhere, and it
+reads that way from the file exactly as it stands.
+
+It is the DASHBOARD_USER name, and it moves when that account is renamed --
+three thousand rows carry no author at all, and pointing this at a name no
+account holds would orphan every one of them.
 
 WHY THE LEDGERS WERE NOT REWRITTEN. Adding `by` to 3,247 existing lines would
 put a script in front of the only copy of work nobody can reproduce -- crops

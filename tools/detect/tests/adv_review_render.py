@@ -183,6 +183,126 @@ def guess_absence_checks(html, script):
     return bad
 
 
+def split_checks(mod, html, script):
+    """Whose answers, and all of them, per class.
+
+    The readout the two audit sheets carry, over this queue's own ledger. What
+    is pinned: it counts the same live verdicts the audit list and the
+    delegation targets count (a fifth reading of an append-only file is a
+    fifth answer to "how many have I done"); it names the classes in the words
+    this page's buttons use; its segments carry the same green/red pair as
+    those buttons; and it hides rather than drawing an empty rail.
+    """
+    bad = []
+    got = mod.review_split('nobody-by-that-name')
+    for key in ('positive', 'negative', 'words', 'who', 'mine', 'all'):
+        if key not in got:
+            bad.append('the readout carries no %r' % (key,))
+    if got.get('positive') != 'true_positive' or \
+            got.get('negative') != 'false_positive':
+        bad.append('the readout does not answer this queue\'s own two '
+                   'classes: %r' % (got,))
+    if sum(got.get('mine', {}).values()):
+        bad.append('a name that has judged nothing is credited with %r'
+                   % (got.get('mine'),))
+    # ...and the totals are the live verdicts, not a count of ledger lines
+    items, _live = mod._review_verdicts()
+    for label in ('true_positive', 'false_positive'):
+        want = sum(1 for it in items if it.get('label') == label)
+        if got['all'].get(label) != want:
+            bad.append('the readout says %r for %s where the live verdicts '
+                       'say %d -- two readings of one ledger'
+                       % (got['all'].get(label), label, want))
+    # the words are the ones on the buttons
+    words = got.get('words') or {}
+    for key, tok in (('true_positive', 'a dog'), ('false_positive', 'not a dog')):
+        if tok not in (words.get(key) or ''):
+            bad.append('the readout calls %s %r, which is not what the button '
+                       'says' % (key, words.get(key)))
+    if 'id="split"' not in html:
+        bad.append('the page has nowhere to draw the readout')
+    # THE SEGMENTS CARRY THE SAME PAIR AS THE BUTTONS: green for yes, red for
+    # no. A readout that colours the answers the other way round contradicts
+    # the tile it sits above.
+    css = html[html.index('<style>'):html.index('</style>')]
+    for sel, want, what in ((r'\.spbar \.sa\{[^}]*\}', '67,181,129', 'yes'),
+                            (r'\.spbar \.sb\{[^}]*\}', '239,83,80', 'no')):
+        m = re.search(sel, css)
+        if not m:
+            bad.append('the readout has no %s segment' % (what,))
+        elif want not in m.group(0):
+            bad.append('the %s segment is not the colour this page uses for '
+                       '%s: %s' % (what, what, m.group(0)))
+    if shutil.which('node') is None:
+        return bad
+    fns = []
+    for name in ('esc', 'att', 'n', 'splitRow', 'paintSplit'):
+        m = re.search(r'^function %s\(' % name, script, re.M)
+        if not m:
+            bad.append('%s() is not a top-level function of the page'
+                       % (name,))
+            return bad
+        fns.append(script[m.start():script.index('\n}', m.start()) + 2])
+    drive = r"""
+'use strict';
+var BOX = {hidden: true, innerHTML: ''};
+global.document = {
+  getElementById: function (id) { return id === 'split' ? BOX : null },
+  createElement: function () { return {textContent: '',
+    get innerHTML() { return String(this.textContent).replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;') }} }};
+function $(id) { return document.getElementById(id) }
+__FNS__
+var bad = [];
+var WORDS = {true_positive: "it’s a dog", false_positive: 'not a dog'};
+// one person, and they are the only one: one row and a sentence, not the
+// same bar drawn twice
+paintSplit({positive: 'true_positive', negative: 'false_positive',
+            words: WORDS, all: {true_positive: 242, false_positive: 102},
+            mine: {true_positive: 242, false_positive: 102}});
+if (BOX.hidden) bad.push('the readout hid itself over 344 answers');
+if ((BOX.innerHTML.match(/sprow/g) || []).length !== 1)
+  bad.push('the only annotator got ' +
+    (BOX.innerHTML.match(/sprow/g) || []).length + ' rows');
+if (BOX.innerHTML.indexOf('every answer here is yours') < 0)
+  bad.push('nothing says the reader is the only one working on this');
+if (BOX.innerHTML.indexOf('>242<') < 0 || BOX.innerHTML.indexOf('>102<') < 0)
+  bad.push('the two class counts are not shown: ' + BOX.innerHTML);
+// two people: their own row and the whole pile
+paintSplit({positive: 'true_positive', negative: 'false_positive',
+            words: WORDS, all: {true_positive: 242, false_positive: 102},
+            mine: {true_positive: 12, false_positive: 3}});
+if ((BOX.innerHTML.match(/sprow/g) || []).length !== 2)
+  bad.push('a second annotator does not get their own row');
+if (BOX.innerHTML.indexOf('every answer here is yours') >= 0)
+  bad.push('the page still claims every answer belongs to the reader');
+// nothing judged yet: no rail at all
+['null', 'empty'].forEach(function (which) {
+  paintSplit(which === 'null' ? null
+    : {positive: 'true_positive', negative: 'false_positive',
+       words: WORDS, all: {}, mine: {}});
+  if (!BOX.hidden) bad.push('an empty ledger draws an empty rail (' + which + ')');
+});
+if (bad.length) { bad.forEach(function (b) { console.log('FAIL ' + b) });
+                  process.exit(1) }
+console.log('ok');
+""".replace('__FNS__', '\n'.join(fns))
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'split.js')
+        with open(js, 'w', encoding='utf-8') as fh:
+            fh.write(drive)
+        r = subprocess.run(['node', js], capture_output=True, text=True,
+                           timeout=90)
+    if r.returncode:
+        for line in (r.stdout or '').splitlines():
+            if line.startswith('FAIL '):
+                bad.append(line[5:])
+        if not (r.stdout or '').strip():
+            bad.append('the readout probe died: %s'
+                       % ((r.stderr or '').strip()[:300],))
+    return bad
+
+
 def leash_absence_checks(html, script):
     """The leash question is REMOVED from this queue, not hidden.
 
@@ -2616,6 +2736,8 @@ def main():
                        guess_absence_checks(html, script)),
                       ('the removed leash question',
                        leash_absence_checks(html, script)),
+                      ('the class split readout',
+                       split_checks(mod, html, script)),
                       ('the annotated-date filter',
                        period_payload_checks(mod)),
                       ('the always-on score', score_checks(html, script)),
