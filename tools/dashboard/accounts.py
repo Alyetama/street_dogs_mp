@@ -98,7 +98,7 @@ PRIVATE_FILES = frozenset({
 # WAL a reader never waits at all, and a writer only waits behind another
 # writer, which here means two invites being minted in the same instant.
 DB_TIMEOUT = 10
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # THREE TIERS, MOST TO LEAST. `owner` is the person whose machine this is:
 # one account, named by DASHBOARD_USER, holding the things an admin should not
@@ -145,6 +145,14 @@ SCRYPT_MAXMEM = 96 * 1024 * 1024
 PBKDF2_ROUNDS = 600_000        # only used where the build has no scrypt
 SALT_BYTES, DK_BYTES = 16, 32
 TOKEN_BYTES = 32               # 256 bits of CSPRNG; see _token_hash()
+
+# How stale "last seen" may get before a request writes it again. Every
+# request resolves a session and therefore already holds the row, so the read
+# is free and only the UPDATE costs anything -- but a write per image request
+# would be a write per thumbnail on a grid of fifty. Two minutes is finer
+# than the column can display and coarse enough that a page of crops is one
+# write, not fifty.
+SEEN_THROTTLE = 120
 
 INVITE_TTL_DEFAULT = 48 * 3600
 INVITE_TTL_MIN, INVITE_TTL_MAX = 300, 30 * 24 * 3600
@@ -213,6 +221,12 @@ CREATE TABLE IF NOT EXISTS users (
     active        INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     created_at    INTEGER NOT NULL,
     last_login_at INTEGER,
+    -- WHEN THEY WERE LAST HERE, which is not when they last typed a
+    -- password. A session lasts a week and an account made by redeeming an
+    -- invite never calls verify_password at all, so last_login_at read NULL
+    -- for an annotator who had been working every day since they joined --
+    -- under a column header that says "last seen".
+    last_seen_at  INTEGER,
     session_epoch INTEGER NOT NULL DEFAULT 1
 );
 -- username_norm's UNIQUE constraint is already an index, and it is the one
@@ -455,6 +469,23 @@ def _restore_high(con, name, high):
                 'WHERE name = ? AND seq < ?', (want, name, want))
 
 
+def _add_last_seen(con):
+    """v4: users gains last_seen_at.
+
+    An added, nullable column, so this is an ALTER and not the table rebuild
+    v3 needed -- a CHECK constraint cannot be altered, a new column can just
+    be appended. Idempotent: a table that already has it is skipped.
+
+    Existing rows stay NULL rather than being seeded from last_login_at. The
+    two are different facts, and inventing the second from the first would
+    tell the admin somebody was here at a moment nobody observed.
+    """
+    cols = {r['name'] for r in con.execute('PRAGMA table_info(users)')}
+    if 'last_seen_at' in cols:
+        return
+    con.execute('ALTER TABLE users ADD COLUMN last_seen_at INTEGER')
+
+
 def _add_owner_role(con):
     """v3: let `role` be 'owner' as well.
 
@@ -564,6 +595,7 @@ def migrate(con, now=None):
     # that had nothing to do anyway.
     if have < SCHEMA_VERSION:
         _add_owner_role(con)
+        _add_last_seen(con)
     with _tx(con):
         con.execute(
             'INSERT OR IGNORE INTO schema_version (version, applied_at) '
@@ -1141,6 +1173,43 @@ def verify_password(username, password, now=None, touch=True, path=None):
         return _public(row)
     finally:
         con.close()
+
+
+def touch_seen(user_id, now=None, path=None, con=None):
+    """Record that this account is here, at most once every SEEN_THROTTLE.
+
+    Called from the session path, which runs on every request -- so it is
+    written to be cheap in the common case: the caller passes the row it
+    already read, and a row seen a moment ago costs one integer comparison
+    and no database work at all.
+
+    Never raises. A dashboard that fell over because it could not write down
+    that somebody was looking at it would be a worse failure than the column
+    being a few minutes stale.
+    """
+    ts = int(time.time() if now is None else now)
+    try:
+        own = con is None
+        if own:
+            con = connect(path)
+        try:
+            row = con.execute(
+                'SELECT last_seen_at FROM users WHERE id = ?',
+                (int(user_id),)).fetchone()
+            if row is None:
+                return None
+            was = int(row['last_seen_at'] or 0)
+            if ts - was < SEEN_THROTTLE:
+                return was
+            with _tx(con):
+                con.execute('UPDATE users SET last_seen_at = ? WHERE id = ?',
+                            (ts, int(user_id)))
+            return ts
+        finally:
+            if own:
+                con.close()
+    except Exception:                      # noqa: BLE001 - see the docstring
+        return None
 
 
 def set_password(who, password, now=None, path=None, bump=True):
@@ -2508,7 +2577,9 @@ def main(argv=None):
             print('  %-20s %-7s %-9s joined %s  last seen %s'
                   % (u['username'], u['role'],
                      'active' if u['active'] else 'disabled',
-                     _fmt_when(u['created_at']), _fmt_when(u['last_login_at'])))
+                     _fmt_when(u['created_at']),
+                     _fmt_when(u.get('last_seen_at')
+                               or u['last_login_at'])))
         if not users:
             print('nobody yet -- run --ensure-admin after setting %s in .env'
                   % (ENV_PASSWORD,))

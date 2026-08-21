@@ -452,6 +452,14 @@ def resolve(value, now=None, path=None, key_path=None):
         # change, a disable or an explicit sign-out moved the number and
         # every cookie minted before it stops verifying here.
         return None
+    # BEING HERE IS WHAT "LAST SEEN" MEANS. A session lasts a week, and an
+    # account that joined by redeeming an invite never calls verify_password
+    # at all -- so a column stamped only at password time read NEVER for an
+    # annotator who had judged crops every day since they signed up. The
+    # write throttles itself inside the store (SEEN_THROTTLE) and never
+    # raises, so the cost on this path -- which runs on every request -- is
+    # one indexed read almost always, one small write occasionally.
+    accounts.touch_seen(row['id'], now=now, path=path or _state()['db'])
     ses = dict(row)
     ses['nonce'] = str(payload['nonce'])
     ses['iat'] = int(payload['iat'])
@@ -738,10 +746,18 @@ SECURITY_HEADERS = (
     ('Referrer-Policy', 'no-referrer'),
     ('X-Content-Type-Options', 'nosniff'),
     ('X-Frame-Options', 'DENY'),
+    # connect-src 'self': the admin page DOES fetch. It draws every
+    # delegated target with an empty progress cell and fills them from
+    # /api/assignments, because this module has no business reading the
+    # annotation ledgers. With default-src 'none' and no connect-src, the
+    # browser refused that request before it was made -- the endpoint was
+    # right, answered correctly when asked directly, and every progress bar
+    # on the page sat at "could not count" regardless. Nothing else here
+    # fetches, and 'self' is the only origin that would ever be right.
     ('Content-Security-Policy',
      "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
-     "script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; "
-     "frame-ancestors 'none'"),
+     "script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; "
+     "base-uri 'none'; frame-ancestors 'none'"),
 )
 
 
@@ -2338,7 +2354,12 @@ def admin_page(session, req, now=None, error='', minted=None):
                esc(u['role']),
                '' if u['active'] else ' off',
                'active' if u['active'] else 'disabled',
-               esc(_when(u['created_at'])), esc(_when(u['last_login_at'])),
+               esc(_when(u['created_at'])),
+               # last_seen_at, and last_login_at only as history: an invited
+               # annotator may never have typed a password, and "last seen"
+               # naming their signup week ago while they judged crops today
+               # was this column lying under its own header.
+               esc(_when(u.get('last_seen_at') or u['last_login_at'])),
                ' '.join(acts)))
     bits.append('</table>\n<div class="note">Disabling an account ends its '
                 'open sessions immediately and can be undone. Removing one '

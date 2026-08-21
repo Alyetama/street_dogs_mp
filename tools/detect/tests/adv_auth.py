@@ -1442,6 +1442,68 @@ def invite_expiry_checks(bad, fx):
                        'which already holds revoke and remove')
 
 
+def seen_checks(bad, fx):
+    """"last seen" means seen, not "last typed a password".
+
+    A session lasts a week, and an account made by redeeming an invite never
+    calls verify_password at all -- so a column stamped only at password time
+    read NEVER for an annotator who had judged crops every day since they
+    joined, under a header that says "last seen".
+    """
+    admin = fx.admin()
+    inv = A.create_invite(admin['id'], ttl=3600, path=fx.db)
+    name = 'seen.' + inv['token'][:6].lower().replace('_', 'a').replace('-',
+                                                                        'b')
+    A.redeem_invite(inv['token'], name, PW2, path=fx.db)
+    u = A.get_user(name, path=fx.db)
+    if u.get('last_seen_at'):
+        bad.append('an account was "seen" before its first request')
+    now = int(time.time())
+    cookie = fx.cookie_for(u)
+    if U.resolve(cookie, now=now, path=fx.db, key_path=fx.key) is None:
+        bad.append('the fixture session did not resolve, so this proves '
+                   'nothing')
+        return
+    u = A.get_user(name, path=fx.db)
+    if int(u.get('last_seen_at') or 0) != now:
+        bad.append('a request did not stamp last_seen_at -- an invited '
+                   'annotator who never types a password reads NEVER '
+                   'forever')
+    # ...but not on every request: a page of fifty thumbnails is one write.
+    U.resolve(cookie, now=now + 5, path=fx.db, key_path=fx.key)
+    if int(A.get_user(name, path=fx.db)['last_seen_at'] or 0) != now:
+        bad.append('every request writes last_seen_at; a grid of fifty '
+                   'crops is fifty writes on the account store')
+    U.resolve(cookie, now=now + A.SEEN_THROTTLE + 1, path=fx.db,
+              key_path=fx.key)
+    if int(A.get_user(name, path=fx.db)['last_seen_at'] or 0) \
+            != now + A.SEEN_THROTTLE + 1:
+        bad.append('last_seen_at stopped moving after the first write')
+    # ...and the page prints the fact it claims to. The login column stays
+    # NULL throughout, which is exactly the case that was wrong.
+    ses = fx.session_for(fx.admin())
+    html = U.admin_page(ses, fx.req(path=U.ADMIN_PATH), now=now)
+    row = re.search(r'<tr><td class="name">%s.*?</tr>' % (re.escape(name),),
+                    html, re.S)
+    if not row:
+        bad.append('the new account is not on the page')
+    else:
+        # The SECOND "when" cell, by position: joined sits in the first and
+        # carries the same minute, so a substring match over the whole row
+        # passes with the seen cell wrong -- measured, that is exactly how a
+        # first version of this check stayed green under mutation.
+        whens = re.findall(r'class="when">([^<]*)<', row.group(0))
+        # the LAST touch above, not the first: the page renders after the
+        # throttle check moved the stamp forward
+        want = time.strftime('%Y-%m-%d %H:%M',
+                             time.localtime(now + A.SEEN_THROTTLE + 1))
+        if len(whens) < 2 or whens[1].strip() != want:
+            bad.append('the "last seen" cell reads %r, not the request '
+                       'just made -- the page still shows last_login_at, '
+                       'which is NEVER for everybody who joined by invite'
+                       % (whens[1].strip() if len(whens) > 1 else None,))
+
+
 def page_checks(bad, fx):
     """Every page is self-contained, escaped, and says nothing extra.
 
@@ -1490,6 +1552,20 @@ def page_checks(bad, fx):
                 bad.append(f'the {name} page is missing {header}: {want}')
         if 'charset=utf-8' not in r.header('Content-Type'):
             bad.append(f'the {name} page does not declare its encoding')
+        # THE PAGE THAT FETCHES MAY FETCH. The admin page fills its progress
+        # cells from /api/assignments, and under default-src 'none' with no
+        # connect-src the browser refused that request before making it: the
+        # endpoint answered perfectly when asked directly, and every cell on
+        # the page read "could not count" regardless. 'self' and no more --
+        # a page that could fetch other origins would be a page that can
+        # exfiltrate what it reads.
+        csp = r.header('Content-Security-Policy')
+        if "connect-src 'self'" not in csp:
+            bad.append(f'the {name} page cannot call its own endpoints '
+                       f'(no connect-src in the CSP), so every fetch() dies '
+                       f'in the browser')
+        if re.search(r"connect-src[^;]*(http|:\/\/)", csp):
+            bad.append(f'the {name} page may fetch beyond its own origin')
 
     # Anything a person typed is escaped on the way back out, including the
     # username of a failed attempt, which is the one field a stranger controls.
@@ -2272,7 +2348,7 @@ def main():
                        signup_checks, admin_checks, page_checks,
                        account_checks, identity_checks,
                        forwarded_checks, leg_checks, cookie_flag_checks,
-                       invite_expiry_checks,
+                       invite_expiry_checks, seen_checks,
                        silence_checks, source_checks, import_checks,
                        handler_checks, reply_checks, wiring_checks):
                 try:
