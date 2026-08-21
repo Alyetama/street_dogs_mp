@@ -64,6 +64,14 @@ def embed(paths, device='cuda', batch=BATCH):
     from PIL import Image
     from torchvision.models import efficientnet_v2_s, EfficientNet_V2_S_Weights
 
+    # 'auto' exists for the caller that is not a person: the dataset build
+    # runs this from the dashboard's build lane, where a training job may
+    # already own the GPU and a hard 'cuda' would be a crash on the one box
+    # that has no GPU at all. A few thousand crops on CPU is minutes, and a
+    # build is already the slow path.
+    if device == 'auto':
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     w = EfficientNet_V2_S_Weights.IMAGENET1K_V1
     model = efficientnet_v2_s(weights=w)
     model.classifier = torch.nn.Identity()

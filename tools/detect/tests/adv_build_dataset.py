@@ -850,6 +850,47 @@ def composition_checks(bad, bd):
             if argv[argv.index('--src') + 1] != os.path.join(root,
                                                              'dogbin_v5'):
                 bad.append('the dog-bin build derives from the wrong base')
+        # THE DUPLICATES dHASH CANNOT SEE. The rebuilder has taken an
+        # embedding cluster file since dogbin_v4, and every build from the
+        # dashboard failed to pass one -- so the same dog, seen again from
+        # another distance or in a second sequence, could land on both sides
+        # of the train/val split. The composer must cluster first and hand
+        # the file over, at the calibrated threshold rather than the tool's
+        # default, in the interpreter that has torch.
+        dd = argv_named('dedup_crops')
+        if not dd:
+            bad.append('a crop build never clusters near-duplicates, so a '
+                       'dog seen twice from different distances can sit in '
+                       'train AND val')
+        else:
+            if 'cluster' not in dd:
+                bad.append('dedup_crops ran without its cluster verb: %r'
+                           % (dd,))
+            if '--threshold' not in dd or                     dd[dd.index('--threshold') + 1] != '0.93':
+                bad.append('the cluster threshold is not the calibrated '
+                           '0.93 the promoted datasets were built at')
+            if dd[0] == sys.executable:
+                bad.append('dedup_crops runs on the composer\'s own '
+                           'interpreter, which has no torch -- it must use '
+                           'crop_python')
+            order = [c['name'] for c in calls]
+            if order.index('dedup_crops') >                     order.index('rebuild_crop_dataset'):
+                bad.append('the clusters are computed AFTER the split used '
+                           'them')
+            if '--dup-clusters' not in argv:
+                bad.append('the clusters are computed and then never handed '
+                           'to the rebuilder')
+        # ...and the escape hatch is recorded as a fact about the dataset
+        calls[:] = []
+        man2 = bd.build('dogbin', no_embed_dedup=True)
+        if argv_named('dedup_crops'):
+            bad.append('--no-embed-dedup still ran the embedding pass')
+        if man2.get('embed_dedup') != 'skipped':
+            bad.append('a build without the embedding pass does not say so '
+                       'in its manifest: %r' % (man2.get('embed_dedup'),))
+        if man.get('embed_dedup') != 'clustered':
+            bad.append('a build WITH the embedding pass does not record it: '
+                       '%r' % (man.get('embed_dedup'),))
         calls[:] = []
         man = bd.build('leash')
         argv = argv_named('rebuild_crop_dataset')

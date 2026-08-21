@@ -994,7 +994,7 @@ def _shape_of(path):
 
 
 def build(family, out=None, by='', duckdb_python=None, crop_python=None,
-          keep_stage=False, no_export=False, now=None):
+          keep_stage=False, no_export=False, no_embed_dedup=False, now=None):
     """Build one dataset. Returns the manifest it wrote."""
     if family not in FAMILIES:
         raise SystemExit('no such model: %s (try %s)'
@@ -1037,7 +1037,10 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     inputs = {k: store_state(k) for k, v in STORES.items()
               if family in v['for']}
 
-    steps_total = 4
+    # 5, not 4: the classify path gained the embedding-dedup step, and a
+    # bar that reaches 4 of 4 with a whole cluster pass still to run tells
+    # the page the build hung at "done".
+    steps_total = 5
     run = Runner(os.path.join(stage, 'build_log.txt'), steps_total)
     extras = {}
     try:
@@ -1143,7 +1146,39 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                 argv += ['--extra-positives', pos]
             if os.path.isdir(neg):
                 argv += ['--extra-negatives', neg]
-            run.progress(2, 're-splitting by sequence')
+            # THE DUPLICATES dHASH CANNOT SEE. The rebuilder always collapses
+            # near-identical framings (dHash) and assigns whole sequences to
+            # one split -- but the same dog turns up in TWO sequences (two
+            # passes, two cameras), one frame later or three metres closer,
+            # and dHash is blind to that by construction. Those pairs are
+            # exactly what leaks a subject across the train/val boundary, and
+            # the rebuilder has taken an embedding cluster file for them since
+            # dogbin_v4 -- which every build from this page then failed to
+            # pass, so the one leak the whole rebuild exists to stop stayed
+            # open from the dashboard. 0.93 is the calibrated threshold the
+            # promoted datasets were built at, not the tool's default: it was
+            # read off real pair sheets, and a build should match the
+            # datasets it will be compared against.
+            clusters = os.path.join(stage, 'clusters.json')
+            if no_embed_dedup:
+                run.say('embedding dedup SKIPPED (--no-embed-dedup) -- '
+                        'near-duplicates that dHash cannot see may cross '
+                        'the split')
+            else:
+                dirs = [d for d in
+                        (os.path.join(base, sp, c)
+                         for sp in ('train', 'val', 'test')
+                         for c in spec['classes'])
+                        if os.path.isdir(d)]
+                dirs += [d for d in (pos, neg) if os.path.isdir(d)]
+                run.progress(2, 'clustering near-duplicates')
+                run.run('dedup_crops',
+                        [crop_python, os.path.join(DETECT, 'dedup_crops.py'),
+                         'cluster'] + dirs +
+                        ['--threshold', '0.93', '--device', 'auto',
+                         '--out', clusters])
+                argv += ['--dup-clusters', clusters]
+            run.progress(3, 're-splitting by sequence')
             run.run('rebuild_crop_dataset', argv + ['--execute'])
         run.progress(steps_total - 1, 'listing what came out')
         files, counts = inventory(out, family)
@@ -1190,6 +1225,12 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                         'python': sys.executable,
                         'duckdb_python': duckdb_python,
                         'crop_python': crop_python},
+            # A SKIPPED PASS IS A FACT ABOUT THE DATASET. A build without the
+            # embedding dedup may hold the same subject on both sides of the
+            # split, and whoever evaluates a model trained on it needs to
+            # know that from the record, not from the shell history.
+            'embed_dedup': (None if spec['kind'] != 'classify' else
+                            'skipped' if no_embed_dedup else 'clustered'),
             'label_studio': (None if not ls_path else {
                 'file': 'bundle/label_studio_export.json',
                 'sha256': sha256(ls_path),
@@ -1268,6 +1309,12 @@ def main(argv=None):
                          'key, which is the training environment)')
     ap.add_argument('--keep-stage', action='store_true',
                     help='leave the working directory behind, to look at')
+    ap.add_argument('--no-embed-dedup', action='store_true',
+                    help='skip the embedding near-duplicate pass (the dHash '
+                         'pass still runs). The skip is recorded in the '
+                         'manifest: a build without it may let the same '
+                         'subject, seen from another distance or angle, land '
+                         'on both sides of the train/val split.')
     ap.add_argument('--no-export', action='store_true',
                     help='skip the Label Studio export. For a rebuild that '
                          'must match an older one exactly, or for a machine '
@@ -1311,7 +1358,7 @@ def main(argv=None):
         return 0
     build(a.family, out=a.out, by=a.by, duckdb_python=a.duckdb_python,
           crop_python=a.crop_python, keep_stage=a.keep_stage,
-          no_export=a.no_export)
+          no_export=a.no_export, no_embed_dedup=a.no_embed_dedup)
     return 0
 
 
