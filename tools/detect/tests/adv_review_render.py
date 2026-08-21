@@ -183,6 +183,43 @@ def guess_absence_checks(html, script):
     return bad
 
 
+def leash_absence_checks(html, script):
+    """The leash question is REMOVED from this queue, not hidden.
+
+    It has its own tab, with its own crops and its own store. What is pinned
+    here is the whole affordance -- the buttons, their wiring, the shortcuts
+    and the flow that held a judged tile back until its leash was answered --
+    and, more usefully, the general rule the removal broke: the page must not
+    teach a key it does not bind. The legend went on offering L and N for
+    three commits after nothing listened for them.
+    """
+    bad = []
+    for tok in ('class="lbtn', 'acts leash', 'awaitleash',
+                '<kbd>L</kbd>', '<kbd>N</kbd>'):
+        if tok in html:
+            bad.append('the leash affordance is back in the markup: %r'
+                       % (tok,))
+    for tok in ('LEASH_ON', 'function leash(', 'paintLeash(', 'releaseHeld'):
+        if tok in script:
+            bad.append('the leash affordance is back in the script: %r'
+                       % (tok,))
+    # EVERY KEY THE LEGEND TEACHES IS A KEY THE PAGE LISTENS FOR.
+    legend = re.findall(r'<kbd>([A-Za-z])</kbd>', html)
+    for key in sorted(set(legend)):
+        if ("e.key==='%s'" % key.lower()) not in script and \
+                ("e.key==='%s'" % key.upper()) not in script:
+            bad.append('the keyboard legend offers %r and nothing binds it'
+                       % (key,))
+    if not legend:
+        bad.append('the legend lists no letter keys at all, so this check '
+                   'is grading nothing')
+    # ...and the icon-only control says what it is
+    if 'class="fbtn edit"' in script and 'aria-label="Redraw this box"' \
+            not in script:
+        bad.append('the crop button is an icon with no accessible name')
+    return bad
+
+
 def sign_in(mod):
     """A session cookie header for the handler under test, or {}.
 
@@ -2577,6 +2614,8 @@ def main():
     for name, bad in (('the shared tab strip', tab_strip_checks(html)),
                       ('the removed guess feature',
                        guess_absence_checks(html, script)),
+                      ('the removed leash question',
+                       leash_absence_checks(html, script)),
                       ('the annotated-date filter',
                        period_payload_checks(mod)),
                       ('the always-on score', score_checks(html, script)),

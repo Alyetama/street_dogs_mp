@@ -2045,9 +2045,15 @@ opacity:1;transform:none;pointer-events:auto}
 /* AUDIT MODE. Belongs in THIS stylesheet: /review is its own document with
    its own <style>, and the same rules in the dashboard's block styled nothing
    here -- the class was on the button and the button looked untouched. */
-.fbtn.on{background:#40341f!important;
-border:1px solid rgba(232,166,69,.55)!important;color:var(--acc)!important;
-font-weight:700}
+/* A recorded verdict is coloured by WHICH answer it is, the same as on the
+   audit sheets and the same as hovering the button that made it. One amber
+   rule for both meant hovering "not a dog" red and then watching it light
+   amber, and the sheet beside it lighting the same answer red. */
+.fbtn.on{font-weight:700}
+.fbtn.yes.on{background:#1c352f!important;
+border:1px solid rgba(67,181,129,.5)!important;color:#5ec89a!important}
+.fbtn.no.on{background:#3e2226!important;
+border:1px solid rgba(239,83,80,.45)!important;color:#f0736a!important}
 .card.changed{box-shadow:inset 0 0 0 2px var(--acc)}
 /* no verdict left on it: neither button is lit, and the tile says so rather
    than looking like a crop that was never reached */
@@ -2094,6 +2100,7 @@ overflow:hidden;text-overflow:ellipsis}
 .fbtn.edit{padding:6px 10px;display:flex;align-items:center;
 justify-content:center;color:var(--dim)}
 .fbtn.edit:hover{color:var(--acc);border-color:rgba(232,166,69,.4)}
+.fbtn.edit:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
 @media(max-width:420px){.fbtn{font-size:11px;padding:8px 2px}}
 
 /* ── states ── */
@@ -2173,6 +2180,9 @@ background:rgba(67,181,129,.14)}
 .lbx{position:absolute;top:16px;right:18px}
 .lbyes{background:rgba(67,181,129,.14);border-color:rgba(67,181,129,.4);color:var(--green)}
 .lbyes:hover{background:rgba(67,181,129,.24)}
+/* the same pairing as the tile behind it: green for yes, red for no */
+.lbno{background:rgba(239,83,80,.12);border-color:rgba(239,83,80,.35);color:#f0736a}
+.lbno:hover{background:rgba(239,83,80,.22)}
 @media(max-width:560px){.score{margin-left:0;width:100%}.grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style></head><body><div class="wrap">
@@ -2200,9 +2210,7 @@ background:rgba(67,181,129,.14)}
         <b class="sec" id="done">&mdash;</b><span>flagged</span>
         <b class="sec pos" id="pos">&mdash;</b><span>marked dog</span>
         <b class="sec" id="seen">&mdash;</b><span>kept</span>
-        <b class="sec dup" id="dups">&mdash;</b><span>repeats hidden</span>
-        <b class="sec lea" id="leashN">&mdash;</b><span title="leashed / unleashed verdicts recorded — a separate axis from the dog verdicts, kept in its own database">leash calls</span>
-      </div>
+        <b class="sec dup" id="dups">&mdash;</b><span>repeats hidden</span>      </div>
     </div>
   </div>
   <!-- ── what you are looking at ──────────────────────────────────────────
@@ -2360,7 +2368,7 @@ __WORKSTRIP__
      the work stay on the summary line where the hand can find them. -->
 <details class="keys" id="keys">
   <summary>
-    <span class="klead"><kbd>F</kbd> not a dog<kbd>D</kbd> is a dog<kbd>L</kbd> leashed<kbd>N</kbd> no leash</span>
+    <span class="klead"><kbd>D</kbd> it&rsquo;s a dog<kbd>F</kbd> not a dog</span>
     <span class="kmore">more</span>
   </summary>
   <div class="kbody">
@@ -2395,13 +2403,12 @@ var page=0,size=50,sort='low',country='',countryName='',items=[],reserve=[],page
    page keeps the number because it is a fact about the project rather than a
    control -- the header says how many calls exist, and nothing here makes
    one. */
-var leashN={leashed:0,unleashed:0};
 /* the crop mark, drawn the same way the dog-bin sheet draws it */
 var CROP_SVG='<svg viewBox="0 0 24 24" width="13" height="13" fill="none" '+
   'stroke="currentColor" stroke-width="1.9" stroke-linecap="round" '+
   'stroke-linejoin="round" aria-hidden="true">'+
   '<path d="M6.5 2v15.5H22"/><path d="M2 6.5h15.5V22"/></svg>';
-function leashNote(msg){
+function note(msg){
   /* the page has no general notice -- showUndo is about a verdict and offers
      to undo it, which is the wrong thing to say when nothing was recorded */
   var t=$('tbox');
@@ -2433,7 +2440,7 @@ function took(r){
   return r.json().then(function(j){return j},function(){return null})
    .then(function(j){
       if(j&&j.ok)return j;
-      leashNote(st===401
+      note(st===401
         ?'Not recorded \u2014 that session has ended. Reload the page to '+
          'sign in again.'
         :('Not recorded'+((j&&j.error)?(': '+j.error):'.')));
@@ -2577,10 +2584,6 @@ function paintChips(){
       '" title="'+att('clear '+a.text)+'" aria-label="'+
       att('clear '+a.text)+'">×</button></span>'}).join('');
 }
-function paintLeashCount(){
-  var e=$('leashN');
-  if(e)e.textContent=n(leashN.leashed)+' / '+n(leashN.unleashed);
-}
 var SOFT=!window.matchMedia||
          !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
 function $(i){return document.getElementById(i)}
@@ -2639,9 +2642,7 @@ function loadAudit(){
     if(j.error)throw 0;
     loading=false;
     items=j.items||[];reserve=[];page=j.page||0;pages=j.pages||1;
-    if(j.leash)LEASH=j.leash;
-    if(j.leash_totals){leashN=j.leash_totals;paintLeashCount();}
-    var only=verdict==='false_positive'?' marked not a dog':
+        var only=verdict==='false_positive'?' marked not a dog':
              verdict==='true_positive'?' marked a dog':' annotated';
     /* "nothing annotated yet" is only true with nothing narrowing the list:
        under a verdict or a period filter the honest sentence is about the
@@ -2691,9 +2692,7 @@ function load(){
     if(j.seen_total!=null)seenN=j.seen_total;
     if(j.positive_total!=null)posN=j.positive_total;
     if(j.collapsed!=null)dupN=j.collapsed;
-    if(j.leash)LEASH=j.leash;
-    if(j.leash_totals){leashN=j.leash_totals;paintLeashCount();}
-    paintCountries(j.countries,j.country,j.country_coverage);
+        paintCountries(j.countries,j.country,j.country_coverage);
     paintChips();
     paintCap(j);
     trimGroups();
@@ -2819,9 +2818,9 @@ function tile(c){
       /* Redrawing the box is something you do TO a tile, so it sits with the
          verdicts rather than two clicks deep -- the same mark, in the same
          place, as the one on the dog-bin sheet. */
-      '<button class="fbtn edit" type="button" title="redraw this box '+
-        '\u2014 changes the crop a future model trains on, not what this '+
-        'one was judged on">'+CROP_SVG+'</button>'+
+      '<button class="fbtn edit" type="button" aria-label="Redraw this box" '+
+        'title="redraw this box \u2014 changes the crop a future model '+
+        'trains on, not what this one was judged on">'+CROP_SVG+'</button>'+
     '</div>'+
     '</div>';
   var im=d.querySelector('.thumb');
@@ -2997,19 +2996,13 @@ function flag(i,viaKey,label){
         if(j.flagged_total!=null)flaggedN=j.flagged_total;
         if(j.positive_total!=null)posN=j.positive_total;
         score();
-        /* leashNote, not toast: this page has no toast(). The audit branch is
+        /* note(), not toast(): this page has no toast(). The audit branch is
            the only caller that reached for one, so every verdict changed here
            threw a ReferenceError into an empty catch and confirmed nothing. */
-        leashNote(undo?'annotation removed \u2014 back in the queue':
+        note(undo?'annotation removed \u2014 back in the queue':
                   'changed to '+(label==='true_positive'?'a dog':'not a dog'));
      }).catch(function(){delete busy[c.name]});
   }
-  /* "Is a dog" is the point at which a leash call becomes askable, so the
-     crop stays where it is instead of being consumed -- you can look again,
-     open it, fix the box and answer the leash, all on the tile you just judged.
-     Only for that verdict, only while the leash store is on, and only until it
-     has a leash call: everything else still leaves the queue on click, which
-     is what makes the queue drain. */
   /* Nothing is held back any more: the leash question moved to its own tab,
      so a judged crop leaves the queue on click, which is what drains it. */
   busy[c.name]=1;
@@ -3042,18 +3035,13 @@ function flag(i,viaKey,label){
 }
 
 /* ── undo ───────────────────────────────────────────────────────────────── */
-function showUndo(c,at,pulled,label,held){
+function showUndo(c,at,pulled,label){
   /* `pulled` records whether the flag consumed a crop from `reserve` to keep
      the grid full; undo has to hand that one back or the page grows on every
-     flag/undo cycle.
-
-     `held` records the other shape: the leash hold deliberately leaves the
-     crop on the grid, so there is nothing to give back and nothing to
-     re-insert. Undo assumed every verdict had removed its tile, so undoing a
-     held one put a second copy in `items` and a second tile on the grid, both
-     lit for a record the server had just deleted. */
-  lastUndo={crop:c,at:at,pulled:pulled,label:label||'false_positive',
-            held:!!held};
+     flag/undo cycle. Every verdict consumes its crop now -- nothing is held
+     back on this page any more -- so that is the only shape undo has to
+     know about. */
+  lastUndo={crop:c,at:at,pulled:pulled,label:label||'false_positive'};
   var t=$('tbox');
   if(!t){t=document.createElement('div');t.className='toast';t.id='tbox';
     document.body.appendChild(t)}
@@ -3089,18 +3077,7 @@ function undo(){
         if(lastEl)g.removeChild(lastEl);
       }
       var at;
-      if(u.held){
-        /* the tile never left: take the verdict back off the one already
-           there rather than adding another */
-        u.crop.label=null;
-        at=idx(u.crop.name);
-        var hel=cardAt(at);
-        if(hel){
-          hel.classList.remove('awaitleash');
-          var hy=hel.querySelector('.fbtn.yes');
-          if(hy)hy.classList.remove('on');
-        }
-      }else{
+      {
         /* back where it was, not at the front: the eye is still on that spot */
         at=Math.min(u.at,items.length);
         if(!items.length)$('state').innerHTML='';
@@ -3149,8 +3126,8 @@ function openLb(i){
         '</span>'+
         '<span class="bsave" id="lbstat"></span>'+
         '<button class="rbtn quiet" id="lbrst">Reset box</button>'+
-        '<button class="rbtn lbyes" id="lby">&#10003; Is a dog</button>'+
-        '<button class="rbtn" id="lbf">&#9873; Not a dog</button></div>';
+        '<button class="rbtn lbyes" id="lby">it\u2019s a dog</button>'+
+        '<button class="rbtn lbno" id="lbf">not a dog</button></div>';
     lb.onclick=function(e){if(e.target===lb)closeLb()};
     document.body.appendChild(lb);
     document.body.style.overflow='hidden';
@@ -3465,13 +3442,6 @@ document.addEventListener('keydown',function(e){
     else if(e.key==='d'||e.key==='D'){var k2=sel;
       flushSave().then(function(){closeLb();if(k2>=0)flag(k2,true,'true_positive')});
       e.preventDefault()}
-    /* Leash calls work in here too, and this is the view where they should be
-       made: a leash is a few pixels wide, and at thumbnail size it is simply
-       not visible -- the same reason the dashboard-thumbnail table reads 54.9%
-       where the full-resolution crops read 81.3% for the same detections.
-       Unlike F and D these do NOT close the lightbox: deciding the leash does
-       not decide the dog, and you usually want to answer both while looking at
-       the same frame. */
     return;
   }
   var c=cols(),moved=true;
