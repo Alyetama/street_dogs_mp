@@ -25,6 +25,7 @@ Run: python tools/detect/tests/adv_train_page.py
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,6 +84,7 @@ def page_checks(bad):
     if '__ACCT' in html:
         bad.append('the identity strip was never substituted')
     _script_checks(bad, html)
+    _overrides_checks(bad, html)
 
 
 def _script_checks(bad, html):
@@ -110,6 +112,70 @@ def _script_checks(bad, html):
         bad.append('THE TRAINING PAGE SCRIPT DOES NOT PARSE -- every control '
                    'on it is dead while the page still draws: %s'
                    % ((got.stderr or '').strip()[:400],))
+
+
+def _overrides_checks(bad, html):
+    """What the parameter form actually sends.
+
+    ultralytics settles a hundred keys and the form curates thirty-one, so
+    the box for the rest is the only way to reach device, save_period, amp and
+    the loss weights from this page -- and a box whose lines are dropped on
+    the floor is worse than no box, because the run then trains with settings
+    the person believes they set.
+    """
+    if shutil.which('node') is None:
+        return
+    script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+    m = re.search(r'^function overrides\(', script, re.M)
+    if not m:
+        bad.append('overrides() is not a top-level function of the page')
+        return
+    end = script.index('\n}', m.start()) + 2
+    drive = r"""
+'use strict';
+var FIELDS = [{key: 'epochs', value: '100'}, {key: 'imgsz', value: '640'}];
+var TYPED = ['device=0', 'save_period=10', '', 'not a parameter line',
+             'lr0: 0.002', '=orphan value'].join(String.fromCharCode(10));
+global.document = {};
+function $(id) {
+  if (id === 'params') return {querySelector: function (sel) {
+    if (sel.indexOf('epochs') >= 0) return {value: ' 50 '};   // changed
+    if (sel.indexOf('imgsz') >= 0) return {value: '640'};     // left alone
+    return null }};
+  if (id === 'pextra') return {value: TYPED};
+  return null;
+}
+__FN__
+var got = overrides();
+var bad = [];
+function want(key, value) {
+  if (got[key] !== value)
+    bad.push(key + ' was sent as ' + JSON.stringify(got[key]) + ', want '
+             + JSON.stringify(value));
+}
+want('epochs', '50');          // a curated field that was changed
+want('device', '0');           // typed into the box
+want('save_period', '10');
+want('lr0', '0.002');          // colon reads the same as equals
+if ('imgsz' in got) bad.push('an untouched field was sent as an override');
+if ('not a parameter line' in got) bad.push('a line with no key became one');
+if ('' in got) bad.push('a line starting with = became a nameless parameter');
+if (bad.length) { bad.forEach(function (b) { console.log('FAIL ' + b) });
+                  process.exit(1) }
+console.log('ok');
+""".replace('__FN__', script[m.start():end])
+    with tempfile.TemporaryDirectory() as tmp:
+        js = os.path.join(tmp, 'ov.js')
+        with open(js, 'w', encoding='utf-8') as fh:
+            fh.write(drive)
+        got = subprocess.run(['node', js], capture_output=True, text=True)
+    if got.returncode:
+        for line in (got.stdout or '').splitlines():
+            if line.startswith('FAIL '):
+                bad.append('the parameter form: ' + line[5:])
+        if not (got.stdout or '').strip():
+            bad.append('the override probe died: %s'
+                       % ((got.stderr or '').strip()[:300],))
 
 
 def outcome_checks(bad):

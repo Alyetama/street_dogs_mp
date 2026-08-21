@@ -274,6 +274,12 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
 /* One line in the dataset's own description, not a banner: it is a fact
    about that dataset, and it belongs where the counts are. */
 .warnnote{color:#e8a645}
+.pextra{margin-top:9px;font-size:12px;color:var(--dim)}
+.pextra summary{cursor:pointer;padding:3px 0}
+.pextra a{color:var(--mut)}
+.pextra textarea{display:block;width:100%;margin-top:7px;padding:8px 10px;
+  font-family:var(--num);font-size:12px;color:var(--tx);background:#0e1014;
+  border:1px solid var(--bd);border-radius:8px;resize:vertical}
 .msg{border-radius:10px;padding:9px 13px;font-size:12.5px;margin-bottom:12px}
 .msg.bad{background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.3);
   color:#ffb4b2}
@@ -325,6 +331,16 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
     <span class="ssub" id="psub"></span></div>
   <div class="params" id="params"></div>
   <button class="pmore" id="pmore" type="button">show every parameter</button>
+  <!-- ultralytics settles more keys than anyone wants as a form, and the
+       curated list is the ones that get changed. The rest are reachable
+       rather than absent: one per line, checked against ultralytics itself
+       before the run starts, the same as every other parameter. -->
+  <details class="pextra"><summary>anything else from the ultralytics
+    <a href="https://docs.ultralytics.com/usage/cfg/" target="_blank"
+       rel="noopener">cfg docs</a></summary>
+    <textarea id="pextra" rows="3" spellcheck="false"
+      placeholder="one per line&#10;device=0&#10;save_period=10"></textarea>
+  </details>
   <div class="row" style="margin-top:13px">
     <button class="btn go" id="train" type="button">Start training</button>
     <button class="btn" id="preset" type="button">reset to the last run</button>
@@ -479,8 +495,8 @@ function paintParams(){
       ' — '+esc(f.from)+'">'+
       '<label for="">'+esc(f.key)+'</label>'+ctl+'</span>';
   }).join('');
-  $('pmore').textContent=ALL?'show fewer':'show every parameter ('+
-    FIELDS.length+')';
+  $('pmore').textContent=ALL?'show fewer':'show the other '+
+    Math.max(0,FIELDS.length-show.length)+' common parameters';
 }
 function overrides(){
   var out={};
@@ -490,6 +506,16 @@ function overrides(){
     var v=el.value.trim();
     if(v===''||v===String(f.value))return;
     out[f.key]=v;
+  });
+  /* the escape hatch, last so it wins: somebody who typed a key meant it.
+     Nothing is validated here -- train_model checks every key against
+     ultralytics' own table, in the environment that has ultralytics, and a
+     key that is not real fails the run in a second saying which one. */
+  ($('pextra').value||'').split('\n').forEach(function(line){
+    var at=line.indexOf('='); if(at<1)at=line.indexOf(':');
+    if(at<1)return;
+    var k=line.slice(0,at).trim(), v=line.slice(at+1).trim();
+    if(k&&v!=='')out[k]=v;
   });
   return out;
 }
