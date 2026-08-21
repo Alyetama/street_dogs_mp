@@ -1440,6 +1440,78 @@ def forwarded_checks(bad, fx):
                    '%r -- one stranger guessing shuts the door on every '
                    'annotator' % (seen,))
 
+    # WITH THE HEADERS A REAL REQUEST CARRIES, which the dict above cannot
+    # express: a name may appear TWICE. A client sends its own
+    # X-Forwarded-For, the proxy in front adds a second header rather than
+    # extending the first, and Message.get() hands back the FIRST one -- the
+    # client's. Then the throttle is keyed on a string the guesser chose, and
+    # nine wrong passwords cost them nothing at all.
+    import http.client as _hc
+    import io as _io
+
+    def head(raw):
+        return _hc.parse_headers(_io.BufferedReader(_io.BytesIO(
+            raw.encode() + b'\r\n')))
+
+    for name, raw, want in (
+            ('two X-Forwarded-For headers, the proxy\'s last',
+             'X-Forwarded-For: 8.8.8.8\r\nX-Forwarded-For: 198.51.100.7\r\n',
+             '198.51.100.7'),
+            ('one header, the proxy appended the last hop',
+             'X-Forwarded-For: 8.8.8.8, 198.51.100.7\r\n', '198.51.100.7'),
+            ('a forged CF-Connecting-IP beside the real chain',
+             'X-Forwarded-For: 198.51.100.7\r\n'
+             'CF-Connecting-IP: 8.8.8.8\r\n', '198.51.100.7'),
+            ('Cloudflare alone, which is where CF- is worth reading',
+             'CF-Connecting-IP: 198.51.100.7\r\n', '198.51.100.7')):
+        got = U.client_address(H('10.0.0.9', head(raw)), env=trust)
+        if got != want:
+            bad.append('%s: counted against %r, want %r' % (name, got, want))
+    # and none of it is read from a peer nobody named
+    if U.client_address(H('203.0.113.9', head(
+            'X-Forwarded-For: 8.8.8.8\r\n')), env=trust) != '203.0.113.9':
+        bad.append('a stranger\'s X-Forwarded-For was believed')
+
+
+def leg_checks(bad, fx):
+    """Which leg a request came in on, decided from the socket.
+
+    Both halves have to hold: the peer is a proxy the operator named AND it
+    appended a client address. Peer alone is not enough -- the tunnel dials
+    the origin from this same box, so a browser ON this box would look like
+    the tunnel and lose its cookie.
+    """
+    import http.client as _hc
+    import io as _io
+
+    def handler(peer, raw=''):
+        class H:
+            client_address = (peer, 4321)
+            headers = _hc.parse_headers(_io.BufferedReader(_io.BytesIO(
+                raw.encode() + b'\r\n')))
+        return H()
+
+    env = {'DASHBOARD_TRUSTED_PROXY': '10.0.0.9,127.0.0.1',
+           'DASHBOARD_HTTPS': '1'}
+    for name, h, want in (
+            ('through the tunnel',
+             handler('127.0.0.1', 'X-Forwarded-For: 203.0.113.9\r\n'), True),
+            ('a browser straight off the origin port',
+             handler('203.0.113.44'), False),
+            ('a browser on the same box as the tunnel',
+             handler('127.0.0.1'), False),
+            ('a stranger sending the header themselves',
+             handler('203.0.113.44', 'X-Forwarded-For: 203.0.113.9\r\n'),
+             False)):
+        got = U.arrived_by_proxy(h, env=env)
+        if got != want:
+            bad.append('%s: proxied=%s, want %s' % (name, got, want))
+    # ...and a Request built by hand is a test, not a plaintext leg: it keeps
+    # the operator's word, or every check written before this one changes
+    # meaning silently.
+    if not U.Request().proxied:
+        bad.append('a hand-built Request defaults to the plaintext leg')
+
 
 def cookie_flag_checks(bad, fx):
     """The session cookie is Secure exactly when the deployment is.
@@ -1463,7 +1535,19 @@ def cookie_flag_checks(bad, fx):
             ('DASHBOARD_HTTPS empty', None, {'DASHBOARD_HTTPS': ''}, False),
             # a request cannot talk this server into it: no forwarded header
             # is read here, for the reason the throttle keys on the socket
-            ('a request claiming https', _Claim(), {}, False)):
+            ('a request claiming https', _Claim(), {}, False),
+            # THE FLAG FOLLOWS THE LEG, and this process has two of them. The
+            # tunnel dials the origin over plain HTTP and a tailnet browser
+            # types that same origin port -- so DASHBOARD_HTTPS=1 flagging
+            # every reply locks the second one out: no Secure cookie is kept
+            # from an http:// origin, nothing comes back, and the login form
+            # returns forever with nothing to read.
+            ('the proxied leg', U.Request(proxied=True),
+             {'DASHBOARD_HTTPS': '1'}, True),
+            ('the plain origin leg', U.Request(proxied=False),
+             {'DASHBOARD_HTTPS': '1'}, False),
+            ('the plain origin leg, no TLS anywhere',
+             U.Request(proxied=False), {}, False)):
         for what, header in (('the session cookie',
                               U.set_cookie('v', 60, req, env=env)[1]),
                              ('the expiring header',
@@ -1747,6 +1831,71 @@ def reply_checks(bad, fx):
     if len([1 for k, _ in r.headers if k == 'Set-Cookie']) != 2:
         bad.append('a reply cannot carry two Set-Cookie headers')
 
+    # THE READER WHO WENT AWAY. This gate answers every unauthenticated
+    # request, which makes it the writer most likely to be talking to nobody:
+    # a scanner that opens and drops, a browser that navigates off the login
+    # form. Unguarded, each one is a traceback in the service log, and a
+    # public address supplies them all day.
+    class Gone(Sink):
+        def __init__(self, at):
+            Sink.__init__(self)
+            self.at = at
+
+        def send_response(self, code):
+            if self.at == 'status':
+                raise BrokenPipeError(32, 'Broken pipe')
+            Sink.send_response(self, code)
+
+        def end_headers(self):
+            if self.at == 'headers':
+                raise ConnectionResetError(104, 'Connection reset by peer')
+            Sink.end_headers(self)
+
+    for at in ('status', 'headers', 'body'):
+        g = Gone(at)
+        if at == 'body':
+            class Dead:
+                def write(self, _):
+                    raise BrokenPipeError(32, 'Broken pipe')
+            g.wfile = Dead()
+        try:
+            U.page_reply('<!doctype html>\n<html></html>').send(g)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            bad.append('a client that hung up while the %s went out raised '
+                       '%s out of the gate -- one traceback per dropped '
+                       'connection' % (at, type(e).__name__))
+        else:
+            if not getattr(g, 'close_connection', False):
+                bad.append('the connection was not marked closed after the '
+                           'client hung up during the %s' % (at,))
+
+    # ...and the same for reading a body that stops arriving, which happens
+    # before any route has been chosen.
+    class Half:
+        command = 'POST'
+        path = '/login'
+        headers = {'Content-Length': '40',
+                   'Content-Type': 'application/x-www-form-urlencoded'}
+
+        class rfile:
+            @staticmethod
+            def read(_):
+                raise ConnectionResetError(104, 'Connection reset by peer')
+
+        headers = __import__('http.client', fromlist=['x']).parse_headers(
+            io.BufferedReader(io.BytesIO(
+                b'Content-Length: 40\r\n'
+                b'Content-Type: application/x-www-form-urlencoded\r\n\r\n')))
+
+    try:
+        got = U.Request.from_handler(Half())
+    except (BrokenPipeError, ConnectionResetError) as e:
+        bad.append('a body that stopped arriving raised %s out of the gate, '
+                   'before any route had been chosen' % (type(e).__name__,))
+    else:
+        if got.form:
+            bad.append('a body that never arrived was read as a form')
+
 
 def account_checks(bad, fx):
     """Changing your own password: the one thing this page is for.
@@ -1978,7 +2127,7 @@ def main():
                        burst_checks, redirect_checks,
                        signup_checks, admin_checks, page_checks,
                        account_checks, identity_checks,
-                       forwarded_checks, cookie_flag_checks,
+                       forwarded_checks, leg_checks, cookie_flag_checks,
                        silence_checks, source_checks, import_checks,
                        handler_checks, reply_checks, wiring_checks):
                 try:

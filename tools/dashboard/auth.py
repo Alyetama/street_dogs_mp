@@ -507,7 +507,7 @@ def parse_cookie(header):
 
 
 def over_https(req=None, env=None):
-    """Is this deployment served over TLS?
+    """Is THIS REQUEST served over TLS?
 
     THE OPERATOR SAYS SO, NOT THE REQUEST. A reverse proxy terminates the TLS
     and what reaches this process is plain HTTP either way, so the obvious
@@ -518,9 +518,25 @@ def over_https(req=None, env=None):
     where the deployment is described: DASHBOARD_HTTPS=1.
 
     Absent, no -- which is exactly how a tailnet deployment behaved before.
+
+    WHAT THE VARIABLE MEANS IS "THE PROXY'S LEG IS TLS", and this process has
+    two legs. The tunnel dials the origin over plain HTTP, and the same origin
+    port is what a tailnet browser types in directly -- so a Secure flag on
+    every reply locks that second browser out: it stores no Secure cookie from
+    an http:// origin, sends nothing back, and the login form returns forever
+    with no error to read. Which leg a request came in on is not a guess: a
+    request through the proxy arrives from a peer the operator named AND
+    carrying the client address that proxy appended. Sending that header
+    yourself only makes your OWN cookie Secure, so there is nothing to gain by
+    it; a plain tailnet request keeps exactly the cookie it had before there
+    was a tunnel.
     """
     got = (env if env is not None else os.environ).get('DASHBOARD_HTTPS')
-    return str(got or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    if str(got or '').strip().lower() not in ('1', 'true', 'yes', 'on'):
+        return False
+    # No request to judge (a caller outside the request path) leaves the
+    # operator's word standing.
+    return True if req is None else bool(getattr(req, 'proxied', True))
 
 
 def _flags(req=None, env=None):
@@ -565,10 +581,11 @@ class Request:
     """
 
     __slots__ = ('method', 'path', 'query', 'form', 'cookies', 'remote',
-                 'host', 'oversize', 'session')
+                 'host', 'oversize', 'session', 'proxied')
 
     def __init__(self, method='GET', path='/', query=None, form=None,
-                 cookies=None, remote='', host='', oversize=False):
+                 cookies=None, remote='', host='', oversize=False,
+                 proxied=True):
         self.method = method
         self.path = path
         self.query = query or {}
@@ -577,6 +594,10 @@ class Request:
         self.remote = remote
         self.host = host
         self.oversize = oversize
+        # True unless somebody positively knows otherwise -- from_handler
+        # decides it from the socket, and a Request built by hand is not a
+        # plaintext leg, it is a test.
+        self.proxied = proxied
         self.session = None
 
     @classmethod
@@ -601,7 +622,16 @@ class Request:
                 oversize = True
             elif n > 0:
                 ctype = (handler.headers.get('Content-Type') or '').lower()
-                data = handler.rfile.read(n)
+                # A client that announced a body and then went away raises
+                # here, on the read -- and this runs before any route has been
+                # chosen, so the traceback would come out of the gate itself.
+                # An empty form is the honest reading: the request said
+                # nothing, and the login flow refuses it the way it refuses
+                # any other empty one.
+                try:
+                    data = handler.rfile.read(n)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    data = b''
                 if ctype.startswith('application/x-www-form-urlencoded'):
                     form = parse_qs(data.decode('utf-8', 'replace'),
                                     keep_blank_values=True)
@@ -625,6 +655,7 @@ class Request:
             # was: a string the caller chose, worth nothing.
             remote=client_address(handler),
             host=handler.headers.get('Host') or '',
+            proxied=arrived_by_proxy(handler),
             oversize=oversize)
 
     def one(self, name, default=''):
@@ -659,13 +690,21 @@ class Reply:
         """Write it. Nothing is logged: BoardHandler.log_message is a no-op
         and must stay one, because a request line on the signup route carries
         the invite token in its query string."""
-        handler.send_response(self.status)
-        for k, v in self.headers:
-            handler.send_header(k, v)
-        handler.send_header('Content-Length', str(len(self.body)))
-        handler.end_headers()
-        if handler.command != 'HEAD' and self.body:
-            handler.wfile.write(self.body)
+        # THE GATE ANSWERS EVERY UNAUTHENTICATED REQUEST, which makes it
+        # the writer most likely to be talking to somebody who has already
+        # gone -- a scanner that opens and drops, a browser that navigates
+        # away from the login form. Without this, each one is a traceback in
+        # the service log, and a public address supplies them all day.
+        try:
+            handler.send_response(self.status)
+            for k, v in self.headers:
+                handler.send_header(k, v)
+            handler.send_header('Content-Length', str(len(self.body)))
+            handler.end_headers()
+            if handler.command != 'HEAD' and self.body:
+                handler.wfile.write(self.body)
+        except (BrokenPipeError, ConnectionResetError):
+            handler.close_connection = True
 
 
 # Every page this module serves carries these. no-store because a login form,
@@ -795,7 +834,7 @@ def bootstrap(db_path=None, key_path=None, env=None, now=None):
     except Exception as e:               # noqa: BLE001 - uptime beats purity
         got = {'action': 'refused', 'ok': False,
                'username': accounts.admin_username(env), 'user_id': None,
-               'admins': 0, 'others': [],
+               'admins': 0, 'others': [], 'demoted': [],
                'detail': 'The accounts database could not be opened (%s: %s). '
                          'Check that data/dashboard is writable, then restart.'
                          % (type(e).__name__, e)}
@@ -845,6 +884,49 @@ def trusted_proxies(env=None):
     return {p.strip() for p in raw.replace(';', ',').split(',') if p.strip()}
 
 
+def forwarded_client(head):
+    """The client address a trusted proxy appended, '' when it appended none.
+
+    X-Forwarded-For FIRST, and the LAST hop of the LAST header of that name.
+    Both parts matter and both were wrong. A client can send its own
+    X-Forwarded-For, and a proxy that adds a second header rather than
+    extending the first leaves two -- and Message.get() hands back the first
+    one, which is the client's. Within a header, every hop but the last came
+    from further out; only the last was written by the proxy in front of us.
+
+    CF-Connecting-IP is the fallback rather than the preference. Cloudflare
+    sets it at the edge and overwrites what a client sent, so it is good here
+    -- but it is only good BECAUSE the proxy is Cloudflare, and nginx or
+    caddy in that position passes a client's copy straight through. Reaching
+    for it only when there is no X-Forwarded-For at all keeps the trusted
+    deployment working and takes the forgeable path off the common one.
+    """
+    chain = []
+    for one in (head.get_all('X-Forwarded-For') or []
+                if hasattr(head, 'get_all')
+                else [head.get('X-Forwarded-For') or '']):
+        chain += [h.strip() for h in (one or '').split(',') if h.strip()]
+    if chain:
+        return chain[-1]
+    return (head.get('CF-Connecting-IP') or '').strip()
+
+
+def arrived_by_proxy(handler, env=None):
+    """Did this request come in through a proxy the operator named?
+
+    Both halves: the socket peer is on the list AND it appended a client
+    address. A request straight off the origin port fails the second half
+    even when the browser happens to sit on the same box as the tunnel.
+    """
+    peer = ''
+    if getattr(handler, 'client_address', None):
+        peer = handler.client_address[0] or ''
+    if peer not in trusted_proxies(env):
+        return False
+    head = getattr(handler, 'headers', None)
+    return bool(head is not None and forwarded_client(head))
+
+
 def client_address(handler, env=None):
     """The address to hold responsible for this request.
 
@@ -866,10 +948,7 @@ def client_address(handler, env=None):
     head = getattr(handler, 'headers', None)
     if head is None:
         return peer
-    got = (head.get('CF-Connecting-IP') or '').strip()
-    if not got:
-        chain = (head.get('X-Forwarded-For') or '').split(',')
-        got = chain[-1].strip() if chain else ''
+    got = forwarded_client(head)
     try:
         return str(ipaddress.ip_address(got)) if got else peer
     except ValueError:
@@ -1304,7 +1383,8 @@ def admin_action(action, req, session, now=None, path=None):
     """
     p = path or _state()['db']
     ts = int(time.time() if now is None else now)
-    if not session or session.get('role') != 'admin' or not session.get(
+    if not session or not accounts.is_admin(session.get('role')) \
+            or not session.get(
             'active'):
         return {'ok': False, 'notice': '', 'invite': None,
                 'message': 'Only an admin can do that.'}
@@ -1383,7 +1463,8 @@ def admin_action(action, req, session, now=None, path=None):
                         'message': ''}
             if what == 'delete':
                 # The work stays. What goes is the ability to sign in.
-                accounts.delete_user(uid, path=p)
+                accounts.delete_user(uid, inherit_to=session['id'],
+                                     path=p)
                 return {'ok': True, 'notice': 'user_deleted', 'invite': None,
                         'message': ''}
             if what in accounts.ROLES:
@@ -1528,7 +1609,7 @@ def serve_request(req, now=None):
     if req.path == ACCOUNT_PATH:
         return do_account(req, now=now)
     if req.path == ADMIN_PATH or req.path.startswith(ADMIN_PATH + '/'):
-        if not req.session or req.session.get('role') != 'admin':
+        if not req.session or not accounts.is_admin(req.session.get('role')):
             # Gated on ROLE, not on being signed in, and answered with the
             # same empty 404 an unknown path gets. A member who guesses the
             # address learns nothing they did not already know.
@@ -1992,7 +2073,8 @@ def account_page(session, error='', notice=''):
     one thing that is genuinely theirs and says what it costs.
     """
     who = esc(str(session.get('username') or ''))
-    role = 'admin' if session.get('role') == 'admin' else 'member'
+    role = session.get('role') if session.get('role') in accounts.ROLES \
+        else 'member'
     bits = ['<div class="card">\n  <h1>Your account</h1>\n'
             '  <div class="sub">Signed in as <b>%s</b> \u2014 %s.</div>\n'
             % (who, role)]
@@ -2141,7 +2223,12 @@ def admin_page(session, req, now=None, error='', minted=None):
     for u in users:
         me = u['id'] == session.get('id')
         acts = []
-        if not me:
+        # THE OWNER'S ROW CARRIES NO BUTTONS. Its tier follows DASHBOARD_USER
+        # rather than anything on this page, and the store refuses every one
+        # of these edits -- offering them would be offering an error. It also
+        # used to read as a promotion: an owner is not an admin, so the button
+        # said "make admin", which is a demotion wearing the wrong word.
+        if not me and u['role'] != 'owner':
             acts.append(_useract(csrf, u['id'],
                                  'disable' if u['active'] else 'enable',
                                  'disable' if u['active'] else 'enable',
@@ -2165,7 +2252,8 @@ def admin_page(session, req, now=None, error='', minted=None):
             '<td class="when">%s</td><td class="when">%s</td>'
             '<td class="acts">%s</td></tr>\n'
             % (esc(u['username']), ' <span class="tag">you</span>' if me else '',
-               ' admin' if u['role'] == 'admin' else '', esc(u['role']),
+               ' admin' if accounts.is_admin(u['role']) else '',
+               esc(u['role']),
                '' if u['active'] else ' off',
                'active' if u['active'] else 'disabled',
                esc(_when(u['created_at'])), esc(_when(u['last_login_at'])),
