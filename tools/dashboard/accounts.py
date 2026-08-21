@@ -142,6 +142,14 @@ ENV_PASSWORD_HASH = 'DASHBOARD_PASSWORD_HASH'
 ENV_INVITE_TTL_HOURS = 'DASHBOARD_INVITE_TTL_HOURS'
 DEFAULT_ADMIN = 'admin'
 
+# Names a stranger would read as staff. Refused for everyone except the
+# account named by DASHBOARD_USER, which may hold its own name.
+IMPERSONABLE = frozenset({
+    'admin', 'admins', 'administrator', 'root', 'staff', 'support',
+    'moderator', 'mod', 'system', 'security', 'help', 'official',
+    'biodiv', 'dashboard', 'streetdogs',
+})
+
 
 class AccountError(ValueError):
     """A refusal with a machine-readable reason.
@@ -577,6 +585,16 @@ def check_username(name, env=None):
             'A username may use letters, digits, dot, dash and underscore, '
             'and must start and end with a letter or digit.')
     norm = normalise_username(raw)
+    # NAMES THAT SPEAK FOR THE PROJECT. This dashboard is public now and its
+    # annotators are volunteers who mostly do not know each other; a sign-up
+    # called `admin` or `support` can tell the others anything and be believed,
+    # and no permission is needed to do it. The account that runs the
+    # deployment is exempt -- it may hold its own name whatever that is.
+    if norm in IMPERSONABLE and \
+            norm != normalise_username(_reserved_for(env)):
+        raise AccountError(
+            'username_reserved',
+            'That username speaks for the project. Pick one that is yours.')
     if norm == normalise_username(LEGACY_AUTHOR) and \
             norm != normalise_username(_reserved_for(env)):
         raise AccountError(
@@ -587,13 +605,84 @@ def check_username(name, env=None):
     return norm
 
 
-def check_password(password):
+# WHAT A GUESSER TRIES FIRST. Not a composition rule -- those produce
+# `Password1!` and a sticky note. Length is the thing that matters, and on top
+# of it the small set of shapes that survive a length rule while surviving no
+# guessing at all: the words everybody picks, one character held down, a walk
+# along the keyboard, a run of digits, and the name of the site or the account
+# the password is for.
+COMMON_PASSWORDS = frozenset("""
+password passw0rd password1 password12 password123 password1234
+passwordpassword letmein letmein123 welcome welcome123 iloveyou
+qwerty qwerty123 qwertyuiop 1q2w3e4r 1qaz2wsx zaq12wsx
+123456 1234567 12345678 123456789 1234567890 12345678910
+abc123 abcd1234 admin123 administrator root123 toor1234
+monkey123 dragon123 football123 baseball123 superman123 batman123
+trustno1 sunshine123 princess123 michael123 shadow123 master123
+changeme changeme123 secret123 default123 pass1234 test1234
+whatever123 nothing123 asdfghjkl asdfasdf zxcvbnm123
+""".split())
+
+# runs to walk in either direction when looking for a keyboard or counting
+_RUNS = ('abcdefghijklmnopqrstuvwxyz', '01234567890',
+         'qwertyuiop', 'asdfghjkl', 'zxcvbnm')
+
+
+def _stem(pw):
+    """The word somebody actually chose, before they were made to decorate it.
+
+    `letmein12345` is `letmein` with the tax paid; so is `Password!!`. The
+    blocklist has to see the word, not the decoration.
+    """
+    return re.sub(r'[^a-z]', '', pw.lower().rstrip('0123456789!@#$%^&*_.-'))
+
+
+def _is_a_run(pw):
+    """True when it is a walk along a keyboard or the digits, decoration aside.
+
+    Not only end to end: `qwertyuiop12` is a whole keyboard row with two
+    digits after it, which is one guess, not twelve characters. Anything whose
+    non-decoration part is a run counts, and so does a run repeated.
+    """
+    low = pw.lower()
+    heads = {low, re.sub(r'[^a-z0-9]', '', low),
+             low.rstrip('0123456789!@#$%^&*_.-')}
+    for row in _RUNS:
+        back = row[::-1]
+        for head in heads:
+            if len(head) < 4:
+                continue
+            if head in row or head in back:
+                return True
+        # a repeated walk -- 'abcabcabcabc' is one idea, not twelve characters
+        for n in range(3, len(low) // 2 + 1):
+            head = low[:n]
+            if (head in row or head in back) and low == head * (len(low) // n) \
+                    + head[:len(low) % n]:
+                return True
+    # digits that simply count, in either direction and from anywhere
+    digits = re.sub(r'\D', '', low)
+    if len(digits) >= 6 and len(digits) >= len(re.sub(r'[^a-z0-9]', '', low)) - 2:
+        step = {(int(b) - int(a)) % 10 for a, b in zip(digits, digits[1:])}
+        if step in ({1}, {9}):
+            return True
+    return False
+
+
+def check_password(password, username='', extra=()):
     """Return the password unchanged, or raise AccountError saying why not.
 
     The upper bound is not a style rule. scrypt hashes whatever it is handed,
     so an unbounded field is an unauthenticated request that makes the server
     do unbounded work -- one megabyte of 'a' per POST, as many POSTs as they
     like.
+
+    The lower bound is not the whole story either. This dashboard is public
+    now and its accounts belong to volunteers, so the rule has to refuse what
+    a guesser actually tries: `password1234` and `aaaaaaaaaaaa` and
+    `qwertyuiop12` all cleared a twelve-character minimum, and each is one
+    guess. What it deliberately does NOT do is demand a symbol and a capital:
+    that produces one predictable shape, not an unpredictable password.
     """
     pw = password if isinstance(password, str) else ''
     if len(pw) < PASSWORD_MIN:
@@ -604,6 +693,35 @@ def check_password(password):
         raise AccountError(
             'password_long',
             'A password may be at most %d characters.' % (PASSWORD_MAX,))
+    low = pw.lower()
+    stripped = re.sub(r'[^a-z0-9]', '', low)
+    if low in COMMON_PASSWORDS or stripped in COMMON_PASSWORDS \
+            or _stem(pw) in COMMON_PASSWORDS:
+        raise AccountError(
+            'password_common',
+            'That is one of the first passwords anybody guesses. Pick '
+            'something nobody else would write down.')
+    if len(set(low)) < 5:
+        raise AccountError(
+            'password_repetitive',
+            'That is the same few characters over and over. A password needs '
+            'at least five different ones.')
+    if _is_a_run(pw):
+        raise AccountError(
+            'password_sequence',
+            'That is a walk along the keyboard. Pick something that is not '
+            'in order.')
+    # the name of the site, or of the account it belongs to: the guesser
+    # knows both
+    for word in [username] + list(extra or ()) + ['dashboard', 'streetdogs',
+                                                  'street dogs', 'biodiv',
+                                                  'mapillary']:
+        word = normalise_username(word or '')
+        if len(word) >= 4 and word in low:
+            raise AccountError(
+                'password_guessable',
+                'That contains %r, which anybody guessing already knows. '
+                'Leave it out.' % (word,))
     return pw
 
 
@@ -694,7 +812,7 @@ def create_user(username, password, role='member', active=True, now=None,
                 path=None, con=None):
     """Make an account. Raises AccountError for anything the input got wrong."""
     norm = check_username(username)
-    check_password(password)
+    check_password(password, username=norm)
     check_role(role)
     raw = (username or '').strip()
     own = con is None
@@ -795,7 +913,7 @@ def set_password(who, password, now=None, path=None, bump=True):
     is usually that somebody else might know the old one, and a session cookie
     minted under it outlives the change otherwise.
     """
-    check_password(password)
+    check_password(password, username=str(who or ''))
     con = connect(path)
     try:
         row = _need(con, who)
@@ -808,6 +926,62 @@ def set_password(who, password, now=None, path=None, bump=True):
                             ' WHERE id = ?', (row['id'],))
         return _public(con.execute('SELECT * FROM users WHERE id = ?',
                                    (row['id'],)).fetchone())
+    finally:
+        con.close()
+
+
+def delete_user(who, path=None):
+    """Remove an account outright. Disabling is the reversible one.
+
+    WHAT THIS DOES NOT TOUCH: the work. Verdicts carry the annotator's name in
+    a ledger, and those rows stay exactly as they are -- the person judged
+    those crops and still did. What goes is the ability to sign in, which is
+    what "remove" means here. A name with no account behind it reads on the
+    audit pages as it always did.
+
+    Refused for the last active admin, the same as demoting one: an account
+    store nobody can sign into as an admin is a dashboard nobody can
+    administer.
+    """
+    con = connect(path)
+    try:
+        with _tx(con):
+            row = _need(con, who)
+            if row['role'] == 'admin' and row['active']:
+                left = con.execute(
+                    "SELECT COUNT(*) c FROM users WHERE role = 'admin' "
+                    "AND active = 1 AND id != ?", (row['id'],)).fetchone()['c']
+                if not left:
+                    raise AccountError(
+                        'last_admin',
+                        'This is the last active admin. Promote somebody '
+                        'else first.')
+            # their open assignments go with them; the invites they issued
+            # stay, because those are a record of what was handed out
+            con.execute('DELETE FROM assignments WHERE user_id = ?',
+                        (row['id'],))
+            con.execute('DELETE FROM users WHERE id = ?', (row['id'],))
+            return {'id': row['id'], 'username': row['username'],
+                    'role': row['role']}
+    finally:
+        con.close()
+
+
+def delete_invite(invite_id, path=None):
+    """Drop an invite from the record entirely -- revoked, used or expired.
+
+    revoke_invite() withdraws an OPEN one and leaves the row, which is the
+    right thing while it still means something. This is for afterwards: a
+    used invite is a line about a person who now has an account, and a
+    revoked one is a line about a link that no longer exists, and neither
+    needs to sit on the page forever.
+    """
+    con = connect(path)
+    try:
+        with _tx(con):
+            n = con.execute('DELETE FROM invites WHERE id = ?',
+                            (invite_id,)).rowcount
+            return bool(n)
     finally:
         con.close()
 
@@ -1239,7 +1413,7 @@ def redeem_invite(token, username, password, now=None, path=None):
     person retyping their name expects.
     """
     norm = check_username(username)
-    check_password(password)
+    check_password(password, username=norm)
     raw = (username or '').strip()
     ts = int(time.time() if now is None else now)
     th = _token_hash(token)
@@ -1796,6 +1970,11 @@ def main(argv=None):
     ap.add_argument('--set-password', metavar='USER')
     ap.add_argument('--sign-out', metavar='USER',
                     help='revoke every live session for one account')
+    ap.add_argument('--unlock', nargs='?', const='*', metavar='SOURCE',
+                    help='clear the login lockout: one source, or all of '
+                         'them. The lockout has no other way out -- it is '
+                         'cleared by a SUCCESSFUL login, which is the thing '
+                         'it is refusing.')
     a = ap.parse_args(argv)
 
     try:
@@ -1816,6 +1995,28 @@ def main(argv=None):
         if a.sign_out:
             bump_session_epoch(a.sign_out, path=a.db)
             print('signed out everywhere')
+            return 0
+        if a.unlock:
+            # THE WAY BACK IN. Every other exit from a lockout is a
+            # successful login, and a lockout is precisely the refusal of
+            # one -- so an operator locked out of their own dashboard had
+            # sqlite as their only remedy, on a live database, with nothing
+            # on the page telling them what had happened.
+            con = connect(a.db)
+            try:
+                with _tx(con):
+                    if a.unlock == '*':
+                        n = con.execute('DELETE FROM throttle').rowcount
+                        print('cleared %d lockout(s)' % (n,))
+                    else:
+                        src = a.unlock if ':' in a.unlock \
+                            else 'ip:' + a.unlock
+                        n = con.execute(
+                            'DELETE FROM throttle WHERE source = ?',
+                            (src,)).rowcount
+                        print('cleared %d lockout(s) for %s' % (n, src))
+            finally:
+                con.close()
             return 0
         if a.disable or a.enable:
             u = set_active(a.disable or a.enable, bool(a.enable), path=a.db)

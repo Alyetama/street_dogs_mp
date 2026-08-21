@@ -548,6 +548,150 @@ def leak_checks(bad, fx):
 
 # ── users ───────────────────────────────────────────────────────────────────
 
+def strength_checks(bad, fx):
+    """What a password has to be, now that the accounts belong to volunteers.
+
+    Length first, and then the small set of shapes that clear a length rule
+    while clearing no guessing at all. NOT composition rules: demanding a
+    capital and a symbol produces `Password1!`, which is one guess wearing a
+    costume, and it is why the passphrases below have to keep working.
+    """
+    weak = [
+        ('password1234', 'password_common'),
+        ('letmein12345', 'password_common'),
+        ('iloveyou1234', 'password_common'),
+        ('aaaaaaaaaaaa', 'password_repetitive'),
+        ('abababababab', 'password_repetitive'),
+        ('123456789012', 'password_sequence'),
+        ('987654321098', 'password_sequence'),
+        ('abcdefghijkl', 'password_sequence'),
+        ('qwertyuiop12', None),        # a keyboard row, however it is spelled
+        ('asdfghjkl123', None),
+        ('short', 'password_short'),
+    ]
+    for pw, code in weak:
+        try:
+            A.check_password(pw, username='alice')
+            bad.append('a guesser gets in with %r on the first try' % (pw,))
+        except A.AccountError as e:
+            if code and e.code != code:
+                bad.append('%r was refused as %r, want %r'
+                           % (pw, e.code, code))
+    # the account's own name, and the project's, are things a guesser knows
+    for pw in ('alice-alice-alice', 'dashboard-is-fun-2', 'biodiv-forever-1'):
+        try:
+            A.check_password(pw, username='alice')
+            bad.append('%r contains something the guesser already has'
+                       % (pw,))
+        except A.AccountError as e:
+            if e.code not in ('password_guessable', 'password_repetitive'):
+                bad.append('%r refused as %r' % (pw, e.code))
+    # ...and a real one still goes through, passphrases included
+    for pw in ('correct-horse-battery', 'tumbling dice in june',
+               'xR4$mv9Qwe1z', 'my cat ate the router', 'ZebraCanoe19Fig'):
+        try:
+            A.check_password(pw, username='alice')
+        except A.AccountError as e:
+            bad.append('a strong password was refused: %r (%s)'
+                       % (pw, e.code))
+    # the rule reaches the places accounts are actually made
+    p = fx.fresh('strength.db')
+    A.ensure_admin(path=p, env=dict(ADMIN_ENV))
+    try:
+        A.create_user('bob', 'password1234', path=p)
+        bad.append('create_user took a password off the guessing list')
+    except A.AccountError:
+        pass
+    try:
+        A.create_user('carol', 'carol-carol-carol', path=p)
+        bad.append('create_user took a password that is the username')
+    except A.AccountError:
+        pass
+
+
+def unlock_checks(bad, fx):
+    """There is a way out of a lockout that is not a successful login.
+
+    Every other exit from the throttle is a login that works, and a lockout
+    is exactly the refusal of one -- so an operator locked out of their own
+    dashboard, or a volunteer locked out by somebody else's guessing, had
+    sqlite on a live database as the only remedy.
+    """
+    import subprocess as _sp
+    p = fx.fresh('unlock.db')
+    A.ensure_admin(path=p, env=dict(ADMIN_ENV))
+    for _ in range(9):
+        A.record_failure('ip:203.0.113.5', path=p)
+    A.record_failure('ip:198.51.100.2', path=p)
+    if not A.throttle_state('ip:203.0.113.5', path=p).get('retry_after'):
+        bad.append('nine failures did not lock the source, so this check '
+                   'proves nothing')
+        return
+    here = os.path.join(REPO, 'tools', 'dashboard', 'accounts.py')
+    got = _sp.run([sys.executable, here, '--db', p, '--unlock',
+                   '203.0.113.5'], capture_output=True, text=True)
+    if got.returncode:
+        bad.append('--unlock failed: %s' % ((got.stderr or '')[:160],))
+    if A.throttle_state('ip:203.0.113.5', path=p).get('retry_after'):
+        bad.append('--unlock left the source locked, so the only way back in '
+                   'is still a login the lockout is refusing')
+    # ...and it clears the named one only
+    if not A.throttle_state('ip:198.51.100.2', path=p).get('fails'):
+        bad.append('--unlock on one source cleared another one too')
+    got = _sp.run([sys.executable, here, '--db', p, '--unlock'],
+                  capture_output=True, text=True)
+    if got.returncode or A.throttle_state('ip:198.51.100.2',
+                                          path=p).get('fails'):
+        bad.append('--unlock with no source did not clear them all: %s'
+                   % ((got.stdout or got.stderr or '')[:120],))
+
+
+def impersonation_checks(bad, fx):
+    """Names a volunteer must not be able to take.
+
+    This dashboard is public and its annotators mostly do not know each other.
+    A sign-up called `admin` or `support` can tell the rest of them anything
+    and be believed, and it needs no permission to do it -- the name is the
+    whole attack. The account that runs the deployment is exempt: it may hold
+    its own name, whatever DASHBOARD_USER says that is.
+    """
+    # a deployment whose admin is NOT called admin, which is the case the
+    # reservation exists for: with DASHBOARD_USER=admin the name belongs to
+    # the deployment and is rightly allowed
+    env = {'DASHBOARD_USER': 'theowner', 'DASHBOARD_PASSWORD': PW}
+    p = fx.fresh('impersonate.db')
+    A.ensure_admin(path=p, env=dict(env))
+    for name in ('admin', 'Admin', 'ADMIN', 'root', 'support', 'staff',
+                 'moderator', 'system', 'official'):
+        try:
+            A.check_username(name, env=dict(env))
+            bad.append('a volunteer may sign up as %r, which reads as the '
+                       'project speaking' % (name,))
+        except A.AccountError as e:
+            if getattr(e, 'code', None) != 'username_reserved':
+                bad.append('%r was refused for the wrong reason: %s'
+                           % (name, getattr(e, 'code', e)))
+    # ...and an ordinary name still works
+    for name in ('alice', 'bob_2', 'a.b-c', 'Zoe99'):
+        try:
+            A.check_username(name, env=dict(env))
+        except A.AccountError as e:
+            bad.append('an ordinary username %r was refused: %s'
+                       % (name, getattr(e, 'code', e)))
+    # ...and the deployment's own admin may hold its own name
+    who = env['DASHBOARD_USER']
+    try:
+        A.check_username(who, env=dict(env))
+    except A.AccountError as e:
+        bad.append('the deployment admin cannot hold its own name %r: %s'
+                   % (who, getattr(e, 'code', e)))
+    try:
+        A.check_username('admin', env=dict(ADMIN_ENV))
+    except A.AccountError as e:
+        bad.append('a deployment whose DASHBOARD_USER really is admin cannot '
+                   'hold that name: %s' % (getattr(e, 'code', e),))
+
+
 def user_checks(bad, fx):
     """Roles, activation, and the session epoch that revokes a cookie."""
     p = fx.fresh('users.db')
@@ -1153,7 +1297,10 @@ def main():
             for fn in (file_checks, pragma_checks, index_checks,
                        private_file_checks, migrate_checks, hash_checks,
                        rehash_on_login_checks, timing_checks,
-                       validation_checks, leak_checks, user_checks,
+                       validation_checks, leak_checks,
+                       impersonation_checks, strength_checks,
+                       unlock_checks,
+                       user_checks,
                        invite_checks, race_checks, rollback_checks,
                        throttle_checks, bootstrap_checks, secret_checks,
                        sql_checks, import_checks):
