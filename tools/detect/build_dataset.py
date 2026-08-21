@@ -186,6 +186,24 @@ LS_SCRIPT = 'export_annotations.sh'
 LS_GROUP = 'label'                    # the field in a task that holds boxes
 LS_DOG = ('leashed dog', 'unleashed dog')
 LS_NOT_DOG = ('other animal', 'cow')
+
+
+def ls_wanted(family):
+    """Which drawn labels a model takes, and what it calls them.
+
+    ONE EXPORT, THREE DIFFERENT READINGS. The leash model is asked leashed or
+    unleashed about a dog, so a goat somebody boxed as `other animal` is not a
+    harder example for it -- it is not an example at all. The gate is asked
+    dog or not, so the goat is exactly what it needs. The detector is asked
+    where the dogs are, so the goat's box is dropped and its frame stays as a
+    picture with no dog in it.
+    """
+    if family == 'leash':
+        return {'leashed dog': 'leashed', 'unleashed dog': 'unleashed'}
+    if family == 'dogdet':
+        return dict((k, 'dog') for k in LS_DOG)
+    return dict([(k, 'dog') for k in LS_DOG]
+                + [(k, 'not_dog') for k in LS_NOT_DOG])
 # Frames are fetched once and kept, because three builds of three models want
 # the same pictures and the server is on the other side of the internet.
 LS_FRAMES = os.path.join(REPO, 'data', 'labelstudio_frames')
@@ -647,10 +665,7 @@ def stage_extras(family, stage, run, duckdb_python, crop_python,
     # drawn one. For the gate that means the negatives are goats somebody
     # boxed as goats, not only the ones the detector mistook for dogs.
     if ls_tasks:
-        want = ({'leashed dog': 'leashed', 'unleashed dog': 'unleashed'}
-                if family == 'leash' else
-                dict([(k, 'dog') for k in LS_DOG]
-                     + [(k, 'not_dog') for k in LS_NOT_DOG]))
+        want = ls_wanted(family)
         cut, _missing = ls_crops(ls_tasks, want,
                                  os.path.join(stage, 'extras'), run=run)
         for klass, n in cut.items():
@@ -845,6 +860,12 @@ def catalogue(family=None):
                    # everything EXCEPT the boxes somebody drew by hand.
                    'label_studio': ((man.get('label_studio') or {})
                                     .get('counts') or {}).get('tasks'),
+                   # ...and what those frames were labelled, because each
+                   # model takes a different part of them: the leash model
+                   # never sees a goat
+                   'label_studio_classes': ((man.get('label_studio') or {})
+                                            .get('counts') or {}).get(
+                                                'classes') or {},
                    'seconds': man.get('seconds'), 'unfinished': False,
                    'damaged': False}
         else:
@@ -876,7 +897,8 @@ def catalogue(family=None):
                                                   time.localtime(at))
                                     if at else None),
                    'built_by': '', 'counts': None, 'bundle': False,
-                   'base': '', 'label_studio': None, 'seconds': None,
+                   'base': '', 'label_studio': None,
+                   'label_studio_classes': {}, 'seconds': None,
                    # This one carries a name only this tool generates, and no
                    # bundle -- the last thing a build writes. So it is a build
                    # that was killed outright: a directory of however many

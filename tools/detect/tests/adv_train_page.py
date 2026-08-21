@@ -138,9 +138,31 @@ def _labelstudio_checks(bad):
         with open(os.path.join(made, 'bundle', 'manifest.json'), 'w') as fh:
             json.dump({'family': 'dogdet', 'kind': 'detect', 'built_at': 1,
                        'built_at_iso': 'probe', 'counts': {'total': 1},
-                       'label_studio': {'counts': {'tasks': 5649}}}, fh)
+                       'label_studio': {'counts': {
+                           'tasks': 5649, 'boxes': 4322,
+                           'classes': {'leashed dog': 1224,
+                                       'unleashed dog': 1384,
+                                       'other animal': 1707, 'cow': 7}}}}, fh)
         got = {f['key']: f.get('label_studio')
                for f in tp.overview()['families']}
+        # EACH MODEL TAKES A DIFFERENT PART OF ONE EXPORT. Reporting the
+        # export's own size against all three promised the leash model twice
+        # the data it gets: it never sees the goats and cows.
+        if (got.get('leash') or {}).get('takes') != 1224 + 1384:
+            bad.append('the leash model is credited with %r of the export, '
+                       'but it only takes the dogs (%d)'
+                       % ((got.get('leash') or {}).get('takes'), 1224 + 1384))
+        if (got.get('dogbin') or {}).get('takes') != 4322:
+            bad.append('the gate is credited with %r, though every drawn box '
+                       'is a dog or a not-dog for it'
+                       % ((got.get('dogbin') or {}).get('takes'),))
+        if (got.get('dogdet') or {}).get('takes') != 1224 + 1384:
+            bad.append('the detector is credited with %r boxes, though the '
+                       'non-dog ones are dropped'
+                       % ((got.get('dogdet') or {}).get('takes'),))
+        if (got.get('leash') or {}).get('skipped') != 1707 + 7:
+            bad.append('nothing says how much of the export the leash model '
+                       'has no use for: %r' % (got.get('leash'),))
         if (got.get('dogdet') or {}).get('tasks') != 5649:
             bad.append('the detector does not report the export its own last '
                        'build used: %r' % (got.get('dogdet'),))

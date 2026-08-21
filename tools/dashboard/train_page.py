@@ -78,9 +78,22 @@ def overview(family=None):
         for rows in (bd.catalogue(key), bd.catalogue()):
             for row in rows:
                 if row.get('label_studio'):
+                    # WHAT THIS MODEL TAKES, not what the export holds. One
+                    # export, three readings: the leash model is asked
+                    # leashed or unleashed about a dog, so the goats and cows
+                    # somebody boxed are not harder examples for it -- they
+                    # are not examples at all, and counting them here would
+                    # promise the build twice the data it will get.
+                    per = row.get('label_studio_classes') or {}
+                    want = bd.ls_wanted(key)
+                    mine = sum(v for k, v in per.items() if k in want)
                     seen = {'tasks': row['label_studio'], 'from': row['id'],
                             'at': row.get('built_at_iso'),
-                            'mine': row.get('family') == key}
+                            'mine': row.get('family') == key,
+                            'takes': mine or None,
+                            'unit': 'boxes' if key == 'dogdet' else 'crops',
+                            'skipped': sum(v for k, v in per.items()
+                                           if k not in want) or None}
                     break
             if seen:
                 break
@@ -456,14 +469,18 @@ function paintBuild(){
   /* the hand-drawn boxes, which are fetched rather than read off disk */
   var ls=f.label_studio;
   chips.push('<span class="fetched" title="'+
-    (ls?(ls.mine?'The last build of this model brought in ':
-                  'The last export, taken by '+esc(ls.from)+', held ')+
-        n(ls.tasks)+' frames. One Label Studio project feeds all three '+
-        'models, and a fresh export is fetched when you press Build, so '+
-        'this is a floor rather than the exact number.'
-       :'Every build fetches the whole Label Studio project.')+
+    (ls?'One Label Studio project feeds all three models and each takes a '+
+        'different part of it'+
+        (ls.skipped?' — '+n(ls.skipped)+' boxes in the last export carry '+
+                     'labels this model has no use for':'')+
+        '. Counted from the export of '+esc(ls.from)+', which held '+
+        n(ls.tasks)+' frames; a fresh one is fetched when you press Build, '+
+        'so this is a floor rather than the exact number.'
+       :'Every build fetches the whole Label Studio project. Each model '+
+        'takes the labels it can use.')+
     '">label studio <b>'+
-    (ls?n(ls.tasks)+' frames':'fetched at build')+'</b></span>');
+    (ls&&ls.takes?n(ls.takes)+' '+esc(ls.unit):'fetched at build')+
+    '</b></span>');
   $('stores').innerHTML=chips.join('');
   var busy=STATE.lanes.build;
   $('build').disabled=!!busy;

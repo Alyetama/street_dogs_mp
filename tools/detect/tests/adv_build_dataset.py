@@ -343,6 +343,68 @@ def stop_checks(bad, bd):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def wanted_checks(bad, bd):
+    """Which drawn labels reach which model.
+
+    One export, three readings. The leash model is asked leashed or unleashed
+    ABOUT A DOG, so a goat somebody boxed as `other animal` is not a harder
+    example for it -- it is not an example at all, and cutting one produces a
+    crop of a goat filed under `leashed` or `unleashed`. The gate is asked dog
+    or not, so the goat is exactly what it needs. The detector is asked where
+    the dogs are, so the goat's box is dropped.
+    """
+    got = {f: bd.ls_wanted(f) for f in ('dogdet', 'dogbin', 'leash')}
+    for name in bd.LS_NOT_DOG:
+        if name in got['leash']:
+            bad.append('THE LEASH MODEL TAKES %r -- it is asked leashed or '
+                       'unleashed about a dog, so that crop would be filed as '
+                       'one or the other' % (name,))
+        if name in got['dogdet']:
+            bad.append('the detector keeps %r boxes, so a one-class dog '
+                       'detector is taught that a %s is a dog'
+                       % (name, name))
+        if got['dogbin'].get(name) != 'not_dog':
+            bad.append('the gate does not read %r as not_dog: %r'
+                       % (name, got['dogbin'].get(name)))
+    for name in bd.LS_DOG:
+        if got['leash'].get(name) != name.split()[0]:
+            bad.append('%r does not become %r for the leash model: %r'
+                       % (name, name.split()[0], got['leash'].get(name)))
+        if got['dogbin'].get(name) != 'dog' or got['dogdet'].get(name) != 'dog':
+            bad.append('%r is not a dog for the gate and the detector'
+                       % (name,))
+    # ...and the cutter must ask that question rather than keep its own copy
+    tasks = [{'image': 'https://x/y/z.jpg', 'label': [
+        {'x': 10, 'y': 10, 'width': 10, 'height': 10,
+         'rectanglelabels': [name]}]}
+        for name in list(bd.LS_DOG) + list(bd.LS_NOT_DOG)]
+    kept = []
+    real_frame = bd.ls_frame
+
+    def fake_frame(task, index=None, s3=None, bucket=None):
+        kept.append([r for b in (task.get(bd.LS_GROUP) or [])
+                     for r in b.get('rectanglelabels') or []])
+        return None                       # nothing to cut; we only want the ask
+
+    tmp = tempfile.mkdtemp(prefix='adv_bd_want_')
+    try:
+        bd.ls_frame = fake_frame
+        bd.ls_crops(tasks, bd.ls_wanted('leash'), os.path.join(tmp, 'out'))
+        flat = [name for one in kept for name in one]
+        for name in bd.LS_NOT_DOG:
+            if name in flat:
+                bad.append('the crop cutter reached for a %r frame while '
+                           'cutting for the leash model' % (name,))
+        if not any(n in flat for n in bd.LS_DOG):
+            bad.append('the crop cutter skipped the dogs as well, so this '
+                       'check proves nothing: %r' % (flat,))
+    except Exception as e:                # noqa: BLE001
+        bad.append('the wanted checks threw %s: %s' % (type(e).__name__, e))
+    finally:
+        bd.ls_frame = real_frame
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def catalogue_checks(bad, bd):
     """Which datasets carry the hand-drawn boxes, and which quietly do not.
 
@@ -1076,6 +1138,7 @@ def main():
                      (labelstudio_checks, (bd,)),
                      (progress_checks, (bd,)),
                      (catalogue_checks, (bd,)),
+                     (wanted_checks, (bd,)),
                      (stop_checks, (bd,)),
                      (remove_checks, (bd,)),
                      (cli_checks, ())):
