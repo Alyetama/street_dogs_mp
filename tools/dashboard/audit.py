@@ -1006,11 +1006,18 @@ __DATECSS__
 .card{background:var(--panel);border:1px solid var(--bd);border-radius:12px;
   overflow:hidden;position:relative}
 .card.done{opacity:.5}
-/* a flag is the FINDING -- it stays lit rather than greying out like an
-   answered question, because the whole point of the page is the pile of them */
-.card.miss{border-color:var(--acc);opacity:1;
-  box-shadow:0 0 0 1px rgba(232,166,69,.35)}
-.card.ok{border-color:rgba(67,181,129,.4)}
+/* THE FRAME AGREES WITH THE BUTTON THAT SET IT: green where the answer was
+   yes, red where it was no. It used to say whether the MODEL had been wrong --
+   amber for a miss, green for a correct call -- so an answered tile could show
+   a green button inside an amber frame, and green meant two opposite things
+   depending on which part of the tile you looked at.
+
+   The first answer still stays LIT rather than greying out like a finished
+   question: on the gate that is a dog the model threw away, and the pile of
+   them is the whole point of the page. */
+.card.said-yes{border-color:rgba(67,181,129,.55);opacity:1;
+  box-shadow:0 0 0 1px rgba(67,181,129,.3)}
+.card.said-no{border-color:rgba(239,83,80,.4)}
 .card.cur{box-shadow:0 0 0 2px var(--acc)}
 .shot{position:relative;background:#0e1014;aspect-ratio:1;display:flex;
   align-items:center;justify-content:center;cursor:zoom-in}
@@ -1065,11 +1072,18 @@ __DATECSS__
    buttons are solid, the gaps are dark rather than light, and a short scrim
    above them keeps the row from looking pasted onto the frame. */
 /* THE SAME BUTTONS AS THE DETECTIONS QUEUE. Two surfaces asking a person to
-   judge a crop should not offer two different-looking controls to do it: the
-   queue's outlined pills are the shape, and each stage keeps its own colours
-   because the words they carry mean different things. */
+   judge a crop should not offer two different-looking controls to do it --
+   same shape, same type, same pair of colours: green for the first answer,
+   red for the second, on every sheet.
+
+   The tile's frame agrees with them (.card.said-yes / .card.said-no), so one
+   colour means one thing everywhere on the tile. */
 .acts{position:absolute;left:0;right:0;bottom:0;display:grid;
-  grid-template-columns:1fr 1fr auto;gap:5px;padding:0 6px 6px;
+  /* tight: the narrowest tile is 178px, and 'unleashed' at 11px needs most
+     of what is left after the crop mark takes its column. Every pixel spent
+     on padding here is a pixel of label, and the label ellipsised. */
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:4px;
+  padding:0 4px 4px;
   opacity:0;transform:translateY(4px);pointer-events:none;
   transition:opacity .13s ease,transform .13s ease}
 .acts::before{content:'';position:absolute;left:0;right:0;bottom:100%;
@@ -1103,7 +1117,7 @@ __DATECSS__
 /* the crop mark, in line with the two verdicts: redrawing a box is something
    you do to a tile, so it belongs on the tile rather than two clicks deep in
    a lightbox */
-.act.e{padding:6px 10px;display:flex;align-items:center;
+.act.e{padding:6px 8px;display:flex;align-items:center;
   justify-content:center}
 .act.e:hover{color:var(--acc)}
 .act.e.on{color:var(--acc);border-color:rgba(232,166,69,.55);
@@ -1506,7 +1520,7 @@ function paintCard(i){
      neither button lit, and the review view -- whose whole job is reading
      back what you recorded -- could not say which answer was on record. */
   el.className='card'+(it.verdict&&it.verdict!==POS?' done':'')+
-    (it.verdict===POS?' miss':it.verdict===NEG?' ok':'')+
+    (it.verdict===POS?' said-yes':it.verdict===NEG?' said-no':'')+
     (i===cur?' cur':'');
   var b=el.querySelectorAll('.act');
   b[0].classList.toggle('on',it.verdict===POS);
@@ -1569,7 +1583,8 @@ function render(){
       '<div class="acts">'+
         '<button class="act m" data-v="'+POS+'" data-i="'+i+'">'+YES+'</button>'+
         '<button class="act c" data-v="'+NEG+'" data-i="'+i+'">'+NO+'</button>'+
-        '<button class="act e" data-edit="'+i+'" title="redraw this box '+
+        '<button class="act e" data-edit="'+i+'" aria-label="Redraw this box" '+
+        'title="redraw this box '+
         '\u2014 changes the crop a future model trains on, not what this one '+
         'was judged on">'+CROP_SVG+'</button>'+
       '</div></div>';

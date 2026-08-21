@@ -2018,7 +2018,7 @@ page.items.forEach(function (it) { delete it.verdict; delete it.corrected });
 render(); watchActs(0);
 page.items[0].verdict = POS;
 paintCard(0);
-chk(/ miss\b/.test(grid.children[0].className),
+chk(/ said-yes\b/.test(grid.children[0].className),
   'a "' + POS + '" find paints as "' + grid.children[0].className + '"');
 chk(acts(0)[0].lit && !acts(0)[1].lit,
   'a "' + POS + '" verdict lit ' + lits(0) + ' — the answer on record is not '
@@ -2026,7 +2026,7 @@ chk(acts(0)[0].lit && !acts(0)[1].lit,
 page.items[0].verdict = NEG;
 paintCard(0);
 chk(/ done\b/.test(grid.children[0].className) &&
-    / ok\b/.test(grid.children[0].className),
+    / said-no\b/.test(grid.children[0].className),
   'a "' + NEG + '" answer paints as "' + grid.children[0].className + '"');
 chk(acts(0)[1].lit && !acts(0)[0].lit,
   'a "' + NEG + '" verdict lit ' + lits(0));
@@ -2056,6 +2056,24 @@ var yesOn = /\.act\.m\.on\{[^}]*\}/.exec(PAGE_CSS);
 var noOn = /\.act\.c\.on\{[^}]*\}/.exec(PAGE_CSS);
 chk(yesOn && /5ec89a|var\(--green\)/.test(yesOn[0]),
   'a recorded yes is not green, though hovering it is: ' + (yesOn && yesOn[0]));
+// ...AND THE TILE'S FRAME AGREES WITH THE BUTTON THAT SET IT. It used to say
+// whether the MODEL had been wrong, in the same two colours, so green meant
+// one thing on the button and the opposite on the frame around it.
+var frameYes = /\.card\.said-yes\{[^}]*\}/.exec(PAGE_CSS);
+var frameNo = /\.card\.said-no\{[^}]*\}/.exec(PAGE_CSS);
+// on the BORDER, not anywhere in the rule: a green box-shadow left behind
+// while the border went amber would satisfy a looser test
+function borderOf(rule) {
+  var m = rule && /border-color:([^;}]+)/.exec(rule[0]);
+  return m ? m[1] : '';
+}
+chk(/67,181,129|var\(--green\)/.test(borderOf(frameYes)),
+  'the frame of a tile answered yes is not green: ' + borderOf(frameYes));
+chk(/239,83,80|var\(--no\)/.test(borderOf(frameNo)),
+  'the frame of a tile answered no is not red: ' + borderOf(frameNo));
+chk(!/\.card\.miss\{|\.card\.ok\{/.test(PAGE_CSS),
+  'the frame still carries its model-was-wrong names, which now paint the '
+  + 'opposite of what they say');
 chk(noOn && /f0736a|var\(--no\)/.test(noOn[0]),
   'a recorded no is not red, though hovering it is: ' + (noOn && noOn[0]));
 chk(yesHov && /5ec89a|var\(--green\)/.test(yesHov[0]),
