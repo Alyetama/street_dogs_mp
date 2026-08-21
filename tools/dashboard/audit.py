@@ -1089,6 +1089,13 @@ __DATECSS__
 .act:hover{color:var(--tx);border-color:rgba(130,140,150,.4)}
 .act.m:hover{background:#3d3223;color:var(--acc)}
 .act.c:hover{background:#1b322d;color:var(--green)}
+/* THE DOG QUESTION IS ANSWERED IN THE SAME COLOURS EVERYWHERE. Green for
+   yes, red for no, on this sheet and on the detections queue alike.
+   Only here: on the leash sheet the two answers are leashed and unleashed,
+   and painting one green and the other red would call a loose dog a mistake
+   rather than the finding it is. */
+[data-stage="gate"] .act.m:hover{background:#1c352f;color:#5ec89a}
+[data-stage="gate"] .act.c:hover{background:#3e2226;color:#f0736a}
 /* a verdict already recorded keeps its colour without hover, the way the
    queue's does -- hiding it until hover reads as "nothing judged here" */
 .act.m.on{background:#40341f;color:var(--acc);
@@ -1157,7 +1164,7 @@ __DATECSS__
   border-color .12s ease}}
 __ACCTCSS__
 __WORKCSS__
-</style></head><body><div class="wrap">
+</style></head><body data-stage="__STAGEID__"><div class="wrap">
 <header>
   <div><h1>__H1__</h1>
     <div class="sub">__SUB__</div></div>
@@ -2384,6 +2391,7 @@ def page_html(stage=DEFAULT_STAGE, account=('', '')):
                  ('__DEFBAND__',
                   json.dumps('rejected' if sp['asymmetric'] else 'all')),
                  ('__THRESH__', json.dumps(fa.THRESHOLD)),
+                 ('__STAGEID__', stage),
                  ('__YESTXT__', sp['yes']), ('__NOTXT__', sp['no']),
                  ('__POSV__', sp['positive']), ('__NEGV__', sp['negative']),
                  ('__BELOWTXT__', sp['below']),

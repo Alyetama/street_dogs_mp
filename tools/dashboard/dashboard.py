@@ -2045,7 +2045,7 @@ opacity:1;transform:none;pointer-events:auto}
 /* AUDIT MODE. Belongs in THIS stylesheet: /review is its own document with
    its own <style>, and the same rules in the dashboard's block styled nothing
    here -- the class was on the button and the button looked untouched. */
-.fbtn.on{background:rgba(232,166,69,.22)!important;
+.fbtn.on{background:#40341f!important;
 border:1px solid rgba(232,166,69,.55)!important;color:var(--acc)!important;
 font-weight:700}
 .card.changed{box-shadow:inset 0 0 0 2px var(--acc)}
@@ -2075,15 +2075,20 @@ __DATECSS__
 
 /* the header tally for the leash store, which is filled on its own tab */
 .sec.lea{color:var(--mut)}
+/* THE DOG-BIN SHEET'S BUTTON, to the pixel. Same border, radius, type and
+   padding, and the same opaque ground: these sit over a photograph too, and a
+   translucent one is read against whatever the crop shows. */
 .fbtn{border:1px solid rgba(130,140,150,.22);border-radius:7px;
-background:rgba(20,24,30,.72);color:var(--mut);padding:6px 4px;
+background:#12151b;color:var(--mut);padding:6px 4px;
 font-size:11px;cursor:pointer;font-family:inherit;font-weight:600;
 transition:background .12s,color .12s,border-color .12s;white-space:nowrap;
 overflow:hidden;text-overflow:ellipsis}
 /* only hover arms a button. Tinting one for the merely-selected tile read as
-   "this one is already flagged". */
-.fbtn.no:hover{background:rgba(239,83,80,.2);color:#f0736a}
-.fbtn.yes:hover{background:rgba(67,181,129,.2);color:#5ec89a}
+   "this one is already flagged". Flat colours rather than washes, for the
+   reason the base rule gives. */
+.fbtn:hover{color:var(--tx);border-color:rgba(130,140,150,.4)}
+.fbtn.no:hover{background:#3e2226;color:#f0736a}
+.fbtn.yes:hover{background:#1c352f;color:#5ec89a}
 .fbtn.no:focus-visible{outline:2px solid var(--no);outline-offset:-2px}
 .fbtn.yes:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
 .fbtn.edit{padding:6px 10px;display:flex;align-items:center;
@@ -2806,11 +2811,11 @@ function tile(c){
         '" type="button" title="'+(c.label==='true_positive'?
           'click again to remove this annotation':
           'a real dog the detector was unsure about (D)')+
-        '">&#10003; Is a dog</button>'+
+        '">it\u2019s a dog</button>'+
       '<button class="fbtn no'+(c.label==='false_positive'?' on':'')+
         '" type="button" title="'+(c.label==='false_positive'?
           'click again to remove this annotation':'false positive (F)')+'">'+
-        '&#9873; Not a dog</button>'+
+        'not a dog</button>'+
       /* Redrawing the box is something you do TO a tile, so it sits with the
          verdicts rather than two clicks deep -- the same mark, in the same
          place, as the one on the dog-bin sheet. */
