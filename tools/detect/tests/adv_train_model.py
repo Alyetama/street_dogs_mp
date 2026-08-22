@@ -753,6 +753,56 @@ def bundle_checks(bad, py, _dataset):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def promoted_fallback_checks(bad, tm):
+    """A family with no run in its project directory inherits the PROMOTED
+    recipe, not ultralytics' bare defaults.
+
+    The promoted classifiers were trained by hand into top-level directories
+    before the launcher existed, so a fresh family fell straight to 100
+    epochs and no augmentation while the recipe that produced the shipping
+    model sat readable in its run directory.
+    """
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='adv_tm_promoted_')
+    old_root = os.environ.get('TRAINING_ROOT')
+    os.environ['TRAINING_ROOT'] = tmp
+    try:
+        # the promoted run, where best_models.json says dogbin's weights live
+        run = os.path.join(tmp, 'dog-bin', 'dogbin_008')
+        os.makedirs(os.path.join(run, 'weights'))
+        open(os.path.join(run, 'weights', 'best.pt'), 'w').close()
+        with open(os.path.join(run, 'results.csv'), 'w') as fh:
+            fh.write('epoch,metrics/accuracy_top1\n1,0.9\n')
+        with open(os.path.join(run, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 500\npatience: 100\nerasing: 0.4\n'
+                     'data: /gone/dogbin_v5\nname: dogbin_008\n')
+        got, src = tm.last_args('dogbin')
+        if not src or 'dogbin_008' not in src:
+            bad.append('an empty project directory fell back to %r, not the '
+                       'promoted run' % (src,))
+        elif got.get('epochs') != '500':
+            bad.append('the promoted recipe came back wrong: %r'
+                       % (got.get('epochs'),))
+        # ...and a run IN the project directory still wins over it
+        newer = os.path.join(tmp, 'runs', 'classify', 'dog-bin', 'dogbin_x')
+        os.makedirs(os.path.join(newer, 'weights'))
+        open(os.path.join(newer, 'weights', 'best.pt'), 'w').close()
+        with open(os.path.join(newer, 'results.csv'), 'w') as fh:
+            fh.write('epoch,metrics/accuracy_top1\n1,0.5\n')
+        with open(os.path.join(newer, 'args.yaml'), 'w') as fh:
+            fh.write('epochs: 42\nname: dogbin_x\n')
+        got, src = tm.last_args('dogbin')
+        if not src or 'dogbin_x' not in src:
+            bad.append('a real run in the project directory lost to the '
+                       'promoted fallback: %r' % (src,))
+    finally:
+        if old_root is None:
+            os.environ.pop('TRAINING_ROOT', None)
+        else:
+            os.environ['TRAINING_ROOT'] = old_root
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def comet_checks(bad, tm):
     """A run from the page reaches Comet, in the project everything tracks.
 
@@ -840,7 +890,8 @@ def main():
         print('FAIL could not import train_model: %s: %s'
               % (type(e).__name__, e))
         return 1
-    for fn in (inherit_checks, dataset_checks, comet_checks):
+    for fn in (inherit_checks, dataset_checks, comet_checks,
+               promoted_fallback_checks):
         try:
             fn(bad, tm)
         except Exception as e:            # noqa: BLE001

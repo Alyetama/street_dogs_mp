@@ -185,18 +185,61 @@ def last_args(family):
     except OSError:
         pass
     if best is None:
+        # NO RUN IN THE PROJECT DIRECTORY IS THE ORDINARY CASE, not the odd
+        # one: the promoted classifiers were trained by hand into top-level
+        # directories before this launcher existed, so a fresh family here
+        # fell straight through to ultralytics' own defaults -- 100 epochs,
+        # no augmentation recipe -- while the recipe that actually produced
+        # the promoted model sat readable in its run directory. The promoted
+        # run is the one somebody would copy by hand; inherit from it.
+        best = _promoted_args_path(family)
+    if best is None:
         return {}, None
+    out = _read_args(best)
+    return (out, best) if out else ({}, None)
+
+
+def _read_args(path):
+    """args.yaml as a flat dict. By hand: the file is flat `key: value`
+    and the dashboard's environment has no yaml."""
     out = {}
     try:
-        with open(best) as fh:
+        with open(path) as fh:
             for line in fh:
                 if ': ' not in line or line.startswith(' '):
                     continue
                 key, _, raw = line.partition(': ')
                 out[key.strip()] = raw.strip()
     except OSError:
-        return {}, None
-    return out, best
+        return {}
+    return out
+
+
+def _promoted_args_path(family):
+    """The promoted run's args.yaml, when the registry can name one.
+
+    data/best_models.json records the promoted weights per project; the run
+    directory is two levels up from best.pt, and its args.yaml is the recipe
+    that produced the model this family currently ships. The path is tried
+    against the training root and the repo, because the detector's registry
+    entry points at an exported engine under data/ rather than a run -- that
+    one resolves nowhere, and the detector keeps its old behaviour.
+    """
+    spec = PROJECTS[family]
+    try:
+        with open(os.path.join(REPO, 'data', 'best_models.json')) as fh:
+            promoted = json.load(fh)['projects'][spec['project']]['best']
+        weights = promoted['weights']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not weights:
+        return None
+    for base in (bd.training_root(), REPO):
+        run = os.path.dirname(os.path.dirname(os.path.join(base, weights)))
+        path = os.path.join(run, 'args.yaml')
+        if os.path.isfile(path) and trained(run):
+            return path
+    return None
 
 
 def _coerce(key, value, tables):
@@ -271,6 +314,7 @@ def resolve(family, overrides=None, tables=None):
     """
     tables = tables or _cfg_tables()
     inherited, source = last_args(family)
+    promoted = bool(source) and os.sep + 'runs' + os.sep not in str(source)
     params, whence = {}, {}
     for key, raw in sorted(inherited.items()):
         if key in PER_RUN or key not in tables['defaults']:
@@ -281,7 +325,8 @@ def resolve(family, overrides=None, tables=None):
             continue
         if got != tables['defaults'].get(key):
             params[key] = got
-            whence[key] = 'the last run'
+            whence[key] = ('the promoted run' if promoted
+                           else 'the last run')
     bad = []
     for key, raw in sorted((overrides or {}).items()):
         if key in PER_RUN:
