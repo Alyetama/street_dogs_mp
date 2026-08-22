@@ -11842,6 +11842,17 @@ def _train_start(j, data, who):
     params = data.get('params') or {}
     if not isinstance(params, dict):
         return {'error': 'the parameters must be an object'}
+    # The size selector. A bare architecture name, matched here against the
+    # one shape ultralytics weights have, because this string becomes a
+    # command-line argument: yolo26x.pt, yolo11s-cls.pt and nothing else.
+    # Anything richer -- a path, a run's best.pt -- is typed into the
+    # parameter box and validated by the launcher like every other override.
+    # Checked with the other input checks, so a bad name is refused as a bad
+    # name rather than hiding behind whichever check happens to run first.
+    size = str(data.get('weights') or '')
+    if size and not re.fullmatch(r'yolo\d{1,2}[nsmlx](-cls)?\.pt', size):
+        return {'error': 'that is not a starting-weights name this page '
+                         'offers'}
     # The dataset has to exist, and be this model's, BEFORE a job is recorded.
     # Left to the launcher the answer was the same, one second later, as a
     # failed job on the page that somebody then has to read and clear.
@@ -11869,12 +11880,15 @@ def _train_start(j, data, who):
             os.path.join(REPO, 'tools', 'detect', 'train_model.py'),
             '--family', family, '--dataset', dataset,
             '--name', name, '--by', str(who or '')]
+    if size:
+        argv += ['--weights', size]
     if params:
         argv += ['--params-json', json.dumps(params, sort_keys=True)]
     got = j.submit('train', argv, lane='train',
                    label='%s on %s' % (family, dataset), by=who,
                    meta={'family': family, 'dataset': dataset,
-                         'run': name, 'params': params})
+                         'run': name, 'params': params,
+                         'weights': size or None})
     if not got['ok']:
         return {'error': got['message']}
     return {'ok': True, 'job': {'id': got['job']['id']}}

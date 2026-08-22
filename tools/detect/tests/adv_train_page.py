@@ -995,6 +995,22 @@ def _button_checks(bad, hit, submitted):
             st, body = hit('/api/train/start', 'boss', body=payload)
             if not json.loads(body).get('error'):
                 bad.append('a training run was accepted with %s' % (why,))
+        # THE SIZE SELECTOR'S VALUE BECOMES AN ARGUMENT. Its whole contract
+        # is the shape of an ultralytics weights name; anything else -- a
+        # path, somebody's best.pt, a flag -- is refused here rather than
+        # handed to a command line.
+        for w, why in (('../weights/best.pt', 'a path'),
+                       ('yolo11m-cls.pt; rm -rf', 'a shell suffix'),
+                       ('--resume', 'a flag'),
+                       ('yolo11q-cls.pt', 'a size that does not exist')):
+            st, body = hit('/api/train/start', 'boss',
+                           body={'family': 'dogbin', 'dataset': 'x',
+                                 'weights': w})
+            err = json.loads(body).get('error') or ''
+            if 'weights' not in err:
+                bad.append('%s as starting weights was refused as %r rather '
+                           'than as a bad weights name -- or not refused at '
+                           'all' % (why, err[:60]))
         if submitted:
             bad.append('%d job(s) were submitted for requests that should '
                        'have been refused: %r'
@@ -1029,6 +1045,27 @@ def _button_checks(bad, hit, submitted):
                     bad.append('A RESUMED RUN DOES NOT LOCK ITS DATASET (%r) '
                                '-- the delete button will take it out from '
                                'under the run' % (meta,))
+            # ...and a chosen size reaches the launcher as --weights, on a
+            # dataset that exists (the resume fixture's).
+            ds_dir = os.path.join(tmp, 'dogdet_20260821_aaaaaa')
+            os.makedirs(os.path.join(ds_dir, 'bundle'), exist_ok=True)
+            with open(os.path.join(ds_dir, 'bundle',
+                                   'manifest.json'), 'w') as fh:
+                json.dump({'family': 'dogdet', 'kind': 'detect'}, fh)
+            was = len(submitted)
+            st, body = hit('/api/train/start', 'boss',
+                           body={'family': 'dogdet',
+                                 'dataset': 'dogdet_20260821_aaaaaa',
+                                 'weights': 'yolo26m.pt'})
+            got = json.loads(body)
+            if got.get('error') or len(submitted) != was + 1:
+                bad.append('a run with a chosen size was refused: %r' % (got,))
+            else:
+                argv = submitted[-1]['argv']
+                if '--weights' not in argv or \
+                        argv[argv.index('--weights') + 1] != 'yolo26m.pt':
+                    bad.append('the chosen size never reached the launcher: '
+                               '%r' % (argv,))
         finally:
             if old_root is None:
                 os.environ.pop('TRAINING_ROOT', None)

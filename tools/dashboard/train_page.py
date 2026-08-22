@@ -285,6 +285,12 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
    from the last run is marked, because "why is this 1280" has an answer. */
 .params{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
   gap:9px 16px;margin-bottom:14px}
+/* A group header spans the grid. Only the expanded view draws them: six
+   fields need no table of contents. */
+.pgrp{grid-column:1/-1;font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.08em;color:var(--dim);margin:6px 0 -2px;
+  border-bottom:1px solid var(--bd);padding-bottom:3px}
+.pgrp:first-child{margin-top:0}
 .p{display:flex;align-items:center;gap:8px;font-size:12px}
 .p label{flex:1;color:var(--dim);white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
@@ -294,6 +300,10 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
 .p.inherited label::after{content:' \00b7';color:var(--acc)}
 .p.changed input,.p.changed select{border-color:rgba(232,166,69,.5);
   color:var(--acc)}
+.wsel{margin-left:auto;display:flex;align-items:center;gap:6px;
+  font-size:11px;color:var(--dim)}
+.wsel select{width:auto;font-family:var(--num);font-size:11.5px;
+  padding:3px 7px}
 .pmore{font-size:12px;color:var(--dim);background:0;border:0;cursor:pointer;
   font-family:inherit;padding:0}
 .pmore:hover{color:var(--tx)}
@@ -324,10 +334,14 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
   background:rgba(130,140,150,.3)}
 .cmd{font-family:var(--num);font-size:11px;color:var(--dim);
   overflow-x:auto;white-space:pre;padding-bottom:2px}
+/* pre, not pre-wrap: a progress line is ~100 columns of aligned figures,
+   and wrapping it stacks the columns into hash. The box scrolls sideways
+   for the rare longer line; the server has already collapsed the redraw
+   storms, so a line here is what a terminal would have shown. */
 .log{font-family:var(--num);font-size:11.5px;line-height:1.45;color:var(--mut);
   background:#0e1014;border:1px solid var(--bd);border-radius:8px;
   padding:10px 12px;margin-top:8px;max-height:300px;overflow:auto;
-  white-space:pre-wrap;word-break:break-word}
+  white-space:pre}
 .log[hidden]{display:none}
 .empty{color:var(--dim);font-size:12.5px;padding:8px 0}
 /* One line in the dataset's own description, not a banner: it is a fact
@@ -392,7 +406,14 @@ option.dead{color:var(--dim)}
 <div class="step">
   <div class="shead"><span class="snum">3</span>
     <span class="stitle">Parameters</span>
-    <span class="ssub" id="psub"></span></div>
+    <span class="ssub" id="psub"></span>
+    <!-- The one choice that is not an ultralytics cfg key: which
+         architecture to start from. Sizes of the family's own base model,
+         because a run's weights decide its speed and its ceiling, and
+         "make the next one an m" should not require knowing the file
+         naming scheme. "inherited" keeps whatever the recipe used. -->
+    <span class="wsel"><label for="wsel">weights</label>
+      <select id="wsel"></select></span></div>
   <div class="params" id="params"></div>
   <button class="pmore" id="pmore" type="button">show every parameter</button>
   <!-- ultralytics settles more keys than anyone wants as a form, and the
@@ -561,6 +582,31 @@ function paintDsNote(){
 
 /* ── step 3 ── */
 var HEADLINE=['epochs','batch','imgsz','optimizer','patience','lr0'];
+/* The expanded view in three named rows, in the order somebody tunes them:
+   when to stop, what goes on the card, what jitters the pictures. */
+var GROUPS=[
+  ['schedule',['epochs','patience','optimizer','lr0','lrf','momentum',
+               'weight_decay','warmup_epochs','cos_lr']],
+  ['data & batch',['batch','imgsz','rect','cache','workers','seed',
+                   'fraction','freeze','dropout','single_cls',
+                   'close_mosaic']],
+  ['augmentation',['hsv_h','hsv_s','hsv_v','degrees','translate','scale',
+                   'fliplr','flipud','mosaic','mixup','erasing']]];
+/* Sizes of the family's own base architecture. The names are the whole
+   contract -- the server refuses anything shaped differently. */
+function sizeNames(){
+  return FAM==='dogdet'
+    ? ['yolo26n.pt','yolo26s.pt','yolo26m.pt','yolo26l.pt','yolo26x.pt']
+    : ['yolo11n-cls.pt','yolo11s-cls.pt','yolo11m-cls.pt','yolo11l-cls.pt',
+       'yolo11x-cls.pt'];
+}
+function paintSizes(inherited){
+  var el=$('wsel');
+  el.innerHTML='<option value="">inherited — '+esc(inherited||'?')+
+    '</option>'+sizeNames().map(function(w){
+      return '<option value="'+w+'">'+w.replace('-cls','').replace('.pt','')
+        .replace(/^yolo\d+/,'size ')+' — '+w+'</option>'}).join('');
+}
 function loadParams(){
   $('params').innerHTML='<span class="empty">reading what the last run used…</span>';
   api('/api/train/params?family='+encodeURIComponent(FAM)).then(function(j){
@@ -569,6 +615,7 @@ function loadParams(){
       ? 'inherited from '+j.inherited_from.split('/').slice(-2)[0]+
         ' · ultralytics '+j.ultralytics
       : 'ultralytics '+j.ultralytics+' defaults';
+    paintSizes(j.weights);
     paintParams();
   }).catch(function(e){
     FIELDS=[];
@@ -584,30 +631,57 @@ function harvest(){
     if(v===''||v===String(f.value))delete EDITS[f.key]; else EDITS[f.key]=v;
   });
 }
+function fieldHtml(f){
+  var inh=f.from!=='the ultralytics default';
+  var edited=(f.key in EDITS);
+  var shown=edited?EDITS[f.key]:f.value;
+  var ctl;
+  if(f.type==='bool'){
+    ctl='<select data-k="'+esc(f.key)+'">'+
+      ['true','false'].map(function(v){
+        return '<option value="'+v+'"'+
+          ((String(shown)==='true')===(v==='true')?' selected':'')+
+          '>'+v+'</option>'}).join('')+'</select>';
+  }else{
+    /* inputmode, never type=number: the numeric keyboard without the
+       spinner arrows that crowd a 96px field. The DEFAULT sits in the
+       placeholder, so clearing a field shows what letting go returns to. */
+    var mode=f.type==='int'?' inputmode="numeric"'
+      :(f.type==='float'||f.type==='fraction')?' inputmode="decimal"':'';
+    ctl='<input data-k="'+esc(f.key)+'" value="'+esc(shown)+'"'+mode+
+      ' placeholder="'+esc(f.default)+'">';
+  }
+  return '<span class="p'+(inh?' inherited':'')+(edited?' changed':'')+
+    '" title="'+esc(f.why)+' — '+esc(f.from)+
+    ' (ultralytics default '+esc(f.default)+')">'+
+    '<label for="">'+esc(f.key)+'</label>'+ctl+'</span>';
+}
 function paintParams(){
   harvest();
-  var show=FIELDS.filter(function(f){
-    return ALL||HEADLINE.indexOf(f.key)>=0||f.from==='the last run'
-      ||(f.key in EDITS)});
-  $('params').innerHTML=show.map(function(f){
-    var inh=f.from==='the last run';
-    var shown=(f.key in EDITS)?EDITS[f.key]:f.value;
-    var ctl;
-    if(f.type==='bool'){
-      ctl='<select data-k="'+esc(f.key)+'">'+
-        ['true','false'].map(function(v){
-          return '<option value="'+v+'"'+
-            ((String(shown)==='true')===(v==='true')?' selected':'')+
-            '>'+v+'</option>'}).join('')+'</select>';
-    }else{
-      ctl='<input data-k="'+esc(f.key)+'" value="'+esc(shown)+'">';
-    }
-    return '<span class="p'+(inh?' inherited':'')+'" title="'+esc(f.why)+
-      ' — '+esc(f.from)+'">'+
-      '<label for="">'+esc(f.key)+'</label>'+ctl+'</span>';
-  }).join('');
-  $('pmore').textContent=ALL?'show fewer':'show the other '+
-    Math.max(0,FIELDS.length-show.length)+' common parameters';
+  if(!ALL){
+    var show=FIELDS.filter(function(f){
+      return HEADLINE.indexOf(f.key)>=0||f.from!=='the ultralytics default'
+        ||(f.key in EDITS)});
+    $('params').innerHTML=show.map(fieldHtml).join('');
+    $('pmore').textContent='show the other '+
+      Math.max(0,FIELDS.length-show.length)+' common parameters';
+    return;
+  }
+  var byKey={}; FIELDS.forEach(function(f){byKey[f.key]=f});
+  var out=[], seen={};
+  GROUPS.forEach(function(g){
+    var fs=g[1].filter(function(k){return k in byKey});
+    if(!fs.length)return;
+    out.push('<span class="pgrp">'+esc(g[0])+'</span>');
+    fs.forEach(function(k){seen[k]=1;out.push(fieldHtml(byKey[k]))});
+  });
+  var rest=FIELDS.filter(function(f){return !(f.key in seen)});
+  if(rest.length){
+    out.push('<span class="pgrp">other</span>');
+    rest.forEach(function(f){out.push(fieldHtml(f))});
+  }
+  $('params').innerHTML=out.join('');
+  $('pmore').textContent='show fewer';
 }
 function overrides(){
   harvest();
@@ -805,10 +879,13 @@ $('train').addEventListener('click',function(){
   var over=overrides();
   var lines=Object.keys(over).sort().map(function(k){return k+'='+over[k]});
   if(!window.confirm('Train '+(famOf()||{}).title+' on '+ds+
+     ($('wsel').value?'\nstarting from '+$('wsel').value:'')+
      (lines.length?'\nwith '+lines.join(', '):'\nwith the inherited parameters')+
      '?\n\nIt runs in the background on the GPU.'))return;
   $('train').disabled=true;
-  api('/api/train/start',{family:FAM,dataset:ds,params:over})
+  var body={family:FAM,dataset:ds,params:over};
+  if($('wsel').value)body.weights=$('wsel').value;
+  api('/api/train/start',body)
     .then(function(j){say('say','training — '+j.job.id,8000);return refresh()})
     .catch(fail).then(function(){$('train').disabled=false});
 });
