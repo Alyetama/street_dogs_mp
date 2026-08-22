@@ -34,6 +34,14 @@ ExecStart=<path-to-python> tools/dashboard/dashboard.py serve --host <private-bi
 # always, not on-failure: a clean exit is not a failure, so on-failure leaves a
 # dashboard that merely stopped stopped -- which is how one stayed down for
 # nearly seven hours with nobody watching.
+# KillMode=process: stopping the dashboard must not stop the TRAINING.
+# The train page submits runs as detached jobs, and setsid survives a dying
+# parent -- but not the service's cgroup: the default control-group kill took
+# every restart of this unit straight through two live trainings (epoch 79
+# and epoch 80, 2026-08-21), and the job runner died with them, so the page
+# said "lost" with no exit code. process kills only the dashboard itself;
+# the jobs it started keep their GPU.
+KillMode=process
 Restart=always
 RestartSec=15
 
