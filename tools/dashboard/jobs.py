@@ -449,7 +449,9 @@ def plain(text):
     last \r per line is exactly what the terminal would have shown.
     """
     text = _ANSI_RE.sub('', text or '')
-    return '\n'.join(line.rsplit('\r', 1)[-1]
+    # rstrip first: a CRLF line ENDS in \r, and taking the text after the
+    # last one turned every Windows-ended line into nothing at all
+    return '\n'.join(line.rstrip('\r').rsplit('\r', 1)[-1]
                      for line in text.split('\n'))
 
 

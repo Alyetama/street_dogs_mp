@@ -138,6 +138,11 @@ def redraw_checks(bad, jobs):
                    'would have shown one' % (t.count('progress '),))
     if 'tail line' not in t:
         bad.append('the line after the bar is missing')
+    # CRLF IS A LINE ENDING, NOT A REDRAW. Taking the text after the last
+    # carriage return turned every Windows-ended line into nothing at all.
+    if jobs.plain('kept one\r\nkept two\r\n') != 'kept one\nkept two\n':
+        bad.append('CRLF line endings erase their lines: %r'
+                   % (jobs.plain('kept one\r\nkept two\r\n'),))
 
 
 def survives_its_parent(bad, jobs_dir):
