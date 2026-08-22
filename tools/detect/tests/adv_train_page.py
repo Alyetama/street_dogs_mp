@@ -703,6 +703,22 @@ def route_checks(bad, d):
             bad.append('the built page carries a static Datasets link outside '
                        'the role-gated navigation, so every member sees one '
                        'that 404s')
+        # OPERATING BUTTONS FOLLOW THE OPERATING ROUTES. /api/refresh and
+        # /api/sweep answer a member with a bare 404, so the buttons that
+        # call them must not reach a member's copy of the page -- a control
+        # that can only fail undoes the gate in the header.
+        # the MARKUP, not the bare id: the page's own JS names these ids
+        # in getElementById calls, member and admin alike
+        st, body = hit('/', 'boss')
+        for want in ('id="refreshBtn"', 'id="sweepBtn"'):
+            if want not in body.decode('utf-8', 'replace'):
+                bad.append('the admin lost the %s control' % (want,))
+        st, body = hit('/', 'sam')
+        text = body.decode('utf-8', 'replace')
+        for got in ('id="refreshBtn"', 'id="sweepBtn"', 'id="gateBtn"'):
+            if got in text:
+                bad.append('a member\'s front page still draws %s, a button '
+                           'that answers them 404' % (got,))
 
         # A REQUEST LINE THAT IS NOT A PATH. A NUL reaches open() as an
         # embedded null and raises out of the standard library's own static

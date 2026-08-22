@@ -10918,6 +10918,14 @@ class BoardHandler(SimpleHTTPRequestHandler):
             lambda: (render_datasets_nav(getattr(self, 'session', None))
                      + render_train_nav(getattr(self, 'session', None))
                      + render_account_nav(getattr(self, 'session', None))))
+        # OPERATING THE MACHINE IS NOT ANNOTATING, and the buttons that do it
+        # follow the routes that were closed: /api/refresh and /api/sweep
+        # answer a member with a bare 404, so a member's page drew a Refresh
+        # button and a green "Resume sweep" that could only ever fail. The
+        # readouts stay -- what the sweep has done is everybody's to see;
+        # starting one is not.
+        if not self._is_admin(getattr(self, 'session', None)):
+            body = _strip_admin(body)
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -11907,6 +11915,27 @@ def account_css():
     """
     g = _auth()
     return '' if g is None else g.IDENTITY_CSS
+
+
+_ADM_OPEN, _ADM_CLOSE = b'<!--ADM-->', b'<!--/ADM-->'
+
+
+def _strip_admin(body):
+    """The operator's controls, removed from a member's copy of the page.
+
+    Sentinel comments rather than a parse, the same trade _splice makes: the
+    template nests too much for a regex over tags, and the sentinels are
+    written where the buttons are, so a control added next month is one pair
+    of comments away from behaving.
+    """
+    while True:
+        a = body.find(_ADM_OPEN)
+        if a < 0:
+            return body
+        b = body.find(_ADM_CLOSE, a)
+        if b < 0:
+            return body
+        body = body[:a] + body[b + len(_ADM_CLOSE):]
 
 
 def render_datasets_nav(session):
@@ -13581,7 +13610,7 @@ __LLMNAV__
     <!-- What the page knows and when it knew it. The date is today on a page
          rebuilt hourly and the cadence never changes, so both moved into the
          title and the line says the one thing worth a glance: how old this is. -->
-    <div class="upd" id="upd" data-at="__EPOCH__"><span class="dot" id="updDot"></span><span class="updt" id="updT" title="Rebuilt __NOW__ · refreshes on the hour">updated __CLOCK__</span><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button></div>
+    <div class="upd" id="upd" data-at="__EPOCH__"><span class="dot" id="updDot"></span><span class="updt" id="updT" title="Rebuilt __NOW__ · refreshes on the hour">updated __CLOCK__</span><!--ADM--><button id="refreshBtn" class="rbtn" title="Re-scan the catalog + image counts now">↻ Refresh now</button><!--/ADM--></div>
     <!-- WHOSE SESSION THIS IS, last and behind a hairline, on this page and
          on every other page with a header. It stood between the nav and the
          status line before, so a name and a sign-out sat in the middle of a
@@ -13668,8 +13697,8 @@ __LLMNAV__
     <button type="button" class="stagebtn" data-stage="leash" role="tab" aria-selected="false">Leash model</button>
   </span>
   <!-- one control slot, and the stage decides which run it drives -->
-  <span class="swctl" id="sweepCtl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span>
-  <span class="swctl" id="gateCtl" hidden><span class="swpill" id="gateState">checking</span><button id="gateBtn" class="rbtn sw" disabled>Checking&hellip;</button></span></summary>
+  <!--ADM--><span class="swctl" id="sweepCtl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span><!--/ADM-->
+  <!--ADM--><span class="swctl" id="gateCtl" hidden><span class="swpill" id="gateState">checking</span><button id="gateBtn" class="rbtn sw" disabled>Checking&hellip;</button></span><!--/ADM--></summary>
 <div class="panel">
   <!-- status line ABOVE the cards, never instead of them: the layout below is
        always present and goes to em-dashes when idle, so nothing jumps when

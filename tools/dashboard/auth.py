@@ -1731,7 +1731,11 @@ body{background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;
 a{color:inherit}
 h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
 .sub{color:var(--dim);font-size:12.5px;margin-top:3px;max-width:56ch}
-.note{font-size:12px;color:var(--dim);margin-top:14px;max-width:44ch}
+/* 76ch on the wide admin tables, 44ch inside the narrow auth card: one
+   width was serving both, and under a full-width members table the note
+   wrapped at forty-four characters into a strip a third of the panel. */
+.note{font-size:12px;color:var(--dim);margin-top:14px;max-width:76ch}
+.card .note{max-width:44ch}
 /* Fields and buttons speak the vocabulary the rest of the dashboard does --
    the same radius, the same border, the same amber for the one control that
    commits. A login page in a different dialect reads as a different site,
