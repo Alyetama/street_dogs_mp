@@ -103,6 +103,43 @@ def basic_checks(bad, jobs):
         bad.append('stderr is not in the log, so a failure explains nothing')
 
 
+def redraw_checks(bad, jobs):
+    """The log box shows what a terminal would have shown.
+
+    tqdm redraws one logical line hundreds of times, each redraw behind a
+    carriage return with an ANSI erase code -- one epoch of training is a
+    45,000-character "line" whose last 150 characters are the state. The old
+    tail seeked into the middle of that, readline()d past everything, and
+    returned an EMPTY tail for a job that was mid-epoch and healthy; what it
+    did return elsewhere wrapped into thirty lines of bar fragments.
+    """
+    job = jobs.submit('probe', ['/bin/sh', '-c', (
+        'awk \'BEGIN{for(i=0;i<4000;i++)'
+        'printf "\\rprogress %d/4000 \\033[K", i;'
+        'print "\\rprogress 4000/4000 done"}\'; echo tail line')],
+        lane='build')['job']
+    got = _settle(jobs, job['id'])
+    if not got or got['state'] != 'done':
+        bad.append('the redraw fixture did not run, so this proves nothing')
+        return
+    t = jobs.tail(job['id'], 2000)
+    if not t.strip():
+        bad.append('a log that is one long redrawn line tails EMPTY -- the '
+                   'page shows nothing for a job that is mid-epoch and fine')
+        return
+    if '\r' in t or '\x1b' in t:
+        bad.append('the tail still carries carriage returns or ANSI codes, '
+                   'which the log box renders as text all over the place')
+    if 'progress 4000/4000 done' not in t:
+        bad.append('the final state of the redrawn line is missing: %r'
+                   % (t[-120:],))
+    if t.count('progress ') > 2:
+        bad.append('%d redraws of one line survive in the tail; a terminal '
+                   'would have shown one' % (t.count('progress '),))
+    if 'tail line' not in t:
+        bad.append('the line after the bar is missing')
+
+
 def survives_its_parent(bad, jobs_dir):
     """THE FEATURE. Spawn from a process that exits, read from a third.
 
@@ -409,7 +446,8 @@ def main():
     jobs.JOBS_DIR = tmp
     bad = []
     try:
-        for fn, args in ((basic_checks, (jobs,)), (cancel_checks, (jobs,)),
+        for fn, args in ((basic_checks, (jobs,)), (redraw_checks, (jobs,)),
+                         (cancel_checks, (jobs,)),
                          (lane_checks, (jobs,)), (refusal_checks, (jobs,)),
                          (progress_checks, (jobs,)),
                          (forget_checks, (jobs,)),

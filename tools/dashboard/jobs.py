@@ -434,25 +434,54 @@ def cancel(job_id, grace=TERM_GRACE_S, now=None):
 
 # ── watching one ────────────────────────────────────────────────────────────
 
-def tail(job_id, nbytes=16000):
-    """The end of a job's output, which is the part anybody wants.
+# \x1b[K and friends: any CSI sequence. tqdm writes one per redraw.
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b')
 
-    Read from the end rather than loaded whole: a training log is megabytes by
-    the time it matters, and this is polled.
+
+def plain(text):
+    """Terminal output as text: ANSI stripped, \r redraws collapsed.
+
+    A tqdm bar is one logical line REDRAWN hundreds of times, each redraw
+    separated by a carriage return -- a single epoch of training is a 45,000
+    character "line" of which only the last 150 characters are the state a
+    reader wants. On a terminal the \r overwrites in place; in a log box it
+    wrapped into thirty lines of bar fragments. Keeping the text after the
+    last \r per line is exactly what the terminal would have shown.
+    """
+    text = _ANSI_RE.sub('', text or '')
+    return '\n'.join(line.rsplit('\r', 1)[-1]
+                     for line in text.split('\n'))
+
+
+def tail(job_id, nbytes=16000):
+    """The end of a job's output, as a terminal would have shown it.
+
+    Read from the end rather than loaded whole: a training log is megabytes
+    by the time it matters, and this is polled. The RAW window read is many
+    times the text returned, because redraw storms inflate the bytes: one
+    epoch is ~45KB raw and ~150 characters once collapsed, so a 24KB raw
+    window could land entirely inside one bar -- the old readline()-past-
+    the-partial-line trick then consumed everything and returned an EMPTY
+    tail for a job that was mid-epoch and healthy.
     """
     if not isinstance(job_id, str) or not ID_RE.match(job_id):
         return ''
     _d, _p, log, _e = _paths(job_id)
+    raw_window = max(nbytes * 16, 1 << 19)
     try:
         size = os.path.getsize(log)
         with open(log, 'rb') as fh:
-            if size > nbytes:
-                fh.seek(size - nbytes)
-                fh.readline()             # drop the half line seeking landed in
+            if size > raw_window:
+                fh.seek(size - raw_window)
             raw = fh.read()
     except OSError:
         return ''
-    return raw.decode('utf-8', 'replace')
+    text = plain(raw.decode('utf-8', 'replace'))
+    if size > raw_window:
+        # drop the line the seek landed inside -- AFTER collapsing, when a
+        # "line" is once again something a person would call one
+        text = text.partition('\n')[2]
+    return text[-nbytes:]
 
 
 def progress(job_id):
