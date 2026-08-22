@@ -155,6 +155,16 @@ def _run_state(family, name):
         out['error'] = doc.get('error')
         if who == 'resume.json':
             out['resumed'] = True
+    # The run's own epoch budget, off its args.yaml -- what turns "79
+    # epochs so far" into a bar. Parsed flat, the way train_model reads it.
+    try:
+        with open(os.path.join(path, 'args.yaml')) as fh:
+            for line in fh:
+                if line.startswith('epochs:'):
+                    out['total_epochs'] = int(line.split(':', 1)[1])
+                    break
+    except (OSError, ValueError):
+        pass
     csv = os.path.join(path, 'results.csv')
     if os.path.isfile(csv):
         try:
@@ -300,10 +310,6 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--acc);
 .p.inherited label::after{content:' \00b7';color:var(--acc)}
 .p.changed input,.p.changed select{border-color:rgba(232,166,69,.5);
   color:var(--acc)}
-.wsel{margin-left:auto;display:flex;align-items:center;gap:6px;
-  font-size:11px;color:var(--dim)}
-.wsel select{width:auto;font-family:var(--num);font-size:11.5px;
-  padding:3px 7px}
 .pmore{font-size:12px;color:var(--dim);background:0;border:0;cursor:pointer;
   font-family:inherit;padding:0}
 .pmore:hover{color:var(--tx)}
@@ -360,7 +366,64 @@ option.dead{color:var(--dim)}
 .msg.ok{background:rgba(67,181,129,.1);border:1px solid rgba(67,181,129,.3);
   color:#9fe3c0}
 .msg[hidden]{display:none}
-@media(prefers-reduced-motion:reduce){.bar i{transition:none}}
+/* ── the launch sequence: pick, tune, go — left to right on a wide screen,
+   stacked on a phone. The three steps were a single column of full-width
+   panels; reading them side by side is what makes the page a sequence
+   rather than a form. */
+.seq{display:grid;grid-template-columns:1fr;gap:14px;align-items:start}
+@media(min-width:1180px){.seq{grid-template-columns:repeat(3,minmax(0,1fr))}}
+/* natural heights, top-aligned: stretching all three to the tallest left
+   the short ones mostly empty panel */
+.seq .step{margin-bottom:0;box-sizing:border-box;min-width:0}
+.seq .shead .ssub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  min-width:0;flex:1}
+.wrow{display:flex;flex-wrap:wrap;align-items:center;gap:5px;
+  margin:-2px 0 11px}
+/* ── the live run, as the page's hero ── */
+.hero{background:var(--panel);border:1px solid rgba(232,166,69,.3);
+  border-radius:14px;padding:16px 20px 14px;margin-bottom:16px;
+  display:flex;flex-direction:column;gap:11px}
+.hero .htop{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.hero .hlive{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--acc);display:flex;align-items:center;gap:7px}
+.hero .hlive::before{content:'';width:7px;height:7px;border-radius:50%;
+  background:var(--acc)}
+.hero .hname{font-family:var(--num);font-size:13px;color:var(--tx);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.hero .hmid{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.hero .hep{font-family:var(--num);font-size:32px;font-weight:650;
+  letter-spacing:-.01em;color:var(--tx)}
+.hero .hep small{font-size:18px;font-weight:500;color:var(--dim)}
+.hero .hstat{font-family:var(--num);font-size:11.5px;color:var(--mut)}
+.hero .hbar{height:9px;border-radius:5px;background:rgba(130,140,150,.12);
+  overflow:hidden}
+.hero .hbar i{display:block;height:100%;background:var(--acc);
+  border-radius:5px;transition:width .5s ease}
+.hero .hbtns{margin-left:auto;display:flex;gap:8px}
+.hero .chip{font-size:10.5px;border:1px solid rgba(130,140,150,.2);
+  border-radius:6px;padding:2px 8px;color:var(--mut);
+  font-family:var(--num)}
+.hero .chip.ok{color:var(--green);border-color:rgba(67,181,129,.3)}
+/* ── where a value came from, as a dot the eye can sweep ── */
+.p .dot{width:6px;height:6px;border-radius:50%;flex:none;
+  background:var(--dim);opacity:.55}
+.p.inherited .dot{background:var(--green);opacity:.9}
+.p.changed .dot{background:var(--acc);opacity:1}
+.plegend{display:flex;gap:14px;font-size:10px;color:var(--dim);
+  margin:-4px 0 10px;align-items:center}
+.plegend i{width:6px;height:6px;border-radius:50%;display:inline-block;
+  margin-right:5px;vertical-align:1px}
+/* ── the size pills: five widths of one architecture, one selected ── */
+.wpills{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+.wpills .wlab{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;
+  color:var(--dim);margin-right:3px}
+.wpills button{font-family:var(--num);font-size:11.5px;padding:4px 10px;
+  border:1px solid rgba(130,140,150,.18);border-radius:8px;background:0;
+  color:var(--dim);cursor:pointer}
+.wpills button:hover{color:var(--tx);border-color:rgba(130,140,150,.35)}
+.wpills button.on{color:var(--acc);border-color:rgba(232,166,69,.45);
+  background:rgba(232,166,69,.06)}
+@media(prefers-reduced-motion:reduce){.bar i,.hero .hbar i{transition:none}}
 </style></head><body><div class="wrap">
 <header>
   <div><h1>Train</h1>
@@ -375,6 +438,12 @@ option.dead{color:var(--dim)}
 
 <div class="models" id="models" role="tablist"></div>
 
+<!-- THE RUN THAT IS BURNING THE GPU RIGHT NOW, above everything: it is the
+     only thing on this page that is moving, and the only question with a
+     deadline. Empty and hidden when nothing trains. -->
+<div id="live" hidden></div>
+
+<div class="seq">
 <div class="step">
   <div class="shead"><span class="snum">1</span>
     <span class="stitle">Build a dataset</span>
@@ -406,14 +475,15 @@ option.dead{color:var(--dim)}
 <div class="step">
   <div class="shead"><span class="snum">3</span>
     <span class="stitle">Parameters</span>
-    <span class="ssub" id="psub"></span>
-    <!-- The one choice that is not an ultralytics cfg key: which
-         architecture to start from. Sizes of the family's own base model,
-         because a run's weights decide its speed and its ceiling, and
-         "make the next one an m" should not require knowing the file
-         naming scheme. "inherited" keeps whatever the recipe used. -->
-    <span class="wsel"><label for="wsel">weights</label>
-      <select id="wsel"></select></span></div>
+    <span class="ssub" id="psub"></span></div>
+  <!-- The one choice that is not an ultralytics cfg key: which architecture
+       to start from. Sizes of the family's own base model, because a run's
+       weights decide its speed and its ceiling, and "make the next one an m"
+       should not require knowing the file naming scheme. "inherited" keeps
+       whatever the recipe used. Its own row: sharing the header put the
+       pills and a long "inherited from" name in one flex line, and the x
+       pill rendered clipped off the panel's edge. -->
+  <div class="wrow"><span class="wpills" id="wsel"></span></div>
   <div class="params" id="params"></div>
   <button class="pmore" id="pmore" type="button">show every parameter</button>
   <!-- ultralytics settles more keys than anyone wants as a form, and the
@@ -432,12 +502,14 @@ option.dead{color:var(--dim)}
     <span class="ssub" id="trainsub"></span>
   </div>
 </div>
+</div>
 
 <div class="step">
   <div class="shead"><span class="snum">&#9679;</span>
     <span class="stitle">Work</span>
     <span class="ssub" id="jobsub"></span></div>
   <div id="jobs"><div class="empty">Nothing has been run yet.</div></div>
+</div>
 </div>
 
 <script>
@@ -594,6 +666,7 @@ var GROUPS=[
                    'fliplr','flipud','mosaic','mixup','erasing']]];
 /* Sizes of the family's own base architecture. The names are the whole
    contract -- the server refuses anything shaped differently. */
+var WSEL='';                 /* '' = inherited; else a weights filename */
 function sizeNames(){
   return FAM==='dogdet'
     ? ['yolo26n.pt','yolo26s.pt','yolo26m.pt','yolo26l.pt','yolo26x.pt']
@@ -601,11 +674,15 @@ function sizeNames(){
        'yolo11x-cls.pt'];
 }
 function paintSizes(inherited){
-  var el=$('wsel');
-  el.innerHTML='<option value="">inherited — '+esc(inherited||'?')+
-    '</option>'+sizeNames().map(function(w){
-      return '<option value="'+w+'">'+w.replace('-cls','').replace('.pt','')
-        .replace(/^yolo\d+/,'size ')+' — '+w+'</option>'}).join('');
+  WSEL='';
+  var short=String(inherited||'?').split('/').pop();
+  $('wsel').innerHTML='<span class="wlab">weights</span>'+
+    '<button type="button" data-w="" class="on" title="whatever the recipe '+
+    'used: '+esc(short)+'">inherited</button>'+
+    sizeNames().map(function(w){
+      var sz=w.replace('-cls','').replace('.pt','').replace(/^yolo\d+/,'');
+      return '<button type="button" data-w="'+w+'" title="'+w+'">'+sz+
+        '</button>'}).join('');
 }
 function loadParams(){
   $('params').innerHTML='<span class="empty">reading what the last run used…</span>';
@@ -615,6 +692,7 @@ function loadParams(){
       ? 'inherited from '+j.inherited_from.split('/').slice(-2)[0]+
         ' · ultralytics '+j.ultralytics
       : 'ultralytics '+j.ultralytics+' defaults';
+    $('psub').title=$('psub').textContent;
     paintSizes(j.weights);
     paintParams();
   }).catch(function(e){
@@ -630,6 +708,13 @@ function harvest(){
     var v=el.value.trim();
     if(v===''||v===String(f.value))delete EDITS[f.key]; else EDITS[f.key]=v;
   });
+}
+function legend(){
+  return '<span class="plegend" style="grid-column:1/-1">'+
+    '<span><i style="background:var(--green)"></i>inherited recipe</span>'+
+    '<span><i style="background:var(--acc)"></i>edited now</span>'+
+    '<span><i style="background:var(--dim)"></i>ultralytics default</span>'+
+    '</span>';
 }
 function fieldHtml(f){
   var inh=f.from!=='the ultralytics default';
@@ -649,11 +734,12 @@ function fieldHtml(f){
     var mode=f.type==='int'?' inputmode="numeric"'
       :(f.type==='float'||f.type==='fraction')?' inputmode="decimal"':'';
     ctl='<input data-k="'+esc(f.key)+'" value="'+esc(shown)+'"'+mode+
-      ' placeholder="'+esc(f.default)+'">';
+      (f.default==null?'':' placeholder="'+esc(f.default)+'"')+'>';
   }
   return '<span class="p'+(inh?' inherited':'')+(edited?' changed':'')+
     '" title="'+esc(f.why)+' — '+esc(f.from)+
-    ' (ultralytics default '+esc(f.default)+')">'+
+    ' (ultralytics default '+(f.default==null?'none':esc(f.default))+')">'+
+    '<span class="dot"></span>'+
     '<label for="">'+esc(f.key)+'</label>'+ctl+'</span>';
 }
 function paintParams(){
@@ -662,7 +748,7 @@ function paintParams(){
     var show=FIELDS.filter(function(f){
       return HEADLINE.indexOf(f.key)>=0||f.from!=='the ultralytics default'
         ||(f.key in EDITS)});
-    $('params').innerHTML=show.map(fieldHtml).join('');
+    $('params').innerHTML=legend()+show.map(fieldHtml).join('');
     $('pmore').textContent='show the other '+
       Math.max(0,FIELDS.length-show.length)+' common parameters';
     return;
@@ -680,7 +766,7 @@ function paintParams(){
     out.push('<span class="pgrp">other</span>');
     rest.forEach(function(f){out.push(fieldHtml(f))});
   }
-  $('params').innerHTML=out.join('');
+  $('params').innerHTML=legend()+out.join('');
   $('pmore').textContent='show fewer';
 }
 function overrides(){
@@ -727,10 +813,59 @@ function outcome(j){
   return '<div class="jid">'+bits.join(' &nbsp;·&nbsp; ')+'</div>'+
     (r.weights?'<div class="cmd">'+esc(r.weights)+'</div>':'');
 }
+function heroHtml(j){
+  var r=j.run||{}, m=j.meta||{};
+  var done=r.epochs||0, total=r.total_epochs||0;
+  var pct=total?Math.min(99,Math.floor(done*100/total)):null;
+  var s=score(r,m.family);
+  return '<div class="hero" data-j="'+esc(j.id)+'">'+
+    '<div class="htop">'+
+      '<span class="hlive">Training now</span>'+
+      '<span class="hname">'+esc((m.run||j.label||'').split('/').pop())+
+      '</span>'+
+      '<span class="hbtns">'+
+        '<button class="btn" data-log="'+esc(j.id)+'">'+
+          (OPEN[j.id]?'hide log':'log')+'</button>'+
+        '<button class="btn warn" data-stop="'+esc(j.id)+'">stop</button>'+
+      '</span>'+
+    '</div>'+
+    '<div class="hmid">'+
+      '<span class="hep">'+n(done)+(total?'<small> / '+n(total)+'</small>'
+                                         :'')+'</span>'+
+      '<span class="hstat">epochs</span>'+
+      (s?'<span class="hstat">best so far <b>'+esc(s)+'</b></span>':'')+
+      '<span class="hstat" style="margin-left:auto">'+
+        ago(j.started_at)+' in'+(j.by?' · by '+esc(j.by):'')+'</span>'+
+    '</div>'+
+    (pct!=null?'<div class="hbar"><i style="width:'+pct+'%"></i></div>':'')+
+    '<div class="htop">'+
+      (m.dataset?'<span class="chip">'+esc(m.dataset)+'</span>':'')+
+      '<span class="chip">'+esc(m.weights||'inherited weights')+'</span>'+
+      '<span class="chip ok">Comet · '+esc(m.family||'')+'</span>'+
+    '</div>'+
+    '<div class="log" id="log-'+esc(j.id)+'"'+(OPEN[j.id]?'':' hidden')+
+    '></div>'+
+  '</div>';
+}
 function paintJobs(){
   var rows=STATE.jobs;
   $('jobsub').textContent=STATE.lanes.build||STATE.lanes.train
     ? 'something is running' : '';
+  /* THE RUNNING TRAINING IS THE HERO, not a row: it is the only thing on
+     this page that is moving, so it renders above the sequence, big, and
+     leaves the list to history. Builds stay in the list -- they are minutes,
+     not hours, and their progress bar already says everything. */
+  var hero=null;
+  rows.forEach(function(j){
+    if(!hero&&j.state==='running'&&j.kind==='train')hero=j});
+  if(hero){
+    $('live').innerHTML=heroHtml(hero);
+    $('live').hidden=false;
+    if(OPEN[hero.id])pullLog(hero.id);
+    rows=rows.filter(function(j){return j!==hero});
+  }else{
+    $('live').innerHTML=''; $('live').hidden=true;
+  }
   if(!rows.length){$('jobs').innerHTML=
     '<div class="empty">Nothing has been run yet.</div>';return}
   $('jobs').innerHTML=rows.map(function(j){
@@ -800,6 +935,14 @@ document.addEventListener('click',function(e){
   if(f&&f.getAttribute('data-f')){
     FAM=f.getAttribute('data-f');
     paintModels();paintBuild();paintDatasets();loadParams();
+    return;
+  }
+  /* a size pill: one selected, '' meaning "whatever the recipe used" */
+  if(t.closest&&t.closest('#wsel')&&t.hasAttribute('data-w')){
+    WSEL=t.getAttribute('data-w')||'';
+    var bs=$('wsel').querySelectorAll('button');
+    for(var bi=0;bi<bs.length;bi++)
+      bs[bi].className=(bs[bi]===t)?'on':'';
     return;
   }
   var lg=t.getAttribute('data-log');
@@ -879,12 +1022,12 @@ $('train').addEventListener('click',function(){
   var over=overrides();
   var lines=Object.keys(over).sort().map(function(k){return k+'='+over[k]});
   if(!window.confirm('Train '+(famOf()||{}).title+' on '+ds+
-     ($('wsel').value?'\nstarting from '+$('wsel').value:'')+
+     (WSEL?'\nstarting from '+WSEL:'')+
      (lines.length?'\nwith '+lines.join(', '):'\nwith the inherited parameters')+
      '?\n\nIt runs in the background on the GPU.'))return;
   $('train').disabled=true;
   var body={family:FAM,dataset:ds,params:over};
-  if($('wsel').value)body.weights=$('wsel').value;
+  if(WSEL)body.weights=WSEL;
   api('/api/train/start',body)
     .then(function(j){say('say','training — '+j.job.id,8000);return refresh()})
     .catch(fail).then(function(){$('train').disabled=false});
