@@ -250,3 +250,9 @@ data/labelstudio_frames/
 # The built dashboard page. Generated, and it embeds absolute paths
 # from whichever machine built it.
 data/dashboard/index.html
+
+# Session handoff notes -- written so another agent can pick the work up, and
+# about the work rather than part of it. They live at the repo root, where the
+# broad `*/` rule above does not reach, so a `git add -A` would stage one.
+HANDOFF*.md
+handoff*.md
