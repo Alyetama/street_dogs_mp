@@ -8,11 +8,11 @@
 
 WHERE THE PARAMETERS COME FROM. Not a list written down here -- a list here is
 correct until somebody trains a better run and silently wrong afterwards. The
-starting point is the args.yaml of the most recent run in this family's
+starting point is the args.yaml of the BEST-SCORING run in this family's
 project, which is ultralytics' own record of what that run was launched with.
 Whatever was learned by getting a good run is therefore what the next one
 starts from, and `--show-defaults` prints it so nobody has to guess what they
-are about to inherit.
+are about to inherit. Best-scoring, not most recent: see last_args().
 
 EVERY KEY IS CHECKED AGAINST ULTRALYTICS ITSELF. The settable keys are
 DEFAULT_CFG_DICT in the installed version, not a list copied off the
@@ -53,11 +53,16 @@ import build_dataset as bd                                    # noqa: E402
 # task and project per family. The project is a DIRECTORY under
 # <training root>/runs/<task>/, and it is also the Comet project name -- see
 # the note in launch() about why those are set separately.
+# The starting weights are the ones the PROMOTED model in each project was
+# trained from, not the newest architecture available: both promoted
+# classifiers (dogbin_008, leash_v2_001) are yolo26x-cls, and offering
+# yolo11x-cls as the family's base quietly started every new classifier from a
+# different network than the one that earned the slot.
 PROJECTS = {
     'dogdet': {'task': 'detect', 'project': 'dogdetection',
                'weights': 'yolo26x.pt'},
     'dogbin': {'task': 'classify', 'project': 'dog-bin',
-               'weights': 'yolo11x-cls.pt'},
+               'weights': 'yolo26x-cls.pt'},
     # 'leash-models', hyphen: the spelling best_models.json tracks,
     # gate_store.STAGES runs, and the promoted run's own args.yaml carries.
     # This file alone said leash_models -- so a new leash run inherited from
@@ -65,7 +70,7 @@ PROJECTS = {
     # project nobody tracks, and landed in a project the dashboard config
     # hides. One spelling, and it is the one every other record uses.
     'leash': {'task': 'classify', 'project': 'leash-models',
-              'weights': 'yolo11x-cls.pt'},
+              'weights': 'yolo26x-cls.pt'},
 }
 
 # Keys that belong to a RUN rather than to how it trains: inheriting them from
@@ -74,6 +79,13 @@ PROJECTS = {
 PER_RUN = frozenset({
     'data', 'model', 'project', 'name', 'save_dir', 'exist_ok', 'resume',
     'task', 'mode', 'source', 'weights', 'cfg', 'tracker',
+    # WHICH CARD IS NOT PART OF A RECIPE. dogbin_008 was launched with
+    # `device: '0'` and every run inheriting from it would then pin card 0 --
+    # on a box where something else holds that card, or where the cards are
+    # numbered differently, that is a run that dies or a run that queues
+    # behind another. Left unset, ultralytics picks; set it explicitly and it
+    # is honoured, and the manifest records that a person chose it.
+    'device',
 })
 
 # What the dashboard offers to change, and why anybody would. Everything else
@@ -156,47 +168,99 @@ def trained(run_dir):
         return False
 
 
+HEADLINE = {'classify': 'metrics/accuracy_top1',
+            'detect': 'metrics/mAP50-95(B)'}
+
+
+def scored(run_dir, task):
+    """The best value this run reached of the metric its task is judged on.
+
+    Read from the run's own results.csv, which is the same column the
+    dashboard's registry reads. None when the run never wrote an epoch, or
+    wrote no such column -- an unscored run is not a bad run, it is a run
+    with nothing to say about how good its recipe was.
+    """
+    col = HEADLINE.get(task)
+    if not col:
+        return None
+    try:
+        with open(os.path.join(run_dir, 'results.csv')) as fh:
+            head = fh.readline().strip().split(',')
+            if col not in head:
+                return None
+            i = head.index(col)
+            best = None
+            for line in fh:
+                bits = line.strip().split(',')
+                if len(bits) <= i:
+                    continue
+                try:
+                    got = float(bits[i])
+                except ValueError:
+                    continue
+                if best is None or got > best:
+                    best = got
+            return best
+    except OSError:
+        return None
+
+
 def last_args(family):
-    """(params, where) from the newest run in this family's project THAT RAN.
+    """(params, where, label) from the BEST-SCORING run in this project.
 
     ultralytics writes args.yaml into every run directory, so the record of
     what a run was launched with is the run itself. Parsed by hand rather
     than with pyyaml: the file is flat `key: value` and the dashboard's
     environment has no yaml.
 
-    A run that crashed on its parameters is the last run somebody wants to
-    inherit from, and it is exactly the newest one: a detector run died on a
-    bad batch size and every later run was then offered that same batch size
-    as the parameters to start from. Runs that produced nothing are skipped,
-    and if none produced anything the page falls back to ultralytics' own
-    defaults rather than to the wreckage.
+    NEWEST WAS THE WRONG RULE, and dog-bin is the proof. Somebody turned every
+    augmentation off for one hand-launched run; the next run through this page
+    inherited those zeros because that wreck was the most recent thing in the
+    directory, memorised the training set by epoch 20 (train loss 0.03, val
+    loss climbing 0.25 -> 0.53) and never beat its own first epoch. A recipe
+    is worth inheriting because of what it SCORED, not because of when it ran
+    -- so the source is the run with the best headline metric, and a run that
+    produced no epochs is not a candidate at all.
+
+    The comparison is honest only within a project, and even there two runs
+    trained on different datasets are not strictly comparable. That is
+    accepted: what is being chosen here is a starting point a human then edits
+    on a form, and the form says which run it came from.
     """
     root = runs_root(family)
-    best, best_at = None, -1
+    task = PROJECTS[family]['task']
+    cands = []
     try:
         for name in os.listdir(root):
             run = os.path.join(root, name)
             path = os.path.join(run, 'args.yaml')
             if not os.path.isfile(path) or not trained(run):
                 continue
-            at = os.path.getmtime(path)
-            if at > best_at:
-                best, best_at = path, at
+            cands.append((scored(run, task), os.path.getmtime(path), path))
     except OSError:
         pass
-    if best is None:
-        # NO RUN IN THE PROJECT DIRECTORY IS THE ORDINARY CASE, not the odd
-        # one: the promoted classifiers were trained by hand into top-level
-        # directories before this launcher existed, so a fresh family here
-        # fell straight through to ultralytics' own defaults -- 100 epochs,
-        # no augmentation recipe -- while the recipe that actually produced
-        # the promoted model sat readable in its run directory. The promoted
-        # run is the one somebody would copy by hand; inherit from it.
-        best = _promoted_args_path(family)
-    if best is None:
-        return {}, None
-    out = _read_args(best)
-    return (out, best) if out else ({}, None)
+    # NO RUN IN THE PROJECT DIRECTORY IS THE ORDINARY CASE, not the odd one:
+    # the promoted classifiers were trained by hand into top-level directories
+    # before this launcher existed, so a fresh family here fell straight
+    # through to ultralytics' own defaults -- 100 epochs, no augmentation
+    # recipe -- while the recipe that actually produced the promoted model sat
+    # readable in its run directory. The promoted run is the one somebody
+    # would copy by hand, and it competes with the rest on its score.
+    promoted = _promoted_args_path(family)
+    if promoted:
+        cands.append((scored(os.path.dirname(promoted), task),
+                      os.path.getmtime(promoted), promoted))
+    if not cands:
+        return {}, None, ''
+    # an unscored run ranks below every scored one, and the newest breaks a tie
+    best = max(cands, key=lambda c: (c[0] is not None, c[0] or 0.0, c[1]))
+    path = best[2]
+    out = _read_args(path)
+    if not out:
+        return {}, None, ''
+    label = ('the promoted run' if path == promoted else
+             'the best run so far' if best[0] is not None else 'the last run')
+    return out, path, label
 
 
 def _read_args(path):
@@ -209,7 +273,13 @@ def _read_args(path):
                 if ': ' not in line or line.startswith(' '):
                     continue
                 key, _, raw = line.partition(': ')
-                out[key.strip()] = raw.strip()
+                raw = raw.strip()
+                # ultralytics writes an empty string as two quotes, and
+                # keeping them made `device` inherit forward, run after run,
+                # as the literal string "''"
+                if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in '"\'':
+                    raw = raw[1:-1]
+                out[key.strip()] = raw
     except OSError:
         return {}
     return out
@@ -313,8 +383,8 @@ def resolve(family, overrides=None, tables=None):
     with an answer, and the answer is usually "the run before it did".
     """
     tables = tables or _cfg_tables()
-    inherited, source = last_args(family)
-    promoted = bool(source) and os.sep + 'runs' + os.sep not in str(source)
+    inherited, source, label = last_args(family)
+    label = label or 'the last run'
     params, whence = {}, {}
     for key, raw in sorted(inherited.items()):
         if key in PER_RUN or key not in tables['defaults']:
@@ -325,8 +395,7 @@ def resolve(family, overrides=None, tables=None):
             continue
         if got != tables['defaults'].get(key):
             params[key] = got
-            whence[key] = ('the promoted run' if promoted
-                           else 'the last run')
+            whence[key] = label
     bad = []
     for key, raw in sorted((overrides or {}).items()):
         if key in PER_RUN:
@@ -342,6 +411,23 @@ def resolve(family, overrides=None, tables=None):
             bad.append(str(e))
             continue
         whence[key] = 'you'
+    # ULTRALYTICS TRAINS A CLASSIFIER AT 224 UNLESS IT IS TOLD A SIZE.
+    # ClassificationTrainer.__init__ substitutes imgsz=224 whenever imgsz is
+    # not among the overrides -- and this function drops every inherited value
+    # that equals an ultralytics default, so `imgsz: 640` in the promoted
+    # run's args.yaml (640 IS the default) was dropped here and silently
+    # became 224 there. Both promoted classifiers were trained at 640, the
+    # runs that went to 224 scored worse, and nothing on the form said the
+    # size had changed. So a classifier always states its size.
+    if PROJECTS[family]['task'] == 'classify' and 'imgsz' not in params:
+        raw = inherited.get('imgsz')
+        try:
+            params['imgsz'] = (_coerce('imgsz', raw, tables) if raw
+                               else tables['defaults']['imgsz'])
+            whence['imgsz'] = label if raw else 'the ultralytics default'
+        except ValueError:
+            params['imgsz'] = tables['defaults']['imgsz']
+            whence['imgsz'] = 'the ultralytics default'
     return params, whence, source, bad
 
 
@@ -719,8 +805,15 @@ def weights_record(model, root=None):
 
 
 def _inherited_weights(family):
-    got, _ = last_args(family)
-    return got.get('model') or None
+    got, _, _ = last_args(family)
+    model = got.get('model') or None
+    # A run resumed from its own weights/last.pt records that absolute path as
+    # its model, and inheriting it would start the next run from the previous
+    # one's checkpoint instead of from pretrained weights -- silently, under a
+    # form that says "inherited".
+    if model and (os.sep in model or not model.endswith('.pt')):
+        return None
+    return model
 
 
 def _torch_version():

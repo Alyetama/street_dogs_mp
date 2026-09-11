@@ -95,24 +95,51 @@ def inherit_checks(bad, tm):
                   'w') as fh:
             fh.write('epochs: 1\nimgsz: 64\nbatch: 2.0\n')
         os.utime(os.path.join(proj, 'older', 'args.yaml'), (1, 1))
-        got, where = tm.last_args('dogdet')
+        got, where, _ = tm.last_args('dogdet')
         if where and 'newest_but_died' in where:
             bad.append('THE PARAMETERS COME FROM A RUN THAT CRASHED before it '
                        'trained a single epoch -- the page calls these the '
                        'best parameters and hands over the ones that failed')
+        # neither of these two wrote the column the task is judged on, so
+        # there is nothing to rank them by and the newest is the fallback
         if not where or 'newer' not in where:
-            bad.append('the parameters were inherited from %r, not the newest '
-                       'run' % (where,))
+            bad.append('with no scores to compare, the parameters were '
+                       'inherited from %r rather than the newest run'
+                       % (where,))
         if got.get('epochs') != '500':
             bad.append('the newest run was not the one read: %r'
                        % (got.get('epochs'),))
+        # THE SCORE DECIDES, NOT THE CLOCK. A hand-launched dog-bin run with
+        # every augmentation turned off was the newest thing in its project,
+        # so the next run through the page inherited the zeros, memorised the
+        # training set and never beat its own first epoch. A recipe is worth
+        # inheriting for what it SCORED.
+        scored = os.path.join(root, 'runs', 'detect', 'dogdetection')
+        for name, mAP, ep in (('good_but_older', '0.61', '300'),
+                              ('newest_and_worse', '0.22', '7')):
+            os.makedirs(os.path.join(scored, name), exist_ok=True)
+            with open(os.path.join(scored, name, 'results.csv'), 'w') as fh:
+                fh.write('epoch,metrics/mAP50-95(B)\n1,%s\n' % (mAP,))
+            with open(os.path.join(scored, name, 'args.yaml'), 'w') as fh:
+                fh.write('epochs: %s\n' % (ep,))
+        os.utime(os.path.join(scored, 'good_but_older', 'args.yaml'), (1, 1))
+        got, where, label = tm.last_args('dogdet')
+        if not where or 'good_but_older' not in where:
+            bad.append('the newest run scored 0.22 and the older one 0.61, '
+                       'and the page hands over %r' % (where,))
+        if got.get('epochs') != '300':
+            bad.append('the best-scoring run was not the one read: %r'
+                       % (got.get('epochs'),))
+        if 'best' not in (label or ''):
+            bad.append('the form would say these parameters came from %r, '
+                       'which does not say which run' % (label,))
         # a project where NOTHING ever trained falls back to ultralytics'
         # own defaults rather than to the wreckage of the last attempt
         empty = os.path.join(root, 'runs', 'classify', 'dog-bin', 'died')
         os.makedirs(empty)
         with open(os.path.join(empty, 'args.yaml'), 'w') as fh:
             fh.write('epochs: 1\nbatch: 2.0\n')
-        got, where = tm.last_args('dogbin')
+        got, where, _ = tm.last_args('dogbin')
         if where is not None or got:
             bad.append('a project whose only run crashed still hands over its '
                        'parameters: %r %r' % (where, got))
@@ -123,7 +150,7 @@ def inherit_checks(bad, tm):
             fh.write('epochs: 1\n')
         with open(os.path.join(head, 'results.csv'), 'w') as fh:
             fh.write('epoch,train/loss\n')
-        got, where = tm.last_args('leash')
+        got, where, _ = tm.last_args('leash')
         if where is not None:
             bad.append('a run whose results.csv holds only a header reads as '
                        'having trained: %r' % (where,))
@@ -284,6 +311,37 @@ def form_checks(bad, py):
     elif missing:
         bad.append('the form offers %r, which ultralytics %s does not have'
                    % (missing, doc.get('ultralytics')))
+    # A CLASSIFIER ALWAYS STATES ITS SIZE. ClassificationTrainer substitutes
+    # imgsz=224 whenever imgsz is absent from the overrides, and resolve()
+    # drops any inherited value equal to an ultralytics default -- so
+    # `imgsz: 640` in the promoted run's args.yaml (640 IS the default) was
+    # dropped and the run silently trained at 224, three times, with the form
+    # still showing 640.
+    got = _run(py, ['--family', 'dogbin', '--show-defaults'])
+    try:
+        doc = json.loads(got.stdout)
+    except ValueError:
+        doc = {}
+    shown = {f['key']: f for f in doc.get('fields', ())}
+    if 'imgsz' in shown and int(float(shown['imgsz']['value'])) == 224:
+        bad.append('the classifier form offers imgsz 224 -- both promoted '
+                   'classifiers trained at 640')
+    probe = ('import json,sys; sys.path.insert(0, %r); import train_model as t;'
+             'p,w,_s,_b=t.resolve("dogbin"); print(json.dumps([p.get("imgsz"),'
+             'w.get("imgsz")]))' % (DETECT,))
+    out = subprocess.run([py, '-c', probe], capture_output=True, text=True,
+                         timeout=180)
+    try:
+        size, whence = json.loads((out.stdout or '[]').strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        size, whence = None, None
+    if size is None:
+        bad.append('a classifier run is launched with no imgsz, so '
+                   'ultralytics will quietly train it at 224 -- whatever the '
+                   'form said (%s)' % (out.stderr.strip()[-200:],))
+    elif not whence:
+        bad.append('imgsz reaches the run with no provenance, so the record '
+                   'cannot say who chose the size')
 
 
 def refusal_checks(bad, py, dataset):
@@ -776,14 +834,16 @@ def promoted_fallback_checks(bad, tm):
         with open(os.path.join(run, 'args.yaml'), 'w') as fh:
             fh.write('epochs: 500\npatience: 100\nerasing: 0.4\n'
                      'data: /gone/dogbin_v5\nname: dogbin_008\n')
-        got, src = tm.last_args('dogbin')
+        got, src, _ = tm.last_args('dogbin')
         if not src or 'dogbin_008' not in src:
             bad.append('an empty project directory fell back to %r, not the '
                        'promoted run' % (src,))
         elif got.get('epochs') != '500':
             bad.append('the promoted recipe came back wrong: %r'
                        % (got.get('epochs'),))
-        # ...and a run IN the project directory still wins over it
+        # ...and a run in the project directory takes the slot by SCORING
+        # better, not by being newer: the promoted run reached 0.9, and a
+        # fresh run that reached 0.5 is a worse recipe however recent it is.
         newer = os.path.join(tmp, 'runs', 'classify', 'dog-bin', 'dogbin_x')
         os.makedirs(os.path.join(newer, 'weights'))
         open(os.path.join(newer, 'weights', 'best.pt'), 'w').close()
@@ -791,10 +851,16 @@ def promoted_fallback_checks(bad, tm):
             fh.write('epoch,metrics/accuracy_top1\n1,0.5\n')
         with open(os.path.join(newer, 'args.yaml'), 'w') as fh:
             fh.write('epochs: 42\nname: dogbin_x\n')
-        got, src = tm.last_args('dogbin')
+        got, src, _ = tm.last_args('dogbin')
+        if not src or 'dogbin_008' not in src:
+            bad.append('a newer run that scored 0.5 took the recipe from the '
+                       'promoted run that scored 0.9: %r' % (src,))
+        with open(os.path.join(newer, 'results.csv'), 'w') as fh:
+            fh.write('epoch,metrics/accuracy_top1\n1,0.95\n')
+        got, src, _ = tm.last_args('dogbin')
         if not src or 'dogbin_x' not in src:
-            bad.append('a real run in the project directory lost to the '
-                       'promoted fallback: %r' % (src,))
+            bad.append('a run that beat the promoted model still lost to it: '
+                       '%r' % (src,))
     finally:
         if old_root is None:
             os.environ.pop('TRAINING_ROOT', None)
@@ -924,10 +990,10 @@ def main():
         for b in bad:
             print('FAIL ' + b)
         return 1
-    print('a run starts from what the last one used, every parameter is '
-          'checked against ultralytics itself before anything is launched, '
-          'and the run records what it trained on and what with — even when '
-          'it falls over')
+    print('a run starts from the best-scoring run in its project, every '
+          'parameter is checked against ultralytics itself before anything is '
+          'launched, a classifier states its own image size, and the run '
+          'records what it trained on and what with — even when it falls over')
     return 0
 
 
