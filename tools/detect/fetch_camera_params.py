@@ -409,10 +409,9 @@ def plan(args):
            where image_id is not null
            group by image_id""", {'paths': paths})
     n = con.execute('select count(*) from work').fetchone()[0]
-    tmp = str(WORK_FILE) + '.tmp'
-    con.execute(
-        "copy (select * from work order by image_id) to ? (format parquet)",
-        [tmp])
+    tmp = Path(str(WORK_FILE) + '.tmp')
+    con.execute('copy (select * from work order by image_id) to '
+                f'{_sql_path(tmp)} (format parquet)')
     os.replace(tmp, WORK_FILE)
 
     by_type = con.execute(

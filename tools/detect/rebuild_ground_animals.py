@@ -63,9 +63,15 @@ BATCH = 100
 WORKERS = 64
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fetch_camera_params import (AllKeysDead, ApiError, KeyPool,  # noqa: E402
-                                 _bar, _err_from_body, _pyarrow, _sql_path,
-                                 keys)
+from fetch_camera_params import (
+    AllKeysDead,
+    ApiError,
+    KeyPool,  # noqa: E402
+    _bar,
+    _err_from_body,
+    _pyarrow,
+    _sql_path,
+    keys)
 
 
 def _duckdb():
@@ -84,7 +90,16 @@ def harvest_schema(con, path):
 
 
 def scan(args):
-    """Find ground_animals files whose schema is not their cell's schema."""
+    """Report files whose schema is not their cell's schema. Exit 0 either way.
+
+    Separate from _find_damaged so the subcommand returns nothing: main()
+    hands its result to sys.exit, and a returned list would both print itself
+    and exit non-zero on a clean repo.
+    """
+    _find_damaged()
+
+
+def _find_damaged():
     duckdb = _duckdb()
     cat = duckdb.connect(str(CATALOG), read_only=True)
     rows = cat.execute(
@@ -257,7 +272,7 @@ def rebuild(args):
     duckdb = _duckdb()
     con = duckdb.connect()
     pool = KeyPool(keys())
-    targets = args.file and [args.file] or scan(args)
+    targets = args.file and [args.file] or _find_damaged()
     if not targets:
         return
     print(f'\n{len(targets)} file(s) to rebuild' +
