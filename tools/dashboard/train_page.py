@@ -20,7 +20,9 @@ terminal with the same arguments.
 import html
 import json
 import os
+import subprocess
 import sys
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
@@ -33,6 +35,59 @@ import work_strip                                             # noqa: E402
 
 def esc(v):
     return html.escape('' if v is None else str(v), quote=True)
+
+
+# The service the dashboard runs as, and the only setting standing between
+# `systemctl restart` and every job it has started.
+UNIT = 'street-dogs-dashboard.service'
+UNIT_FILE = os.path.join(REPO, 'tools', 'dashboard', UNIT)
+_UNIT = {'at': 0.0, 'got': None}
+
+
+def service_state(ttl=120.0):
+    """Whether stopping the dashboard would take a job with it.
+
+    THE REAL FIX IS ELSEWHERE. Jobs now start inside a transient scope of
+    their own under the user manager (jobs.py), so the system unit's kill mode
+    no longer decides whether a training survives a restart -- three of them
+    died before that was true, at epochs 79, 80 and 12. What is left here is
+    the case that scope cannot cover: a machine with no user manager to make
+    one, where a job is a plain orphan in the dashboard's own control group
+    and the kill mode is once again the only thing between it and
+    `systemctl restart`.
+
+    So this reports the INSTALLED unit's kill mode -- the repo's copy proves
+    nothing about this machine -- and the page raises it only when a job that
+    is actually running is not in a scope. None when there is no systemd unit
+    to ask about: somebody running the dashboard from a terminal is not
+    misconfigured.
+    """
+    now = time.time()
+    if _UNIT['got'] is not None and now - _UNIT['at'] < ttl:
+        return _UNIT['got']
+    got = None
+    try:
+        out = subprocess.run(
+            ['systemctl', 'show', '-p', 'KillMode', '-p', 'LoadState',
+             '--value', UNIT], capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            bits = [x.strip() for x in (out.stdout or '').splitlines()
+                    if x.strip()]
+            # `show` prints the properties in the order it knows them, not the
+            # order asked; LoadState is the word that is not a kill mode.
+            modes = {'control-group', 'process', 'mixed', 'none'}
+            mode = next((b for b in bits if b in modes), None)
+            loaded = next((b for b in bits if b not in modes), None)
+            if mode and loaded == 'loaded':
+                got = {'unit': UNIT, 'kill_mode': mode,
+                       'ok': mode in ('process', 'mixed'),
+                       'fix': 'sudo cp %s /etc/systemd/system/%s && '
+                              'sudo systemctl daemon-reload'
+                              % (os.path.relpath(UNIT_FILE, REPO), UNIT)}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        got = None
+    _UNIT.update(at=now, got=got)
+    return got
 
 
 # The three models, in the order the pipeline runs them: the detector finds
@@ -114,6 +169,7 @@ def overview(family=None):
         'jobs': [_job_row(j) for j in jobs.listing(limit=25)],
         'lanes': {lane: (lambda j: j and j['id'])(jobs.lane_holder(lane))
                   for lane in jobs.LANES},
+        'service': service_state(),
     }
 
 
@@ -209,6 +265,11 @@ def _job_row(job):
             'started_at': job.get('started_at'),
             'ended_at': job.get('ended_at'),
             'exit_code': job.get('exit_code'),
+            # Whether this run is in a control group of its own, and therefore
+            # whether restarting the dashboard would take it with it. The page
+            # says so on the running job, because the answer decides whether
+            # somebody can safely restart the service while it runs.
+            'detached': bool(job.get('detached')),
             'argv': job.get('argv'),
             'progress': jobs.progress(job.get('id') or ''),
             'run': _run_state((job.get('meta') or {}).get('family'),
@@ -363,6 +424,10 @@ option.dead{color:var(--dim)}
 .msg{border-radius:10px;padding:9px 13px;font-size:12.5px;margin-bottom:12px}
 .msg.bad{background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.3);
   color:#ffb4b2}
+.msg.warn{background:rgba(232,166,69,.10);
+  border:1px solid rgba(232,166,69,.32);color:var(--acc)}
+.msg.warn code{font-family:var(--num);font-size:11.5px;color:var(--tx);
+  background:rgba(130,140,150,.14);border-radius:5px;padding:1px 5px}
 .msg.ok{background:rgba(67,181,129,.1);border:1px solid rgba(67,181,129,.3);
   color:#9fe3c0}
 .msg[hidden]{display:none}
@@ -400,6 +465,8 @@ option.dead{color:var(--dim)}
 .hero .hbar i{display:block;height:100%;background:var(--acc);
   border-radius:5px;transition:width .5s ease}
 .hero .hbtns{margin-left:auto;display:flex;gap:8px}
+.hero .chip.warn{color:var(--acc);border-color:rgba(232,166,69,.4);
+  background:rgba(232,166,69,.07)}
 .hero .chip{font-size:10.5px;border:1px solid rgba(130,140,150,.2);
   border-radius:6px;padding:2px 8px;color:var(--mut);
   font-family:var(--num)}
@@ -433,6 +500,10 @@ option.dead{color:var(--dim)}
   <div class="hdrend"><a class="back" href="/">&larr; dashboard</a>__ACCOUNT__</div>
 </header>
 
+<!-- A misconfiguration this page can see and the operator cannot: whether
+     stopping the dashboard would stop the training too. Above the errors,
+     because it is true before anything goes wrong. -->
+<div class="msg warn" id="svc" hidden></div>
 <div class="msg bad" id="err" hidden></div>
 <div class="msg ok" id="say" hidden></div>
 
@@ -668,10 +739,13 @@ var GROUPS=[
    contract -- the server refuses anything shaped differently. */
 var WSEL='';                 /* '' = inherited; else a weights filename */
 function sizeNames(){
+  /* yolo26 for both tasks: the promoted classifier and the promoted leash
+     model are both yolo26x-cls, so offering the 11 series here handed the
+     next run a different network than the one that earned the slot. */
   return FAM==='dogdet'
     ? ['yolo26n.pt','yolo26s.pt','yolo26m.pt','yolo26l.pt','yolo26x.pt']
-    : ['yolo11n-cls.pt','yolo11s-cls.pt','yolo11m-cls.pt','yolo11l-cls.pt',
-       'yolo11x-cls.pt'];
+    : ['yolo26n-cls.pt','yolo26s-cls.pt','yolo26m-cls.pt','yolo26l-cls.pt',
+       'yolo26x-cls.pt'];
 }
 function paintSizes(inherited){
   WSEL='';
@@ -842,6 +916,16 @@ function heroHtml(j){
       (m.dataset?'<span class="chip">'+esc(m.dataset)+'</span>':'')+
       '<span class="chip">'+esc(m.weights||'inherited weights')+'</span>'+
       '<span class="chip ok">Comet · '+esc(m.family||'')+'</span>'+
+      /* The one fact about a live run that decides whether the operator can
+         touch the service while it trains. */
+      (j.detached
+        ? '<span class="chip ok" title="This run is in a control group of '+
+          'its own, under the user manager. Restarting, stopping or killing '+
+          'the dashboard leaves it alone.">detached &middot; survives a '+
+          'dashboard restart</span>'
+        : '<span class="chip warn" title="This run is in the dashboard\'s '+
+          'own control group, so stopping the dashboard stops it too.">tied '+
+          'to the dashboard</span>')+
     '</div>'+
     '<div class="log" id="log-'+esc(j.id)+'"'+(OPEN[j.id]?'':' hidden')+
     '></div>'+
@@ -905,12 +989,38 @@ function paintJobs(){
   }).join('');
 }
 
+/* The one thing on this page that is about the MACHINE rather than the
+   models: the installed service file. KillMode=process is what keeps a
+   `systemctl restart` from killing the run -- the default kills the unit's
+   whole cgroup, and a detached job is still in it. Three trainings have died
+   that way, the last one at epoch 12 with the corrected unit sitting
+   uninstalled in the repo. Said out loud, before it happens again. */
+function paintService(){
+  /* A job started inside its own scope is out of the dashboard's control
+     group, so the installed kill mode cannot reach it and this warning would
+     be crying wolf. It is raised only for a run that is genuinely exposed:
+     one that is going right now and did NOT get a scope. */
+  var s=STATE&&STATE.service, el=$('svc');
+  var exposed=(STATE.jobs||[]).filter(function(x){
+    return x.state==='running'&&!x.detached});
+  if(!s||s.ok||!exposed.length){el.hidden=true;return}
+  el.innerHTML='<b>Restarting the dashboard will kill '+
+    esc(exposed[0].label||'the job running now')+'.</b> '+
+    'It is running in the dashboard\'s own control group — this machine has '+
+    'no user manager to give it one of its own — and the installed '+
+    esc(s.unit)+' has KillMode='+esc(s.kill_mode)+', so systemd stops '+
+    'everything in that group. Install the unit this repo carries: '+
+    '<code>'+esc(s.fix)+'</code>';
+  el.hidden=false;
+}
+
 /* ── wiring ── */
 function refresh(){
   return api('/api/train/overview'+(FAM?'?family='+encodeURIComponent(FAM):''))
     .then(function(j){
       STATE=j;
       if(!FAM)FAM=(j.families[0]||{}).key;
+      paintService();
       paintModels();paintBuild();paintDatasets();paintJobs();
       var live=j.jobs.some(function(x){return x.state==='running'});
       clearTimeout(POLL);

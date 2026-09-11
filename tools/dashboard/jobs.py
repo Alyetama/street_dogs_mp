@@ -13,6 +13,19 @@ memory, and the dashboard learns what is happening by reading rather than by
 remembering. Restart the dashboard mid-training and it picks the run back up,
 because there was never anything to lose.
 
+...AND NOT TIED TO THE DASHBOARD'S SERVICE EITHER. Orphaning a process is not
+enough on a machine running systemd: a child keeps its parent's CONTROL GROUP,
+and `systemctl restart` kills a unit's whole control group by default. Three
+trainings died that way -- two at epochs 79 and 80, one at epoch 12 -- with
+setsid faithfully doing what it promises and the cgroup taking them anyway.
+So a job is started inside a transient scope of its own, under the USER
+manager (`systemd-run --user --scope`), which puts it in
+user@<uid>.service/app.slice/<job>.scope. Nothing the system unit does can
+reach it: it can be restarted, stopped, killed or crash, and the run carries
+on writing its log and its exit status. Where there is no user manager to ask,
+the plain orphan is used and the record says so, so the page can be honest
+about which kind of job somebody is looking at.
+
     data/dashboard/jobs/<id>/job.json   what it is, and what happened
                             /log        stdout and stderr, appended
                             /exit       the exit status, written by the shell
@@ -71,6 +84,80 @@ LANES = ('build', 'train')
 # How long a cancelled job gets to stop politely before it is killed.
 TERM_GRACE_S = 8.0
 
+# The user manager, and how to reach it from a SYSTEM service. A unit running
+# as User=biodiv under the system manager has no session bus in its
+# environment, so the two variables that address the user bus are supplied
+# here when they are missing -- this is the ordinary way a system service
+# talks to a user manager, not a trick.
+_SYSTEMD = {'at': 0.0, 'ok': None}
+SYSTEMD_PROBE_S = 300.0
+
+
+def _user_bus_env():
+    """{XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS} for this user, or {}."""
+    run = os.environ.get('XDG_RUNTIME_DIR') or '/run/user/%d' % (os.getuid(),)
+    bus = os.path.join(run, 'bus')
+    if not os.path.exists(bus):
+        return {}
+    return {'XDG_RUNTIME_DIR': run,
+            'DBUS_SESSION_BUS_ADDRESS': 'unix:path=%s' % (bus,)}
+
+
+def systemd_ready(env=None, ttl=SYSTEMD_PROBE_S):
+    """Can this process put a job in a scope of its own?
+
+    Asked of the machine rather than assumed: there is no user manager in a
+    container, on a mac, or for a user without lingering enabled, and a job
+    that cannot be started is worse than a job that is merely killable.
+    Memoised, because it is a subprocess and the answer changes about as often
+    as the machine boots.
+    """
+    now = time.time()
+    if _SYSTEMD['ok'] is not None and now - _SYSTEMD['at'] < ttl:
+        return _SYSTEMD['ok']
+    ok = False
+    bus = _user_bus_env()
+    if bus and _which('systemd-run') and _which('systemctl'):
+        try:
+            run_env = dict(os.environ, **bus)
+            got = subprocess.run(['systemctl', '--user', 'show', '-p',
+                                  'Version', '--value'],
+                                 capture_output=True, text=True, timeout=10,
+                                 env=run_env)
+            ok = got.returncode == 0 and bool((got.stdout or '').strip())
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+    _SYSTEMD.update(at=now, ok=ok)
+    return ok
+
+
+def _which(name):
+    for d in (os.environ.get('PATH') or '/usr/bin:/bin').split(os.pathsep):
+        p = os.path.join(d, name)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def unit_active(unit):
+    """Is this job's scope still running? False for anything unanswerable."""
+    if not unit or not _which('systemctl'):
+        return False
+    try:
+        got = subprocess.run(['systemctl', '--user', 'is-active', unit],
+                             capture_output=True, text=True, timeout=10,
+                             env=dict(os.environ, **_user_bus_env()))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (got.stdout or '').strip() == 'active'
+
+# A job that has only just started, whose process is already gone and whose
+# exit file has not appeared yet, is a RACE, not a job that vanished. The
+# window is milliseconds -- the wrapper writes the status and exits -- but a
+# job read inside it used to be written off as `lost` permanently, and `lost`
+# is a final state that nothing revisits.
+LOST_GRACE_S = 5.0
+
 # What `state` can be. `lost` is its own answer and not a failure: the process
 # is gone and left no exit status, which means it was killed from outside or
 # the machine went down under it -- a different thing from a run that failed,
@@ -110,6 +197,15 @@ def _proc_start(pid):
     return _stat(pid)[1]
 
 
+def _alive_pid(pid):
+    """Bare "is there a process with this number", with no identity check."""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError as e:
+        return e.errno == errno.EPERM
+
+
 def _write(path, obj):
     """One job record, atomically. A half-written job.json is a job whose
     state cannot be read, and this file is read by another process while it
@@ -139,6 +235,18 @@ def _paths(job_id):
     d = job_dir(job_id)
     return d, os.path.join(d, 'job.json'), os.path.join(d, 'log'), \
         os.path.join(d, 'exit')
+
+
+def _pid_file(job_id):
+    """Where the wrapper writes its own pid, as its first act.
+
+    `echo $!` reports whatever the outer shell backgrounded, and once the work
+    is started through systemd-run that is not necessarily the process holding
+    it: systemd-run may exec into the wrapper or fork it, and either way the
+    pid worth recording is the one INSIDE the scope. The wrapper knows it, so
+    the wrapper says it.
+    """
+    return os.path.join(job_dir(job_id), 'pid')
 
 
 # ── is it still going ───────────────────────────────────────────────────────
@@ -194,6 +302,24 @@ def group_alive(pgid):
         return e.errno == errno.EPERM     # alive, and not ours to signal
 
 
+def _running(job):
+    """Is there still work behind this job, by any witness available?
+
+    Three, in cost order, and any one of them is enough:
+
+      * the recorded pid is still the process it was;
+      * something is left in its process group -- the pid recorded is a
+        wrapper, and a trainer that outlives it is still the job;
+    The scope is NOT one of them. It answers about a control group, and an
+    emptied group can outlive the last process in it by a moment -- long
+    enough for a cancelled job to still read as running, which holds the lane
+    against the next one. The scope's job is to keep the work alive across a
+    restart of this process; the pid then answers for it, because the wrapper
+    is inside the scope too and its pid is still its own.
+    """
+    return alive(job) or group_alive(job.get('pgid'))
+
+
 def _settle(job, path, exit_path):
     """Fill in how a job ended, once it has. Returns the job either way.
 
@@ -221,9 +347,25 @@ def _settle(job, path, exit_path):
         job['state'] = ('done' if code == 0 else
                         'cancelled' if job.get('cancel_at') or code in (130, 143)
                         else 'failed')
-    elif alive(job):
+    elif _running(job):
         return job
     else:
+        # ONE MORE LOOK BEFORE WRITING IT OFF. Between the liveness test above
+        # and this line the wrapper may have finished and written its status;
+        # `lost` is final, so it is worth the second read.
+        try:
+            with open(exit_path) as fh:
+                raw = fh.read().strip()
+        except OSError:
+            raw = ''
+        if raw:
+            return _settle(dict(job, state='running'), path, exit_path)
+        started = job.get('started_at') or job.get('created_at') or 0
+        # ...unless somebody asked for it to stop, in which case there is no
+        # mystery about where the process went and no reason to hold the lane
+        # shut for another five seconds.
+        if not job.get('cancel_at') and time.time() - started < LOST_GRACE_S:
+            return job                    # too soon to call it anything
         job['state'] = 'cancelled' if job.get('cancel_at') else 'lost'
         job['exit_code'] = None
     job['ended_at'] = int(time.time())
@@ -317,6 +459,11 @@ def submit(kind, argv, lane, label='', by='', cwd=None, env=None, meta=None,
            'created_at': ts, 'started_at': None, 'ended_at': None,
            'pid': None, 'boot_id': _boot_id(), 'pid_start': None,
            'exit_code': None, 'state': 'running', 'cancel_at': None,
+           # The scope this job runs in, or None when there was no user
+           # manager to make one. Recorded because it is the difference
+           # between a run that survives `systemctl restart` and one that
+           # does not, and the page says which.
+           'unit': None, 'detached': False,
            'meta': meta or {}}
     _write(path, job)
 
@@ -337,12 +484,34 @@ def submit(kind, argv, lane, label='', by='', cwd=None, env=None, meta=None,
     # the job, so reading the pid back would block until the job finished --
     # which for a training run is hours, and for a fast one meant the pid was
     # already gone by the time it arrived.
-    line = '{ %s >>%s 2>&1; printf %%s "$?" >%s; } >/dev/null 2>&1 & echo $!' % (
+    pid_path = _pid_file(job_id)
+    inner = '{ printf %%s "$$" >%s; %s >>%s 2>&1; printf %%s "$?" >%s; }' % (
+        shlex.quote(pid_path),
         ' '.join(shlex.quote(a) for a in argv),
         shlex.quote(log), shlex.quote(exit_path))
     run_env = dict(os.environ)
     run_env.update({str(k): str(v) for k, v in (env or {}).items()})
     run_env.setdefault('PYTHONUNBUFFERED', '1')
+    # THE WHOLE WRAPPER GOES IN THE SCOPE, not just the work. systemd-run
+    # --scope EXECS the command it is given, so the shell that records the
+    # exit status is itself inside the new control group -- which is what
+    # keeps a restart of the dashboard from taking the status file with it,
+    # and what keeps the recorded pid a pid that still exists afterwards.
+    unit = None
+    if systemd_ready():
+        unit = '%s.scope' % (job_id,)
+        run_env.update(_user_bus_env())
+        # stdout to /dev/null, stderr to the LOG. The first of those keeps
+        # the backgrounded job off this pipe, which is what lets the pid be
+        # read back at once; the second is why a job that never started says
+        # so. It used to send both to /dev/null, and a scope that could not be
+        # created left a job in state `lost` with an empty log and nothing
+        # anywhere to say why.
+        line = ('systemd-run --user --scope --collect --quiet '
+                '--unit=%s -- /bin/sh -c %s >/dev/null 2>>%s & echo $!'
+                % (shlex.quote(unit), shlex.quote(inner), shlex.quote(log)))
+    else:
+        line = '%s >/dev/null 2>>%s & echo $!' % (inner, shlex.quote(log))
     try:
         # start_new_session puts it in its own session AND its own process
         # group. The first is what makes it survive this process; the second
@@ -359,6 +528,23 @@ def submit(kind, argv, lane, label='', by='', cwd=None, env=None, meta=None,
         pid = int((out or b'').strip() or 0)
         if pid <= 0:
             raise OSError('the shell did not report a pid')
+        # ...and then the wrapper's own pid, which is the one inside the
+        # scope. Waited for briefly: it is written before the work starts, so
+        # this is microseconds in practice, and a job whose wrapper never got
+        # far enough to write it is a job whose `$!` is the best there is.
+        end = time.time() + 2.0
+        while time.time() < end:
+            try:
+                with open(pid_path) as fh:
+                    got = int((fh.read() or '').strip() or 0)
+                if got > 0:
+                    pid = got
+                    break
+            except (OSError, ValueError):
+                pass
+            if not _alive_pid(pid):
+                break                     # it is over; nothing more is coming
+            time.sleep(0.01)
         # The group, recorded now while there is certainly something to ask.
         # Later it is the only way to tell a job whose shell was killed from
         # one whose work is really over: the trainer under it carries on,
@@ -374,7 +560,29 @@ def submit(kind, argv, lane, label='', by='', cwd=None, env=None, meta=None,
         return {'ok': False, 'job': job,
                 'message': 'That would not start (%s).' % (type(e).__name__,)}
     job.update(pid=pid, pid_start=_proc_start(pid), pgid=pgid,
+               unit=unit, detached=bool(unit),
                started_at=int(time.time()))
+    # DID IT ACTUALLY START? The wrapper writes its pid before it runs
+    # anything, so no pid file and no wrapper left means the work never began
+    # -- a scope that could not be created, a binary that is not there. That
+    # used to be reported as a job that started fine and then, five seconds
+    # later, as one that was `lost`; the lane was held for those five seconds
+    # and the reason was nowhere. Said now, at the click, with whatever the
+    # shell complained about.
+    if not os.path.exists(pid_path) and not _alive_pid(pid) \
+            and not os.path.exists(exit_path):
+        why = ''
+        try:
+            with open(log) as fh:
+                why = plain(fh.read())[-300:].strip().splitlines()[-1]
+        except (OSError, IndexError):
+            why = ''
+        job.update(state='failed', ended_at=int(time.time()),
+                   error=why or 'the job did not start')
+        _write(path, job)
+        return {'ok': False, 'job': job,
+                'message': 'That did not start: %s'
+                           % (why or 'no reason was recorded.')}
     _write(path, job)
     return {'ok': True, 'job': job, 'message': ''}
 
@@ -387,7 +595,9 @@ def cancel(job_id, grace=TERM_GRACE_S, now=None):
     Signals the process GROUP, not the process: the pid recorded is the shell,
     and the work is its child with its own children under that. TERM to the
     group first so ultralytics can close its writers, KILL after the grace
-    period for whatever ignored it.
+    period for whatever ignored it, and -- for a job in a scope of its own --
+    `systemctl --user stop` after that, which empties the control group
+    whatever is left in it.
     """
     job = read(job_id)
     if job is None:
@@ -429,6 +639,20 @@ def cancel(job_id, grace=TERM_GRACE_S, now=None):
             time.sleep(0.1)
         if stopped():
             break
+    # ...AND THE SCOPE, ALWAYS. Signalling the group is what gives ultralytics
+    # its chance to close its writers, and it is enough for every run that
+    # keeps the group it was started in. A worker that made its own session
+    # would survive it and keep the GPU -- systemd owns the whole control
+    # group and empties it. Unconditional, not just when something is left:
+    # an emptied scope that nobody tore down lingers in `systemctl --user
+    # list-units` and is one more thing to explain later.
+    if job.get('unit'):
+        try:
+            subprocess.run(['systemctl', '--user', 'stop', job['unit']],
+                           capture_output=True, timeout=20,
+                           env=dict(os.environ, **_user_bus_env()))
+        except (OSError, subprocess.SubprocessError):
+            pass
     return {'ok': True, 'job': read(job_id), 'message': ''}
 
 

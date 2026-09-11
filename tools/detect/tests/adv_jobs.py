@@ -445,6 +445,74 @@ def forget_checks(bad, jobs):
             bad.append('clearing accepted %s' % (why,))
 
 
+def _cgroup(pid):
+    """The control group a process is in, or '' when the kernel does not say."""
+    try:
+        with open('/proc/%d/cgroup' % (int(pid),)) as fh:
+            return fh.read().strip().split(':')[-1]
+    except (OSError, ValueError):
+        return ''
+
+
+def detach_checks(bad, jobs):
+    """A JOB IS NOT IN THE DASHBOARD'S CONTROL GROUP.
+
+    Orphaning a process does not save it from `systemctl restart`: a child
+    keeps its parent's cgroup, and stopping a unit kills that cgroup. Three
+    trainings died that way -- two at epochs 79 and 80, one at epoch 12 -- and
+    each time the fix that was reached for was the unit file, which is a file
+    on one machine that nobody remembers to install.
+
+    So the rule is now in the code: a job runs in a transient scope of its
+    own, under the user manager, and the test is the one that matters -- the
+    kernel's own answer to "what control group is this in", compared with the
+    control group of the process that started it. Different groups is the
+    whole property: nothing done to ours can reach theirs.
+    """
+    if not jobs.systemd_ready():
+        print('SKIP: no user manager on this machine, so jobs cannot be given '
+              'scopes of their own and are only as safe as the unit file')
+        got = jobs.submit('probe', ['/bin/sh', '-c', 'echo plain'],
+                          lane='build')
+        job = _settle(jobs, got['job']['id'])
+        if job.get('detached') or job.get('unit'):
+            bad.append('a job claims to be detached on a machine that cannot '
+                       'detach it')
+        if job.get('state') != 'done':
+            bad.append('the fallback path does not run jobs: %r'
+                       % (job.get('state'),))
+        return
+    got = jobs.submit('probe', ['/bin/sh', '-c', 'sleep 30'], lane='train',
+                      label='detached')
+    job = got['job']
+    if not got['ok']:
+        bad.append('a job would not start: %r' % (got.get('message'),))
+        return
+    if not job.get('unit') or not job.get('detached'):
+        bad.append('a job was started with no scope of its own, so a restart '
+                   'of the dashboard would take it: %r' % (job.get('unit'),))
+        return
+    mine, theirs = _cgroup(os.getpid()), _cgroup(job['pid'])
+    if not theirs:
+        bad.append('the job\'s control group cannot be read, so nothing here '
+                   'is proven')
+    elif theirs == mine:
+        bad.append('THE JOB IS IN THIS PROCESS\'S CONTROL GROUP (%s) -- '
+                   'stopping the dashboard would stop it too' % (theirs,))
+    if job['unit'] not in theirs:
+        bad.append('the job is not in the scope its record names: %r vs %r'
+                   % (job['unit'], theirs))
+    if not jobs.alive(jobs.read(job['id'])):
+        bad.append('a job in a scope does not read as alive')
+    # ...and the scope is torn down when the job is, or the next reader finds
+    # a control group that outlives its work
+    jobs.cancel(job['id'], grace=0.5)
+    if jobs.unit_active(job['unit']):
+        bad.append('the scope is still active after the job was cancelled')
+    if jobs.lane_holder('train') is not None:
+        bad.append('the lane is still held after the job was cancelled')
+
+
 def main():
     import jobs
     tmp = tempfile.mkdtemp(prefix='adv_jobs_')
@@ -456,6 +524,7 @@ def main():
                          (lane_checks, (jobs,)), (refusal_checks, (jobs,)),
                          (progress_checks, (jobs,)),
                          (forget_checks, (jobs,)),
+                         (detach_checks, (jobs,)),
                          (survives_its_parent, (tmp,))):
             try:
                 fn(bad, *args)
@@ -475,7 +544,8 @@ def main():
         for b in bad:
             print('FAIL ' + b)
         return 1
-    print('a job outlives the process that started it, says how it ended to '
+    print('a job runs in a control group of its own, outlives the process '
+          'that started it, says how it ended to '
           'anybody who asks later, stops with its whole tree when told to, '
           'and never runs an argument as a command')
     return 0
