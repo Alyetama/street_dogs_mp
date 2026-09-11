@@ -443,23 +443,23 @@ def check_markup(html):
             ('max-height:88vh', 'lightbox image height cap'),
             ('object-fit:contain', 'lightbox image fit'),
             ('.dcrop.cx{cursor:pointer', 'clickable-tile affordance'),
-            # ── false-positive flag -> hard negatives ──
-            ('/api/detect/flag', 'flag endpoint call'),
-            ('id="cropLbFlag"', 'lightbox flag button'),
-            ('id="dcropFlagged"', 'flagged-count line'),
-            ('class="fx"', 'per-tile flag button'),
-            ('.dcrop .fx{position:absolute;left:4px;top:4px', 'flag button '
-             'must sit top-LEFT, clear of the bottom-right conf badge'),
-            ('@media(hover:none){.dcrop .fx{opacity:1}}', 'flag button always '
-             'visible without hover (touch)'),
-            # colour is a design choice, not a contract -- assert the RULE
-            # exists so a flagged tile stays visually distinct, and let the
-            # palette move without breaking the suite
-            ('.dcrop.fl{border-color:', 'flagged tile border'),
-            ('flagged as false positive', 'flagged title/undo copy'),
-            ('stopPropagation', 'flag click must not open the lightbox')):
+            # the way to the judging surface, which is where flagging lives
+            ('/audit/review', 'link to the bulk review page')):
         if frag not in html:
             bad.append(f'{why} missing ({frag!r})')
+    # ── NO judging on this grid ──────────────────────────────────────────
+    # The sample is random, 60 seconds old and replaced on every refresh, so a
+    # flag taken here could not be checked, corrected or found again. It was
+    # removed; these keep it removed. /audit/review is the judging surface.
+    for frag, why in (
+            ('id="dcropFlagged"', 'the flagged-count line'),
+            ('id="cropLbFlag"', 'the lightbox flag button'),
+            ('class="fx"', 'the per-tile flag button'),
+            ('.dcrop.fl{', 'the flagged-tile style'),
+            ('/api/detect/flag', 'a flag POST')):
+        if frag in html:
+            bad.append(f'{why} is back on the live-detections grid ({frag!r}) '
+                       f'-- judging belongs on /audit/review')
     # the buttons must reuse the dashboard's own button style, not a new one
     for bid in ('cropLbClose', 'cropLbPrev', 'cropLbNext'):
         m = re.search(r'<button[^>]*id="%s"' % bid, html)
@@ -1073,15 +1073,16 @@ def check_flag_api():
                      f'{fn.__name__} no longer publishes through os.replace '
                      f'(a partial write would be visible)')
 
-            # the crops payload must advertise what is flagged
+            # ...and the crops payload carries NO flag state. The grid it
+            # feeds does not judge, so seeding it cost the flag lock and a set
+            # intersection on every 60 s poll for a field nothing read.
             dash.CROPS = crops
             with open(os.path.join(crops, race), 'wb') as f:
                 f.write(b'\xff\xd8x')
             p = dash.crops_payload(now_ms=1785663400000)
-            want(p.get('flagged') == [race],
-                 f"payload flagged list: {p.get('flagged')}")
-            want(p.get('flagged_total') == 2,
-                 f"payload flagged_total: {p.get('flagged_total')}")
+            want('flagged' not in p and 'flagged_total' not in p,
+                 f'the crops payload is seeding flag state again: '
+                 f'{sorted(p)}')
         finally:
             (dash.CROPS, dash.HN_DIR, dash.HN_CROPS, dash.HN_FULL,
              dash.HN_LABELS, dash._flagged) = keep
@@ -1452,8 +1453,8 @@ try {
   // the open-crop snapshot now lives inside the shared makeLightbox()
   // component, so read it back through LB rather than an IIFE-local
   C = new Function(csrc +
-    '\nreturn {renderCrops, openLb, closeLb, step, onGridClick, toggleFlag,'
-    + ' list: () => LB.list(), flags: () => flagged, total: () => flagTotal};')();
+    '\nreturn {renderCrops, openLb, closeLb, step, onGridClick,'
+    + ' list: () => LB.list()};')();
 } catch (e) {
   console.log('FAIL: could not evaluate crops IIFE body: ' + e);
   process.exit(1);
@@ -1574,101 +1575,40 @@ for (const cc of COLCASES) {
 console.log('ok   crops/' + name + ' (all ' + COLCASES.length + ' grid widths)');
 }
 
-// ── false-positive flagging (hard negatives) ──────────────────────────────
+// ── the grid judges nothing ───────────────────────────────────────────────
+// There was a per-tile flag button here, and a lightbox flag button behind
+// it. Both are gone: this sample is random, a minute old and replaced on the
+// next refresh, so a flag taken on it could not be checked or found again.
+// What is asserted now is the absence -- markup, handler and POST.
 (async () => {
-  const fail = m => failures.push('flag: ' + m);
+  const fail = m => failures.push('no-judging: ' + m);
   const P = cropPayloads.mixed_has_full, NAMES = P.crops.map(c => c.name);
-  const lbF = els['cropLbFlag'], fLine = els['dcropFlagged'];
-  const frame = (flagged, total) => ({ crops: P.crops, total_last_min: 6,
-    flagged, flagged_total: total });
-  const fxEvt = i => clickEvt(fakeEl('fx', { 'data-fx': NAMES[i] },
-    fakeEl('dcrop cx', { 'data-i': String(i) })));
   try {
     COLS = 8; cgrid.clientWidth = 0; fetchReply = null; C.closeLb();
-
-    // seeded from the payload, so a flag survives refresh / Shuffle / reload
-    C.renderCrops(frame([NAMES[0]], 3));
-    if (!C.flags().has(NAMES[0])) fail('Set not seeded from payload.flagged');
-    if (!cgrid.innerHTML.includes(' fl"'))
-      fail('seeded flag did not render the flagged tile state');
-    if (!cgrid.innerHTML.includes('flagged as false positive'))
-      fail('flagged tile is missing the undo title');
-    if (String(fLine.textContent) !== '3 flagged as false positive')
-      fail('count line: ' + JSON.stringify(fLine.textContent));
-    C.renderCrops(frame([], 0));
-    if (String(fLine.textContent) !== '')
-      fail('count line must say nothing at 0: '
-        + JSON.stringify(fLine.textContent));
-
-    // clicking the ✗ flags, swallows the event, and does NOT open the lightbox
-    fetchCalls = []; C.closeLb();
-    const e1 = fxEvt(0);
-    C.onGridClick(e1);
-    if (!e1._stopped) fail('the ✗ click did not stopPropagation');
-    if (lb.hidden === false) fail('the ✗ click opened the lightbox');
-    if (!C.flags().has(NAMES[0])) fail('the ✗ click did not flag');
-    if (!cgrid.innerHTML.includes(' fl"')) fail('tile did not turn flagged');
-    if (!fetchCalls.length || !String(fetchCalls[0].url).includes('/api/detect/flag'))
-      fail('no POST to /api/detect/flag');
-    else {
-      const o = fetchCalls[0].opt || {}, b = JSON.parse(o.body || '{}');
-      if (o.method !== 'POST') fail('flag request is not a POST');
-      if (b.name !== NAMES[0] || b.label !== 'false_positive' || b.undo !== false)
-        fail('wrong flag body: ' + o.body);
-    }
-    // ...but a click on the tile itself still opens it
-    C.onGridClick(clickEvt(fakeEl('dcrop cx', { 'data-i': '0' })));
-    if (lb.hidden !== false) fail('a plain tile click stopped opening the lightbox');
-    C.closeLb();
-
-    // a refresh landing while the POST is still in flight must not revert it
-    C.renderCrops(frame([], 0));
-    if (!C.flags().has(NAMES[0]))
-      fail('an in-flight flag was reverted by a refresh');
-
-    // clicking again undoes
     fetchCalls = [];
-    C.onGridClick(fxEvt(0));
-    if (C.flags().has(NAMES[0])) fail('the second ✗ click did not undo');
-    if (JSON.parse((fetchCalls[0].opt || {}).body || '{}').undo !== true)
-      fail('undo:true not sent');
-
-    // a server refusal rolls the optimistic tile back
-    fetchReply = { ok: false, error: 'nope' };
-    C.renderCrops(frame([], 0));
-    C.toggleFlag(NAMES[2]);
-    if (!C.flags().has(NAMES[2])) fail('the tile did not flip optimistically');
-    await settle(); await settle();
-    if (C.flags().has(NAMES[2])) fail('a refused flag was not rolled back');
-
-    // an accepted flag takes flagged_total from the response
-    fetchReply = { ok: true, flagged_total: 41 };
-    C.toggleFlag(NAMES[2]);
-    await settle(); await settle();
-    if (C.total() !== 41) fail('flagged_total not taken from the response');
-    if (String(fLine.textContent) !== '41 flagged as false positive')
-      fail('count line not updated from the response: '
-        + JSON.stringify(fLine.textContent));
-
-    // the lightbox button tracks the shown image and syncs back to the grid
-    fetchReply = { ok: true, flagged_total: 1 };
-    C.renderCrops(frame([], 0));
-    C.closeLb(); C.openLb(0);
-    if (String(lbF.className).includes('on'))
-      fail('lightbox flag button starts in the flagged state');
-    C.toggleFlag(P.crops[0].name);
-    await settle(); await settle();
-    if (!String(lbF.className).includes('on'))
-      fail('lightbox flag button did not turn on');
-    if (!String(lbF.title).includes('click to undo'))
-      fail('lightbox flag title not updated: ' + lbF.title);
-    if (!cgrid.innerHTML.includes(' fl"'))
-      fail('the grid tile did not sync from the lightbox flag');
+    C.renderCrops({ crops: P.crops, total_last_min: 6,
+                    // a server still sending the old fields must change nothing
+                    flagged: [NAMES[0]], flagged_total: 3 });
+    if (cgrid.innerHTML.includes('class="fx"'))
+      fail('a per-tile flag button is back in the grid');
+    if (cgrid.innerHTML.includes(' fl"'))
+      fail('a payload flag still paints a flagged tile');
+    if (cgrid.innerHTML.includes('false positive'))
+      fail('flag copy is back on a tile');
+    if (typeof C.toggleFlag === 'function')
+      fail('the crops IIFE still exports a flag toggle');
+    // a click on a tile opens the full frame, and posts nothing anywhere
+    C.onGridClick(clickEvt(fakeEl('dcrop cx', { 'data-i': '0' })));
+    if (lb.hidden !== false) fail('a tile click stopped opening the lightbox');
+    if (els['cropLbFlag']) fail('the lightbox still carries a flag button');
     C.closeLb();
-    console.log('ok   flag ui (seed, ✗ click, no-lightbox, undo, rollback, lightbox sync)');
+    if (fetchCalls.some(c => String(c.url).includes('/api/detect/flag')))
+      fail('the grid posted to /api/detect/flag');
+    console.log('ok   live-detections grid judges nothing (no tile flag, no '
+      + 'lightbox flag, no POST)');
   } catch (e) {
     fail('THREW ' + e.constructor.name + ': ' + e.message);
-    console.log('FAIL flag ui — ' + e);
+    console.log('FAIL no-judging — ' + e);
   }
 
   if (failures.length) { console.log('FAILURES: ' + failures.join(' | ')); process.exit(1); }

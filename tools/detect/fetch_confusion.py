@@ -6,6 +6,7 @@ Cache each training run's confusion matrix from Comet into data/confusion.json.
     python tools/detect/fetch_confusion.py --update   # pull anything missing
     python tools/detect/fetch_confusion.py --update --projects dog-bin
     python tools/detect/fetch_confusion.py --update --all   # refetch everything
+    python tools/detect/fetch_confusion.py --index          # experiment keys only
 
 Ultralytics writes a confusion_matrix.png next to every finished run, but a PNG
 is a picture of the numbers, not the numbers -- it cannot be restyled, summed,
@@ -24,6 +25,12 @@ false positive with a false negative.
 
 So the cache records the orientation explicitly, and readers use that rather
 than re-deriving it.
+
+Alongside the matrices the cache keeps an ``experiments`` index: run key ->
+Comet experiment key. That id lives nowhere in a run directory, so without it
+the dashboard cannot link a run to the page holding its curves. ``--index``
+records it for every experiment in the workspace and fetches no assets, which
+is the cheap sweep; ``--update`` records it for whatever it walks anyway.
 
 The API key is read from a .env (never printed, never written to the JSON).
 """
@@ -117,7 +124,8 @@ def trim(labels, matrix):
             [[matrix[i][j] for j in keep] for i in keep])
 
 
-def fetch(update=False, refetch=False, workspace=None, only=None):
+def fetch(update=False, refetch=False, workspace=None, only=None,
+          index_only=False):
     if not load_key():
         print('no COMET_API_KEY (set $COMET_ENV_FILE to the .env holding it)',
               file=sys.stderr)
@@ -131,7 +139,12 @@ def fetch(update=False, refetch=False, workspace=None, only=None):
         return 1
     st['workspace'] = ws
     runs = st['runs']
-    added = skipped = 0
+    # The experiment KEY, for every experiment walked -- matrix or not. It is
+    # the only thing a Comet URL can be built from (nothing in a run directory
+    # carries it), and it costs nothing here: the sweep already holds the
+    # experiment. Kept out of `runs`, which means "has a matrix".
+    idx = st.setdefault('experiments', {})
+    added = skipped = indexed = 0
     want = {x.strip().lower() for x in (only or []) if x.strip()}
     for proj in api.get_projects(ws):
         pname = proj if isinstance(proj, str) else proj.get('projectName')
@@ -147,6 +160,13 @@ def fetch(update=False, refetch=False, workspace=None, only=None):
             if not name:
                 continue
             key = f'{proj_name(params.get("project") or pname)}/{name}'
+            ekey = getattr(exp, 'id', None) or getattr(exp, 'key', None)
+            if ekey and idx.get(key, {}).get('key') != ekey:
+                idx[key] = {'key': ekey, 'experiment': exp.name,
+                            'comet_project': pname}
+                indexed += 1
+            if index_only:
+                continue
             if key in runs and not refetch:
                 skipped += 1
                 continue
@@ -170,13 +190,14 @@ def fetch(update=False, refetch=False, workspace=None, only=None):
             added += 1
             n = len(labels)
             print(f'  + {key}  {n}x{n}  from {exp.name}')
-    if added:
+    if added or indexed:
         import datetime as _dt
         st['updated_at'] = _dt.date.today().isoformat()
     if update:
         save_state(st)
     print(f'{added} fetched, {skipped} already cached, '
-          f'{len(runs)} total in {os.path.relpath(STATE, REPO)}')
+          f'{len(runs)} total in {os.path.relpath(STATE, REPO)}; '
+          f'{indexed} experiment keys recorded, {len(idx)} known')
     return 0
 
 
@@ -207,10 +228,15 @@ def main(argv=None):
     ap.add_argument('--projects', default=None,
                     help='comma-separated Comet projects to sweep '
                          '(default: every project in the workspace)')
+    ap.add_argument('--index', action='store_true',
+                    help='record every experiment key without fetching any '
+                         'matrix -- what the dashboard links runs to Comet '
+                         'with, and cheap enough to sweep the whole workspace')
     a = ap.parse_args(argv)
-    if a.update:
+    if a.update or a.index:
         return fetch(update=True, refetch=a.all, workspace=a.workspace,
-                     only=(a.projects or '').split(','))
+                     only=(a.projects or '').split(','),
+                     index_only=a.index and not a.update)
     return show()
 
 

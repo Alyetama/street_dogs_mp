@@ -1650,19 +1650,15 @@ def crops_payload(window_s=CROP_WINDOW_S, cap=CROP_CAP, now_ms=None):
     # newest RECENT_N form the pool, then a random sample of `cap` from it
     elig.sort(key=lambda c: -c['ts'])
     pool = elig[:RECENT_N]
-    # `flagged` seeds the client's Set so a flag survives the 60 s refresh and
-    # Shuffle: it covers the whole pool, not just this sample, because the next
-    # shuffle draws from the pool.
-    with _flag_lock:
-        fl = _flag_names(FLAG_LABEL)
-        total = len(fl)
-        seen = sorted({c['name'] for c in pool} & fl)
+    # No flag state here any more. The grid this feeds shows a random sample
+    # of the last minute and nothing to do to it; judging lives on
+    # /audit/review, which reads the ledger itself. Seeding it from here cost
+    # the flag lock and a set intersection on every 60 s poll, for a field
+    # nothing reads.
     return {
         'crops': random.sample(pool, cap) if len(pool) > cap else pool,
         'total_last_min': len(pool),
         'pool_n': RECENT_N,
-        'flagged': seen,
-        'flagged_total': total
     }
 
 
@@ -4764,6 +4760,7 @@ def best_per_project(runs):
 def _history(runs):
     """Finished runs as a table -- also the non-hover route to every value."""
     top = best_per_project(runs)
+    urls = comet_urls()
     body = []
     for r in runs:
         lab, cls, gly = TRK_STATUS.get(r['status'], (r['status'], 'idle', ''))
@@ -4790,6 +4787,20 @@ def _history(runs):
                          f'registry column, which records what was promoted, '
                          f'on reserved data.')
                     + '>&#9733; best</span>')
+        # Comet holds everything this table does not: the loss curves as
+        # logged, the parameters, the assets. A link only where the
+        # experiment key is actually known -- see comet_urls().
+        u = urls.get(run_key(r).lower())
+        cmt = (f'<a class="tcmt" href="{esc_html(u)}" target="_blank" '
+               f'rel="noopener"'
+               + _t('Open this run on Comet') + '>Comet'
+               '<span class="ext">&#8599;</span></a>' if u else
+               '<span class="tcmt none"'
+               + _t('No Comet experiment recorded for this run. The key '
+                    'comes from data/best_models.json or the sweep '
+                    'tools/detect/fetch_confusion.py leaves in '
+                    'data/confusion.json, and neither names this run.')
+               + '>&mdash;</span>')
         body.append(
             f'<tr data-proj="{esc_html(r["project"])}" '
             f'data-key="{esc_html(run_key(r))}" tabindex="0" '
@@ -4804,7 +4815,8 @@ def _history(runs):
             f'<td class="num">{best}</td>'
             f'<td class="tbest">{star}</td>'
             f'<td class="num">{dur}</td>'
-            f'<td>{prom}</td></tr>')
+            f'<td>{prom}</td>'
+            f'<td class="tcmtc">{cmt}</td></tr>')
     return (
         '<div class="tscroll"><table class="thist"><thead><tr>'
         '<th>run</th><th>status</th>'
@@ -4820,7 +4832,10 @@ def _history(runs):
         'best in project</th>'
         f'<th class="num"{_t("Epochs times the mean seconds per epoch.")}>'
         'wall clock</th>'
-        '<th>registry</th></tr></thead><tbody>'
+        '<th>registry</th>'
+        f'<th{_t("Opens the run on Comet: the curves as logged, the "
+                 "parameters, the assets. Blank where no experiment key is "
+                 "recorded for the run.")}>comet</th></tr></thead><tbody>'
         + ''.join(body) + '</tbody></table></div>'
         '<div class="tpage" hidden><button type="button" class="tpb" '
         'data-d="-1" aria-label="previous page">&#8592;</button>'
@@ -5638,7 +5653,7 @@ def render_mistakes(r):
 # fetched: the dashboard must render without a Comet key and without a network
 # round trip in the request path.
 CONFUSION_FILE = os.path.join(REPO, 'data', 'confusion.json')
-_CONF = {'at': None, 'runs': {}, 'fold': {}}
+_CONF = {'at': None, 'runs': {}, 'fold': {}, 'exp': {}, 'ws': ''}
 
 
 def confusion_index():
@@ -5649,24 +5664,30 @@ def confusion_index():
     except OSError:
         # fold too: clearing only `runs` left confusion_for() answering from a
         # cache built out of a file that is no longer there
-        _CONF.update(at=None, runs={}, fold={})
+        _CONF.update(at=None, runs={}, fold={}, exp={}, ws='')
         return _CONF['runs']
     if _CONF['at'] == stamp:
         return _CONF['runs']
-    runs = {}
+    runs, exp, ws = {}, {}, ''
     try:
         with open(CONFUSION_FILE) as fh:
             got = json.load(fh)
         if isinstance(got, dict) and isinstance(got.get('runs'), dict):
             runs = got['runs']
+        # The same fetch records the experiment KEY of every experiment it
+        # walked, matrix or not -- that is what a Comet URL is made of.
+        if isinstance(got, dict) and isinstance(got.get('experiments'), dict):
+            exp = got['experiments']
+            ws = str(got.get('workspace') or '')
     except (OSError, ValueError):
         runs = {}
     # Folded once here, not per lookup. The same project reaches this file
     # spelled two ways -- args.yaml says `dogdetection` where Comet logged
     # `DogDetection` -- and an exact match silently found nothing for four of
     # the five detector runs that had a matrix waiting.
-    _CONF.update(at=stamp, runs=runs,
-                 fold={k.lower(): v for k, v in runs.items()})
+    _CONF.update(at=stamp, runs=runs, ws=ws,
+                 fold={k.lower(): v for k, v in runs.items()},
+                 exp={k.lower(): v for k, v in exp.items()})
     return runs
 
 
@@ -5677,6 +5698,64 @@ def confusion_for(key):
     if got is None:
         got = (_CONF.get('fold') or {}).get(str(key).lower())
     return got
+
+
+COMET_URL = 'https://www.comet.com/{workspace}/{project}/{key}'
+
+
+def comet_urls():
+    """{run key: the run's page on Comet}, from the two files that KNOW it.
+
+    A Comet URL needs the experiment key -- a 32-hex id that appears nowhere
+    in a run directory. Two local files carry it: data/best_models.json names
+    the exact experiment behind every promoted and candidate run, and
+    data/confusion.json carries one entry per experiment fetch_confusion.py
+    has walked. Nothing here is constructed from a run NAME: a URL guessed
+    that way is a 404 with a hyperlink on it, which is worse than no link,
+    because the reader cannot tell the difference until they click.
+
+    The registry wins where both know a run: it is hand-checked, and it also
+    covers runs whose matrix was never fetched.
+    """
+    st = best_models()
+    tmpl = st.get('url_template', COMET_URL)
+    reg_ws = st.get('workspace') or ''
+
+    out = {}
+
+    def add(project, run, key, ws):
+        if not (project and run and key and ws):
+            return
+        try:
+            u = tmpl.format(workspace=ws, project=project, key=key)
+        except (KeyError, IndexError):
+            return
+        # the run key travels through the table folded, because a project
+        # reaches these files spelled two ways (`dogdetection`/`DogDetection`)
+        out.setdefault(f'{project}/{run}'.lower(), u)
+
+    for proj, d in (st.get('projects') or {}).items():
+        b = d.get('best') or {}
+        add(proj, b.get('run'), b.get('key'), reg_ws)
+        for c in (d.get('candidates') or ()):
+            add(proj, c.get('run'), c.get('key'), reg_ws)
+
+    confusion_index()          # loads/refreshes the experiment index too
+    ws = _CONF.get('ws') or reg_ws
+    for k, v in (_CONF.get('exp') or {}).items():
+        if not isinstance(v, dict) or not v.get('key') or not ws:
+            continue
+        # the lookup key stays as the TRACKER spells it (the run directory's
+        # parent); the URL takes the project as COMET spells it, and the two
+        # differ by case for every detector run
+        proj, _, run = str(k).rpartition('/')
+        try:
+            out.setdefault(str(k).lower(), tmpl.format(
+                workspace=ws, project=v.get('comet_project') or proj,
+                key=v['key']))
+        except (KeyError, IndexError):
+            continue
+    return out
 
 
 def _is_bg(label, diag):
@@ -6761,6 +6840,10 @@ def render_store_path():
 # At most one top-up attempt per this many seconds, however many runs finish.
 CONF_TOPUP_S = 600
 _CONF_TOPUP = {'at': 0.0}
+# The key sweep walks every experiment in the workspace, so it is measured in
+# minutes and is worth doing about as often as somebody starts a new project.
+IDX_SWEEP_S = 6 * 3600
+_IDX_SWEEP = {'at': 0.0}
 
 
 def confusion_topup():
@@ -6782,7 +6865,16 @@ def confusion_topup():
         return False
     try:
         have = confusion_index()
+        urls = comet_urls()
         want = set()
+        # A run with no experiment key is a run the table cannot link, and an
+        # interrupted run never triggers a matrix fetch -- so the key sweep is
+        # asked for separately, and is cheap: no assets, just the ids.
+        want_idx = set()
+        for r in training_runs():
+            if r.get('status') != 'never_started' and not urls.get(
+                    run_key(r).lower()):
+                want_idx.add(r['project'])
         for r in training_runs():
             # only a run that has FINISHED has a matrix to fetch; a live one
             # has not run its final validation yet
@@ -6800,17 +6892,27 @@ def confusion_topup():
                                                'confusion_matrix.png')):
                 continue
             want.add(r['project'])
-        if not want:
-            return False
-        _CONF_TOPUP['at'] = now
         script = os.path.join(REPO, 'tools', 'detect', 'fetch_confusion.py')
         if not os.path.exists(script):
+            return False
+        # --update indexes whatever it walks anyway, so a project needing a
+        # matrix never also needs the key-only pass. The key sweep runs
+        # unfiltered and rarely: a project is spelled one way on disk and
+        # another on Comet, so --projects would miss exactly the runs asking
+        # for it -- and runs that were never logged to Comet at all would keep
+        # asking for it every ten minutes, forever.
+        if want:
+            _CONF_TOPUP['at'] = now
+            arg = ['--update', '--projects', ','.join(sorted(want))]
+        elif want_idx and now - _IDX_SWEEP['at'] >= IDX_SWEEP_S:
+            _IDX_SWEEP['at'] = now
+            arg = ['--index']
+        else:
             return False
         env = dict(os.environ, COMET_ENV_FILE=COMET_ENV_FILE)
         log = open(os.path.join(REPO, 'data', 'confusion_fetch.log'), 'a')
         _SPAWNED.append(subprocess.Popen(
-            [CONFUSION_PYTHON, script, '--update',
-             '--projects', ','.join(sorted(want))],
+            [CONFUSION_PYTHON, script] + arg,
             cwd=REPO, env=env, stdout=log, stderr=log,
             stdin=subprocess.DEVNULL, start_new_session=True))
         return True
@@ -7770,6 +7872,11 @@ COUNTRY_INDEX = os.path.join(OUT, 'countries.json')
 # seconds between incremental rebuilds. Well under the ~4 minute pool
 # turnover, and an incremental pass is ~1.7s, so the duty cycle is ~1%.
 COUNTRY_REFRESH = 120
+# The Explore index describes finished work -- a sweep that has run, a gate
+# that has judged -- so it moves when a stage finishes, not minute to minute.
+# Checked twice an hour, rebuilt when the file is older than this.
+EXPLORE_REFRESH = 6 * 3600
+EXPLORE_CHECK = 1800
 _country_cache = {'mtime': None, 'doc': {'by_image': {}, 'counts': {},
                                          'names': {}}}
 
@@ -9936,6 +10043,49 @@ class BoardHandler(SimpleHTTPRequestHandler):
             return True
         return False
 
+    def _explore_get(self, path):
+        """The Explore page's read-only API. True when it answered.
+
+        Three routes: the built index, a live sample out of the parquets, and
+        one frame as a picture. Nothing here writes, and nothing takes a
+        parameter that is not checked in explore_page.py before it reaches a
+        filesystem path.
+        """
+        e = _explore_page()
+        if e is None:
+            self._json({'error': 'the explore page would not load'})
+            return True
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            if path == '/api/explore/index':
+                self._json(e.overview())
+                return True
+            if path == '/api/explore/sample':
+                self._json(e.sample(q.get('cc', [''])[0],
+                                    q.get('src', ['ground_animals'])[0],
+                                    q.get('n', ['12'])[0]))
+                return True
+            if path == '/explore/frame':
+                # The thumbnail is cut once and cached, so the browser may
+                # keep it: the frame behind it is a file that never changes.
+                got = e.thumb(q.get('cell', [''])[0], q.get('id', [''])[0])
+                if not got:
+                    self.send_error(404)
+                    return True
+                with open(got, 'rb') as fh:
+                    body = fh.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'public, max-age=86400')
+                self.end_headers()
+                self.wfile.write(body)
+                return True
+        except Exception as ex:           # noqa: BLE001 - a page, not a 500
+            self._json({'error': '%s: %s' % (type(ex).__name__, ex)})
+            return True
+        return False
+
     def _train_post(self, path):
         """Everything that starts or stops work. True when it answered."""
         if not self._train_admin():
@@ -10566,6 +10716,27 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if _p.startswith('/api/train/'):
             if self._train_get(_p):
                 return
+        # ── Explore ──────────────────────────────────────────────────────
+        # Readable by anyone with a session, like the review queue: it starts
+        # no work and changes nothing. Claimed before the static handler,
+        # which would otherwise answer /explore with a 404 from OUT.
+        if _p == '/explore':
+            e = _explore_page()
+            if e is None:
+                self.send_error(503, 'the explore page would not load')
+                return
+            body = e.page_html(account=account_strip(self.session)) \
+                .encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if _p.startswith('/api/explore/') or _p == '/explore/frame':
+            if self._explore_get(_p):
+                return
         if _p == '/audit/review':
             body = REVIEW_HTML.encode('utf-8')
             self.send_response(200)
@@ -10907,15 +11078,16 @@ class BoardHandler(SimpleHTTPRequestHandler):
         body = self._splice(
             body, self._ACCT_OPEN, self._ACCT_CLOSE,
             lambda: render_account(getattr(self, 'session', None)))
-        # Datasets, then Train, then Accounts: where the material is, where
-        # the work is done, and who may do it -- the order they are wanted in,
-        # and the order they stood in when Datasets was a plain anchor in the
-        # template. It is here now because it is admin-only, and a link that
-        # 404s for most of the people who can see it undoes the gate in the
-        # header.
+        # Explore, Datasets, Train, Accounts: what there is, where the
+        # material is, where the work is done, and who may do it -- the order
+        # they are wanted in. The last three are admin-only and drawn for
+        # nobody else, because a link that 404s for most of the people who can
+        # see it undoes the gate in the header; Explore is drawn for everyone
+        # with a session, which is why it leads.
         body = self._splice(
             body, self._NAV_OPEN, self._NAV_CLOSE,
-            lambda: (render_datasets_nav(getattr(self, 'session', None))
+            lambda: (render_explore_nav(getattr(self, 'session', None))
+                     + render_datasets_nav(getattr(self, 'session', None))
                      + render_train_nav(getattr(self, 'session', None))
                      + render_account_nav(getattr(self, 'session', None))))
         # OPERATING THE MACHINE IS NOT ANNOTATING, and the buttons that do it
@@ -11623,6 +11795,32 @@ def serve(args):
 
     threading.Thread(target=country_loop, daemon=True).start()
 
+    # The Explore index is a different animal again: a 160-second pass over
+    # 32M harvest coordinates, a hive-partitioned store and two ledgers, which
+    # peaks at several GB. So it runs as a SUBPROCESS -- the memory goes back
+    # to the operating system when it exits, instead of sitting in a server
+    # that stays up for weeks -- and it asks the builder whether the file is
+    # stale rather than deciding here, so one definition of stale serves the
+    # command line and the loop alike.
+    def explore_loop():
+        script = os.path.join(REPO, 'tools', 'dashboard', 'explore_index.py')
+        while True:
+            if os.path.exists(script):
+                try:
+                    _reap()               # the loop runs for weeks
+                    log = open(os.path.join(REPO, 'data',
+                                            'explore_index.log'), 'a')
+                    _SPAWNED.append(subprocess.Popen(
+                        [sys.executable, script, '--top', '0',
+                         '--stale-after', str(EXPLORE_REFRESH)],
+                        cwd=REPO, stdout=log, stderr=log,
+                        stdin=subprocess.DEVNULL, start_new_session=True))
+                except Exception as e:    # noqa: BLE001 - a page, not the gate
+                    sys.stderr.write('explore index refresh failed: %s\n' % (e,))
+            time.sleep(EXPLORE_CHECK)
+
+    threading.Thread(target=explore_loop, daemon=True).start()
+
     threading.Thread(target=loop, daemon=True).start()
     BoardHandler.db = args.db
     handler = functools.partial(BoardHandler, directory=OUT)
@@ -11658,6 +11856,9 @@ _TRAIN = {'mod': None, 'tried': False}
 _JOBS = {'mod': None, 'tried': False}
 
 
+_EXPLORE = {'tried': False, 'mod': None}
+
+
 def _train_page():
     """The training page, imported once and only when asked for."""
     if not _TRAIN['tried']:
@@ -11669,6 +11870,25 @@ def _train_page():
         except Exception:                 # noqa: BLE001 - a page, not the gate
             _TRAIN['mod'] = None
     return _TRAIN['mod']
+
+
+def _explore_page():
+    """The Explore page, imported once and only when asked for.
+
+    Same shape as _train_page(): the module pulls duckdb, geopandas and PIL in
+    on demand, and a dashboard that cannot import one of those must still
+    serve every other page rather than fail at startup.
+    """
+    if not _EXPLORE['tried']:
+        _EXPLORE['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import explore_page as _e
+            _EXPLORE['mod'] = _e
+        except Exception as e:            # noqa: BLE001 - a page, not the gate
+            sys.stderr.write('explore page unavailable: %s\n' % (e,))
+            _EXPLORE['mod'] = None
+    return _EXPLORE['mod']
 
 
 def _jobs():
@@ -11970,6 +12190,21 @@ def render_train_nav(session):
     return ('<a class="hnav" href="/train" title="Build a dataset from the '
             'annotations, and train on it">'
             '<span class="hnf">&#9881;</span>Train</a>')
+
+
+def render_explore_nav(session):
+    """The way to the Explore page, for the action row.
+
+    Everyone with a session, unlike Datasets and Train: it starts nothing and
+    names no path on this machine. An annotator judging crops in one country
+    has the same reason to look at what is in it as anybody else.
+    """
+    if not session:
+        return ''
+    return ('<a class="hnav" href="/explore" title="Every layer of the data, '
+            'one country at a time \u2014 images, frames, boxes, dogs, '
+            'leashes">'
+            '<span class="hnf">&#9673;</span>Explore</a>')
 
 
 def render_account_nav(session):
@@ -12367,9 +12602,6 @@ LB_CSS = """
 .lbcopy{font-variant-numeric:tabular-nums}
 .lbcopy.done{color:var(--green);border-color:rgba(67,181,129,.5);
 background:rgba(67,181,129,.14)}
-.lbflag{padding:3px 11px;font-size:11.5px}
-.lbflag.on{background:#d8743a;border-color:#d8743a;color:#15100a}
-.lbflag.on:hover{background:#c9682f}
 .lbx{top:16px;right:18px}
 .lbprev{left:14px;top:50%;transform:translateY(-50%)}
 .lbnext{right:14px;top:50%;transform:translateY(-50%)}"""
@@ -12385,36 +12617,23 @@ LB_HTML = """
   <div class="lbfoot">
     <div class="lbcap" id="cropLbCap"></div>
     <button class="rbtn quiet lbcopy" id="cropLbCopy" title="copy this image’s Mapillary id">Copy ID</button>
-    <button class="rbtn lbflag" id="cropLbFlag" title="flag as false positive">⚑ not a dog</button>
   </div>
 </div>"""
 
-# cfg.flagged(name) -> bool and cfg.toggle(name) let the host page own the flag
-# state; the component only reflects and requests it.
+# A viewer, and only a viewer: the full frame, its caption and its id. It used
+# to carry a flag button too, wired to whichever page opened it -- the only
+# page that ever did was the sweep panel, where judging did not belong. The
+# judging surfaces (/audit/review and the two model audits) draw their own.
 LB_JS = r"""
-function makeLightbox(cfg){
-  cfg=cfg||{};
+function makeLightbox(){
   var lb=document.getElementById('cropLb'),
       img=document.getElementById('cropLbImg'),
       cap=document.getElementById('cropLbCap'),
       bx=document.getElementById('cropLbClose'),
       bp=document.getElementById('cropLbPrev'),
       bn=document.getElementById('cropLbNext'),
-      bf=document.getElementById('cropLbFlag'),
       bc=document.getElementById('cropLbCopy');
   var list=[],at=-1,prevOv='';
-  var ON='flagged as false positive — click to undo',
-      OFF='flag as false positive (not a dog)';
-  function sync(){
-    if(!bf)return;
-    var c=(at>=0&&list[at])||null;
-    if(!c){bf.style.display='none';return}
-    bf.style.display='';
-    var on=!!(cfg.flagged&&cfg.flagged(c.name));
-    bf.className='rbtn lbflag'+(on?' on':'');
-    bf.textContent=on?'⚑ flagged — undo':'⚑ not a dog';
-    bf.title=on?ON:OFF;
-  }
   function show(i){
     if(!list.length)return;
     at=(i%list.length+list.length)%list.length;   /* wraps both ways */
@@ -12429,7 +12648,6 @@ function makeLightbox(cfg){
     var many=list.length>1?'':'none';   /* one crop: nothing to step to */
     if(bp)bp.style.display=many;
     if(bn)bn.style.display=many;
-    sync();
   }
   /* The caller hands over a SNAPSHOT: a refresh on the host page can neither
      close the overlay nor swap the picture out from under the arrow keys. */
@@ -12458,11 +12676,6 @@ function makeLightbox(cfg){
   });
   if(bp)bp.addEventListener('click',function(){step(-1)});
   if(bn)bn.addEventListener('click',function(){step(1)});
-  if(bf)bf.addEventListener('click',function(e){
-    if(e.stopPropagation)e.stopPropagation();
-    var c=(at>=0&&list[at])||null;
-    if(c&&cfg.toggle)cfg.toggle(c.name);
-  });
   document.addEventListener('keydown',function(e){
     if(!lb||lb.hidden)return;              /* keys are ours only when open */
     if(e.key==='Escape')close();
@@ -12471,7 +12684,7 @@ function makeLightbox(cfg){
     else return;
     e.preventDefault();
   });
-  return {open:open,close:close,step:step,sync:sync,
+  return {open:open,close:close,step:step,
           list:function(){return list},at:function(){return at}};
 }"""
 
@@ -13195,22 +13408,11 @@ cursor:pointer;transition:color .12s,background .12s}
 .dcrop.cx{cursor:pointer;transition:border-color .12s,transform .12s}
 .dcrop.cx:hover{border-color:var(--acc);transform:translateY(-1px)}
 .dcrop.cx:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
-/* false-positive flag: TOP-LEFT, opposite the confidence badge bottom-right.
-   Hidden until hover/focus on a pointer device; always shown where there is
-   no hover to reveal it (touch). */
-.dcrop .fx{position:absolute;left:4px;top:4px;z-index:1;width:19px;height:19px;padding:0;
-  display:flex;align-items:center;justify-content:center;cursor:pointer;
-  background:rgba(19,21,26,.78);border:1px solid rgba(130,140,150,.28);color:var(--mut);
-  border-radius:6px;font-size:11px;font-weight:700;line-height:1;font-family:inherit;
-  opacity:0;transition:opacity .12s,background .12s,color .12s,border-color .12s}
-.dcrop:hover .fx,.dcrop .fx:focus-visible{opacity:1}
-.dcrop .fx:hover{background:rgba(216,116,58,.85);border-color:#d8743a;color:#fff}
-@media(hover:none){.dcrop .fx{opacity:1}}
-/* flagged: persistent red-family state, kept through refresh and Shuffle */
-.dcrop.fl{border-color:#d8743a}
-.dcrop.fl img{opacity:.45}
-.dcrop.fl .fx{opacity:1;background:#d8743a;border-color:#d8743a;color:#15100a}
-.dflag{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;margin-top:8px}
+/* NO per-tile flag here. This grid is a random sample of the last minute --
+   a glance at what the sweep is finding, not a judging surface. Flagging
+   lives on /audit/review, which draws a stable page, counts what was judged
+   and can be paged back through; a one-click flag on a tile that vanishes in
+   60 seconds could not be checked, corrected or found again. */
 __LB_CSS__
 .derr{font-size:12px;color:var(--mut);margin-top:14px}
 .derr.ok{color:var(--green)}
@@ -13553,6 +13755,15 @@ color:var(--acc);white-space:nowrap}
 .tbest{white-space:nowrap}
 .tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .thist{min-width:640px}
+/* the one cell in this table that leaves the page: it says where it goes */
+.tcmtc{white-space:nowrap}
+.tcmt{display:inline-flex;align-items:center;gap:3px;font-size:11px;
+color:var(--acc);text-decoration:none;border:1px solid rgba(232,166,69,.28);
+border-radius:6px;padding:2px 7px}
+.tcmt:hover{background:rgba(232,166,69,.10)}
+.tcmt:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.tcmt.none{color:var(--dim);border-color:transparent;padding:2px 0}
+.tcmt .ext{font-size:9px;opacity:.8}
 .tpage{display:flex;align-items:center;gap:10px;justify-content:flex-end;
 margin-top:11px}
 /* a bare display:flex beats the UA's [hidden]{display:none}, so pager.hidden
@@ -13736,7 +13947,6 @@ __LLMNAV__
       <a href="/audit/review" class="rbtn nav rev" title="flag false positives in bulk — 50 or 100 per page">⚑ Review all</a>
     </div>
     <div class="dcrops" id="dcropGrid"></div>
-    <div class="dflag" id="dcropFlagged"></div>
   </div>
 
   <!-- The gate, in the same shapes. Not every card carries over: the gate has
@@ -14354,7 +14564,12 @@ function initTracker(){
   [].forEach.call(document.querySelectorAll('.thist tbody tr'),function(tr){
     var key=tr.getAttribute('data-key');
     if(!key) return;
-    tr.addEventListener('click',function(){ openRun(key,tr); });
+    /* the Comet cell is a real link. Without this the click both opened
+       Comet in a tab and expanded the run below, on a page the reader was
+       leaving anyway. */
+    tr.addEventListener('click',function(e){
+      if(e.target&&e.target.closest&&e.target.closest('a')) return;
+      openRun(key,tr); });
     tr.addEventListener('keydown',function(e){
       if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openRun(key,tr); }
     });
@@ -16038,8 +16253,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
   var fold=document.getElementById('f-detect'),
       grid=document.getElementById('dcropGrid'),
       sub=document.getElementById('dcropSub'),
-      btn=document.getElementById('dcropShuffle'),
-      fEl=document.getElementById('dcropFlagged');
+      btn=document.getElementById('dcropShuffle');
   if(!fold||!grid)return;
   var POLL=60000,timer=null,inflight=false;
   var ROWS=2,MINW=110,GAP=8;   /* must match .dcrops minmax()/gap in the CSS */
@@ -16049,14 +16263,6 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
   var shown=[];
   /* `pool` is everything the API returned; the grid paints a fitted slice */
   var pool=[],poolN=0,rz=null;
-  /* false-positive flags. The server copies the pixels out of the rolling
-     window at flag time, so this Set is only the view state; it is re-seeded
-     from the payload on every refresh so a flag survives Shuffle and reload.
-     `pending` holds names whose POST is still in flight, so a refresh landing
-     mid-request cannot revert the tile the user just clicked. */
-  var flagged=new Set(),pending=new Set(),flagTotal=0;
-  var FLAG_ON='flagged as false positive \\u2014 click to undo',
-      FLAG_OFF='flag as false positive (not a dog)';
   /* esc() leaves quotes alone; these values land in a title="" attribute */
   function att(s){return esc(s).replace(/"/g,'&quot;')}
   function cap(c){
@@ -16085,114 +16291,52 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     var cs=pool.slice(0,fit(pool.length));
     shown=cs;
     if(sub)sub.textContent='random sample from the last minute \\u00b7 '+poolN+' found';
-    flagLine();
     if(!cs.length){
       grid.innerHTML='<div class="dnone" style="grid-column:1/-1">no detections in the last minute</div>';
       return;
     }
     grid.innerHTML=cs.map(function(c,i){
       var conf=(+c.conf||0).toFixed(2),age=Math.max(0,Math.round(+c.age_s||0)),
-          hit=!!c.has_full,   /* no full frame on disk -> not clickable */
-          fl=flagged.has(c.name);
-      return '<div class="dcrop'+(hit?' cx':'')+(fl?' fl':'')+'"'+
+          hit=!!c.has_full;   /* no full frame on disk -> not clickable */
+      return '<div class="dcrop'+(hit?' cx':'')+'"'+
         (hit?' data-i="'+i+'" role="button" tabindex="0"':'')+
         ' title="image_id '+att(c.image_id)+' \\u00b7 conf '+conf+' \\u00b7 '+age+
-        's ago'+(fl?' \\u2014 flagged':hit?' \\u2014 click for the full frame':'')+'">'+
-        '<button type="button" class="fx" data-fx="'+att(c.name)+'" title="'+
-        (fl?FLAG_ON:FLAG_OFF)+'" aria-pressed="'+(fl?'true':'false')+
-        '">\\u2691</button>'+
+        's ago'+(hit?' \\u2014 click for the full frame':'')+'">'+
         '<img loading="lazy" alt="detection crop" src="/recent_crops/'+
         encodeURIComponent(''+c.name)+'"><span class="cf">'+conf+'</span></div>';
     }).join('');
   }
-  function flagLine(){
-    if(fEl)fEl.textContent=flagTotal>0?flagTotal+' flagged as false positive':'';
-  }
-  /* Optimistic: the tile flips at once and rolls back if the POST fails. The
-     copy out of the rolling window happens server-side before it answers. */
-  function toggleFlag(name){
-    if(!name)return;
-    var on=!flagged.has(name);
-    function put(v){
-      if(v)flagged.add(name);else flagged['delete'](name);
-      flagTotal=Math.max(0,flagTotal+(v?1:-1));
-      paint();syncLbFlag();
-    }
-    put(on);
-    pending.add(name);
-    function settle(){pending['delete'](name)}
-    fetch('/api/detect/flag',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:name,label:'false_positive',undo:!on})})
-      .then(function(r){return r.json()})
-      .then(function(j){
-        settle();
-        if(!j||!j.ok){put(!on);return;}          /* server refused -> revert */
-        if(j.flagged_total!=null){flagTotal=j.flagged_total;paint();syncLbFlag();}
-      })
-      .catch(function(){settle();put(!on)});
-  }
   function renderCrops(j){
     pool=(j&&j.crops)||[];poolN=(j&&j.total_last_min)||0;
-    /* the server is authoritative, except for flags still in flight */
-    if(j&&j.flagged){
-      var s=new Set(j.flagged);
-      pending.forEach(function(nm){
-        if(flagged.has(nm))s.add(nm);else s['delete'](nm);
-      });
-      flagged=s;
-    }
-    if(j&&j.flagged_total!=null)flagTotal=j.flagged_total;
-    paint();syncLbFlag();
+    paint();
   }
   /* a resize changes the column count, so the whole-row slice changes with it */
   window.addEventListener('resize',function(){
     if(rz)clearTimeout(rz);
     rz=setTimeout(paint,150);
   });
-  /* the shared component (see makeLightbox) — identical overlay on /review */
-  var LB=makeLightbox({flagged:function(n){return flagged.has(n)},
-                       toggle:function(n){toggleFlag(n)}});
+  /* the shared component (see makeLightbox): the full frame, and nothing to
+     do to it — judging is /audit/review's job */
+  var LB=makeLightbox();
   function openLb(i){if(shown.length)LB.open(shown,i)}
   function closeLb(){LB.close()}
   function step(d){LB.step(d)}
-  function syncLbFlag(){LB.sync()}
   function hitOf(e){
     var t=e&&e.target;
     return t&&t.closest?t.closest('.dcrop.cx'):null;
   }
-  function fxOf(e){
-    var t=e&&e.target;
-    return t&&t.closest?t.closest('.fx'):null;
-  }
-  /* The flag button sits INSIDE the clickable tile, so it must swallow the event or
-     flagging would also open the lightbox. */
   function onGridClick(e){
-    var fx=fxOf(e);
-    if(fx){
-      if(e.stopPropagation)e.stopPropagation();
-      if(e.preventDefault)e.preventDefault();
-      toggleFlag(fx.getAttribute('data-fx'));
-      return;
-    }
     var t=hitOf(e);
     if(t)openLb(+t.getAttribute('data-i')||0);
   }
   grid.addEventListener('click',onGridClick);
   grid.addEventListener('keydown',function(e){
     if(e.key!=='Enter'&&e.key!==' ')return;
-    var fx=fxOf(e);
-    if(fx){
-      e.preventDefault();
-      if(e.stopPropagation)e.stopPropagation();
-      toggleFlag(fx.getAttribute('data-fx'));
-      return;
-    }
     var t=hitOf(e);
     if(t){e.preventDefault();openLb(+t.getAttribute('data-i')||0)}
   });
   /* NO lightbox listeners here: makeLightbox() binds the scrim, close, prev,
-     next, flag and the Escape/arrow keys itself. Binding them a second time
+     next and the Escape/arrow keys itself. Binding them a second time
      made every ‹/› click and every arrow press fire step() twice, so the
      overlay skipped a crop each time. */
   function load(){
