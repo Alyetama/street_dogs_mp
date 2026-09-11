@@ -997,6 +997,63 @@ def status(args):
         print(f'live: {BEAT_FILE.read_text()}')
 
 
+def backup_name(path):
+    """Where the original is parked while its replacement is checked."""
+    return Path(path).with_name(Path(path).name + '.premerge')
+
+
+def recover_backups(paths):
+    """Put back anything a previous run died in the middle of.
+
+    A .premerge beside a file means that file was mid-swap. The backup is the
+    original, so restoring it is always the safe direction: at worst the merge
+    is redone, and merge is idempotent because a file that already has all
+    three columns is skipped.
+    """
+    restored = 0
+    for path in paths:
+        bak = backup_name(path)
+        if not bak.exists():
+            continue
+        os.replace(bak, path)
+        restored += 1
+        print(f'  recovered {Path(path).name} from an interrupted merge')
+    return restored
+
+
+def verify_merged(con, bak, new, cols):
+    """Is `new` the original plus three columns, and nothing else changed?
+
+    Row count, column order, and -- the check that matters -- every value in
+    every ORIGINAL column, compared both directions. A row-count match alone
+    would not notice a join that silently reordered or rewrote a column.
+    Returns None when it is sound, or the reason it is not.
+    """
+    got = [
+        c[0] for c in con.execute("select * from read_parquet(?) limit 0",
+                                  [str(new)]).description
+    ]
+    if got != list(cols) + list(ADDED):
+        return f'columns are {got}, expected {list(cols) + list(ADDED)}'
+    a = con.execute("select count(*) from read_parquet(?)",
+                    [str(bak)]).fetchone()[0]
+    b = con.execute("select count(*) from read_parquet(?)",
+                    [str(new)]).fetchone()[0]
+    if a != b:
+        return f'{a:,} rows became {b:,}'
+    sel = ', '.join(f'"{c}"' for c in cols)
+    drift = con.execute(
+        f'select (select count(*) from ((select {sel} from read_parquet(?)) '
+        f'   except (select {sel} from read_parquet(?)))) as lost, '
+        f'       (select count(*) from ((select {sel} from read_parquet(?)) '
+        f'   except (select {sel} from read_parquet(?)))) as gained',
+        [str(bak), str(new), str(new), str(bak)]).fetchone()
+    if drift[0] or drift[1]:
+        return (f'{drift[0]} original row(s) missing and {drift[1]} altered '
+                'in the rewrite')
+    return None
+
+
 def _sql_path(s):
     """A path as a SQL string literal.
 
@@ -1016,6 +1073,23 @@ def merge(args):
     A file counts as done only when all three are present; one that has some
     but not all is refused, because merge touches a file once and skipping it
     would strand the missing columns forever.
+
+    NOTHING IS OVERWRITTEN UNTIL ITS REPLACEMENT HAS BEEN CHECKED. Per file:
+
+        os.link(path, path.premerge)   a hardlink -- instant, no extra space,
+                                       a second name for the original inode
+        write the rewrite to a dot-name
+        verify it against the backup   columns, order, row count, and every
+                                       value in every ORIGINAL column, both
+                                       directions
+        os.replace(tmp, path)          atomic
+        verify the file now on disk    the one a reader will actually open
+        unlink the backup              only now is the original let go
+
+    Any failure puts the original back with os.replace(bak, path). A run
+    killed between the swap and the unlink leaves a .premerge behind, and the
+    next run restores from it before doing anything else -- restoring is
+    always the safe direction, since merge skips a file that is already done.
 
     Opt-in, and the slow path by design: it rewrites every source file. Each
     file is written to a dot-name and os.replace()d, so a crash leaves the
@@ -1058,6 +1132,12 @@ def merge(args):
     paths = _catalog_paths(args.kind)
     shards = str(OUT_DIR / 'camera-*.parquet')
 
+    # A .premerge left behind means a previous run was killed mid-swap. Put
+    # those originals back before deciding what still needs merging.
+    n_rec = recover_backups(paths)
+    if n_rec:
+        print(f'recovered {n_rec} file(s) from an interrupted merge\n')
+
     print(f'{len(paths):,} {args.kind} files to rewrite' +
           ('  (DRY RUN -- nothing is written)' if args.dry_run else ''))
     if not args.dry_run:
@@ -1090,7 +1170,15 @@ def merge(args):
             changed += 1
             continue
         tmp = Path(path).with_name('.' + Path(path).name + '.merge')
+        bak = backup_name(path)
+        swapped = False
         try:
+            # A HARDLINK, not a copy: a second name for the same inode, made
+            # instantly and costing no space. os.replace then repoints `path`
+            # at the rewrite while `bak` still names the untouched original,
+            # so the original survives until it has been checked and is one
+            # rename away from coming back.
+            os.link(path, bak)
             # The harvest is ZSTD; DuckDB's COPY default is SNAPPY, which
             # would inflate these files ~1.9x across terabytes.
             con.execute(
@@ -1099,19 +1187,33 @@ def merge(args):
                 "      left join read_parquet(?) c using (image_id)) "
                 f"to {_sql_path(tmp)} (format parquet, compression zstd)",
                 [path, shards])
-            after = con.execute("select count(*) from read_parquet(?)",
-                                [str(tmp)]).fetchone()[0]
-            if after != before:
+            why = verify_merged(con, bak, tmp, cols)
+            if why:
                 refused += 1
-                print(f'  REFUSED {Path(path).name}: {before:,} rows -> '
-                      f'{after:,} (the join changed the row count; duplicate '
-                      'image_ids in the store?)')
+                print(f'  REFUSED {Path(path).name}: {why} -- original kept')
                 continue
             os.replace(tmp, path)
+            swapped = True
+            # Read the file that is actually on disk now, not the temp it came
+            # from: the check is worth nothing if it never looks at what a
+            # reader will open.
+            why = verify_merged(con, bak, path, cols)
+            if why:
+                os.replace(bak, path)  # put the original back
+                refused += 1
+                print(f'  REVERTED {Path(path).name}: {why}')
+                continue
             changed += 1
+        except Exception as e:
+            if swapped and bak.exists():
+                os.replace(bak, path)
+                print(f'  REVERTED {Path(path).name}: {type(e).__name__}: {e}')
+            raise
         finally:
             if tmp.exists():
                 tmp.unlink()  # never leave a dot-file the catalog would index
+            if bak.exists():
+                bak.unlink()  # verified: the original is no longer needed
         if i % 500 == 0:
             print(f'  {i:,}/{len(paths):,} ...', flush=True)
     print(f'\nrewritten: {changed:,}   already had the column: {skipped:,}   '
