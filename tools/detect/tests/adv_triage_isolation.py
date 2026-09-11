@@ -808,6 +808,11 @@ check('t5f-b every exported label is its own verdict', not ex_bad,
 # be classified before this passes.
 BULK_DIRS = ('gate',            # the gate's own shards, one model verdict each
              'leash',           # the same for the leash stage
+             # camera_parameters / altitude / computed_altitude, fetched from
+             # Mapillary per image_id. Metadata the harvest failed to ask for,
+             # not a verdict about anything: no model looked at a pixel to
+             # produce it and no human chose it.
+             'camera',
              'detect',          # the parquet predictions store + its status
              'engines',         # tensorrt engines and their sums
              'geo',             # natural-earth shapefiles
@@ -836,6 +841,11 @@ MODEL_WORKING = (
     # names the model that produced it in its 'source' field, which is what
     # keeps them out of HUMAN_STORES.
     'dashboard/map_layer_dogs.json', 'dashboard/map_layer_leash.json',
+    # the explore page's rollup, built by explore_index.py from the same two
+    # shard stores. Thresholded counts per country plus the run ids that
+    # produced them ('models': gate, leash) -- a summary of model output, with
+    # no reviewer's verdict anywhere in it.
+    'dashboard/explore.json',
     'dashboard/regions_status.json',
     'dashboard/sequence_cache.json', 'dashboard/triage_status.json',
     'dashboard/world.json', 'dashboard/history.duckdb',
