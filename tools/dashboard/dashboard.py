@@ -5489,6 +5489,176 @@ def mistake_bytes(key, i):
         return None
 
 
+
+# The frame a mistake sits in, whole, for the viewer the tiles open. The tile
+# is a crop around the box, which answers "what did it see" and hides the two
+# things a diagnosis needs: where in the street the box is, and what the
+# labels say is really there. The viewer draws in the frame's ORIGINAL pixels
+# (an SVG viewBox), so the size cap below never has to be undone by anyone.
+FRAME_MAX = 4096
+
+
+def _label_path(image_path):
+    """YOLO's convention: the LAST /images/ becomes /labels/, suffix .txt.
+
+    The last one, because a dataset can itself live under a directory called
+    images, and replacing the first would point at a file that is not there.
+    """
+    head, sep, tail = str(image_path).rpartition(os.sep + 'images' + os.sep)
+    if not sep:
+        return None
+    return os.path.splitext(head + os.sep + 'labels' + os.sep + tail)[0] + '.txt'
+
+
+def _labelled_boxes(image_path, W, H):
+    """Every labelled box in a frame, in pixels. [] when there are none."""
+    lp = _label_path(image_path)
+    out = []
+    try:
+        with open(lp) as fh:
+            for line in fh:
+                v = line.split()
+                if len(v) < 5:
+                    continue
+                cx, cy, bw, bh = (float(x) for x in v[1:5])
+                out.append([round((cx - bw / 2) * W, 1),
+                            round((cy - bh / 2) * H, 1),
+                            round((cx + bw / 2) * W, 1),
+                            round((cy + bh / 2) * H, 1)])
+    except (OSError, TypeError, ValueError):
+        return []
+    return out
+
+
+def _box_iou(a, b):
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1])
+             - inter)
+    return inter / union if union > 0 else 0.0
+
+
+def _frame_note(item, boxes):
+    """One line on what KIND of wrong this box is, read off the frame.
+
+    run_mistakes.py matches at IoU 0.5, greedily by confidence, and records
+    only what did not match -- so the geometry of the wrong box against the
+    labelled ones separates three failures that look identical as a crop:
+
+      invented, IoU >= 0.5 with a labelled box   that box was already taken by
+                                                 a surer one: a duplicate
+      invented, 0 < IoU < 0.5                    on a dog, but too loose to
+                                                 count: a misplaced box
+      invented, touching nothing                 nothing labelled there at all
+    """
+    b = item.get('box')
+    if not b or len(b) != 4:
+        return ''
+
+    def iou(v):
+        # TRUNCATED, not rounded: 0.4995 rounds to "0.50", which beside "too
+        # loose to count" reads as a contradiction. Cut to two places, a value
+        # under the 0.5 line always prints under it.
+        return f'{int(v * 100) / 100:.2f}'
+
+    if item.get('kind') == 'invented':
+        best = max((_box_iou(b, x['box']) for x in boxes
+                    if x['kind'] in ('found', 'label', 'missed')), default=0.0)
+        if best >= 0.5:
+            return (f'a second box on a dog it already found (IoU {iou(best)})'
+                    ' — a duplicate that should have been suppressed')
+        if best > 0:
+            return (f'on a labelled dog, but at IoU {iou(best)} — too loose '
+                    'to count, so a misplaced box rather than an invented one')
+        return ('no labelled dog anywhere under it — either it saw '
+                'something that is not a dog, or the label missed one')
+    near = max((_box_iou(b, x['box']) for x in boxes
+                if x['kind'] == 'invented'), default=0.0)
+    if near > 0:
+        return (f'it did put a box here, at IoU {iou(near)} — too loose to '
+                'count as finding it')
+    touch = max((_box_iou(b, x['box']) for x in boxes
+                 if x['kind'] == 'found'), default=0.0)
+    if touch > 0:
+        return ('it sits against a dog it did find — one box may be '
+                'covering both')
+    return 'it drew nothing on this dog'
+
+
+def mistake_frame(key, i):
+    """Everything the viewer draws over one mistake's frame, or None.
+
+    Every labelled box in the frame -- split into the ones the model found
+    and the ones it missed -- and every other mistake it made in the same
+    frame, so a wrong box is always seen beside the right one. Resolved from
+    the run's own cache by index, exactly as mistake_item() does: nothing the
+    client sends is ever joined onto a path.
+    """
+    path, item = mistake_item(key, i)
+    if not path:
+        return None
+    doc = mistakes_for(key) or {}
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            W, H = im.size
+    except Exception:
+        return None
+    i = int(i)
+    detect = doc.get('task') == 'detect'
+    same = [(j, it) for j, it in enumerate(doc.get('items') or [])
+            if it.get('file') == item.get('file')]
+    boxes = []
+    if detect:
+        missed = [it['box'] for _, it in same
+                  if it.get('kind') == 'missed' and it.get('box')]
+        # A cache that kept only the surest N mistakes may have dropped some
+        # of this frame's misses, so a labelled box it does not list as
+        # missed is only KNOWN to be found when nothing was cut.
+        cut = bool(doc.get('truncated'))
+        for g in _labelled_boxes(path, W, H):
+            if any(_box_iou(g, m) > 0.9 for m in missed):
+                continue          # a missed box IS a labelled one; draw it once
+            boxes.append({'kind': 'label' if cut else 'found', 'box': g})
+        for j, it in same:
+            b = it.get('box')
+            if b and len(b) == 4:
+                boxes.append({'kind': it.get('kind'), 'box': b,
+                              'p': it.get('p'), 'i': j, 'sel': j == i})
+    sel = {k: item.get(k) for k in ('kind', 'p', 'cls', 'box', 'true', 'pred')}
+    return {'w': W, 'h': H, 'task': doc.get('task'),
+            'name': os.path.basename(path), 'sel': sel, 'boxes': boxes,
+            'note': _frame_note(item, boxes) if detect else '',
+            'others': max(0, len(same) - 1)}
+
+
+def mistake_frame_bytes(key, i):
+    """The whole frame a mistake came from, as JPEG, capped at FRAME_MAX.
+
+    Served as-is when it already fits. Re-encoded when it does not, and when
+    it carries an EXIF rotation: the boxes are in the file's raw pixels, and a
+    browser that honoured the rotation would draw every box in the wrong place.
+    """
+    path, _ = mistake_item(key, i)
+    if not path:
+        return None
+    try:
+        from PIL import Image
+        import io
+        with Image.open(path) as im:
+            turned = im.getexif().get(0x0112, 1) not in (0, 1)
+            if im.format == 'JPEG' and max(im.size) <= FRAME_MAX and not turned:
+                with open(path, 'rb') as fh:
+                    return fh.read()
+            im = im.convert('RGB')
+            im.thumbnail((FRAME_MAX, FRAME_MAX))
+            buf = io.BytesIO()
+            im.save(buf, 'JPEG', quality=88)
+            return buf.getvalue()
+    except Exception:
+        return None
+
 def render_mistakes(r):
     """The crops a run got wrong, grouped by which way it went wrong."""
     key = run_key(r)
@@ -5555,6 +5725,9 @@ def render_mistakes(r):
             + _t(ghint(k))
             + f'>{gname(k)} <em>{len(groups[k]):,}</em></button>')
 
+    open_hint = ('see the whole frame: where it put the box, and what the '
+                 'labels say is really there' if detect else
+                 'see this crop full size')
     tiles = []
     for k in order:
         for i, it in groups[k]:
@@ -5591,11 +5764,19 @@ def render_mistakes(r):
                       + _t('the DATASET is wrong here, not the model \u2014 '
                            'flag it and the next build leaves it out')
                       + '>label is wrong</button>')
+            # The picture is a BUTTON: it opens the whole frame with the box
+            # drawn where the model put it, beside what the labels say is
+            # there. A real button rather than a clickable <img>, so it can be
+            # reached and pressed from the keyboard.
             tiles.append(
                 f'<figure class="wrtile{" flagged" if fl and " on" in fl else ""}" '
-                f'data-g="{esc_html(str(k[0]))}|{esc_html(str(k[1]))}">'
-                f'<img loading="lazy" alt="what the model got wrong" '
+                f'data-g="{esc_html(str(k[0]))}|{esc_html(str(k[1]))}" '
+                f'data-i="{i}">'
+                f'<button type="button" class="wropen"'
+                + _t(open_hint)
+                + f'><img loading="lazy" alt="what the model got wrong" '
                 f'src="/api/training/wrong?key={quote(key)}&amp;i={i}">'
+                f'</button>'
                 f'<figcaption>{dir_html}'
                 f'<span class="wrp">{sure}</span>{fl}'
                 f'</figcaption></figure>')
@@ -10865,6 +11046,30 @@ class BoardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split('?', 1)[0] == '/api/training/wrongframe':
+            q = parse_qs(urlparse(self.path).query)
+            doc = mistake_frame(q.get('key', [''])[0], q.get('i', [''])[0])
+            if doc is None:
+                self.send_error(404)
+                return
+            self._json(doc)
+            return
+        if self.path.split('?', 1)[0] == '/api/training/wrongframe.jpg':
+            q = parse_qs(urlparse(self.path).query)
+            body = mistake_frame_bytes(q.get('key', [''])[0],
+                                       q.get('i', [''])[0])
+            if not body:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(body)))
+            # immutable, as the crop is: a val frame does not change under a
+            # finished run
+            self.send_header('Cache-Control', 'public, max-age=86400')
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.split('?', 1)[0] == '/api/training/diff':
             try:
                 q = parse_qs(urlparse(self.path).query)
@@ -13555,6 +13760,62 @@ line-height:1.5}
 /* the matrix's own off-diagonal cells jump here */
 .cxc.err{cursor:pointer}
 .cxc.err:hover{outline:1px solid rgba(216,116,58,.55);outline-offset:-1px}
+/* the tile's picture opens the whole frame */
+.wropen{display:block;width:100%;padding:0;margin:0;border:0;background:none;
+cursor:zoom-in}
+.wropen:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+/* ── the frame viewer: where in the street the wrong box is ──
+   Drawn in the frame's own pixels -- an SVG whose viewBox IS the frame -- so
+   a box from the scoring cache lands exactly where the model put it, and
+   zooming is a change of viewBox rather than arithmetic on every box. */
+/* opaque: at .94 the page's own header read through the title bar */
+.wfv{position:fixed;inset:0;z-index:70;background:#0b0d10;
+display:flex;flex-direction:column;gap:10px;padding:14px 18px 12px}
+.wfv[hidden]{display:none}
+.wfvbar{display:flex;align-items:flex-start;justify-content:space-between;
+gap:18px}
+.wfvhead{min-width:0}
+.wfvtitle{font:600 13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+color:var(--tx);font-variant-numeric:tabular-nums;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.wfvtitle .wfvdim{color:var(--dim);font-weight:400}
+.wfvnote{margin-top:3px;font-size:12.5px;line-height:1.45;color:var(--mut);
+max-width:86ch}
+.wfvctl{display:flex;align-items:center;gap:6px;flex:none}
+.wfvctl button{appearance:none;background:var(--panel2);color:var(--tx);
+border:1px solid var(--bd);border-radius:7px;padding:4px 11px;font-size:12px;
+line-height:1.4;cursor:pointer}
+.wfvctl button:hover{border-color:var(--dim)}
+.wfvctl button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.wfvctl button:disabled{opacity:.4;cursor:default}
+.wfvz[aria-pressed="true"]{color:var(--acc);border-color:rgba(232,166,69,.5)}
+.wfvat{min-width:70px;text-align:center;color:var(--mut);
+font:400 12px ui-monospace,SFMono-Regular,Menlo,monospace;
+font-variant-numeric:tabular-nums}
+.wfvstage{position:relative;flex:1;min-height:0}
+.wfvsvg{position:absolute;inset:0;width:100%;height:100%;display:block;
+cursor:zoom-out}
+.wfvsvg.wide{cursor:zoom-in}
+.wfvmsg{position:absolute;inset:0;display:flex;align-items:center;
+justify-content:center;color:var(--mut);font-size:13px;pointer-events:none}
+.wfvbox rect{fill:none;vector-effect:non-scaling-stroke}
+/* a dark halo under every line, so a box stays visible on a white wall */
+.wfvbox .halo{stroke:#000;stroke-opacity:.6;stroke-width:5}
+.wfvbox .inv{stroke:var(--red);stroke-width:2}
+.wfvbox .mis{stroke:#dfe3e8;stroke-width:2;stroke-dasharray:7 5}
+.wfvbox .fnd{stroke:var(--green);stroke-width:1.5}
+.wfvbox .sel{stroke-width:3.5}
+.wfvbox .halo.sel{stroke-width:7.5}
+.wfvkey{display:flex;gap:18px;flex-wrap:wrap;align-items:center;
+color:var(--dim);font:400 11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.wfvkey i{display:inline-block;width:17px;height:10px;margin-right:6px;
+vertical-align:-1px;border:2px solid}
+.wfvkey .inv{border-color:var(--red)}
+.wfvkey .mis{border-color:#dfe3e8;border-style:dashed}
+.wfvkey .fnd{border-color:var(--green);border-width:1.5px}
+.wfvhint{margin-left:auto}
+.wfv.plain .wfvk{display:none}
+@media(max-width:720px){.wfvbar{flex-direction:column}.wfvhint{display:none}}
 /* ── confusion matrix ── */
 .cxwrap{margin:18px 0 2px}
 .cxhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
@@ -14399,6 +14660,232 @@ function initTracker(){
   var det=document.getElementById('trkdet');
   /* Controls that appear inside a swapped-in detail region. Called after every
      swap, because innerHTML threw the old nodes and their listeners away. */
+  /* ── the frame viewer ──────────────────────────────────────────────────
+     A tile is a crop around the box. This is the street it came out of, with
+     the box drawn where the model put it and every labelled box beside it --
+     which is what separates a duplicate from a misplaced box from a dog that
+     is not there. Built once and kept on <body>, because the detail region it
+     is opened from is replaced wholesale on every refresh. The list it steps
+     through is a SNAPSHOT of the tiles under the chip that was on when it
+     opened, so a refresh behind it can neither close it nor reorder it. */
+  var wfv=(function(){
+    var NS='http://www.w3.org/2000/svg';
+    var el,svg,img,gb,title,note,at,bz,bp,bn,bx,msg,kf;
+    var key='',list=[],pos=0,whole=false,cur=null,seq=0,back=null,ov='';
+    function mk(tag,cls,txt){
+      var n=document.createElement(tag);
+      if(cls)n.className=cls;
+      if(txt!=null)n.textContent=txt;
+      return n;
+    }
+    function build(){
+      el=mk('div','wfv');
+      el.hidden=true;
+      el.setAttribute('role','dialog');
+      el.setAttribute('aria-modal','true');
+      el.setAttribute('aria-label','where the model put the box');
+      el.innerHTML='<div class="wfvbar"><div class="wfvhead">'+
+        '<div class="wfvtitle"></div><div class="wfvnote"></div></div>'+
+        '<div class="wfvctl">'+
+        '<button type="button" class="wfvz" aria-pressed="false" '+
+        'title="show the whole frame, or zoom back to the box (Z)">whole frame</button>'+
+        '<button type="button" class="wfvp" aria-label="previous mistake">&lsaquo;</button>'+
+        '<span class="wfvat"></span>'+
+        '<button type="button" class="wfvn" aria-label="next mistake">&rsaquo;</button>'+
+        '<button type="button" class="wfvx" aria-label="close">&times;</button>'+
+        '</div></div>'+
+        '<div class="wfvstage"><svg class="wfvsvg" xmlns="'+NS+'" '+
+        'preserveAspectRatio="xMidYMid meet" aria-hidden="true">'+
+        '<image class="wfvimg" preserveAspectRatio="none"></image>'+
+        '<g class="wfvbox"></g></svg><div class="wfvmsg"></div></div>'+
+        '<div class="wfvkey">'+
+        '<span class="wfvk"><i class="inv"></i>invented: it drew this, the labels have nothing here</span>'+
+        '<span class="wfvk"><i class="mis"></i>missed: labelled, never found</span>'+
+        '<span class="wfvk wfvfnd"><i class="fnd"></i>labelled, and found</span>'+
+        '<span class="wfvhint">&larr; &rarr; step &middot; Z zoom &middot; Esc close</span>'+
+        '</div>';
+      document.body.appendChild(el);
+      svg=el.querySelector('.wfvsvg');
+      img=el.querySelector('.wfvimg');
+      gb=el.querySelector('.wfvbox');
+      title=el.querySelector('.wfvtitle');
+      note=el.querySelector('.wfvnote');
+      at=el.querySelector('.wfvat');
+      bz=el.querySelector('.wfvz');
+      bp=el.querySelector('.wfvp');
+      bn=el.querySelector('.wfvn');
+      bx=el.querySelector('.wfvx');
+      msg=el.querySelector('.wfvmsg');
+      kf=el.querySelector('.wfvfnd');
+      bx.addEventListener('click',close);
+      bp.addEventListener('click',function(){step(-1)});
+      bn.addEventListener('click',function(){step(1)});
+      bz.addEventListener('click',toggle);
+      svg.addEventListener('click',toggle);
+      /* the dim margin around everything is the backdrop */
+      el.addEventListener('click',function(e){if(e.target===el)close()});
+      img.addEventListener('load',function(){if(cur)msg.textContent=''});
+      img.addEventListener('error',function(){
+        if(cur)msg.textContent='the frame is no longer on disk';
+      });
+      /* capture phase, so a key the viewer answers is not ALSO handled by
+         whatever the page behind it listens for */
+      document.addEventListener('keydown',function(e){
+        if(el.hidden)return;
+        var k=e.key;
+        if(k==='Escape')close();
+        else if(k==='ArrowLeft')step(-1);
+        else if(k==='ArrowRight')step(1);
+        else if(k==='z'||k==='Z')toggle();
+        else if(k==='Tab'){
+          /* keep focus inside the dialog: it is modal, and a tab that walks
+             off into the page behind it lands on controls you cannot see */
+          var bs=[bz,bp,bn,bx].filter(function(b){return !b.disabled});
+          var i=bs.indexOf(document.activeElement);
+          if(i<0||(e.shiftKey?i===0:i===bs.length-1)){
+            (e.shiftKey?bs[bs.length-1]:bs[0]).focus();
+          }else return;
+        }else return;
+        e.preventDefault();
+        e.stopPropagation();
+      },true);
+    }
+    function rect(b,cls){
+      var r=document.createElementNS(NS,'rect');
+      r.setAttribute('x',b[0]);
+      r.setAttribute('y',b[1]);
+      r.setAttribute('width',Math.max(1,b[2]-b[0]));
+      r.setAttribute('height',Math.max(1,b[3]-b[1]));
+      r.setAttribute('class',cls);
+      r.setAttribute('vector-effect','non-scaling-stroke');
+      return r;
+    }
+    function clear(){while(gb.firstChild)gb.removeChild(gb.firstChild)}
+    function draw(){
+      clear();
+      var cls={invented:'inv',missed:'mis',found:'fnd',label:'fnd'};
+      /* the selected box goes on last, so it is never under one it overlaps */
+      (cur.boxes||[]).slice().sort(function(a,b){
+        return (a.sel?1:0)-(b.sel?1:0);
+      }).forEach(function(x){
+        if(!x.box||x.box.length!==4)return;
+        var s=x.sel?' sel':'';
+        gb.appendChild(rect(x.box,'halo'+s));
+        gb.appendChild(rect(x.box,(cls[x.kind]||'fnd')+s));
+      });
+    }
+    /* Zoomed is the default: a 70px dog in a 1280px street is the thing you
+       came to look at. The window keeps the frame's own shape, is never less
+       than a third of the frame -- the surroundings are half the diagnosis --
+       and is clamped inside the picture. */
+    function view(){
+      if(!cur)return;
+      var W=cur.w,H=cur.h,b=cur.sel&&cur.sel.box,x=0,y=0,w=W,h=H;
+      var can=!!(b&&b.length===4);
+      if(!whole&&can){
+        var cx=(b[0]+b[2])/2,cy=(b[1]+b[3])/2;
+        w=Math.max((b[2]-b[0])*5,W*0.35);
+        h=Math.max((b[3]-b[1])*5,H*0.35);
+        if(w/h>W/H)h=w*H/W;else w=h*W/H;
+        w=Math.min(W,w);
+        h=Math.min(H,h);
+        x=Math.max(0,Math.min(W-w,cx-w/2));
+        y=Math.max(0,Math.min(H-h,cy-h/2));
+      }
+      svg.setAttribute('viewBox',[x,y,w,h].map(function(v){
+        return +v.toFixed(1);
+      }).join(' '));
+      var wide=whole||!can;
+      svg.classList.toggle('wide',wide);
+      bz.setAttribute('aria-pressed',wide?'true':'false');
+      bz.disabled=!can;
+    }
+    function toggle(){if(!cur)return;whole=!whole;view()}
+    function head(){
+      title.textContent='';
+      var s=cur.sel||{},det=cur.task==='detect';
+      if(det){
+        var inv=s.kind==='invented';
+        title.appendChild(mk('span',inv?'wrsaid':'wrwas',inv?'invented':'missed'));
+        title.appendChild(document.createTextNode(' a '+(s.cls||'box')+' · '+
+          (s.p!=null?Math.round(s.p*100)+'% sure':'never fired')));
+      }else{
+        title.appendChild(mk('span','wrwas',''+(s.true==null?'':s.true)));
+        title.appendChild(document.createTextNode(' → '));
+        title.appendChild(mk('span','wrsaid',''+(s.pred==null?'':s.pred)));
+        title.appendChild(document.createTextNode(' · '+
+          Math.round((s.p||0)*100)+'% sure'));
+      }
+      title.appendChild(mk('span','wfvdim',' · '+cur.name+
+        (cur.others?(' · '+cur.others+' more wrong in this frame'):'')));
+      note.textContent=cur.note||'';
+      /* found is only claimed when the cache kept every mistake; otherwise
+         the server says label, and so does the key */
+      kf.lastChild.textContent=(cur.boxes||[]).some(function(x){
+        return x.kind==='label';
+      })?'labelled':'labelled, and found';
+      el.classList.toggle('plain',!det);
+    }
+    function show(){
+      var i=list[pos],mine=++seq;
+      at.textContent=(pos+1)+' / '+list.length;
+      bp.disabled=bn.disabled=list.length<2;
+      cur=null;
+      title.textContent='';
+      note.textContent='';
+      clear();
+      img.removeAttribute('href');
+      msg.textContent='loading…';
+      var q='?key='+encodeURIComponent(key)+'&i='+i;
+      fetch('/api/training/wrongframe'+q)
+        .then(function(r){if(!r.ok)throw new Error(r.status);return r.json()})
+        .then(function(d){
+          if(mine!==seq)return;   /* stepped on again before this arrived */
+          cur=d;
+          img.setAttribute('width',d.w);
+          img.setAttribute('height',d.h);
+          img.setAttribute('href','/api/training/wrongframe.jpg'+q);
+          head();
+          draw();
+          view();
+        })
+        .catch(function(){
+          if(mine===seq)msg.textContent='could not load this frame';
+        });
+    }
+    function step(d){
+      if(list.length<2)return;
+      pos=(pos+d+list.length)%list.length;
+      show();
+    }
+    function open(k,l,p,from){
+      if(!el)build();
+      if(!l||!l.length)return;
+      key=k;
+      list=l.slice();
+      pos=Math.max(0,Math.min(list.length-1,p));
+      back=from||null;
+      if(el.hidden){
+        ov=document.body.style.overflow||'';
+        document.body.style.overflow='hidden';   /* freeze the page behind */
+      }
+      el.hidden=false;
+      show();
+      bx.focus();
+    }
+    function close(){
+      if(!el||el.hidden)return;
+      el.hidden=true;
+      seq++;                          /* a fetch still in flight is dropped */
+      cur=null;
+      img.removeAttribute('href');
+      document.body.style.overflow=ov;    /* restore, don't assume '' */
+      /* back to the tile it came from -- unless a refresh replaced it */
+      if(back&&document.contains(back))back.focus();
+      back=null;
+    }
+    return {open:open};
+  })();
   /* The chips and the matrix are two views of one fact, so they drive each
      other: picking a direction filters the grid, and clicking an off-diagonal
      cell of the matrix picks that direction. */
@@ -14478,6 +14965,16 @@ function initTracker(){
             }
             saytally(j.total);
           });
+      });
+    });
+    /* the picture opens its whole frame, and steps through the tiles under
+       the chip that is on -- the same set, in the same order, as the grid */
+    [].forEach.call(wrap.querySelectorAll('.wropen'),function(b){
+      b.addEventListener('click',function(){
+        var mine=tiles.filter(function(t){return !group||t.dataset.g===group}),
+            idx=mine.map(function(t){return +t.dataset.i}),
+            me=+b.closest('.wrtile').dataset.i;
+        wfv.open(wrap.dataset.run||'',idx,idx.indexOf(me),b);
       });
     });
     saytally(wrap.querySelectorAll('.wrflag.on').length);
