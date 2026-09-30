@@ -82,5 +82,7 @@
   "rfdetr_model": "rfdetr",
   "_rfdetr_model": "Which RF-DETR size that backend runs: 'rfdetr' (medium, the default), 'rfdetr-small', 'rfdetr-nano' or 'rfdetr-large'.",
   "dogbin_python": "/path/to/envs/dogdet/bin/python",
-  "_dogbin_python": "Interpreter for the dog-bin gate -- ultralytics, a third environment again. Two features want it: the dog-bin backend of the review page's guesser, which also needs a promoted checkpoint in data/best_models.json, and the Start/Stop controls for the gate and leash passes over the whole crop store. Unset, the backend is not offered and the run controls say which key to set. The weights are NOT config: the promoted checkpoint is already recorded in data/best_models.json, and a second place to write it down is a second place for it to go stale."
+  "_dogbin_python": "Interpreter for the dog-bin gate -- ultralytics, a third environment again. Two features want it: the dog-bin backend of the review page's guesser, which also needs a promoted checkpoint in data/best_models.json, and the Start/Stop controls for the gate and leash passes over the whole crop store. Unset, the backend is not offered and the run controls say which key to set. The weights are NOT config: the promoted checkpoint is already recorded in data/best_models.json, and a second place to write it down is a second place for it to go stale.",
+  "label_studio_dir": "/path/to/label-studio/intake",
+  "_label_studio_dir": "The Label Studio intake directory: new_images/, images_to_add.csv, uploaded_to_wasabi/ and create_new_tasks.ipynb. tools/detect/pick_label_frames.py reads it to leave out every frame already in Label Studio, and stages a new batch into its new_images/. Unset, that tool refuses to run rather than guess."
 }
