@@ -35,8 +35,10 @@ WHAT IS KEPT OUT, and why:
 
 WHAT IT WRITES. data/label_batches/<batch>/manifest.jsonl, one line per
 frame: why it was chosen, the seed dog it was chosen for, and where its jpg
-is; and summary.json, what was asked and what was excluded. A batch is never
-rebuilt over. `stage` copies the jpgs into the Label Studio intake directory,
+is; summary.json, what was asked and what was excluded; and seeds.json, where
+each frame's seed dog stood in its own frame, which the dashboard's Annotate
+page draws as a hint and never as a label. A batch is never rebuilt over.
+`seeds` writes seeds.json for a batch planned before it existed. `stage` copies the jpgs into the Label Studio intake directory,
 <label_studio_dir>/new_images, with each file's mtime set to its capture time
 -- which is what create_new_tasks.ipynb turns into image_timestamp. Nothing
 here uploads anything or touches Label Studio; those steps stay manual.
@@ -364,6 +366,12 @@ def plan(args):
     }
     with open(os.path.join(out, 'summary.json'), 'w') as fh:
         json.dump(summary, fh, indent=2)
+    try:
+        write_seeds(out, picks, args.p_dog)
+    except Exception as e:  # noqa: BLE001 - the batch stands without hints
+        print('no seeds.json (%s) -- the Annotate page will show no hints; '
+              'retry with: pick_label_frames.py seeds --batch %s' %
+              (e, args.batch))
     cells = len({p['cell'] for p in picks})
     print('picked %d of %s candidate frames (%s sequences), across %d cells' %
           (len(picks), f"{stats['candidate_frames']:,}",
@@ -373,6 +381,83 @@ def plan(args):
     print('wrote %s' % (out, ))
     print('next: python tools/detect/pick_label_frames.py stage --batch %s' %
           (args.batch, ))
+
+
+def seed_boxes(picks, p_dog):
+    """{picked image_id: {'seed_id', 'box', 'w', 'h'}} -- the seed dog each
+    frame was chosen for, as a box in the SEED frame's pixels with that
+    frame's size. The widest sure dog, the one select() measured."""
+    ids = sorted({str(p['seed_id']) for p in picks if p.get('seed_id')})
+    if not ids:
+        return {}
+    con = _duckdb().connect()
+    box = dict(
+        con.execute(
+            f"""select g.image_id::varchar,
+                      arg_max([d.x1, d.y1, d.x2, d.y2], d.x2 - d.x1)
+               from read_parquet('{GATE}') g
+               join read_parquet('{DET}', hive_partitioning = true) d
+                 on d.image_id::varchar = g.image_id::varchar
+                and d.det_idx = g.det_idx
+               where g.label = 'dog' and g.p_dog >= $p
+                 and g.image_id::varchar in (select unnest($i))
+               group by 1""", {
+                'p': float(p_dog),
+                'i': ids
+            }).fetchall())
+    size = {
+        r[0]: (r[1], r[2])
+        for r in con.execute(
+            f"""select image_id::varchar, any_value(orig_w),
+                      any_value(orig_h)
+               from read_parquet('{IMG}', hive_partitioning = true)
+               where image_id::varchar in (select unnest($i))
+               group by 1""", {
+                'i': ids
+            }).fetchall()
+    }
+    con.close()
+    out = {}
+    for p in picks:
+        sid = str(p.get('seed_id') or '')
+        b, wh = box.get(sid), size.get(sid)
+        if b and wh and wh[0] and wh[1]:
+            out[p['image_id']] = {
+                'seed_id': sid,
+                'box': [round(float(v), 1) for v in b],
+                'w': int(wh[0]),
+                'h': int(wh[1])
+            }
+    return out
+
+
+def write_seeds(out, picks, p_dog):
+    got = seed_boxes(picks, p_dog)
+    path = os.path.join(out, 'seeds.json')
+    with open(path + '.part', 'w') as fh:
+        json.dump(got, fh)
+    os.replace(path + '.part', path)
+    return len(got)
+
+
+def seeds(args):
+    """seeds.json for a batch that has none, or has a stale one. A hint, not
+    a label, so rewriting it changes nothing anybody decided."""
+    out = os.path.join(BATCHES, args.batch)
+    man = os.path.join(out, 'manifest.jsonl')
+    if not os.path.isfile(man):
+        raise SystemExit('no batch %s -- run plan first' % (args.batch, ))
+    with open(man) as fh:
+        picks = [json.loads(l) for l in fh if l.strip()]
+    p_dog = args.p_dog
+    if p_dog is None:
+        try:
+            with open(os.path.join(out, 'summary.json')) as fh:
+                p_dog = json.load(fh)['params']['p_dog']
+        except (OSError, ValueError, KeyError):
+            p_dog = 0.9
+    n = write_seeds(out, picks, p_dog)
+    print('wrote seeds.json: a hint for %d of %d frames' % (n, len(picks)))
 
 
 def stage(args):
@@ -454,6 +539,15 @@ def main(argv=None):
                    help='the dataset whose val sequences stay out '
                    '(default: the newest dogdet_*)')
     p.set_defaults(fn=plan)
+    h = sub.add_parser('seeds',
+                       help="write a batch's seeds.json (the Annotate "
+                       "page's hints)")
+    h.add_argument('--batch', required=True)
+    h.add_argument('--p-dog',
+                   type=float,
+                   default=None,
+                   help="default: the batch's own, from summary.json")
+    h.set_defaults(fn=seeds)
     s = sub.add_parser('stage', help='copy a batch into new_images/')
     s.add_argument('--batch', required=True)
     s.add_argument('--ls-dir')

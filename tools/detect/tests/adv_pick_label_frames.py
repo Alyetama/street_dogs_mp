@@ -21,6 +21,9 @@ the right answer is known exactly:
   k7  plan() refuses to rebuild over an existing batch
   k8  stage() copies nothing if any file would clash, and otherwise carries
       the capture time onto the copy
+  k9  the Annotate page's hint is the widest SURE dog of the seed frame, in
+      that frame's pixels and with its size -- never a doubtful box or a
+      non-dog
 """
 import json
 import os
@@ -255,6 +258,62 @@ try:
             f for f in os.listdir(os.path.join(ls, 'new_images'))
             if f.endswith('.part')
         ])
+
+    # ── k9 ────────────────────────────────────────────────────────────────
+    pq = os.path.join(tmp, 'pq')
+    for d in ('gate', 'det/drive=x', 'img/drive=x'):
+        os.makedirs(os.path.join(pq, d))
+    c9 = duckdb.connect()
+    c9.execute(f"""copy (select * from (values
+        ('8000000000001', 0, 'dog', 0.95), ('8000000000001', 1, 'dog', 0.97),
+        ('8000000000001', 2, 'not_dog', 0.99),
+        ('8000000000001', 3, 'dog', 0.50), ('8000000000003', 0, 'dog', 0.99))
+        t(image_id, det_idx, label, p_dog))
+        to '{os.path.join(pq, 'gate', 'gate-1.parquet')}' (format parquet)""")
+    c9.execute(f"""copy (select * from (values
+        ('8000000000001', 0, 10.0, 20.0, 30.0, 40.0),
+        ('8000000000001', 1, 100.0, 50.0, 160.0, 90.0),
+        ('8000000000001', 2, 0.0, 0.0, 900.0, 900.0),
+        ('8000000000001', 3, 0.0, 0.0, 700.0, 700.0),
+        ('8000000000003', 0, 5.0, 5.0, 50.0, 50.0))
+        t(image_id, det_idx, x1, y1, x2, y2))
+        to '{os.path.join(pq, 'det', 'drive=x', 'a.det.parquet')}'
+        (format parquet)""")
+    c9.execute(f"""copy (select * from (values
+        ('8000000000001', 2000, 1500)) t(image_id, orig_w, orig_h))
+        to '{os.path.join(pq, 'img', 'drive=x', 'a.img.parquet')}'
+        (format parquet)""")
+    c9.close()
+    real9 = (plf.GATE, plf.DET, plf.IMG)
+    try:
+        plf.GATE = os.path.join(pq, 'gate', 'gate-*.parquet')
+        plf.DET = os.path.join(pq, 'det', '**', '*.det.parquet')
+        plf.IMG = os.path.join(pq, 'img', '**', '*.img.parquet')
+        got = plf.seed_boxes([{
+            'image_id': '8000000000009',
+            'seed_id': '8000000000001'
+        }, {
+            'image_id': '8000000000008',
+            'seed_id': '8000000000002'
+        }, {
+            'image_id': '8000000000007',
+            'seed_id': '8000000000003'
+        }], 0.9)
+    except Exception as e:  # noqa: BLE001 -- a raise is a wrong answer too
+        got = 'raised %r' % (e, )
+    finally:
+        plf.GATE, plf.DET, plf.IMG = real9
+    check(
+        'k9 the hint is the widest sure dog of the seed frame, with that '
+        'frame\'s size; a seed that is unknown, or of no known size, '
+        'gives none', got == {
+            '8000000000009': {
+                'seed_id': '8000000000001',
+                'box': [100.0, 50.0, 160.0, 90.0],
+                'w': 2000,
+                'h': 1500
+            }
+        }, f'{got}')
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
