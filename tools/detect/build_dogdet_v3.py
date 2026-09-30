@@ -22,6 +22,10 @@ WHAT GOES IN, beyond dogdet_v2:
     model's own opinion is never a label.
   * box_corrections -- hand-drawn geometry overriding the detector's, applied
     wherever an added frame carries one.
+  * frame labels -- whole frames a person boxed every dog in, or declared
+    empty, on the dashboard's Annotate page (frame_labels.py). Any number of
+    boxes, since the silence around them is the person's own; an empty one
+    goes in as a background.
 
 ONLY SINGLE-DETECTION FRAMES ARE ADDED, the same rule build_detector_negatives
 applies to backgrounds, for the same reason read the other way: a frame gets
@@ -229,10 +233,15 @@ def main():
     adds = confirmed_positive_ids()
     have = set(train_ids) | set(val_ids)
     adds -= have
-    print(f'{len(adds)} confirmed-positive frames not yet in the dataset',
-          flush=True)
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import frame_labels
+    framed = frame_labels.read()
+    # a whole-frame label says more than one confirmed box on the same frame
+    adds -= set(framed)
+    print(f'{len(adds)} confirmed-positive frames not yet in the dataset, '
+          f'{len(framed)} whole-frame labels on record', flush=True)
 
-    seq = resolve_sequences(sorted(have | adds), con)
+    seq = resolve_sequences(sorted(have | adds | set(framed)), con)
     tr_seq = {seq[i] for i in train_ids if i in seq}
 
     # ── the split ───────────────────────────────────────────────────────────
@@ -271,7 +280,7 @@ def main():
           flush=True)
 
     # ── the additions ───────────────────────────────────────────────────────
-    meta, boxes = frame_meta(sorted(adds), con)
+    meta, boxes = frame_meta(sorted(adds | set(framed)), con)
     fixes = corrections()
     roots = _grid_roots()
     added, skipped = [], {'multi_detection': 0, 'val_sequence': 0,
@@ -300,6 +309,18 @@ def main():
         added.append((iid, src, box, (w, h)))
     print(f'adding {len(added)} frames to train, skipped {skipped}',
           flush=True)
+    where = {}
+    for iid in framed:
+        m = meta.get(iid)
+        if m and m[3] and m[4] in roots:
+            where[iid] = os.path.join(roots[m[4]], m[3],
+                                      'ground_animal_images', f'{iid}.jpg')
+    framed_added, framed_skipped = frame_labels.plan(
+        framed, seq, val_seqs, have, where,
+        size_of=frame_labels.image_size)
+    print(f'adding {len(framed_added)} whole-frame labels to train '
+          f'({sum(1 for *_, t in framed_added if not t)} empty), skipped '
+          f'{framed_skipped}', flush=True)
 
     # ── write it ────────────────────────────────────────────────────────────
     for sub in ('images/train', 'images/val', 'labels/train', 'labels/val'):
@@ -342,11 +363,24 @@ def main():
                                f'{iid}.txt'), 'w') as fh:
             fh.write(f'0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n')
 
+    for iid, src, text in framed_added:
+        dst = os.path.join(a.out, 'images', 'train', f'{iid}.jpg')
+        if os.path.exists(dst):
+            os.remove(dst)
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+        with open(os.path.join(a.out, 'labels', 'train',
+                               f'{iid}.txt'), 'w') as fh:
+            fh.write(text)
+
     with open(os.path.join(a.out, 'dataset.yaml'), 'w') as fh:
         fh.write(f'path: {a.out}\ntrain: images/train\nval: images/val\n\n'
                  f'names:\n  0: target\n')
 
-    n_train = len(new_train) + len(added)
+    n_train = len(new_train) + len(added) + len(framed_added)
+    n_bg['train'] += sum(1 for *_, t in framed_added if not t)
     manifest = {
         'src': V2, 'seed': a.seed,
         'train': n_train, 'val': len(new_val),
@@ -362,15 +396,21 @@ def main():
             1 for i, *_ in added
             if (i, 0) in fixes
             and not is_reset(fixes[(i, 0)], boxes.get((i, 0)))),
-        'sequences': {i: seq.get(i) for i in sorted(new_train | new_val
-                                                    | {x[0] for x in added})},
+        'added_frame_labels': len(framed_added),
+        'added_frame_label_ids': sorted(i for i, *_ in framed_added),
+        'frame_labels_empty': sum(1 for *_, t in framed_added if not t),
+        'frame_labels_skipped': framed_skipped,
+        'sequences': {i: seq.get(i) for i in sorted(
+            new_train | new_val | {x[0] for x in added}
+            | {x[0] for x in framed_added})},
     }
     with open(os.path.join(a.out, 'manifest.json'), 'w') as fh:
         json.dump(manifest, fh, indent=1)
     print(f"dogdet_v3: {n_train} train ({n_bg['train']} bg) / "
           f"{len(new_val)} val ({n_bg['val']} bg), "
           f"holdout {len(holdout)}, +{len(added)} confirmed positives "
-          f"({manifest['corrections_applied']} with corrected boxes)")
+          f"({manifest['corrections_applied']} with corrected boxes), "
+          f"+{len(framed_added)} whole-frame labels")
     return 0
 
 

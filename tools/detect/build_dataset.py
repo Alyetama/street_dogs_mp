@@ -152,6 +152,8 @@ STORES = {
                        'for': ('dogdet', 'dogbin')},
     'box_corrections': {'ledger': D('box_corrections', 'boxes.jsonl'),
                         'crops': None, 'for': ('dogdet',)},
+    'frame_labels': {'ledger': D('frame_labels', 'labels.jsonl'),
+                     'crops': None, 'for': ('dogdet',)},
     'gate_audit': {'ledger': D('fn_audit', 'verdicts.jsonl'),
                    'crops': None, 'for': ('dogdet', 'dogbin')},
     'gate_audit_finds': {'ledger': D('audit_finds', 'manifest.jsonl'),
