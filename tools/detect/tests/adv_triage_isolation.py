@@ -135,6 +135,7 @@ HUMAN_STORES = ('hard_negatives/labels.jsonl',      # flag verdicts
                 'hard_positives/labels.jsonl',
                 'hard_negatives/reviewed.jsonl',    # looked at and kept
                 'box_corrections/boxes.jsonl',      # hand-drawn geometry
+                'frame_labels/labels.jsonl',        # whole frames, drawn
                 'fn_audit/verdicts.jsonl',          # audit answers
                 'leash_audit/verdicts.jsonl',
                 # not answers, but the denominator of every rate the audit

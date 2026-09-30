@@ -10175,7 +10175,8 @@ class BoardHandler(SimpleHTTPRequestHandler):
     # reply. Two collections because two shapes: /hq?name=... is a path with
     # a query, /audit/crop/<key>.jpg is a path with the key IN it.
     AUTH_IMAGE_PATHS = frozenset({'/hq', '/orig', '/flagged',
-                                  '/datasets/thumb', '/datasets/image'})
+                                  '/datasets/thumb', '/datasets/image',
+                                  '/annotate/frame.jpg'})
     AUTH_IMAGE_DIRS = ('/audit/crop/', '/audit/frame/') + STATIC_DIRS
 
     def end_headers(self):
@@ -10259,6 +10260,55 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self.send_header('Content-Type', 'image/jpeg')
                 self.send_header('Content-Length', str(len(body)))
                 self.send_header('Cache-Control', 'public, max-age=86400')
+                self.end_headers()
+                self.wfile.write(body)
+                return True
+        except Exception as ex:           # noqa: BLE001 - a page, not a 500
+            self._json({'error': '%s: %s' % (type(ex).__name__, ex)})
+            return True
+        return False
+
+    def _annotate_get(self, path):
+        """The Annotate page's reads. True when it answered.
+
+        Every frame is named by its batch and its index in that batch's
+        manifest -- annotate_page.py resolves both, and nothing the client
+        sends is joined onto a path.
+        """
+        a = _annotate_page()
+        if a is None:
+            self._json({'error': 'the annotate page would not load'})
+            return True
+        q = parse_qs(urlparse(self.path).query)
+        batch = q.get('batch', [''])[0]
+        try:
+            if path == '/api/annotate/batches':
+                self._json({'batches': a.batches()})
+                return True
+            if path == '/api/annotate/next':
+                got = a.next_frame(batch, self._annotator(),
+                                   q.get('after', [None])[0])
+                self._json(got if got is not None
+                           else {'error': 'no such batch, or its frames '
+                                          'could not be read'})
+                return True
+            if path == '/api/annotate/frame':
+                got = a.frame(batch, q.get('i', [''])[0], self._annotator())
+                self._json(got if got is not None
+                           else {'error': 'no such frame in that batch'})
+                return True
+            if path == '/annotate/frame.jpg':
+                got = a.frame_path(batch, q.get('i', [''])[0])
+                if not got:
+                    self.send_error(404)
+                    return True
+                with open(got, 'rb') as fh:
+                    body = fh.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(body)))
+                # a harvested frame never changes under its id
+                self.send_header('Cache-Control', 'private, max-age=86400')
                 self.end_headers()
                 self.wfile.write(body)
                 return True
@@ -10918,6 +10968,26 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if _p.startswith('/api/explore/') or _p == '/explore/frame':
             if self._explore_get(_p):
                 return
+        # ── Annotate ─────────────────────────────────────────────────────
+        # Every signed-in account, like the review queue: drawing a dog is
+        # annotating, and the label is signed with the session's name.
+        if _p == '/annotate':
+            a = _annotate_page()
+            if a is None:
+                self.send_error(503, 'the annotate page would not load')
+                return
+            body = a.page_html(account=account_strip(self.session)) \
+                .encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if _p.startswith('/api/annotate/') or _p == '/annotate/frame.jpg':
+            if self._annotate_get(_p):
+                return
         if _p == '/audit/review':
             body = REVIEW_HTML.encode('utf-8')
             self.send_response(200)
@@ -11292,6 +11362,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
         body = self._splice(
             body, self._NAV_OPEN, self._NAV_CLOSE,
             lambda: (render_explore_nav(getattr(self, 'session', None))
+                     + render_annotate_nav(getattr(self, 'session', None))
                      + render_datasets_nav(getattr(self, 'session', None))
                      + render_train_nav(getattr(self, 'session', None))
                      + render_account_nav(getattr(self, 'session', None))))
@@ -11499,6 +11570,23 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if self.path.split('?', 1)[0].startswith('/api/train/'):
             if self._train_post(self.path.split('?', 1)[0]):
                 return
+        if _p == '/api/annotate/save':
+            data = self._body()
+            if data is None:
+                return
+            a = _annotate_page()
+            if a is None:
+                self._json({'ok': False,
+                            'error': 'the annotate page would not load'})
+                return
+            try:
+                got = a.save(data.get('batch'), data.get('i'),
+                             data.get('boxes'), data.get('empty'),
+                             by=self._annotator())
+            except Exception as e:        # noqa: BLE001 - a reply, not a 500
+                got = {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+            self._json(got, 200 if got.get('ok') else 400)
+            return
         if self.path.split('?', 1)[0] == '/api/audit/box':
             try:
                 data = self._body()
@@ -12062,6 +12150,7 @@ _JOBS = {'mod': None, 'tried': False}
 
 
 _EXPLORE = {'tried': False, 'mod': None}
+_ANNOTATE = {'tried': False, 'mod': None}
 
 
 def _train_page():
@@ -12094,6 +12183,21 @@ def _explore_page():
             sys.stderr.write('explore page unavailable: %s\n' % (e,))
             _EXPLORE['mod'] = None
     return _EXPLORE['mod']
+
+
+def _annotate_page():
+    """The Annotate page, imported once and only when asked for -- a
+    dashboard that cannot import it (PIL missing) still serves the rest."""
+    if not _ANNOTATE['tried']:
+        _ANNOTATE['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import annotate_page as _a
+            _ANNOTATE['mod'] = _a
+        except Exception as e:            # noqa: BLE001 - a page, not the gate
+            sys.stderr.write('annotate page unavailable: %s\n' % (e,))
+            _ANNOTATE['mod'] = None
+    return _ANNOTATE['mod']
 
 
 def _jobs():
@@ -12410,6 +12514,16 @@ def render_explore_nav(session):
             'one country at a time \u2014 images, frames, boxes, dogs, '
             'leashes">'
             '<span class="hnf">&#9673;</span>Explore</a>')
+
+
+def render_annotate_nav(session):
+    """The way to the Annotate page, for the action row. Everyone with a
+    session, like Explore: drawing the dogs in a frame is annotating."""
+    if not session:
+        return ''
+    return ('<a class="hnav" href="/annotate" title="Box every dog in a '
+            'whole frame \u2014 the ones the detector missed">'
+            '<span class="hnf">&#9635;</span>Annotate</a>')
 
 
 def render_account_nav(session):

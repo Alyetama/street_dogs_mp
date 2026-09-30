@@ -864,7 +864,7 @@ def refusal_checks(bad):
 # set inserts in this file, and a rule that cries wolf at those is a rule the
 # next person deletes.
 WRITE_FUNCS = ('flag_crop', 'save_box', 'mark_seen')
-WRITE_METHODS = ('record', 'add', 'save_correction')
+WRITE_METHODS = ('record', 'add', 'save_correction', 'save')
 STORE_NAMES = ('mod', 'a')
 # `remove` is deliberately absent from both. Taking a verdict back is not an
 # annotation and none of the three stores records who did it -- see the report

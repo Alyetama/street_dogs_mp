@@ -294,6 +294,7 @@ def own_checks(bad):
     forbidden = [os.path.join(REPO, 'data', p) for p in (
         'hard_positives/labels.jsonl', 'hard_negatives/labels.jsonl',
         'hard_negatives/reviewed.jsonl', 'box_corrections/boxes.jsonl',
+        'frame_labels/labels.jsonl',
         'fn_audit/verdicts.jsonl', 'leash_audit/verdicts.jsonl',
         'audit_finds/manifest.jsonl', 'audit_finds_leash/manifest.jsonl',
         'leash_labels/leash.db', 'label_flags/label_flags.db',
@@ -1046,6 +1047,7 @@ def untouched_checks(bad):
         'llm_annotations/llm_guesses.jsonl',
         'hard_positives/labels.jsonl', 'hard_negatives/labels.jsonl',
         'hard_negatives/reviewed.jsonl', 'box_corrections/boxes.jsonl',
+        'frame_labels/labels.jsonl',
         'fn_audit/verdicts.jsonl', 'fn_audit/drawn.jsonl',
         'leash_audit/verdicts.jsonl', 'leash_audit/drawn.jsonl',
         'audit_finds/manifest.jsonl', 'audit_finds_leash/manifest.jsonl',
