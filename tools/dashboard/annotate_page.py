@@ -8,6 +8,11 @@ This page is where they get labels. It serves whole frames out of a label
 batch (tools/detect/pick_label_frames.py chooses them), and a person draws a
 box round every dog in the frame, however small, or says there is none.
 
+A LEASHED DOG'S BOX TAKES IN ITS LEASH. That is the Label Studio convention,
+kept on purpose: the same boxes are cut into the leash classifier's crops, and
+a crop without the leash cannot show one. The detector trains on Label
+Studio's boxes and these together, so the page asks for the same thing.
+
 WHAT IS WRITTEN. data/frame_labels/labels.jsonl, append-only, one line per
 save: the image, its batch, every box in the frame's own pixels, whether the
 frame was declared empty, the frame's size, who drew it and when. The LATEST
@@ -538,7 +543,8 @@ __ACCTCSS__
     <p class="sub">The detector drew <b>nothing</b> on these frames, but a dog
     was seen a second earlier on the same road. <b>Box every dog you can see,
     however small</b> &mdash; zoom in to look &mdash; or mark the frame
-    &ldquo;no dog&rdquo;.</p>
+    &ldquo;no dog&rdquo;. For a dog on a leash, <b>take the leash into the
+    box</b>, as in Label Studio.</p>
   </div>
   <div class="hdrend"><a class="back" href="/">&larr; dashboard</a>__ACCOUNT__</div>
 </header>
