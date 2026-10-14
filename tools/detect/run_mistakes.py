@@ -119,7 +119,7 @@ def _spec(yaml_path):
         with open(yaml_path) as fh:
             for ln in fh:
                 if not ln[:1].strip() or ln.lstrip().startswith('#'):
-                    continue          # indented (nested) or a comment
+                    continue  # indented (nested) or a comment
                 k, sep, v = ln.partition(':')
                 if not sep or not k.strip():
                     continue
@@ -153,23 +153,138 @@ def _iou(a, b):
     inter = iw * ih
     if inter <= 0:
         return 0.0
-    ua = ((a[2] - a[0]) * (a[3] - a[1])
-          + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+    ua = ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) -
+          inter)
     return inter / ua if ua > 0 else 0.0
 
 
-def score_detect(weights, yaml_path, split='val', device='cpu', imgsz=640,
-                 conf=0.25, iou_hit=0.5):
-    """Boxes a detector invented, and boxes it missed.
+def _inside(a, b):
+    """The share of box a's own area that lies inside box b."""
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    area = (a[2] - a[0]) * (a[3] - a[1])
+    return iw * ih / area if area > 0 else 0.0
+
+
+# A box that misses IoU 0.5 is not always a box on nothing. The detector set
+# carries two box conventions on purpose -- a Label Studio leashed dog is boxed
+# with its leash, a detector-confirmed one without -- so the same dog can be
+# found and still fail the strict test, and strict scoring then counts that one
+# disagreement twice: an invented box AND a missed dog. After the strict pass,
+# a leftover prediction and a leftover label are the same dog, drawn
+# differently, when one sits mostly inside the other and they still overlap a
+# fair amount. Checked against the shared 489-frame val before it was fixed
+# here: moving CONTAIN anywhere in 0.7-0.9 changes the pairs by about three.
+TOL_CONTAIN = 0.8  # intersection / the smaller box's area
+TOL_IOU = 0.25  # and never a sliver: a big box over a far corner is not it
+MATCH = {
+    'rule': 'tolerant-v1',
+    'iou_hit': 0.5,
+    'contain': TOL_CONTAIN,
+    'iou_floor': TOL_IOU,
+    'merged_at': 2
+}
+
+
+def match_boxes(preds,
+                gt,
+                iou_hit=0.5,
+                contain=TOL_CONTAIN,
+                iou_floor=TOL_IOU):
+    """Strict matches, tolerant pairs, and what is left on each side.
+
+    preds: [(cls, conf, box)] sorted surest first; gt: [(cls, box)].
+    Returns (hits, pairs, invented, missed): hits and pairs are lists of
+    (pred index, label index), invented a list of pred indices, missed a list
+    of label indices. Every prediction and every label lands in exactly one.
+
+    Strict first, exactly as before: greedy by confidence at IoU >= iou_hit,
+    same class. Then the leftovers are paired one to one, closest IoU first,
+    when one box covers at least `contain` of the smaller one and the two
+    still reach `iou_floor`.
+
+    One prediction covering two or more labelled dogs is never paired: that
+    box is a merge, not a different way of drawing one dog, and crediting it
+    would hide a real failure behind the tolerant number.
+    """
+    used, hits, left = set(), [], []
+    for pi, (pc, _pconf, pbox) in enumerate(preds):
+        best, at = 0.0, -1
+        for gi, (gc, gbox) in enumerate(gt):
+            if gi in used or gc != pc:
+                continue
+            v = _iou(pbox, gbox)
+            if v > best:
+                best, at = v, gi
+        if best >= iou_hit and at >= 0:
+            used.add(at)
+            hits.append((pi, at))
+        else:
+            left.append(pi)
+    cand = []
+    for pi in left:
+        pc, pconf, pbox = preds[pi]
+        if sum(1 for gc, gbox in gt
+               if gc == pc and _inside(gbox, pbox) >= contain) >= 2:
+            continue
+        for gi, (gc, gbox) in enumerate(gt):
+            if gi in used or gc != pc:
+                continue
+            v = _iou(pbox, gbox)
+            if v < iou_floor:
+                continue
+            if max(_inside(pbox, gbox), _inside(gbox, pbox)) >= contain:
+                cand.append((-v, -pconf, pi, gi))
+    pairs, pp, gp = [], set(), set()
+    for _v, _c, pi, gi in sorted(cand):
+        if pi in pp or gi in gp:
+            continue
+        pp.add(pi)
+        gp.add(gi)
+        pairs.append((pi, gi))
+    invented = [pi for pi in left if pi not in pp]
+    missed = [gi for gi in range(len(gt)) if gi not in used and gi not in gp]
+    return hits, pairs, invented, missed
+
+
+def run_imgsz(weights):
+    """The imgsz a run TRAINED at, read off its args.yaml, or None.
+
+    A detector scored below its training size is scored on a picture it was
+    never taught to read: every mistakes file made at the old 640 default for
+    a model trained at 1280 put the 0923 detector's recall at 0.695 against
+    0.862 at its own size, and the panel showed the smaller number.
+    """
+    path = os.path.join(os.path.dirname(os.path.dirname(weights)), 'args.yaml')
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+        import training_tracker
+        v = training_tracker.read_args(path).get('imgsz')
+    except Exception:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+        return None
+    return int(v)
+
+
+def score_detect(weights,
+                 yaml_path,
+                 split='val',
+                 device='cpu',
+                 imgsz=640,
+                 conf=0.25,
+                 iou_hit=0.5):
+    """Boxes a detector invented, boxes it missed, and dogs it boxed differently.
 
     A classifier is wrong about a whole picture, so the picture is the
     evidence. A detector is wrong about a REGION, so the region is: an
     invented box is cropped from where it fired, a missed one from where the
     label says it should have. Matching is greedy by confidence at IoU 0.5,
-    the threshold the metrics on this page already use.
+    the threshold the metrics on this page already use; match_boxes() then
+    pairs what is left over when it is one dog drawn two ways.
     """
-    from ultralytics import YOLO
     import yaml as _yaml
+    from ultralytics import YOLO
     with open(yaml_path) as fh:
         spec = _yaml.safe_load(fh) or {}
     base = spec.get('path') or os.path.dirname(yaml_path)
@@ -190,7 +305,7 @@ def score_detect(weights, yaml_path, split='val', device='cpu', imgsz=640,
     model = YOLO(weights)
     files = sorted(f for f in os.listdir(img_dir)
                    if f.lower().endswith(('.jpg', '.jpeg', '.png')))
-    wrong, n_gt, n_hit = [], 0, 0
+    wrong, n_gt, n_hit, n_tol = [], 0, 0, 0
     for f in files:
         ipath = os.path.join(img_dir, f)
         with Image.open(ipath) as im:
@@ -209,47 +324,67 @@ def score_detect(weights, yaml_path, split='val', device='cpu', imgsz=640,
         except OSError:
             pass
         n_gt += len(gt)
-        res = model.predict(ipath, imgsz=imgsz, device=device, conf=conf,
+        res = model.predict(ipath,
+                            imgsz=imgsz,
+                            device=device,
+                            conf=conf,
                             verbose=False)[0]
         preds = []
         for b in res.boxes:
             preds.append((int(b.cls.item()), float(b.conf.item()),
                           [float(v) for v in b.xyxy[0].tolist()]))
         preds.sort(key=lambda x: -x[1])
-        used = set()
-        for pc, pconf, pbox in preds:
-            best, at = 0.0, -1
-            for gi, (gc, gbox) in enumerate(gt):
-                if gi in used or gc != pc:
-                    continue
-                v = _iou(pbox, gbox)
-                if v > best:
-                    best, at = v, gi
-            if best >= iou_hit and at >= 0:
-                used.add(at)
-                n_hit += 1
-            else:
-                wrong.append({'file': os.path.relpath(ipath, base),
-                              'kind': 'invented', 'p': round(pconf, 4),
-                              'cls': classes[pc] if pc < len(classes) else str(pc),
-                              'box': [round(v, 1) for v in pbox]})
-        for gi, (gc, gbox) in enumerate(gt):
-            if gi not in used:
-                wrong.append({'file': os.path.relpath(ipath, base),
-                              'kind': 'missed', 'p': None,
-                              'cls': classes[gc] if gc < len(classes) else str(gc),
-                              'box': [round(v, 1) for v in gbox]})
-    # invented boxes first and by confidence, misses after: a confident
-    # invention is the most informative thing here, and a miss has no
-    # confidence to sort by
-    wrong.sort(key=lambda x: (x['kind'] != 'invented', -(x['p'] or 0)))
-    return classes, base, n_gt, n_hit, wrong
+        hits, pairs, invented, missed = match_boxes(preds, gt, iou_hit)
+        n_hit += len(hits)
+        n_tol += len(pairs)
+        rel = os.path.relpath(ipath, base)
+
+        def name(c):
+            return classes[c] if c < len(classes) else str(c)
+
+        for pi in invented:
+            pc, pconf, pbox = preds[pi]
+            wrong.append({
+                'file': rel,
+                'kind': 'invented',
+                'p': round(pconf, 4),
+                'cls': name(pc),
+                'box': [round(v, 1) for v in pbox]
+            })
+        # one record per disagreement, carrying BOTH boxes: the frame viewer
+        # draws the two side by side, which is the whole point of the record
+        for pi, gi in pairs:
+            pc, pconf, pbox = preds[pi]
+            wrong.append({
+                'file': rel,
+                'kind': 'boxed_differently',
+                'p': round(pconf, 4),
+                'cls': name(pc),
+                'box': [round(v, 1) for v in pbox],
+                'label': [round(v, 1) for v in gt[gi][1]],
+                'iou': round(_iou(pbox, gt[gi][1]), 3)
+            })
+        for gi in missed:
+            gc, gbox = gt[gi]
+            wrong.append({
+                'file': rel,
+                'kind': 'missed',
+                'p': None,
+                'cls': name(gc),
+                'box': [round(v, 1) for v in gbox]
+            })
+    # invented boxes first and by confidence, then the dogs it found but drew
+    # differently, misses last: a confident invention is the most informative
+    # thing here, and a miss has no confidence to sort by
+    rank = {'invented': 0, 'boxed_differently': 1}
+    wrong.sort(key=lambda x: (rank.get(x['kind'], 2), -(x['p'] or 0)))
+    return classes, base, n_gt, n_hit, n_tol, wrong
 
 
 def score(weights, dataset, split='val', device='cpu', imgsz=640, batch=16):
     """[(rel path, true, pred, p_pred, p_true)] for every crop it got wrong."""
-    from ultralytics import YOLO
     from PIL import Image
+    from ultralytics import YOLO
     root = os.path.join(dataset, split)
     # ultralytics assigns class indices by SORTED directory name, so the truth
     # has to be read the same way or every label is quietly off by one
@@ -280,11 +415,17 @@ def score(weights, dataset, split='val', device='cpu', imgsz=640, batch=16):
                 continue
             data = probs.data.tolist()
             wrong.append({
-                'file': os.path.relpath(path, dataset),
-                'true': classes[truth] if truth < len(classes) else str(truth),
-                'pred': classes[pred] if pred < len(classes) else str(pred),
-                'p': round(float(data[pred]), 4),
-                'p_true': round(float(data[truth]), 4)})
+                'file':
+                os.path.relpath(path, dataset),
+                'true':
+                classes[truth] if truth < len(classes) else str(truth),
+                'pred':
+                classes[pred] if pred < len(classes) else str(pred),
+                'p':
+                round(float(data[pred]), 4),
+                'p_true':
+                round(float(data[truth]), 4)
+            })
         for im in ims:
             im.close()
     # most confident first: those are the ones the model is sure about and
@@ -295,34 +436,69 @@ def score(weights, dataset, split='val', device='cpu', imgsz=640, batch=16):
 
 def run_one(key, task, weights, dataset, split, device, imgsz):
     if task == 'detect':
-        classes, base, n_gt, n_hit, wrong = score_detect(
-            weights, dataset, split, device, imgsz)
-        doc = {'run': key, 'task': 'detect', 'dataset': base,
-               'yaml': dataset, 'split': split, 'classes': classes,
-               'n': n_gt, 'hit': n_hit, 'wrong': len(wrong),
-               # recall, not accuracy: a detector has no denominator that
-               # counts the things it correctly did not fire on
-               'recall': round(n_hit / n_gt, 4) if n_gt else None,
-               'device': device, 'imgsz': imgsz,
-               'truncated': len(wrong) > KEEP, 'items': wrong[:KEEP]}
+        # the run's own training size unless the caller said otherwise
+        own = run_imgsz(weights)
+        size = imgsz or own or 640
+        size_from = ('flag' if imgsz else 'args.yaml' if own else 'default')
+        classes, base, n_gt, n_hit, n_tol, wrong = score_detect(
+            weights, dataset, split, device, size)
+        doc = {
+            'run': key,
+            'task': 'detect',
+            'dataset': base,
+            'yaml': dataset,
+            'split': split,
+            'classes': classes,
+            'n': n_gt,
+            'hit': n_hit,
+            'hit_tolerant': n_hit + n_tol,
+            'wrong': len(wrong),
+            # recall, not accuracy: a detector has no denominator that
+            # counts the things it correctly did not fire on. Strict is
+            # the IoU 0.5 number every other panel uses; tolerant also
+            # counts a dog found but boxed the other convention's way.
+            'recall': round(n_hit / n_gt, 4) if n_gt else None,
+            'recall_tolerant': (round(
+                (n_hit + n_tol) / n_gt, 4) if n_gt else None),
+            # a file without this was scored under the old rule (and at
+            # 640): the dashboard re-scores it rather than show it
+            'match': dict(MATCH),
+            'device': device,
+            'imgsz': size,
+            'imgsz_from': size_from,
+            'truncated': len(wrong) > KEEP,
+            'items': wrong[:KEEP]
+        }
     else:
-        classes, n, wrong = score(weights, dataset, split, device, imgsz)
-        doc = {'run': key, 'task': 'classify', 'dataset': dataset,
-               'split': split, 'classes': classes, 'n': n,
-               'wrong': len(wrong),
-               'accuracy': round((n - len(wrong)) / n, 4) if n else None,
-               'device': device, 'imgsz': imgsz,
-               'truncated': len(wrong) > KEEP, 'items': wrong[:KEEP]}
+        classes, n, wrong = score(weights, dataset, split, device, imgsz
+                                  or 640)
+        doc = {
+            'run': key,
+            'task': 'classify',
+            'dataset': dataset,
+            'split': split,
+            'classes': classes,
+            'n': n,
+            'wrong': len(wrong),
+            'accuracy': round((n - len(wrong)) / n, 4) if n else None,
+            'device': device,
+            'imgsz': imgsz,
+            'truncated': len(wrong) > KEEP,
+            'items': wrong[:KEEP]
+        }
     os.makedirs(OUT_DIR, exist_ok=True)
     tmp = out_path(key) + '.tmp'
     with open(tmp, 'w') as fh:
         json.dump(doc, fh, indent=1)
     os.replace(tmp, out_path(key))
     if doc['task'] == 'detect':
+        kinds = [i['kind'] for i in doc['items']]
         print(f"  {key}: {doc['wrong']} wrong "
-              f"({sum(1 for i in doc['items'] if i['kind'] == 'invented')} "
-              f"invented, {sum(1 for i in doc['items'] if i['kind'] == 'missed')}"
-              f" missed of {doc['n']} labelled) -> "
+              f"({kinds.count('invented')} invented, "
+              f"{kinds.count('boxed_differently')} boxed differently, "
+              f"{kinds.count('missed')} missed of {doc['n']} labelled; "
+              f"recall {doc['recall']} strict, {doc['recall_tolerant']} "
+              f"tolerant, imgsz {doc['imgsz']}) -> "
               f"{os.path.relpath(out_path(key), REPO)}")
     else:
         n = doc['n']
@@ -335,18 +511,26 @@ def run_one(key, task, weights, dataset, split, device, imgsz):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
     ap.add_argument('--run', help='project/name, as the dashboard shows it')
-    ap.add_argument('--all', action='store_true',
+    ap.add_argument('--all',
+                    action='store_true',
                     help='every classify run whose weights and dataset are '
-                         'both still on disk')
-    ap.add_argument('--root', default=os.environ.get('TRAINING_ROOT', ''),
+                    'both still on disk')
+    ap.add_argument('--root',
+                    default=os.environ.get('TRAINING_ROOT', ''),
                     help='where the runs live (default $TRAINING_ROOT)')
     ap.add_argument('--split', default='val')
-    ap.add_argument('--device', default='cpu',
+    ap.add_argument('--device',
+                    default='cpu',
                     help="cpu or cuda. cpu by default: this box trains on the "
-                         "GPU, and a debugging aid should never be the reason "
-                         "a training run runs out of memory")
-    ap.add_argument('--imgsz', type=int, default=640)
-    ap.add_argument('--force', action='store_true',
+                    "GPU, and a debugging aid should never be the reason "
+                    "a training run runs out of memory")
+    ap.add_argument('--imgsz',
+                    type=int,
+                    default=None,
+                    help="default: a detector's own training imgsz "
+                    "(its args.yaml), 640 for a classifier")
+    ap.add_argument('--force',
+                    action='store_true',
                     help='rescore runs that already have a file')
     a = ap.parse_args(argv)
 
@@ -376,8 +560,10 @@ def main(argv=None):
         found = ([f for f in found if f[0] == a.run]
                  or [f for f in found if f[0].lower() == a.run.lower()])
         if not found:
-            print(f'{a.run}: not a run with weights and a dataset still on '
-                  f'disk', file=sys.stderr)
+            print(
+                f'{a.run}: not a run with weights and a dataset still on '
+                f'disk',
+                file=sys.stderr)
             return 1
     elif not a.all:
         print(f'{len(found)} run(s) can be scored:')

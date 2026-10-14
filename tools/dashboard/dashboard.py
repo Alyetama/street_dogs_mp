@@ -5342,22 +5342,31 @@ def mistakes_topup(r):
     the next look.
     """
     key = run_key(r)
-    if not scorable(r) or mistakes_for(key):
+    doc = mistakes_for(key)
+    if not scorable(r) or (doc and not mistakes_stale(doc)):
         return False
     py = mistakes_python()
     script = os.path.join(REPO, 'tools', 'detect', 'run_mistakes.py')
     if not py or not os.path.exists(script):
         return False
     now = time.time()
-    if now - _MISS_TRIED.get(key, (0.0, None))[0] < MISS_RETRY_S:
+    at, prev = _MISS_TRIED.get(key, (0.0, None))
+    if now - at < MISS_RETRY_S:
+        return False
+    # A detector scored at its own 1280 on the CPU outlasts the retry window,
+    # and a second scorer started beside a live one only doubles the wait
+    if prev is not None and prev.poll() is None:
         return False
     # stamped BEFORE the spawn, so a Popen that raises is still a try and the
     # panel does not fork one per render
     _MISS_TRIED[key] = (now, None)
     try:
         log = open(os.path.join(REPO, 'data', 'mistakes_run.log'), 'a')
+        # --force: a stale file is still on disk, and without it the scorer
+        # says "already scored" and leaves it there
         proc = subprocess.Popen(
-            [py, script, '--run', key, '--root', training_root()],
+            [py, script, '--run', key, '--root', training_root()]
+            + (['--force'] if doc else []),
             cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
             start_new_session=True)
         _SPAWNED.append(proc)
@@ -5379,7 +5388,22 @@ def mistakes_pending(key):
     at, proc = _MISS_TRIED.get(key, (0.0, None))
     if not at or proc is None:
         return False
-    return proc.poll() in (None, 0) and (time.time() - at) < MISS_RETRY_S
+    if proc.poll() is None:
+        return True           # alive is in flight, however long it has taken
+    return proc.poll() == 0 and (time.time() - at) < MISS_RETRY_S
+
+
+def mistakes_stale(doc):
+    """Was this detector file scored under the old rule?
+
+    run_mistakes.py now writes a `match` record: the rule that pairs a dog it
+    found but boxed the other convention's way, and the run's own imgsz. A
+    detector file without it counted each of those twice -- invented AND
+    missed -- and was scored at 640 for models trained at 1280, so its recall
+    is not one to show beside the new ones. Classifier files are unaffected.
+    """
+    return (isinstance(doc, dict) and doc.get('task') == 'detect'
+            and not isinstance(doc.get('match'), dict))
 
 
 def _mistake_path(key):
@@ -5551,6 +5575,9 @@ def _frame_note(item, boxes):
       invented, 0 < IoU < 0.5                    on a dog, but too loose to
                                                  count: a misplaced box
       invented, touching nothing                 nothing labelled there at all
+
+    A pair the tolerant pass matched (boxed_differently) is its own kind: the
+    dog was found, and the note says which way the two boxes disagree.
     """
     b = item.get('box')
     if not b or len(b) != 4:
@@ -5562,9 +5589,21 @@ def _frame_note(item, boxes):
         # under the 0.5 line always prints under it.
         return f'{int(v * 100) / 100:.2f}'
 
+    if item.get('kind') == 'boxed_differently':
+        g = item.get('label')
+        if not g or len(g) != 4:
+            return 'found this dog, but drew its box differently from the label'
+        pa = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+        ga = max(0.0, g[2] - g[0]) * max(0.0, g[3] - g[1])
+        way = ('its box takes in more than the label does'
+               if pa > ga else 'its box is tighter than the label')
+        return (f'found this dog, but {way} (IoU {iou(_box_iou(b, g))}) '
+                '— one sits inside the other, so it is counted once, as '
+                'found and boxed differently, not as invented and missed')
     if item.get('kind') == 'invented':
         best = max((_box_iou(b, x['box']) for x in boxes
-                    if x['kind'] in ('found', 'label', 'missed')), default=0.0)
+                    if x['kind'] in ('found', 'label', 'missed', 'paired')),
+                   default=0.0)
         if best >= 0.5:
             return (f'a second box on a dog it already found (IoU {iou(best)})'
                     ' — a duplicate that should have been suppressed')
@@ -5613,6 +5652,10 @@ def mistake_frame(key, i):
     if detect:
         missed = [it['box'] for _, it in same
                   if it.get('kind') == 'missed' and it.get('box')]
+        # the label half of a boxed-differently pair is drawn with its pair
+        missed += [it['label'] for _, it in same
+                   if it.get('kind') == 'boxed_differently'
+                   and it.get('label') and len(it['label']) == 4]
         # A cache that kept only the surest N mistakes may have dropped some
         # of this frame's misses, so a labelled box it does not list as
         # missed is only KNOWN to be found when nothing was cut.
@@ -5626,6 +5669,11 @@ def mistake_frame(key, i):
             if b and len(b) == 4:
                 boxes.append({'kind': it.get('kind'), 'box': b,
                               'p': it.get('p'), 'i': j, 'sel': j == i})
+                g = it.get('label')
+                if (it.get('kind') == 'boxed_differently' and g
+                        and len(g) == 4):
+                    boxes.append({'kind': 'paired', 'box': g, 'i': j,
+                                  'sel': j == i})
     sel = {k: item.get(k) for k in ('kind', 'p', 'cls', 'box', 'true', 'pred')}
     return {'w': W, 'h': H, 'task': doc.get('task'),
             'name': os.path.basename(path), 'sel': sel, 'boxes': boxes,
@@ -5685,6 +5733,22 @@ def render_mistakes(r):
         return (f'<div class="wrwrap"><div class="wrhead">'
                 f'<b>What it got wrong</b>'
                 f'<span class="wrsub">{note}</span></div></div>')
+    # A detector file from before the tolerant rule is shown, so the panel is
+    # not empty while it re-scores, but its numbers are marked as the old ones
+    stale = ''
+    if mistakes_stale(doc):
+        # the old file still renders: a re-score that cannot start is a line
+        # on the panel, never a panel that fails to draw
+        try:
+            busy = mistakes_topup(r) or mistakes_pending(key)
+        except Exception:
+            busy = False
+        stale = ('scored under the old rule, at imgsz '
+                 f'{esc_html(str(doc.get("imgsz", "?")))} &mdash; '
+                 + ('re-scoring now, reload in a few minutes'
+                    if busy else 'not re-scored yet. Run '
+                    'tools/detect/run_mistakes.py --force --run '
+                    + esc_html(key)) + ' &middot; ')
     items = doc.get('items') or []
     if not items:
         return (f'<div class="wrwrap"><div class="wrhead"><b>Nothing wrong</b>'
@@ -5706,12 +5770,19 @@ def render_mistakes(r):
     def gname(k):
         if not detect:
             return f'{esc_html(k[0])} &rarr; {esc_html(k[1])}'
+        if k[0] == 'boxed_differently':
+            return 'found the dog, box differs'
         return ('invented a ' if k[0] == 'invented' else 'missed a ') + \
             esc_html(str(k[1]))
 
     def ghint(k):
         if not detect:
             return f'crops that really were {k[0]} and the model called {k[1]}'
+        if k[0] == 'boxed_differently':
+            return ('a labelled dog it found, with a box that sits mostly '
+                    'inside the label or around it -- with or without the '
+                    'leash, say -- so under IoU 0.5. Counted once, here, not '
+                    'as an invented box and a missed dog')
         return ('boxes it drew where the labels say there was nothing'
                 if k[0] == 'invented' else
                 'labelled boxes it never found')
@@ -5737,6 +5808,8 @@ def render_mistakes(r):
                 # omission -- the colour marks which is the model's claim
                 lead = ('<span class="wrsaid">invented</span>'
                         if k[0] == 'invented' else
+                        '<span class="wrbd">boxed differently</span>'
+                        if k[0] == 'boxed_differently' else
                         '<span class="wrwas">missed</span>')
                 dir_html = (f'<span class="wrdir">{lead}'
                             f'<span class="wrarr">&middot;</span>'
@@ -5788,8 +5861,21 @@ def render_mistakes(r):
         hit = doc.get('hit', 0)
         sub = (f'{hit:,} of {n:,} labelled boxes found &middot; '
                f'{wrong:,} wrong{more}')
+        tol = doc.get('hit_tolerant')
+        if isinstance(tol, int) and n:
+            # both, because they answer different questions: strict is the
+            # number every other panel and ultralytics use, tolerant is how
+            # many dogs it actually found
+            sub = (f'recall {hit / n:.1%} at IoU 0.5 &middot; '
+                   f'{tol / n:.1%} counting {tol - hit:,} '
+                   f'found but boxed differently &middot; {n:,} labelled '
+                   f'&middot; imgsz {esc_html(str(doc.get("imgsz", "?")))}'
+                   f'<br>{wrong:,} listed{more}')
         keyline = (f'<span class="wrkeyi"><span class="wrsaid">invented</span>'
                    f'a box where the labels say there was nothing</span>'
+                   f'<span class="wrkeyi"><span class="wrbd">boxed '
+                   f'differently</span>found the dog, drew the box another '
+                   f'way</span>'
                    f'<span class="wrkeyi"><span class="wrwas">missed</span>'
                    f'a labelled box it never found</span>')
     else:
@@ -5806,7 +5892,7 @@ def render_mistakes(r):
     return (f'<div class="wrwrap" id="wrong" data-run="{esc_html(key)}" '
             f'data-dataset="{esc_html(str(doc.get("dataset") or ""))}">'
             f'<div class="wrhead"><b>What it got wrong</b>'
-            f'<span class="wrsub">{sub}</span></div>'
+            f'<span class="wrsub">{stale}{sub}</span></div>'
             f'<div class="wrbox">'
             f'<div class="wrbar"><div class="wrchips">{"".join(chips)}</div>'
             f'<div class="wrpage"><button type="button" class="wrnav" '
@@ -13843,6 +13929,10 @@ font-variant-numeric:tabular-nums}
 .wrsaid{color:var(--red);font-weight:600;overflow:hidden;
 text-overflow:ellipsis;white-space:nowrap}
 .wrwas{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* found, but drawn the other convention's way: not the model's claim of a dog
+   that is not there, so not the red of an invention */
+.wrbd{color:#6cb4ee;font-weight:600;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap}
 .wrarr{color:var(--dim);flex:none;opacity:.7}
 .wrp{display:block;color:var(--mut);margin-top:1px}
 /* the reviewer's own verdict on the label, so it is the one thing on the tile
@@ -13918,6 +14008,8 @@ justify-content:center;color:var(--mut);font-size:13px;pointer-events:none}
 .wfvbox .inv{stroke:var(--red);stroke-width:2}
 .wfvbox .mis{stroke:#dfe3e8;stroke-width:2;stroke-dasharray:7 5}
 .wfvbox .fnd{stroke:var(--green);stroke-width:1.5}
+.wfvbox .bdf{stroke:#6cb4ee;stroke-width:2}
+.wfvbox .bdl{stroke:var(--green);stroke-width:1.5;stroke-dasharray:3 3}
 .wfvbox .sel{stroke-width:3.5}
 .wfvbox .halo.sel{stroke-width:7.5}
 .wfvkey{display:flex;gap:18px;flex-wrap:wrap;align-items:center;
@@ -13927,6 +14019,8 @@ vertical-align:-1px;border:2px solid}
 .wfvkey .inv{border-color:var(--red)}
 .wfvkey .mis{border-color:#dfe3e8;border-style:dashed}
 .wfvkey .fnd{border-color:var(--green);border-width:1.5px}
+.wfvkey .bdf{border-color:#6cb4ee}
+.wfvkey .bdl{border-color:var(--green);border-width:1.5px;border-style:dotted}
 .wfvhint{margin-left:auto}
 .wfv.plain .wfvk{display:none}
 @media(max-width:720px){.wfvbar{flex-direction:column}.wfvhint{display:none}}
@@ -14815,6 +14909,8 @@ function initTracker(){
         '<div class="wfvkey">'+
         '<span class="wfvk"><i class="inv"></i>invented: it drew this, the labels have nothing here</span>'+
         '<span class="wfvk"><i class="mis"></i>missed: labelled, never found</span>'+
+        '<span class="wfvk"><i class="bdf"></i>its box, on a dog it found</span>'+
+        '<span class="wfvk"><i class="bdl"></i>that dog&rsquo;s label</span>'+
         '<span class="wfvk wfvfnd"><i class="fnd"></i>labelled, and found</span>'+
         '<span class="wfvhint">&larr; &rarr; step &middot; Z zoom &middot; Esc close</span>'+
         '</div>';
@@ -14877,7 +14973,8 @@ function initTracker(){
     function clear(){while(gb.firstChild)gb.removeChild(gb.firstChild)}
     function draw(){
       clear();
-      var cls={invented:'inv',missed:'mis',found:'fnd',label:'fnd'};
+      var cls={invented:'inv',missed:'mis',found:'fnd',label:'fnd',
+        boxed_differently:'bdf',paired:'bdl'};
       /* the selected box goes on last, so it is never under one it overlaps */
       (cur.boxes||[]).slice().sort(function(a,b){
         return (a.sel?1:0)-(b.sel?1:0);
@@ -14919,8 +15016,9 @@ function initTracker(){
       title.textContent='';
       var s=cur.sel||{},det=cur.task==='detect';
       if(det){
-        var inv=s.kind==='invented';
-        title.appendChild(mk('span',inv?'wrsaid':'wrwas',inv?'invented':'missed'));
+        var inv=s.kind==='invented',bd=s.kind==='boxed_differently';
+        title.appendChild(mk('span',inv?'wrsaid':bd?'wrbd':'wrwas',
+          inv?'invented':bd?'found, boxed differently':'missed'));
         title.appendChild(document.createTextNode(' a '+(s.cls||'box')+' · '+
           (s.p!=null?Math.round(s.p*100)+'% sure':'never fired')));
       }else{
