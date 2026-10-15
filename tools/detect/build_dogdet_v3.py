@@ -139,6 +139,27 @@ def frame_meta(ids, con):
     return meta, boxes
 
 
+def leashed_ids(ids, con):
+    """The ids the leash stage calls leashed, off its shards in data/leash.
+
+    Model output, used only to leave frames OUT: an addition carries the
+    sweep's dog-only box, and a leashed dog is boxed with its leash
+    everywhere a person drew one. Detection 0 only, because an addition is a
+    single-detection frame.
+    """
+    shards = sorted(glob.glob(os.path.join(REPO, 'data', 'leash',
+                                           '*.parquet')))
+    if not shards or not ids:
+        return set()
+    con.execute("CREATE OR REPLACE TEMP TABLE lwant(image_id VARCHAR)")
+    con.executemany("INSERT INTO lwant VALUES (?)", [(i,) for i in ids])
+    return {r[0] for r in con.execute(f"""
+        SELECT DISTINCT CAST(l.image_id AS VARCHAR)
+        FROM read_parquet({shards!r}, union_by_name=true) l
+        SEMI JOIN lwant w ON w.image_id = CAST(l.image_id AS VARCHAR)
+        WHERE l.det_idx = 0 AND l.label = 'leashed'""").fetchall()}
+
+
 def confirmed_positive_ids():
     """Frames a HUMAN said contain a real dog, from both ledgers."""
     out = set()
@@ -194,7 +215,7 @@ def is_reset(fix, det):
     return all(abs(f - d) < 0.5 for f, d in zip(fix, det))
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--out', default=os.path.join(TRAINING_ROOT,
                                                   'dogdet_v3'))
@@ -208,7 +229,22 @@ def main():
                     help='promote whole train sequences to val until val '
                          'reaches roughly this many frames')
     ap.add_argument('--memory', default='6GB')
-    a = ap.parse_args()
+    ap.add_argument('--hidden-dogs', default=None,
+                    help='the hidden-dog store (default: '
+                         'data/hidden_dogs/flagged.json). A confirmed '
+                         'positive it flags is left out: an independent '
+                         'model sees a second dog the one-box label would '
+                         'teach as "not a dog"')
+    ap.add_argument('--no-hidden-dogs', action='store_true',
+                    help='ignore the hidden-dog store')
+    ap.add_argument('--leashed-additions', choices=('keep', 'drop'),
+                    default='keep',
+                    help='drop: leave out every confirmed positive the leash '
+                         'stage calls leashed. Their boxes are the sweep\'s, '
+                         'drawn round the dog only, where a leashed dog in '
+                         'Label Studio is boxed with its leash -- the mixed '
+                         'convention that teaches the model both boxes')
+    a = ap.parse_args(argv)
     if a.src:
         # Module-level because the reading and writing below reach for it by
         # name in half a dozen places; rebinding it here is what makes one
@@ -307,6 +343,22 @@ def main():
             skipped['no_meta'] += 1
             continue
         added.append((iid, src, box, (w, h)))
+    # ── what the additions must not teach ───────────────────────────────────
+    import hidden_dogs
+    hidden_path = None if a.no_hidden_dogs else (a.hidden_dogs
+                                                 or hidden_dogs.STORE)
+    flagged = hidden_dogs.read(hidden_path) if hidden_path else {}
+    added, hidden_out = hidden_dogs.screen(
+        added,
+        {i: r for i, r in flagged.items() if r.get('role') == 'addition'},
+        key=lambda x: x[0])
+    skipped['hidden_dog'] = len(hidden_out)
+    leashed_out = []
+    if a.leashed_additions == 'drop':
+        leashed = leashed_ids([i for i, *_ in added], con)
+        leashed_out = [x for x in added if x[0] in leashed]
+        added = [x for x in added if x[0] not in leashed]
+    skipped['leashed'] = len(leashed_out)
     print(f'adding {len(added)} frames to train, skipped {skipped}',
           flush=True)
     where = {}
@@ -392,6 +444,16 @@ def main():
         'added_confirmed_positives': len(added),
         'added_ids': sorted(i for i, *_ in added),
         'additions_skipped': skipped,
+        'hidden_dogs': {
+            'store': (os.path.relpath(hidden_path, REPO)
+                      if hidden_path else None),
+            'flagged_frames': len(flagged),
+            'additions_left_out': sorted(x[0] for x in hidden_out),
+        },
+        'leashed_additions': {
+            'mode': a.leashed_additions,
+            'left_out': sorted(x[0] for x in leashed_out),
+        },
         'corrections_applied': sum(
             1 for i, *_ in added
             if (i, 0) in fixes

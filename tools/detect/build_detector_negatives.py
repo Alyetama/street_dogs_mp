@@ -143,7 +143,7 @@ def resolve_originals(ids, roots_file, repo):
     return out
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -167,8 +167,15 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--duckdb-python',
                     default=os.environ.get('DUCKDB_PYTHON') or sys.executable)
+    ap.add_argument('--hidden-dogs', default=None,
+                    help='the hidden-dog store (default: '
+                         'data/hidden_dogs/flagged.json). A frame it flags is '
+                         'never made a background: an independent model sees '
+                         'a dog in it')
+    ap.add_argument('--no-hidden-dogs', action='store_true',
+                    help='ignore the hidden-dog store')
     ap.add_argument('--execute', action='store_true')
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     rng = random.Random(args.seed)
     tr_img = os.path.join(args.src, 'images', 'train')
@@ -255,6 +262,19 @@ def main():
     capped.sort()
     rng.shuffle(capped)
     chosen = sorted(capped[:want])
+    # 6. never a background where an independent model sees a dog
+    #
+    # Dropped AFTER the draw, not before it, and not refilled: the frames
+    # drawn are the ones that were audited, and a refill would bring in
+    # backgrounds nobody has looked for dogs in.
+    import hidden_dogs
+    hidden_path = None if args.no_hidden_dogs else (args.hidden_dogs
+                                                    or hidden_dogs.STORE)
+    flagged = hidden_dogs.read(hidden_path) if hidden_path else {}
+    chosen, hidden_out = hidden_dogs.screen(chosen, flagged)
+    print(f'  {len(hidden_out)} drawn frame(s) hold a dog an independent '
+          f'model sees ({len(flagged)} flagged on record) -> left out, not '
+          f'replaced')
     final_bg = n_bg + len(chosen)
     final_n = n_train + len(chosen)
     print(f'\nadding {len(chosen)} background frames to TRAIN only')
@@ -302,6 +322,12 @@ def main():
         'seed': args.seed,
         'max_per_sequence': args.max_per_sequence,
         'added_image_ids': chosen,
+        'hidden_dogs': {
+            'store': (os.path.relpath(hidden_path, REPO)
+                      if hidden_path else None),
+            'flagged_frames': len(flagged),
+            'left_out': sorted(hidden_out),
+        },
     }
     with open(os.path.join(args.out, 'negatives_manifest.json'), 'w') as fh:
         json.dump(man, fh, indent=1)

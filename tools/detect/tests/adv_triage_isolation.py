@@ -855,6 +855,11 @@ MODEL_WORKING = (
     'leash_acceptance_set.json', 'dogbin_v4_clusters.json',
     'leash_v2_clusters.json', 'leash_label_conflicts.json',
     'catalog.parquet', 'catalog.duckdb', 'dead_manifest_rows.parquet',
+    # frames an independent model (stock COCO detector, class dog) sees a dog
+    # in that no label holds, written by hidden_dogs.py import. Tier
+    # 'unverified' in the file itself; the builds only use it to leave frames
+    # OUT, and its boxes reach the Annotate page as a hint, never a label.
+    'hidden_dogs/flagged.json',
 )
 # Suffixes that are never a store wherever they turn up: page assets, logs,
 # plain-text config, sqlite journals, and the .bak/.tmp a rotation leaves.
