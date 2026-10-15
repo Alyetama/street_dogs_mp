@@ -25,7 +25,9 @@ render ever waits for inference.
 import argparse
 import json
 import os
+import shutil
 import sys
+import time
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -487,6 +489,18 @@ def run_one(key, task, weights, dataset, split, device, imgsz):
             'items': wrong[:KEEP]
         }
     os.makedirs(OUT_DIR, exist_ok=True)
+    # A re-score replaces the only record of what the panel said before -- the
+    # old rule's numbers, at the old imgsz -- so the file it replaces is kept
+    # under superseded/, stamped with when, and can be put back by hand
+    if os.path.exists(out_path(key)):
+        keep = os.path.join(OUT_DIR, 'superseded')
+        os.makedirs(keep, exist_ok=True)
+        shutil.copy2(
+            out_path(key),
+            os.path.join(
+                keep,
+                os.path.basename(out_path(key))[:-len('.json')] +
+                time.strftime('.%Y%m%d-%H%M%S') + '.json'))
     tmp = out_path(key) + '.tmp'
     with open(tmp, 'w') as fh:
         json.dump(doc, fh, indent=1)

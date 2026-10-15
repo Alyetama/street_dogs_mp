@@ -65,6 +65,10 @@ import run_mistakes as rm  # noqa: E402
 _fails = []
 
 
+class _Skip(Exception):
+    """A check failed in a way that leaves nothing for the rest to read."""
+
+
 def check(label, ok, detail=''):
     print(('ok   ' if ok else 'FAIL ') + label + ('' if ok else '  ' + detail))
     if not ok:
@@ -359,13 +363,21 @@ try:
     real_out = rm.OUT_DIR
     rm.OUT_DIR = out
     SEEN.clear()
+    err = None
     try:
         doc = rm.run_one('proj/r1280', 'detect', w1280, yml, 'val', 'cpu',
                          None)
         flagged = rm.run_one('proj/flag', 'detect', w1280, yml, 'val', 'cpu',
                              640)
+    except Exception as e:
+        err = f'{type(e).__name__}: {e}'
     finally:
         rm.OUT_DIR = real_out
+    # a scorer that raises writes nothing, and every check below reads what it
+    # wrote -- so the raise is the failure, named, and the rest is skipped
+    check('m13 scoring a run to disk runs to the end', err is None, err or '')
+    if err:
+        raise _Skip
     with open(os.path.join(out, 'proj__r1280.json')) as fh:
         disk = json.load(fh)
     check(
@@ -388,6 +400,36 @@ try:
         sorted(os.listdir(out)) == ['proj__flag.json', 'proj__r1280.json']
         and not os.path.exists(rm.out_path('proj/r1280')),
         f'wrote {sorted(os.listdir(out))}')
+
+    # ── m15 ─────────────────────────────────────────────────────────────────
+    with open(os.path.join(out, 'proj__r1280.json'), 'rb') as fh:
+        before = fh.read()
+    rm.OUT_DIR = out
+    err = None
+    try:
+        rm.run_one('proj/r1280', 'detect', w1280, yml, 'val', 'cpu', 640)
+    except Exception as e:
+        err = f'{type(e).__name__}: {e}'
+    finally:
+        rm.OUT_DIR = real_out
+    check('m15 re-scoring a run that has a file runs to the end', err is None,
+          err or '')
+    sup = os.path.join(out, 'superseded')
+    kept = sorted(os.listdir(sup)) if os.path.isdir(sup) else []
+    same = False
+    if len(kept) == 1:
+        with open(os.path.join(sup, kept[0]), 'rb') as fh:
+            same = fh.read() == before
+    with open(os.path.join(out, 'proj__r1280.json')) as fh:
+        now = json.load(fh)
+    check(
+        'm15 a re-score keeps the file it replaces, byte for byte, under '
+        'superseded/',
+        len(kept) == 1 and kept[0].startswith('proj__r1280.')
+        and kept[0].endswith('.json') and same and now.get('imgsz') == 640,
+        f'kept {kept}, identical {same}, new imgsz {now.get("imgsz")}')
+    check('m15b the first scoring of a run supersedes nothing',
+          not any(k.startswith('proj__flag.') for k in kept), f'kept {kept}')
 
     # ── m14 ─────────────────────────────────────────────────────────────────
     import argparse
@@ -667,6 +709,8 @@ try:
           '<i class="bdf"></i>' in viewer and '<i class="bdl"></i>' in viewer)
     check('d7c the viewer titles a pair as found, boxed differently',
           "'found, boxed differently'" in viewer)
+except _Skip:
+    pass
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
