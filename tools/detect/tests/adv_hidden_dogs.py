@@ -19,7 +19,8 @@ taught as silence, and the flag that says so is never a label.
   h7  a batch is never written into a directory that exists
   h8  build_dogdet_v3 leaves a flagged addition out and lists it; ignores a
       flagged BACKGROUND there; --no-hidden-dogs keeps it; --leashed-
-      additions drop leaves out a leashed addition and keep is the default
+      additions drop leaves out a leashed addition and keep is the default,
+      and the leash calls are read off the stage's shards and nothing else
   h9  build_detector_negatives drops a flagged frame from the draw, does not
       refill it, and lists it; --no-hidden-dogs keeps it
 
@@ -323,6 +324,37 @@ try:
         }, f'keep {on.get("leashed_additions")}, drop '
         f'{drop.get("raised") or drop.get("added_ids")} '
         f'{drop.get("leashed_additions")}')
+
+    # ── h8d ─────────────────────────────────────────────────────────────────
+    import duckdb
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    lrepo = os.path.join(tmp, 'leashrepo')
+    ldir = os.path.join(lrepo, 'data', 'leash')
+    os.makedirs(os.path.join(ldir, 'archive', 'old'))
+
+    def lrow(path, iid):
+        pq.write_table(
+            pa.table({
+                'image_id': [iid],
+                'det_idx': [0],
+                'label': ['leashed']
+            }), path)
+
+    lrow(os.path.join(ldir, 'leash-00000.parquet'), 'L1')
+    lrow(os.path.join(ldir, 'work.parquet'), 'W1')
+    lrow(os.path.join(ldir, 'archive', 'old', 'leash-00000.parquet'), 'A1')
+    real_repo = v3.REPO
+    try:
+        v3.REPO = lrepo
+        got_l = v3.leashed_ids(['L1', 'W1', 'A1'], duckdb.connect())
+    except Exception as e:  # noqa: BLE001
+        got_l = repr(e)
+    finally:
+        v3.REPO = real_repo
+    check(
+        'h8d the leash calls come from the stage\'s shards only -- not its '
+        'work list, not an archived run', got_l == {'L1'}, f'{got_l}')
 
     # ── h9 ──────────────────────────────────────────────────────────────────
     import build_detector_negatives as neg

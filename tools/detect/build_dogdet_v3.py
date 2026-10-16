@@ -147,8 +147,10 @@ def leashed_ids(ids, con):
     everywhere a person drew one. Detection 0 only, because an addition is a
     single-detection frame.
     """
+    # the stage's shards only: work.parquet sits beside them, and an archive
+    # of a re-run sits below them
     shards = sorted(glob.glob(os.path.join(REPO, 'data', 'leash',
-                                           '*.parquet')))
+                                           'leash-*.parquet')))
     if not shards or not ids:
         return set()
     con.execute("CREATE OR REPLACE TEMP TABLE lwant(image_id VARCHAR)")
