@@ -27,9 +27,35 @@ and the verdicts it replaces are set aside, never deleted.
       `rerun`, and the confirm says the old verdicts are archived and how they
       come back
 
+The detector sweep, the same way over its whole store:
+
+  s1  an archive moves the shards, errors, run manifests, status and SQL
+      snapshot, byte for byte, and keeps the worklist and the bootstrap
+  s2  it refuses while a sweep holds the run lock, and moves nothing
+  s3  nothing to move is no archive
+  s4  a restore puts it back, sets aside what was there first, marks the
+      archive restored, and refuses a name that is not an archive
+  s5  the store's model is its newest run's that recorded an engine
+  s6  the dashboard refuses a re-run while the sweep runs, while a stage
+      reads the store, with no detector promoted, with no engine for it, and
+      when the store is already that model's -- and moves nothing
+  s7  a re-run sets the store aside and starts the sweep on the promoted
+      engine, saying where the archive is and how to undo it
+  s8  Resume loads the engine the store's newest run loaded, and refuses
+      when that engine is gone, rather than finishing on another model
+  s9  the gate's list is out of date once the detector has run since it was
+      built, and the gate is not re-run while the sweep runs
+  s10 sweep.py --engine replaces the configured engine and refuses one that
+      is not on disk
+  s11 the page offers the detector re-run beside Resume, only to an admin,
+      never folds the panel, posts `rerun`, and is disabled when there is
+      nothing to gain
+
 EVERY PATH IS REDIRECTED to a temp directory; the live stage directories are
 fingerprinted before and compared after.
 """
+import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -50,6 +76,7 @@ except ImportError:
 
 import dashboard as d  # noqa: E402
 import gate_store as gs  # noqa: E402
+import sweep_archive as sa  # noqa: E402
 
 _fails = []
 
@@ -94,11 +121,29 @@ def read(path):
 
 
 LIVE = {s: os.path.join(REPO, 'data', s) for s in ('gate', 'leash')}
+try:
+    import store as _store
+    LIVE_DETECT = _store.get_detect_root()
+except Exception:  # noqa: BLE001 -- no store here is nothing to protect
+    LIVE_DETECT = None
+
+
+def detect_print():
+    """The live detect store's top level and its run manifests: what a
+    re-run would move. The shards themselves are thousands of files."""
+    if not LIVE_DETECT or not os.path.isdir(LIVE_DETECT):
+        return None
+    top = sorted(os.listdir(LIVE_DETECT))
+    return top, fingerprint(os.path.join(LIVE_DETECT, 'runs'))
+
+
 live_before = {s: fingerprint(p) for s, p in LIVE.items()}
+detect_before = detect_print()
 tmp = tempfile.mkdtemp(prefix='sweep-rerun-')
 real = {
     k: getattr(d, k)
-    for k in ('REPO', 'gate_pids', 'gate_planning', 'best_models', '_gate_act')
+    for k in ('REPO', 'gate_pids', 'gate_planning', 'best_models', '_gate_act',
+              'sweep_pids', '_sweep_spawn', '_detect_root')
 }
 try:
     root = os.path.join(tmp, 'repo')
@@ -239,6 +284,8 @@ try:
         }
     }
     d.best_models = lambda: best
+    d.sweep_pids = lambda: []
+    d._detect_root = lambda: os.path.join(root, 'nodetect')
     started = []
     d._gate_act = lambda action, stage, sp, pids: (started.append(
         (action, stage, sorted(os.listdir(d.gate_dir(stage))))) or {
@@ -387,6 +434,289 @@ try:
         'g12c it is hidden while the stage runs or plans, or has nothing to '
         'replace', 'rr.hidden=!best||!j.rows||!!j.running||!!j.planning'
         in paint, 'visibility rule changed')
+
+    # ── the detector sweep ──────────────────────────────────────────────────
+    droot = os.path.join(tmp, 'detect')
+
+    def store_files(r):
+        for sub, f, body in (('shards/gen=0001/region=R/cell=C/drive=x',
+                              'p0.img.parquet', b'img'),
+                             ('errors/gen=0001', 'e0.parquet',
+                              b'err'), ('runs/gen=0001', 'run_1_a.json',
+                                        json.dumps({
+                                            'run_started_epoch': 100,
+                                            'model': {
+                                                'engine':
+                                                'data/engines/old.engine',
+                                                'sha256': 'aa' * 32,
+                                                'comet_run': 'train-30'
+                                            }
+                                        }).encode()),
+                             ('runs/gen=0001', 'run_0_z.json',
+                              json.dumps({
+                                  'run_started_epoch': 50,
+                                  'model': {
+                                      'engine': 'data/engines/older.engine',
+                                      'sha256': 'cc' * 32,
+                                      'comet_run': 'train-29'
+                                  }
+                              }).encode()),
+                             ('runs/gen=0001', 'run_2_b.attested.json',
+                              json.dumps({
+                                  'run_started_epoch': 200,
+                                  'model': {
+                                      'engine': None,
+                                      'sha256': None
+                                  }
+                              }).encode()), ('', 'status.json', b'{}'),
+                             ('', 'sweep.duckdb',
+                              b'db'), ('worklist/gen=0001', 'ids.npy',
+                                       b'ids'), ('_bootstrap/gen=_bootstrap',
+                                                 'img.parquet', b'boot')):
+            os.makedirs(os.path.join(r, sub), exist_ok=True)
+            with open(os.path.join(r, sub, f), 'wb') as fh:
+                fh.write(body)
+        open(os.path.join(r, 'runs', 'gen=0001', '.lock'), 'w').close()
+
+    def tree(r):
+        out = {}
+        for base, _, files in os.walk(r):
+            for f in files:
+                p = os.path.join(base, f)
+                out[os.path.relpath(p, r)] = read(p)
+        return out
+
+    store_files(droot)
+    whole = tree(droot)
+
+    # ── s5 ──────────────────────────────────────────────────────────────────
+    cm = sa.current_model(droot) or {}
+    check('s5 the store\'s model is its newest run\'s that recorded an engine',
+          cm.get('comet_run') == 'train-30', f'{cm}')
+
+    # ── s2 ──────────────────────────────────────────────────────────────────
+    holder = open(os.path.join(droot, 'runs', 'gen=0001', '.lock'), 'a')
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    err = raises(lambda: sa.archive_store(droot, {}, 'x', now=1e9))
+    fcntl.flock(holder, fcntl.LOCK_UN)
+    holder.close()
+    check(
+        's2 an archive refuses while a sweep holds the store, and moves '
+        'nothing', err == 'RuntimeError' and tree(droot) == whole,
+        f'raised {err}')
+
+    # ── s1 ──────────────────────────────────────────────────────────────────
+    note = sa.archive_store(droot, {'train-30': 'all'}, 'train-31', now=1e9)
+    arch = note and note['path']
+    kept_top = sorted(os.listdir(droot))
+    moved_ok = bool(arch) and all(
+        read(os.path.join(arch, k)) == v
+        for k, v in whole.items() if k.split(os.sep)[0] in sa.MOVES)
+    check(
+        's1 an archive moves what the sweep wrote, byte for byte, and keeps '
+        'the worklist and the bootstrap', moved_ok
+        and kept_top == ['_bootstrap', 'archive', 'worklist']
+        and sorted(note['files']) == sorted(sa.MOVES),
+        f'left {kept_top}, moved {note and note["files"]}')
+
+    # ── s3 ──────────────────────────────────────────────────────────────────
+    check(
+        's3 nothing to move is no archive',
+        sa.archive_store(droot, {}, 'x', now=2e9) is None
+        and os.listdir(os.path.join(droot, 'archive')) == [note['name']])
+    with open(os.path.join(droot, 'status.json'), 'wb') as fh:
+        fh.write(b'later')
+    twice = raises(lambda: sa.archive_store(droot, {}, 'x', now=1e9))
+    check(
+        's3b an archive is never written into one that exists, and then '
+        'nothing moves', twice == 'FileExistsError'
+        and read(os.path.join(droot, 'status.json')) == b'later'
+        and read(os.path.join(arch, 'status.json')) == b'{}', f'{twice}')
+    os.remove(os.path.join(droot, 'status.json'))
+
+    # ── s4 ──────────────────────────────────────────────────────────────────
+    os.makedirs(os.path.join(droot, 'shards'))
+    with open(os.path.join(droot, 'shards', 'new.img.parquet'), 'wb') as fh:
+        fh.write(b'new')
+    try:
+        got = sa.restore_store(droot, note['name'], now=3e9)
+    except Exception as e:  # noqa: BLE001 -- a raise is a failed restore
+        got = {'raised': repr(e)}
+    back = {
+        k: v
+        for k, v in tree(droot).items() if not k.startswith('archive')
+    }
+    aside = got.get('set_aside')
+    planted = os.path.join(droot, sa.NOTE)
+    with open(planted, 'w') as fh:
+        json.dump({'files': []}, fh)
+    bad = [
+        raises(lambda n=n: sa.restore_store(droot, n))
+        for n in ('', 'nope', '..', '.', '../x')
+    ]
+    os.remove(planted)
+    restored_note = sa.archives(droot)
+    check(
+        's4 a restore puts the sweep back, sets aside what was there, marks '
+        'the archive and refuses a name that is not one', back == whole
+        and bool(aside) and os.path.exists(
+            os.path.join(droot, 'archive', aside, 'shards', 'new.img.parquet'))
+        and any(n['name'] == note['name'] and n.get('restored_at')
+                for n in restored_note) and all(x == 'ValueError'
+                                                for x in bad),
+        f'{got.get("raised") or ""} same {back == whole}, aside {aside}, '
+        f'refusals {bad}')
+
+    # ── dashboard: s6 / s7 / s8 ─────────────────────────────────────────────
+    shutil.rmtree(droot)
+    store_files(droot)
+    whole = tree(droot)
+    drepo = os.path.join(tmp, 'drepo')
+    os.makedirs(os.path.join(drepo, 'data', 'engines'))
+    for e in ('old.engine', 'new.engine'):
+        open(os.path.join(drepo, 'data', 'engines', e), 'wb').close()
+    d.REPO = drepo
+    d._detect_root = lambda: droot
+    spawned = []
+    d._sweep_spawn = lambda engine=None: spawned.append(engine)
+    d.gate_pids = lambda stage='gate': []
+    d.gate_planning = lambda: False
+    dbest = {
+        'projects': {
+            'dogdetection': {
+                'best': {
+                    'run': 'train-31',
+                    'engine': 'data/engines/new.engine',
+                    'sha256_engine': 'bb' * 32
+                }
+            }
+        }
+    }
+    refused = {}
+    d.best_models = lambda: dbest
+    d.sweep_pids = lambda: [7]
+    refused['running'] = d.sweep_control('rerun')
+    d.sweep_pids = lambda: []
+    d.gate_pids = lambda stage='gate': [9] if stage == 'leash' else []
+    refused['stage reading'] = d.sweep_control('rerun')
+    d.gate_pids = lambda stage='gate': []
+    d.best_models = lambda: {'projects': {}}
+    refused['no best'] = d.sweep_control('rerun')
+    d.best_models = lambda: {
+        'projects': {
+            'dogdetection': {
+                'best': {
+                    'run': 'train-31',
+                    'engine': 'data/engines/missing.engine'
+                }
+            }
+        }
+    }
+    refused['no engine'] = d.sweep_control('rerun')
+    d.best_models = lambda: {
+        'projects': {
+            'dogdetection': {
+                'best': {
+                    'run': 'train-30',
+                    'engine': 'data/engines/old.engine',
+                    'sha256_engine': 'aa' * 32
+                }
+            }
+        }
+    }
+    refused['same'] = d.sweep_control('rerun')
+    check(
+        's6 a detector re-run is refused while it runs, while a stage reads '
+        'the store, with nothing promoted, no engine, or the same model -- '
+        'and nothing moves',
+        all(not r.get('ok') for r in refused.values()) and not spawned
+        and tree(droot) == whole,
+        f'{ {k: (v.get("ok"), v.get("msg")) for k, v in refused.items()} }, '
+        f'spawned {spawned}')
+
+    # ── s8 ──────────────────────────────────────────────────────────────────
+    res = d.sweep_control('resume')
+    os.remove(os.path.join(drepo, 'data', 'engines', 'old.engine'))
+    gone = d.sweep_control('resume')
+    check(
+        's8 Resume loads the store\'s own engine, and refuses when it is gone',
+        res.get('ok') and spawned[:1] == ['data/engines/old.engine']
+        and not gone.get('ok') and len(spawned) == 1,
+        f'resume {res}, spawned {spawned}, gone {gone}')
+    open(os.path.join(drepo, 'data', 'engines', 'old.engine'), 'wb').close()
+    spawned.clear()
+
+    # ── s7 ──────────────────────────────────────────────────────────────────
+    d.best_models = lambda: dbest
+    out = d.sweep_control('rerun')
+    name = out.get('archived') or ''
+    check(
+        's7 a re-run sets the store aside and starts on the promoted engine, '
+        'saying where the archive is and how to undo it',
+        out.get('ok')
+        and spawned == [os.path.join(drepo, 'data', 'engines', 'new.engine')]
+        and os.path.isdir(os.path.join(droot, 'archive', name, 'shards'))
+        and not os.path.exists(os.path.join(droot, 'shards'))
+        and f'restore --archive {name}' in (out.get('msg') or ''),
+        f'{out}, spawned {spawned}')
+
+    # ── s9 ──────────────────────────────────────────────────────────────────
+    gw = os.path.join(drepo, 'data', 'gate')
+    os.makedirs(gw)
+    with open(os.path.join(gw, 'work.parquet'), 'wb') as fh:
+        fh.write(b'w')
+    os.utime(os.path.join(gw, 'work.parquet'), (1e9, 1e9))
+    os.makedirs(os.path.join(droot, 'runs', 'gen=0001'), exist_ok=True)
+    mf = os.path.join(droot, 'runs', 'gen=0001', 'run_3_c.json')
+    with open(mf, 'w') as fh:
+        json.dump({'run_started_epoch': 300, 'model': {'engine': 'x'}}, fh)
+    os.utime(mf, (1e9 - 60, 1e9 - 60))
+    before_list = d._gate_stale_plan('gate')
+    os.utime(mf, (1e9 + 60, 1e9 + 60))
+    after_list = d._gate_stale_plan('gate')
+    d.sweep_pids = lambda: [7]
+    d._GATE.clear()
+    gref = d.gate_control('rerun', 'gate')
+    d.sweep_pids = lambda: []
+    check(
+        's9 the gate list is out of date once the detector has run since it '
+        'was built, and the gate waits for a running sweep',
+        before_list is False and after_list is True and not gref.get('ok')
+        and 'sweep' in (gref.get('msg') or ''),
+        f'before {before_list}, after {after_list}, gate {gref}')
+
+    # ── s10 ─────────────────────────────────────────────────────────────────
+    import sweep
+    ns = argparse.Namespace(engine=os.path.join(tmp, 'nope.engine'))
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = sweep.cmd_run(ns)
+    except BaseException as e:  # noqa: BLE001 -- it went past the refusal
+        rc = repr(e)[:120]
+    src = open(sweep.__file__).read()
+    check(
+        's10 sweep.py --engine replaces the configured engine and refuses one '
+        'that is not on disk', rc == 1 and "r.add_argument('--engine'" in src
+        and "cfg['engine'] = (args.engine" in src, f'rc {rc}')
+
+    # ── s11 ─────────────────────────────────────────────────────────────────
+    page = d.TEMPLATE
+    adm = page[page.index('id="sweepCtl"'):]
+    adm = adm[:adm.index('<!--/ADM-->')]
+    js = page[page.index("if(rr)rr.addEventListener('click',function(e){\n"
+                         "    /* inside <summary>, like"):]
+    js = js[:js.index("b.addEventListener('click'")]
+    paint_ = page[page.index('function paintRerun(j){'):]
+    paint_ = paint_[:paint_.index('var la=')]
+    check(
+        's11 the detector re-run sits beside Resume, admin only, never folds '
+        'the panel, posts `rerun`, and is disabled with nothing to gain',
+        'id="sweepRerun"' in adm and "action:'rerun'" in js
+        and 'e.preventDefault()' in js and 'sweep_archive.py restore' in js
+        and 'rr.disabled=!!j.same||!j.best_engine_ok;' in paint_
+        and 'rr.hidden=!best||!!j.running;' in paint_, 'page text changed')
 finally:
     for k, v in real.items():
         setattr(d, k, v)
@@ -398,6 +728,9 @@ check('g0 the live stage directories were not touched', {
     s: fingerprint(p)
     for s, p in LIVE.items()
 } == live_before, 'a live file changed')
+
+check('g0b the live detect store was not touched',
+      detect_print() == detect_before, 'its top level or its runs changed')
 
 if _fails:
     print(f'\n{len(_fails)} re-run check(s) FAILED: ' + '; '.join(_fails))

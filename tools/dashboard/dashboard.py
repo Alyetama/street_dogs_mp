@@ -10070,13 +10070,22 @@ def _gate_stale_plan(stage):
     built from? The leash list is the gate's dogs: re-run the gate and the
     list names last model's dogs, so it has to be built again."""
     up = GATE_STAGES[stage]['feeds_on']
-    if not up:
-        return False
-    s = _gate_shards(up)
     try:
         made = os.path.getmtime(os.path.join(gate_dir(stage), 'work.parquet'))
     except OSError:
         return False
+    if not up:
+        # the gate's list is the detector's boxes: a sweep run since (a
+        # re-run with a promoted detector writes its manifest first) makes it
+        # a list of boxes that may no longer exist
+        try:
+            import glob
+            runs = glob.glob(os.path.join(_detect_root(), 'runs', 'gen=*',
+                                          'run_*.json'))
+            return bool(runs) and max(map(os.path.getmtime, runs)) > made
+        except Exception:
+            return False
+    s = _gate_shards(up)
     return bool(s and s.get('last')) and s['last'] > made
 
 
@@ -10113,6 +10122,10 @@ def _gate_set_aside(stage, sp):
     if gate_planning():
         return {'ok': False, 'running': False,
                 'msg': 'a work list is being built \u2014 wait for it'}
+    if sweep_pids():
+        return {'ok': False, 'running': False,
+                'msg': 'the detector sweep is running \u2014 the '
+                       f'{sp["title"]} judges its boxes, so wait for it'}
     up = gate_upstream(stage)
     if up and not up['ready']:
         return {'ok': False, 'running': False,
@@ -10230,10 +10243,73 @@ def _gate_act(action, stage, sp, pids):
     return {'ok': True, 'running': True, 'msg': f'{sp["title"]} started'}
 
 
+def _sweep_archive():
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import sweep_archive
+    return sweep_archive
+
+
+def _detect_root():
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import store
+    return store.get_detect_root(REPO)
+
+
+def detector_best():
+    """The detector promoted in data/best_models.json: its run name, its
+    TensorRT engine (absolute) and the engine's digest, or None."""
+    best = ((best_models().get('projects') or {}).get('dogdetection')
+            or {}).get('best') or {}
+    if not best.get('run'):
+        return None
+    eng = str(best.get('engine') or '')
+    if eng and not os.path.isabs(eng):
+        eng = os.path.join(REPO, eng)
+    return {'run': best['run'], 'engine': eng or None,
+            'engine_ok': bool(eng) and os.path.exists(eng),
+            'sha256': best.get('sha256_engine')}
+
+
+def sweep_model_state():
+    """What wrote the store, what is promoted, and whether they are one."""
+    try:
+        cur = _sweep_archive().current_model(_detect_root()) or {}
+    except Exception:
+        cur = {}
+    best = detector_best()
+    same = bool(best) and bool(cur) and (
+        (best['sha256'] and best['sha256'] == cur.get('sha256'))
+        or (bool(best['engine']) and bool(cur.get('engine'))
+            and os.path.realpath(best['engine']) == os.path.realpath(
+                os.path.join(REPO, cur['engine']))))
+    return {'store_model': (cur.get('comet_run') or cur.get('sha8')
+                            or (os.path.basename(cur['engine'])
+                                if cur.get('engine') else None)),
+            'store_engine': cur.get('engine'),
+            'best_model': best and best['run'],
+            'best_engine_ok': bool(best and best['engine_ok']),
+            'same': same}
+
+
+def _sweep_spawn(engine=None):
+    py = os.environ.get('SWEEP_PYTHON', SWEEP_PYTHON)
+    log = open(os.path.join(REPO, 'data', 'sweep_resume.log'), 'a')
+    argv = [py, os.path.join(REPO, 'tools', 'detect', 'sweep.py'),
+            'run', '--gen', '1']
+    if engine:
+        argv += ['--engine', engine]
+    _SPAWNED.append(subprocess.Popen(
+        argv, cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+        start_new_session=True))
+
+
 def sweep_control(action):
     """stop = SIGTERM (graceful: commits its contiguous prefix, loses nothing);
     resume = relaunch detached. Resume is safe because the store's tiling
-    resume replays only uncommitted ranges."""
+    resume replays only uncommitted ranges -- and it loads the engine the
+    store's newest run loaded, so a re-run with a promoted detector is not
+    finished by the config default. rerun = set the whole sweep aside and
+    start it over with the promoted detector."""
     pids = sweep_pids()
     if action == 'stop':
         if not pids:
@@ -10244,21 +10320,66 @@ def sweep_control(action):
             except OSError:
                 pass
         return {'ok': True, 'running': False,
-                'msg': 'stopping — the sweep commits what it has, then exits'}
+                'msg': 'stopping \u2014 the sweep commits what it has, then exits'}
     if action == 'resume':
         if pids:
             return {'ok': True, 'running': True, 'msg': 'already running'}
-        py = os.environ.get('SWEEP_PYTHON', SWEEP_PYTHON)
-        log = open(os.path.join(REPO, 'data', 'sweep_resume.log'), 'a')
+        st = sweep_model_state()
+        eng = st['store_engine']
+        if eng and not os.path.exists(eng if os.path.isabs(eng)
+                                      else os.path.join(REPO, eng)):
+            return {'ok': False, 'running': False,
+                    'msg': f'the store was written by {eng}, which is no '
+                           f'longer on disk \u2014 resuming with another '
+                           f'engine would mix two models in one store'}
         try:
-            _SPAWNED.append(subprocess.Popen(
-                [py, os.path.join(REPO, 'tools', 'detect', 'sweep.py'),
-                 'run', '--gen', '1'],
-                cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-                start_new_session=True))
+            _sweep_spawn(eng)
         except Exception as e:
             return {'ok': False, 'running': False, 'msg': str(e)}
         return {'ok': True, 'running': True, 'msg': 'resuming'}
+    if action == 'rerun':
+        if pids:
+            return {'ok': False, 'running': True,
+                    'msg': 'the sweep is running \u2014 stop it before '
+                           're-running it'}
+        if any(gate_pids(s) for s in GATE_STAGES) or gate_planning():
+            return {'ok': False, 'running': False,
+                    'msg': 'a classifier stage is reading the store \u2014 '
+                           'stop it first'}
+        best = detector_best()
+        if not best:
+            return {'ok': False, 'running': False,
+                    'msg': 'no detector is promoted in data/best_models.json'}
+        if not best['engine_ok']:
+            return {'ok': False, 'running': False,
+                    'msg': f'{best["run"]} has no TensorRT engine on disk '
+                           f'(the "engine" of its entry in data/best_models.'
+                           f'json) \u2014 the sweep loads only an engine'}
+        st = sweep_model_state()
+        if st['same']:
+            return {'ok': False, 'running': False,
+                    'msg': f'the store is already {best["run"]}\u2019s '
+                           f'\u2014 a re-run would spend days of GPU to '
+                           f'write the same boxes'}
+        try:
+            root = _detect_root()
+            note = _sweep_archive().archive_store(
+                root, {st['store_model'] or 'unknown': 'all'}, best['run'],
+                reason='re-run from the dashboard with the promoted detector')
+        except Exception as e:
+            return {'ok': False, 'running': False,
+                    'msg': f'could not set the sweep aside: {e}'}
+        try:
+            _sweep_spawn(best['engine'])
+        except Exception as e:
+            return {'ok': False, 'running': False,
+                    'msg': f'set aside, but the sweep did not start: {e}'}
+        where = (f'set aside in archive/{note["name"]} (undo: sweep_archive.py '
+                 f'restore --archive {note["name"]}); ' if note else '')
+        return {'ok': True, 'running': True, 'archived': note and note['name'],
+                'msg': where + f'sweeping again with {best["run"]}. The gate '
+                       f'and leash stages read these boxes: re-run them '
+                       f'when it finishes.'}
     return {'ok': False, 'msg': 'unknown action'}
 
 
@@ -11372,7 +11493,21 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 self._json({'html': '', 'error': str(e)})
             return
         if self.path.split('?', 1)[0] == '/api/sweep':
-            self._json({'running': bool(sweep_pids())})
+            doc = {'running': bool(sweep_pids())}
+            # what wrote the store beside what is promoted, for the re-run
+            # button; never the reason the Stop/Resume answer goes missing
+            try:
+                doc.update(sweep_model_state())
+                got = _sweep_archive().archives(_detect_root())
+                doc['last_archive'] = ({
+                    k: got[0].get(k)
+                    for k in ('name', 'models', 'replaced_by', 'archived_at',
+                              'restore')
+                } | {'restored': bool(got[0].get('restored_at'))}
+                    if got else None)
+            except Exception:
+                pass
+            self._json(doc)
             return
         if self.path.split('?', 1)[0] == '/api/sys':
             try:
@@ -14499,7 +14634,7 @@ __LLMNAV__
     <button type="button" class="stagebtn" data-stage="leash" role="tab" aria-selected="false">Leash model</button>
   </span>
   <!-- one control slot, and the stage decides which run it drives -->
-  <!--ADM--><span class="swctl" id="sweepCtl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span><!--/ADM-->
+  <!--ADM--><span class="swctl" id="sweepCtl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button><button id="sweepRerun" class="rbtn sw" type="button" hidden>Re-run</button></span><!--/ADM-->
   <!--ADM--><span class="swctl" id="gateCtl" hidden><span class="swpill" id="gateState">checking</span><button id="gateBtn" class="rbtn sw" disabled>Checking&hellip;</button><button id="gateRerun" class="rbtn sw" type="button" hidden>Re-run</button></span><!--/ADM--></summary>
 <div class="panel">
   <!-- status line ABOVE the cards, never instead of them: the layout below is
@@ -14507,6 +14642,7 @@ __LLMNAV__
        the sweep starts. #detOn is kept (and never hidden) as the cards' box. -->
   __STOREPATH__
   <div id="detOff" class="dnone dstat">sweep idle</div>
+  <div class="dmeta" id="detArch" hidden></div>
   <div id="detOn">
     <div class="kpis" style="margin-bottom:12px">
       <div class="kpi lead"><div class="kpi-label">Complete</div><div class="kpi-val" id="dhPct">—</div></div>
@@ -16819,7 +16955,12 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
       });
   });
   var rr=document.getElementById('gateRerun');
-  if(rr)rr.addEventListener('click',function(){
+  if(rr)rr.addEventListener('keydown',function(e){
+    if(e.key===' '||e.key==='Enter')e.stopPropagation();
+  });
+  if(rr)rr.addEventListener('click',function(e){
+    /* inside <summary>: a bare click would fold the panel */
+    e.preventDefault();e.stopPropagation();
     var st=window.__stage==='leash'?'leash':'gate';
     /* one line, for the same reason as the Stop confirm above */
     if(!confirm('Re-run the '+(st==='leash'?'leash model':'dog-bin gate')+
@@ -17263,10 +17404,65 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     if(pill){pill.className='swpill '+(r?'on':'off');
              pill.textContent=r?'running':'stopped'}
   }
+  /* Re-run with the promoted detector. Offered only while the sweep is
+     stopped; disabled, with the reason, when the store is already that
+     model's or it has no engine -- a re-run is days of GPU. */
+  var rr=document.getElementById('sweepRerun'),da=document.getElementById('detArch');
+  function paintRerun(j){
+    if(!rr||rr.dataset.busy==='1')return;
+    var best=j.best_model||'';
+    rr.hidden=!best||!!j.running;
+    rr.disabled=!!j.same||!j.best_engine_ok;
+    rr.textContent=j.same?'Re-run':'Re-run with '+best;
+    rr.dataset.best=best;
+    rr.dataset.had=j.store_model||'an unknown model';
+    rr.title=j.same
+      ? 'the store is already '+best+'\u2019s \u2014 a re-run would write the same boxes'
+      : !j.best_engine_ok
+        ? best+' has no TensorRT engine on disk \u2014 the sweep loads only an engine'
+        : 'swept so far by '+rr.dataset.had+'; this sweeps every image again with '+
+          best+' \u2014 the old boxes are moved to an archive, not deleted';
+    var la=j.last_archive;
+    if(da){
+      da.hidden=!la;
+      if(la)da.textContent='previous sweep ('+
+        (Object.keys(la.models||{}).join(', ')||'unknown model')+
+        ') archived '+(la.archived_at||la.name)+
+        (la.restored?' \u2014 since restored'
+                    :' \u2014 to put it back: '+(la.restore||''));
+    }
+  }
   function poll(){
     fetch('/api/sweep').then(function(x){return x.json()})
-      .then(function(j){paint(!!j.running)}).catch(function(){});
+      .then(function(j){paint(!!j.running);paintRerun(j)}).catch(function(){});
   }
+  if(rr)rr.addEventListener('click',function(e){
+    /* inside <summary>, like the button beside it: never fold the panel */
+    e.preventDefault();e.stopPropagation();
+    if(rr.disabled||busy)return;
+    if(!window.confirm('Re-run the detection sweep with '+rr.dataset.best+
+      '? Every image is swept again from the start, which takes days. The '+
+      'boxes from '+rr.dataset.had+' are moved to an archive in the detect '+
+      'store (not deleted; sweep_archive.py restore puts them back). Until '+
+      'the new sweep catches up, the review page and the counts see only '+
+      'what it has done, and the gate and leash stages must be re-run '+
+      'after it finishes.'))return;
+    rr.dataset.busy='1';rr.disabled=true;rr.textContent='Setting aside\u2026';
+    fetch('/api/sweep',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'rerun'})})
+     .then(function(x){return x.json()})
+     .catch(function(){return {ok:false,msg:'the dashboard did not answer'}})
+     .then(function(j){
+        rr.dataset.busy='';
+        if(typeof toast==='function'&&j&&j.msg)toast(j.msg);
+        else if(j&&j.msg)window.alert(j.msg);
+        poll();
+     });
+  });
+  if(rr)rr.addEventListener('keydown',function(e){
+    if(e.key===' '||e.key==='Enter')e.stopPropagation();
+  });
   b.addEventListener('click',function(e){
     /* the button lives inside <summary>: a bare click would fold the panel */
     e.preventDefault();e.stopPropagation();

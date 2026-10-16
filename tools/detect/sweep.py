@@ -422,6 +422,15 @@ class PreviewWriter:
 
 def cmd_run(args):
     cfg = load_cfg()
+    if args.engine:
+        # a re-run with a promoted detector, or the resume of one: the run
+        # must keep loading the engine it started with, whatever the config
+        # default is, or one store ends up holding two models' boxes
+        cfg['engine'] = (args.engine if os.path.isabs(args.engine) else
+                         os.path.join(REPO, args.engine))
+        if not os.path.exists(cfg['engine']):
+            print(f'engine not found: {cfg["engine"]}', file=sys.stderr)
+            return 1
     import torch
     detect_root = store.get_detect_root()
     store.ensure_bootstrap(detect_root)
@@ -699,6 +708,9 @@ def main():
     r.add_argument('--max-images', type=int)
     r.add_argument('--drives', nargs='+')
     r.add_argument('--rate-cap', type=float)
+    r.add_argument('--engine',
+                   help='the TensorRT engine to load instead of the '
+                        'configured one (absolute, or relative to the repo)')
     r.add_argument('--no-preview',
                    action='store_true',
                    help='disable the live detection-crop preview')
