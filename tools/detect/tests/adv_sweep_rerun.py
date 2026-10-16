@@ -37,8 +37,8 @@ The detector sweep, the same way over its whole store:
       archive restored, and refuses a name that is not an archive
   s5  the store's model is its newest run's that recorded an engine
   s6  the dashboard refuses a re-run while the sweep runs, while a stage
-      reads the store, with no detector promoted, with no engine for it, and
-      when the store is already that model's -- and moves nothing
+      reads the store, with no detector promoted or with no engine for it --
+      and moves nothing; the same model again is allowed (s7b)
   s7  a re-run sets the store aside and starts the sweep on the promoted
       engine, saying where the archive is and how to undo it
   s8  Resume loads the engine the store's newest run loaded, and refuses
@@ -48,8 +48,8 @@ The detector sweep, the same way over its whole store:
   s10 sweep.py --engine replaces the configured engine and refuses one that
       is not on disk
   s11 the page offers the detector re-run beside Resume, only to an admin,
-      never folds the panel, posts `rerun`, and is disabled when there is
-      nothing to gain
+      never folds the panel, posts `rerun`, and is always clickable; its
+      confirm says when the model is the same one
 
 EVERY PATH IS REDIRECTED to a temp directory; the live stage directories are
 fingerprinted before and compared after.
@@ -613,22 +613,10 @@ try:
         }
     }
     refused['no engine'] = d.sweep_control('rerun')
-    d.best_models = lambda: {
-        'projects': {
-            'dogdetection': {
-                'best': {
-                    'run': 'train-30',
-                    'engine': 'data/engines/old.engine',
-                    'sha256_engine': 'aa' * 32
-                }
-            }
-        }
-    }
-    refused['same'] = d.sweep_control('rerun')
     check(
         's6 a detector re-run is refused while it runs, while a stage reads '
-        'the store, with nothing promoted, no engine, or the same model -- '
-        'and nothing moves',
+        'the store, with nothing promoted or with no engine -- and nothing '
+        'moves',
         all(not r.get('ok') for r in refused.values()) and not spawned
         and tree(droot) == whole,
         f'{ {k: (v.get("ok"), v.get("msg")) for k, v in refused.items()} }, '
@@ -659,6 +647,33 @@ try:
         and not os.path.exists(os.path.join(droot, 'shards'))
         and f'restore --archive {name}' in (out.get('msg') or ''),
         f'{out}, spawned {spawned}')
+
+    # ── s7b ─────────────────────────────────────────────────────────────────
+    # the same model again: allowed, and the answer says so
+    shutil.rmtree(droot)
+    store_files(droot)
+    spawned.clear()
+    d.best_models = lambda: {
+        'projects': {
+            'dogdetection': {
+                'best': {
+                    'run': 'train-30',
+                    'engine': 'data/engines/old.engine',
+                    'sha256_engine': 'aa' * 32
+                }
+            }
+        }
+    }
+    same = d.sweep_control('rerun')
+    check(
+        's7b a re-run with the model that wrote the store is allowed, sets it '
+        'aside like any other, and says it is the same model',
+        same.get('ok')
+        and spawned == [os.path.join(drepo, 'data', 'engines', 'old.engine')]
+        and bool(same.get('archived'))
+        and 'the model that wrote it' in (same.get('msg') or ''),
+        f'{same}, spawned {spawned}')
+    d.best_models = lambda: dbest
 
     # ── s9 ──────────────────────────────────────────────────────────────────
     gw = os.path.join(drepo, 'data', 'gate')
@@ -712,11 +727,18 @@ try:
     paint_ = paint_[:paint_.index('var la=')]
     check(
         's11 the detector re-run sits beside Resume, admin only, never folds '
-        'the panel, posts `rerun`, and is disabled with nothing to gain',
+        'the panel, posts `rerun`, and is never painted disabled -- a '
+        'disabled button there looked enabled and did nothing',
         'id="sweepRerun"' in adm and "action:'rerun'" in js
         and 'e.preventDefault()' in js and 'sweep_archive.py restore' in js
-        and 'rr.disabled=!!j.same||!j.best_engine_ok;' in paint_
+        and 'rr.disabled=false;' in paint_ and 'rr.disabled=!' not in paint_
         and 'rr.hidden=!best||!!j.running;' in paint_, 'page text changed')
+    check(
+        's11b its confirm says when the model is the same one, and a '
+        'disabled sweep control looks disabled',
+        'expect the same boxes back' in js and 'rr.dataset.same' in js
+        and '.rbtn.sw:disabled{opacity:.45' in page,
+        'confirm or style changed')
 finally:
     for k, v in real.items():
         setattr(d, k, v)

@@ -10355,12 +10355,9 @@ def sweep_control(action):
                     'msg': f'{best["run"]} has no TensorRT engine on disk '
                            f'(the "engine" of its entry in data/best_models.'
                            f'json) \u2014 the sweep loads only an engine'}
+        # the same model again is allowed: the page says so before the
+        # click is confirmed, and it is the operator's GPU to spend
         st = sweep_model_state()
-        if st['same']:
-            return {'ok': False, 'running': False,
-                    'msg': f'the store is already {best["run"]}\u2019s '
-                           f'\u2014 a re-run would spend days of GPU to '
-                           f'write the same boxes'}
         try:
             root = _detect_root()
             note = _sweep_archive().archive_store(
@@ -10377,7 +10374,9 @@ def sweep_control(action):
         where = (f'set aside in archive/{note["name"]} (undo: sweep_archive.py '
                  f'restore --archive {note["name"]}); ' if note else '')
         return {'ok': True, 'running': True, 'archived': note and note['name'],
-                'msg': where + f'sweeping again with {best["run"]}. The gate '
+                'msg': where + f'sweeping again with {best["run"]}'
+                       + (' (the model that wrote it)' if st['same'] else '')
+                       + '. The gate '
                        f'and leash stages read these boxes: re-run them '
                        f'when it finishes.'}
     return {'ok': False, 'msg': 'unknown action'}
@@ -13550,6 +13549,7 @@ box-shadow:none}
 .swpill.off{color:var(--mut);background:rgba(130,140,150,.08)}
 /* stopping a multi-day GPU job is not a primary action: neutral until hover */
 .rbtn.sw{background:rgba(130,140,150,.1);border-color:rgba(130,140,150,.28);color:var(--mut)}
+.rbtn.sw:disabled{opacity:.45;cursor:not-allowed}
 .rbtn.sw.stop:hover{background:rgba(216,116,58,.18);border-color:rgba(216,116,58,.5);color:#e0864f}
 .rbtn.sw.go{background:rgba(67,181,129,.13);border-color:rgba(67,181,129,.4);color:var(--green)}
 .rbtn.sw.go:hover{background:rgba(67,181,129,.22)}
@@ -17404,20 +17404,23 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     if(pill){pill.className='swpill '+(r?'on':'off');
              pill.textContent=r?'running':'stopped'}
   }
-  /* Re-run with the promoted detector. Offered only while the sweep is
-     stopped; disabled, with the reason, when the store is already that
-     model's or it has no engine -- a re-run is days of GPU. */
+  /* Re-run with the promoted detector. Offered while the sweep is stopped
+     and always clickable: what it costs -- days of GPU, and the same boxes
+     again when the store is already that model's -- is said in the confirm,
+     and a refusal (no engine on disk) comes back as a message. A disabled
+     button here looked enabled and did nothing. */
   var rr=document.getElementById('sweepRerun'),da=document.getElementById('detArch');
   function paintRerun(j){
     if(!rr||rr.dataset.busy==='1')return;
     var best=j.best_model||'';
     rr.hidden=!best||!!j.running;
-    rr.disabled=!!j.same||!j.best_engine_ok;
+    rr.disabled=false;
     rr.textContent=j.same?'Re-run':'Re-run with '+best;
     rr.dataset.best=best;
+    rr.dataset.same=j.same?'1':'';
     rr.dataset.had=j.store_model||'an unknown model';
     rr.title=j.same
-      ? 'the store is already '+best+'\u2019s \u2014 a re-run would write the same boxes'
+      ? 'the store is already '+best+'\u2019s \u2014 a re-run sweeps every image again with it'
       : !j.best_engine_ok
         ? best+' has no TensorRT engine on disk \u2014 the sweep loads only an engine'
         : 'swept so far by '+rr.dataset.had+'; this sweeps every image again with '+
@@ -17439,9 +17442,11 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
   if(rr)rr.addEventListener('click',function(e){
     /* inside <summary>, like the button beside it: never fold the panel */
     e.preventDefault();e.stopPropagation();
-    if(rr.disabled||busy)return;
+    if(rr.dataset.busy==='1'||busy)return;
     if(!window.confirm('Re-run the detection sweep with '+rr.dataset.best+
-      '? Every image is swept again from the start, which takes days. The '+
+      '? Every image is swept again from the start, which takes days.'+
+      (rr.dataset.same?' The store is already '+rr.dataset.best+
+       '\u2019s, so expect the same boxes back.':'')+' The '+
       'boxes from '+rr.dataset.had+' are moved to an archive in the detect '+
       'store (not deleted; sweep_archive.py restore puts them back). Until '+
       'the new sweep catches up, the review page and the counts see only '+
