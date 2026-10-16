@@ -68,7 +68,7 @@ def current_model(root):
         if not model.get('engine') and not model.get('sha256'):
             continue  # an attested run that never recorded its engine
         if at is None or started > at:
-            best, at = model, started
+            best, at = dict(model, run_started=doc.get('run_started')), started
     return best
 
 

@@ -51,6 +51,15 @@ The detector sweep, the same way over its whole store:
       never folds the panel, posts `rerun`, and is always clickable; its
       confirm says when the model is the same one
 
+What a re-run would replace is on screen before it is pressed:
+
+  v1  the store's model carries when its run started, and the dashboard
+      passes both on with the promoted model beside them
+  v2  each tab opens with a line naming the model that wrote its results
+      and the promoted one, saying whether they are the same; the names are
+      escaped, and the header no longer hardcodes a model name
+  v3  the gate panel is told when its newest shard landed
+
 EVERY PATH IS REDIRECTED to a temp directory; the live stage directories are
 fingerprinted before and compared after.
 """
@@ -739,6 +748,84 @@ try:
         'expect the same boxes back' in js and 'rr.dataset.same' in js
         and '.rbtn.sw:disabled{opacity:.45' in page,
         'confirm or style changed')
+
+    # ── v1 ──────────────────────────────────────────────────────────────────
+    shutil.rmtree(droot)
+    store_files(droot)
+    cm = sa.current_model(droot) or {}
+    d.best_models = lambda: dbest
+    st = d.sweep_model_state()
+    check(
+        'v1 the store\'s model carries its run start, passed on beside the '
+        'promoted model',
+        cm.get('run_started') is None and 'run_started' in cm
+        and st.get('store_model') == 'train-30'
+        and st.get('best_model') == 'train-31' and st.get('same') is False
+        and 'store_started' in st, f'{cm}, {st}')
+    with open(os.path.join(droot, 'runs', 'gen=0001', 'run_1_a.json')) as fh:
+        mdoc = json.load(fh)
+    mdoc['run_started'] = '2026-08-02 20:09:33'
+    with open(os.path.join(droot, 'runs', 'gen=0001', 'run_1_a.json'),
+              'w') as fh:
+        json.dump(mdoc, fh)
+    check('v1b and the start is the newest run\'s own',
+          d.sweep_model_state().get('store_started') == '2026-08-02 20:09:33',
+          f'{d.sweep_model_state()}')
+
+    # ── v2 ──────────────────────────────────────────────────────────────────
+    page = d.TEMPLATE
+    det_on = page[page.index('<div id="detOn">'):]
+    det_on = det_on[:det_on.index('<div class="kpis"')]
+    gate_on = page[page.index('<div id="gateOn" hidden>'):]
+    gate_on = gate_on[:gate_on.index('<div class="kpis"')]
+    ml = page[page.index('function modelLine(what,had,when,best){'):]
+    ml = ml[:ml.index('\n}\n') + 2]
+    hint = page[page.index('<span id="stgHint">'):]
+    hint = hint[:hint.index('</span>')]
+    switch = page[page.index("var h=document.getElementById('stgHint');"):]
+    switch = switch[:switch.index('var dl=')]
+    check(
+        'v2 each tab opens with the model line, painted from the store\'s '
+        'model and the promoted one', 'id="detModel"' in det_on
+        and 'id="gModel"' in gate_on
+        and "modelLine('Last sweep',j.store_model," in page
+        and "modelLine('Verdicts by'," in page, 'model lines missing')
+    got = None
+    node = shutil.which('node')
+    if node:
+        import subprocess
+        js_ = (ml + ';console.log(JSON.stringify(['
+               "modelLine('Last sweep','train-30','started x','train-30'),"
+               "modelLine('Last sweep','train-30','','train-31'),"
+               "modelLine('Last sweep','<i>a</i>','','<b>')]))")
+        try:
+            got = json.loads(
+                subprocess.run([node, '-e', js_],
+                               capture_output=True,
+                               text=True,
+                               timeout=30).stdout)
+        except Exception as e:  # noqa: BLE001
+            got = repr(e)
+    check(
+        'v2b it says "same model" or "different", and escapes the names',
+        isinstance(got, list) and 'same model' in got[0]
+        and 'train-30' in got[0] and 'different' in got[1]
+        and 'train-31' in got[1] and '<i>' not in got[2]
+        and '&lt;i&gt;' in got[2] and '&lt;b&gt;' in got[2],
+        f'{got}' if node else 'node is not installed -- the line was never '
+        'rendered')
+    check(
+        'v2c the header names no model: the model line does',
+        all(n not in hint + switch
+            for n in ('yolo26x', 'dogbin_0', 'leash_v2', 'train-30')),
+        f'{hint} / {switch}'[:200])
+
+    # ── v3 ──────────────────────────────────────────────────────────────────
+    src_d = open(d.__file__).read()
+    check(
+        'v3 the gate panel is told when its newest shard landed',
+        "doc['last_shard_at'] = (_gate_shards(stage) or {}).get('last')"
+        in src_d and "j.last_shard_at" in page, 'last_shard_at not wired')
 finally:
     for k, v in real.items():
         setattr(d, k, v)

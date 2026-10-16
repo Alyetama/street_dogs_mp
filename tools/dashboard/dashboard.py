@@ -10286,6 +10286,7 @@ def sweep_model_state():
                             or (os.path.basename(cur['engine'])
                                 if cur.get('engine') else None)),
             'store_engine': cur.get('engine'),
+            'store_started': cur.get('run_started'),
             'best_model': best and best['run'],
             'best_engine_ok': bool(best and best['engine_ok']),
             'same': same}
@@ -11531,6 +11532,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 doc['best_model'] = stage_best(stage)
                 doc['models'] = (_gate_shards(stage) or {}).get('models') or {}
                 doc['last_archive'] = gate_last_archive(stage)
+                doc['last_shard_at'] = (_gate_shards(stage) or {}).get('last')
                 doc['can_run'] = bool(DOGBIN_PYTHON) and (
                     not doc.get('upstream')
                     or doc['upstream']['ready'])
@@ -13550,6 +13552,11 @@ box-shadow:none}
 /* stopping a multi-day GPU job is not a primary action: neutral until hover */
 .rbtn.sw{background:rgba(130,140,150,.1);border-color:rgba(130,140,150,.28);color:var(--mut)}
 .rbtn.sw:disabled{opacity:.45;cursor:not-allowed}
+.smodel{margin:0 0 12px;padding:8px 12px;border-radius:8px;font-size:13px;
+  background:rgba(130,140,150,.08);border:1px solid rgba(130,140,150,.22)}
+.smodel b{font-weight:600}
+.smodel .same{color:var(--mut)}
+.smodel .diff{color:var(--green)}
 .rbtn.sw.stop:hover{background:rgba(216,116,58,.18);border-color:rgba(216,116,58,.5);color:#e0864f}
 .rbtn.sw.go{background:rgba(67,181,129,.13);border-color:rgba(67,181,129,.4);color:var(--green)}
 .rbtn.sw.go:hover{background:rgba(67,181,129,.22)}
@@ -14618,7 +14625,7 @@ __LLMNAV__
 </details>
 
 <details class="fold sec" id="f-detect" open>
-<summary class="sect">Model sweeps <span id="stgHint">yolo26x @1280 — live, updates every 5 s while open</span>
+<summary class="sect">Model sweeps <span id="stgHint">live, updates every 5 s while open</span>
   <!-- Two stages of one pipeline, so one section with a switch rather than
        two sections saying the same six things. The detector finds ground
        animals; the gate decides which of them are dogs. They run at different
@@ -14644,6 +14651,9 @@ __LLMNAV__
   <div id="detOff" class="dnone dstat">sweep idle</div>
   <div class="dmeta" id="detArch" hidden></div>
   <div id="detOn">
+    <!-- which model wrote what is on screen, beside the one a re-run would
+         use: the thing to read before pressing Re-run -->
+    <div class="smodel" id="detModel" hidden></div>
     <div class="kpis" style="margin-bottom:12px">
       <div class="kpi lead"><div class="kpi-label">Complete</div><div class="kpi-val" id="dhPct">—</div></div>
       <div class="kpi"><div class="kpi-label" title="images the detector has covered all-time, across every restart">Processed</div><div class="kpi-val" id="dhDone" style="font-size:19px">—</div></div>
@@ -14680,6 +14690,7 @@ __LLMNAV__
        no per-drive lanes of its own and no live crops, and inventing an empty
        one for symmetry would be worse than leaving it out. -->
   <div id="gateOn" hidden>
+    <div class="smodel" id="gModel" hidden></div>
     <div class="kpis" style="margin-bottom:12px">
       <div class="kpi lead"><div class="kpi-label">Complete</div><div class="kpi-val" id="gPct">—</div></div>
       <div class="kpi"><div class="kpi-label" title="detections the gate has judged">Judged</div><div class="kpi-val" id="gDone" style="font-size:19px">—</div></div>
@@ -14819,6 +14830,19 @@ var D=__DATA__;
   else { el.setAttribute('stroke-linecap','butt'); el.setAttribute('stroke-dashoffset',C-arc); }
 })();
 /* mirrors human() in dashboard.py exactly -- see the note there */
+/* "Last sweep: X · started … · promoted: Y (same model)" -- what made the
+   results on screen, beside what a re-run would load. Escaped: the names
+   come from files a person edits. */
+function modelLine(what,had,when,best){
+  function e(t){return String(t).replace(/[&<>"]/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+  var s=what+': <b>'+e(had||'unknown')+'</b>'+(when?' \u00b7 '+e(when):'');
+  if(best)s+=' \u00b7 promoted model: <b>'+e(best)+'</b> '+
+    (had&&had===best
+      ?'<span class="same">(same model \u2014 a re-run would use it again)</span>'
+      :'<span class="diff">(different \u2014 a re-run would switch to it)</span>');
+  return s;
+}
 function fmt(v){v=+v;if(v>=1e9)return (v/1e9).toFixed(2)+'B';if(v>=1e6)return (v/1e6).toFixed(2)+'M';if(v>=1e3)return (v/1e3).toFixed(2)+'K';return ''+v}
 /* ── pipeline tracker board ── */
 /* The stages are a SEQUENCE -- pending, extract, coverage, backfill,
@@ -16702,10 +16726,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     if(gc)gc.hidden=det;
     var h=document.getElementById('stgHint');
     if(h)h.textContent=det
-      ? 'yolo26x @1280 — live, updates every 5 s while open'
+      ? 'live, updates every 5 s while open'
       : stage==='leash'
-        ? 'leash_v2_001 over every box the gate called a dog'
-        : 'dogbin_008 over every detection the sweep committed';
+        ? 'over every box the gate called a dog'
+        : 'over every detection the sweep committed';
     /* the share card is the one label that is about the model rather than
        the run, so it is the one that has to follow the stage */
     var dl=document.getElementById('gDogLbl');
@@ -16895,6 +16919,16 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
                     :'judged so far by '+rr.dataset.had+
                      '; this judges every box again with '+best)+
                ' — the old verdicts are moved to an archive, not deleted';
+    }
+    var gm=document.getElementById('gModel');
+    if(gm){
+      var by=j.models||{},names=Object.keys(by);
+      gm.hidden=!names.length&&!j.best_model;
+      gm.innerHTML=modelLine('Verdicts by',
+        names.length?names.join(' + '):'',
+        (names.length>1?names.map(function(n){return n+' '+fmt(by[n])}).join(', ')+' \u00b7 ':'')+
+        (j.last_shard_at?'last shard '+new Date(j.last_shard_at*1000).toLocaleString():''),
+        j.best_model);
     }
     var ga=document.getElementById('gArch'),la=j.last_archive;
     if(ga){
@@ -17435,9 +17469,18 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
                     :' \u2014 to put it back: '+(la.restore||''));
     }
   }
+  /* painted before the controls, and whatever state they are in */
+  function paintModel(j){
+    var dm=document.getElementById('detModel');
+    if(!dm)return;
+    dm.hidden=!j.store_model&&!j.best_model;
+    dm.innerHTML=modelLine('Last sweep',j.store_model,
+      j.store_started?'started '+j.store_started:'',j.best_model);
+  }
   function poll(){
     fetch('/api/sweep').then(function(x){return x.json()})
-      .then(function(j){paint(!!j.running);paintRerun(j)}).catch(function(){});
+      .then(function(j){paintModel(j);paint(!!j.running);paintRerun(j)})
+      .catch(function(){});
   }
   if(rr)rr.addEventListener('click',function(e){
     /* inside <summary>, like the button beside it: never fold the panel */
