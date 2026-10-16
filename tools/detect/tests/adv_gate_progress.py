@@ -311,7 +311,8 @@ def exit_code_checks(bad):
         return
     src = inspect.getsource(d)
     for fn, what in (('_gate_plan', 'the planner'),
-                     ('gate_control', 'the runner')):
+                     # the start path gate_control and a re-run share
+                     ('_gate_act', 'the runner')):
         i = src.index(f'def {fn}(')
         body = src[i:src.index('\ndef ', i + 1)]
         if 'code == 0' not in body:

@@ -7,6 +7,7 @@
     python tools/detect/gate_store.py status
     python tools/detect/gate_store.py plan  --stage leash
     python tools/detect/gate_store.py run   --stage leash
+    python tools/detect/gate_store.py restore --stage gate [--archive NAME]
 
 TWO STAGES, ONE MACHINE. The pipeline narrows: the detector finds ground
 animals, the gate decides which of them are dogs, and the leash model decides
@@ -691,6 +692,137 @@ def status(args):
     return 0
 
 
+# ── re-running a stage with a newly promoted model ─────────────────────────
+# A finished stage holds one model's verdicts, and the runner skips every
+# shard already on disk -- so judging the store again with the model promoted
+# since means moving the old record out of the runner's way first. MOVED, not
+# deleted: into archive/<when>/ beside a note naming the model that wrote it,
+# so a re-run that turns out worse is one `restore` away from undone. The
+# readers glob <dir>-*.parquet at the top level only, so an archive is out of
+# every count, map and pool the moment it is made.
+ARCHIVE = 'archive'
+ARCHIVE_NOTE = 'ARCHIVED.json'
+# the planned work list and the shard size the job pinned on its first run;
+# they move only when the work list itself is out of date
+PLAN_FILES = ('plan.json', 'work.parquet', 'shard_size')
+
+
+def _stage_dir(stage, repo=None):
+    return os.path.join(repo or REPO, 'data', STAGES[stage]['dir'])
+
+
+def _verdict_files(stage, repo=None):
+    d, pre = _stage_dir(stage, repo), STAGES[stage]['dir'] + '-'
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    return sorted(f for f in names
+                  if f.startswith(pre) and f.endswith('.parquet'))
+
+
+def archive_run(stage, models, best, replan=False, reason='', repo=None,
+                now=None):
+    """Move a stage's verdicts out of the runner's way; returns the note
+    written beside them, or None when there was nothing to move.
+
+    `models` is what wrote the verdicts ({run: rows}) and `best` what is about
+    to replace them -- both go in the note, so the archive says what it is
+    without anybody reading a shard. `replan` moves the work list as well,
+    for a stage whose list was built from an upstream that has changed.
+    """
+    if stage not in STAGES:
+        raise ValueError(f'unknown stage {stage!r}')
+    d = _stage_dir(stage, repo)
+    moving = _verdict_files(stage, repo)
+    if os.path.exists(os.path.join(d, 'progress.json')):
+        moving.append('progress.json')
+    if replan:
+        moving += [f for f in PLAN_FILES if os.path.exists(os.path.join(d, f))]
+    if not moving:
+        return None
+    at = time.localtime(now if now is not None else time.time())
+    name = time.strftime('%Y%m%d-%H%M%S', at)
+    dest = os.path.join(d, ARCHIVE, name)
+    os.makedirs(dest)          # never into an archive that is already there
+    note = {
+        'stage': stage,
+        'archived_at': time.strftime('%Y-%m-%d %H:%M:%S', at),
+        'models': dict(models or {}),
+        'replaced_by': best,
+        'replanned': bool(replan),
+        'reason': reason,
+        'files': moving,
+        'restore': f'python tools/detect/gate_store.py restore --stage {stage} '
+                   f'--archive {name}',
+    }
+    # the note first: an archive interrupted mid-move still says what it is
+    with open(os.path.join(dest, ARCHIVE_NOTE), 'w') as fh:
+        json.dump(note, fh, indent=1)
+    for f in moving:
+        os.replace(os.path.join(d, f), os.path.join(dest, f))
+    return dict(note, name=name, path=dest)
+
+
+def restore_run(stage, name, repo=None, now=None):
+    """Put an archived record back. Whatever is there now is archived first,
+    so a restore is as undoable as the re-run it undoes."""
+    if stage not in STAGES:
+        raise ValueError(f'unknown stage {stage!r}')
+    base = os.path.join(_stage_dir(stage, repo), ARCHIVE)
+    if (not isinstance(name, str) or not name or os.sep in name
+            or name.startswith('.') or not os.path.isfile(
+                os.path.join(base, name, ARCHIVE_NOTE))):
+        raise ValueError(f'no archive {name!r} for the {stage} stage')
+    src = os.path.join(base, name)
+    with open(os.path.join(src, ARCHIVE_NOTE)) as fh:
+        note = json.load(fh)
+    files = [f for f in note.get('files') or []
+             if os.path.basename(f) == f and os.path.exists(
+                 os.path.join(src, f))]
+    replan = any(f in PLAN_FILES for f in files)
+    current = archive_run(stage, {}, f'restore of {name}', replan=replan,
+                          reason=f'set aside to restore {name}', repo=repo,
+                          now=now)
+    d = _stage_dir(stage, repo)
+    for f in files:
+        os.replace(os.path.join(src, f), os.path.join(d, f))
+    note['restored_at'] = time.strftime(
+        '%Y-%m-%d %H:%M:%S',
+        time.localtime(now if now is not None else time.time()))
+    note['restored_files'] = files
+    with open(os.path.join(src, ARCHIVE_NOTE), 'w') as fh:
+        json.dump(note, fh, indent=1)
+    return {'restored': files, 'set_aside': current and current['name']}
+
+
+def restore(args):
+    """CLI: list the archives, or put one back."""
+    base = os.path.join(OUT_DIR, ARCHIVE)
+    if not args.archive:
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            names = []
+        for n in names:
+            try:
+                with open(os.path.join(base, n, ARCHIVE_NOTE)) as fh:
+                    note = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            print(f"{n}  {', '.join(note.get('models') or {}) or '-':24s} "
+                  f"{len(note.get('files') or [])} files"
+                  + ('  (restored)' if note.get('restored_at') else ''))
+        if not names:
+            print('no archives')
+        return 0
+    got = restore_run(STAGE, args.archive)
+    print(f"restored {len(got['restored'])} files from {args.archive}"
+          + (f"; what was there is in archive/{got['set_aside']}"
+             if got['set_aside'] else ''))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -709,9 +841,14 @@ def main(argv=None):
     r.add_argument('--limit', type=int, default=0,
                    help='stop after this many BOXES (for a trial run)')
     s = sub.add_parser('status'); s.set_defaults(fn=status)
+    rs = sub.add_parser('restore', help='list the archived runs of a stage, '
+                        'or put one back')
+    rs.set_defaults(fn=restore)
+    rs.add_argument('--archive', default=None,
+                    help='the archive to put back (omit to list them)')
     # every subcommand takes it, and it has to be applied before any of them
     # touches a path
-    for sp_ in (p, r, s):
+    for sp_ in (p, r, s, rs):
         sp_.add_argument('--stage', default='gate', choices=sorted(STAGES),
                          help='which pass over the store to work on')
     a = ap.parse_args(argv)

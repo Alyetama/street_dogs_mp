@@ -6322,10 +6322,18 @@ def _gate_shards(stage='gate'):
             # every 20 seconds, which is why it was limited to the newest
             # three shards and why the share was a sample rather than the
             # whole record -- read once, it can be all of it.
-            t = pq.read_table(f, columns=['label'])
+            # and which model wrote them, so a re-run can say what it is
+            # replacing; a shard from before the stamp counts as unknown
+            have = pq.ParquetFile(f).schema_arrow.names
+            t = pq.read_table(f, columns=['label'] + (
+                ['model'] if 'model' in have else []))
             col = t.column('label').to_pylist()
             pos = GATE_STAGES[stage]['positive']
-            files[f] = (mt, len(col), sum(1 for v in col if v == pos))
+            by = {}
+            for m in (t.column('model').to_pylist() if 'model' in have
+                      else ['unknown'] * len(col)):
+                by[m or 'unknown'] = by.get(m or 'unknown', 0) + 1
+            files[f] = (mt, len(col), sum(1 for v in col if v == pos), by)
         except Exception:
             continue
     for f in list(files):                # a shard that went away is not a fact
@@ -6333,6 +6341,10 @@ def _gate_shards(stage='gate'):
             files.pop(f, None)
     rows = sum(v[1] for v in files.values())
     dogs = sum(v[2] for v in files.values())
+    models = {}
+    for v in files.values():
+        for m, k in v[3].items():
+            models[m] = models.get(m, 0) + k
     seen = rows
     times = sorted(v[0] for v in files.values())
     total = int(plan.get('rows') or 0)
@@ -6381,6 +6393,7 @@ def _gate_shards(stage='gate'):
            'dogs': dogs, 'seen': seen, 'last': times[-1] if times else 0.0,
            'rate': rate, 'sustained': sus,
            'model': plan.get('model') or 'dog-bin gate',
+           'models': models,
            'images': images,
            'created': plan.get('created') or ''}
     memo.update(at=now, doc=doc)
@@ -10023,93 +10036,198 @@ def gate_planning():
 
 def gate_control(action, stage='gate'):
     """stop = SIGTERM (the shard in flight is lost, the written ones are not);
-    start = relaunch detached, which resumes at the first unwritten shard."""
+    start = relaunch detached, which resumes at the first unwritten shard;
+    rerun = set the stage's verdicts aside, then start it over with the model
+    promoted now."""
     if stage not in GATE_STAGES:
         return {'ok': False, 'msg': f'unknown stage {stage}'}
     sp = GATE_STAGES[stage]
     with _SPAWN_LOCK:
         _reap()
-        pids = gate_pids(stage)
-        if action == 'stop':
-            if not pids:
-                return {'ok': True, 'running': False, 'msg': 'already stopped'}
-            for pid in pids:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except OSError:
-                    pass
-            return {'ok': True, 'running': False,
-                    'msg': 'stopping — finished shards are kept'}
-        if action != 'start':
-            return {'ok': False, 'msg': 'unknown action'}
-        if pids:
-            return {'ok': True, 'running': True, 'msg': 'already running'}
-        py = DOGBIN_PYTHON
-        script = os.path.join(REPO, 'tools', 'detect', 'gate_store.py')
-        if not py:
-            return {'ok': False, 'running': False,
-                    'msg': f'no interpreter for the {sp["title"]} (set '
-                           f'dogbin_python in the dashboard config)'}
-        if not os.path.exists(script):
-            return {'ok': False, 'running': False,
-                    'msg': 'tools/detect/gate_store.py is missing'}
-        # A stage that reads another's output cannot start before that one is
-        # done, and saying so beats a button that fails.
-        up = gate_upstream(stage)
-        if up and not up['ready']:
-            return {'ok': False, 'running': False,
-                    'msg': f'the {up["title"]} has judged '
-                           f'{up["rows"]:,} of {up["total"]:,} boxes — the '
-                           f'{sp["title"]} reads its verdicts and cannot be '
-                           f'planned until it finishes'}
-        if not os.path.exists(os.path.join(gate_dir(stage), 'work.parquet')):
-            # Plan it here rather than sending someone to a terminal. The
-            # planner needs duckdb, and THIS interpreter has it -- it is the
-            # only one that can both parse this file and open the catalog, so
-            # the "run it where duckdb lives" instruction was pointing at the
-            # process reading it. Detached, because a 4.8M-row join is minutes
-            # and a request handler is not the place to spend them.
-            return _gate_plan(stage, sp)
+        if action == 'rerun':
+            moved = _gate_set_aside(stage, sp)
+            if not moved.get('ok'):
+                return moved
+            out = _gate_act('start', stage, sp, gate_pids(stage))
+            out['archived'] = moved.get('archived')
+            out['msg'] = moved['msg'] + ' ' + (out.get('msg') or '')
+            return out
+        return _gate_act(action, stage, sp, gate_pids(stage))
+
+
+def stage_best(stage):
+    """The run promoted for a stage's project in data/best_models.json, or
+    None. The runner loads exactly this (gate_store.gate_weights), so it is
+    the model a re-run will judge with."""
+    proj = (best_models().get('projects') or {}).get(
+        GATE_STAGES[stage]['project']) or {}
+    best = proj.get('best') or {}
+    return best.get('run') if best.get('weights') else None
+
+
+def _gate_stale_plan(stage):
+    """Is this stage's work list older than the upstream verdicts it was
+    built from? The leash list is the gate's dogs: re-run the gate and the
+    list names last model's dogs, so it has to be built again."""
+    up = GATE_STAGES[stage]['feeds_on']
+    if not up:
+        return False
+    s = _gate_shards(up)
+    try:
+        made = os.path.getmtime(os.path.join(gate_dir(stage), 'work.parquet'))
+    except OSError:
+        return False
+    return bool(s and s.get('last')) and s['last'] > made
+
+
+def gate_last_archive(stage):
+    """The newest record a re-run set aside for this stage, or None: what
+    wrote it, what replaced it, and the command that puts it back."""
+    base = os.path.join(gate_dir(stage), 'archive')
+    try:
+        names = sorted(os.listdir(base), reverse=True)
+    except OSError:
+        return None
+    for n in names:
         try:
-            log = open(os.path.join(REPO, 'data',
-                                    f'{sp["dir"]}_run.log'), 'a')
-            env = dict(os.environ)
-            # the runner resolves the promoted weights against this
-            env['TRAINING_ROOT'] = training_root()
-            proc = subprocess.Popen(
-                [py, script, 'run', '--stage', stage],
-                cwd=REPO, stdout=log, stderr=log,
-                stdin=subprocess.DEVNULL, start_new_session=True, env=env)
-            _SPAWNED.append(proc)
-        except Exception as e:
-            return {'ok': False, 'running': False, 'msg': str(e)}
-        # the usual failure is an interpreter without ultralytics, which dies
-        # on the import in under a second and after this call has returned
-        try:
-            code = proc.wait(timeout=2.5)
-            if proc in _SPAWNED:
-                _SPAWNED.remove(proc)
-            tail = ''
+            with open(os.path.join(base, n, 'ARCHIVED.json')) as fh:
+                note = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(note, dict):
+            continue
+        return {'name': n, 'models': note.get('models') or {},
+                'replaced_by': note.get('replaced_by'),
+                'archived_at': note.get('archived_at'),
+                'restored': bool(note.get('restored_at')),
+                'restore': note.get('restore')}
+    return None
+
+
+def _gate_set_aside(stage, sp):
+    """Move a stage's verdicts out of the runner's way, or say why not."""
+    if gate_pids(stage):
+        return {'ok': False, 'running': True,
+                'msg': f'the {sp["title"]} is running \u2014 stop it before '
+                       f're-running it'}
+    if gate_planning():
+        return {'ok': False, 'running': False,
+                'msg': 'a work list is being built \u2014 wait for it'}
+    up = gate_upstream(stage)
+    if up and not up['ready']:
+        return {'ok': False, 'running': False,
+                'msg': f'the {up["title"]} has not finished \u2014 the '
+                       f'{sp["title"]} judges its verdicts'}
+    best = stage_best(stage)
+    if not best:
+        return {'ok': False, 'running': False,
+                'msg': f'no {sp["project"]} model is promoted in '
+                       f'data/best_models.json'}
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import gate_store
+    shards = _gate_shards(stage) or {}
+    try:
+        note = gate_store.archive_run(
+            stage, shards.get('models') or {}, best,
+            replan=_gate_stale_plan(stage),
+            reason='re-run from the dashboard with the promoted model',
+            repo=REPO)
+    except Exception as e:
+        return {'ok': False, 'running': False,
+                'msg': f'could not set the old verdicts aside: {e}'}
+    _GATE.pop(stage, None)          # the panel re-reads what is left
+    if not note:
+        return {'ok': True, 'archived': None,
+                'msg': f'nothing to set aside; judging with {best}.'}
+    return {'ok': True, 'archived': note['name'],
+            'msg': (f'{len(note["files"])} files set aside in data/'
+                    f'{sp["dir"]}/archive/{note["name"]} (undo: '
+                    f'gate_store.py restore --stage {stage} --archive '
+                    f'{note["name"]}); judging with {best}.')}
+
+
+def _gate_act(action, stage, sp, pids):
+    """Stop or start one stage; the caller holds _SPAWN_LOCK."""
+    if action == 'stop':
+        if not pids:
+            return {'ok': True, 'running': False, 'msg': 'already stopped'}
+        for pid in pids:
             try:
-                with open(os.path.join(REPO, 'data',
-                                       f'{sp["dir"]}_run.log')) as fh:
-                    lines = [x.strip() for x in fh if x.strip()]
-                tail = lines[-1] if lines else ''
+                os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-            # A run that ends this fast has done nothing -- but say WHICH
-            # kind of nothing: a clean exit means there was no work left,
-            # not that it fell over.
-            if code == 0:
-                return {'ok': True, 'running': False,
-                        'msg': f'the {sp["title"]} finished immediately — '
-                               f'nothing left to judge. ' + tail[:160]}
-            return {'ok': False, 'running': False,
-                    'msg': f'the {sp["title"]} exited immediately '
-                           f'(code {code}). ' + tail[:160]}
-        except subprocess.TimeoutExpired:
+        return {'ok': True, 'running': False,
+                'msg': 'stopping — finished shards are kept'}
+    if action != 'start':
+        return {'ok': False, 'msg': 'unknown action'}
+    if pids:
+        return {'ok': True, 'running': True, 'msg': 'already running'}
+    py = DOGBIN_PYTHON
+    script = os.path.join(REPO, 'tools', 'detect', 'gate_store.py')
+    if not py:
+        return {'ok': False, 'running': False,
+                'msg': f'no interpreter for the {sp["title"]} (set '
+                       f'dogbin_python in the dashboard config)'}
+    if not os.path.exists(script):
+        return {'ok': False, 'running': False,
+                'msg': 'tools/detect/gate_store.py is missing'}
+    # A stage that reads another's output cannot start before that one is
+    # done, and saying so beats a button that fails.
+    up = gate_upstream(stage)
+    if up and not up['ready']:
+        return {'ok': False, 'running': False,
+                'msg': f'the {up["title"]} has judged '
+                       f'{up["rows"]:,} of {up["total"]:,} boxes — the '
+                       f'{sp["title"]} reads its verdicts and cannot be '
+                       f'planned until it finishes'}
+    if not os.path.exists(os.path.join(gate_dir(stage), 'work.parquet')):
+        # Plan it here rather than sending someone to a terminal. The
+        # planner needs duckdb, and THIS interpreter has it -- it is the
+        # only one that can both parse this file and open the catalog, so
+        # the "run it where duckdb lives" instruction was pointing at the
+        # process reading it. Detached, because a 4.8M-row join is minutes
+        # and a request handler is not the place to spend them.
+        return _gate_plan(stage, sp)
+    try:
+        log = open(os.path.join(REPO, 'data',
+                                f'{sp["dir"]}_run.log'), 'a')
+        env = dict(os.environ)
+        # the runner resolves the promoted weights against this
+        env['TRAINING_ROOT'] = training_root()
+        proc = subprocess.Popen(
+            [py, script, 'run', '--stage', stage],
+            cwd=REPO, stdout=log, stderr=log,
+            stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+        _SPAWNED.append(proc)
+    except Exception as e:
+        return {'ok': False, 'running': False, 'msg': str(e)}
+    # the usual failure is an interpreter without ultralytics, which dies
+    # on the import in under a second and after this call has returned
+    try:
+        code = proc.wait(timeout=2.5)
+        if proc in _SPAWNED:
+            _SPAWNED.remove(proc)
+        tail = ''
+        try:
+            with open(os.path.join(REPO, 'data',
+                                   f'{sp["dir"]}_run.log')) as fh:
+                lines = [x.strip() for x in fh if x.strip()]
+            tail = lines[-1] if lines else ''
+        except OSError:
             pass
-        return {'ok': True, 'running': True, 'msg': f'{sp["title"]} started'}
+        # A run that ends this fast has done nothing -- but say WHICH
+        # kind of nothing: a clean exit means there was no work left,
+        # not that it fell over.
+        if code == 0:
+            return {'ok': True, 'running': False,
+                    'msg': f'the {sp["title"]} finished immediately — '
+                           f'nothing left to judge. ' + tail[:160]}
+        return {'ok': False, 'running': False,
+                'msg': f'the {sp["title"]} exited immediately '
+                       f'(code {code}). ' + tail[:160]}
+    except subprocess.TimeoutExpired:
+        pass
+    return {'ok': True, 'running': True, 'msg': f'{sp["title"]} started'}
 
 
 def sweep_control(action):
@@ -11275,6 +11393,10 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 # a run killed mid-shard leaves recent mtimes behind
                 doc['running'] = bool(gate_pids(stage))
                 doc['planning'] = gate_planning()
+                # what a re-run would judge with, beside what judged so far
+                doc['best_model'] = stage_best(stage)
+                doc['models'] = (_gate_shards(stage) or {}).get('models') or {}
+                doc['last_archive'] = gate_last_archive(stage)
                 doc['can_run'] = bool(DOGBIN_PYTHON) and (
                     not doc.get('upstream')
                     or doc['upstream']['ready'])
@@ -14378,7 +14500,7 @@ __LLMNAV__
   </span>
   <!-- one control slot, and the stage decides which run it drives -->
   <!--ADM--><span class="swctl" id="sweepCtl"><span class="swpill" id="sweepState">checking</span><button id="sweepBtn" class="rbtn sw" disabled>Checking&hellip;</button></span><!--/ADM-->
-  <!--ADM--><span class="swctl" id="gateCtl" hidden><span class="swpill" id="gateState">checking</span><button id="gateBtn" class="rbtn sw" disabled>Checking&hellip;</button></span><!--/ADM--></summary>
+  <!--ADM--><span class="swctl" id="gateCtl" hidden><span class="swpill" id="gateState">checking</span><button id="gateBtn" class="rbtn sw" disabled>Checking&hellip;</button><button id="gateRerun" class="rbtn sw" type="button" hidden>Re-run</button></span><!--/ADM--></summary>
 <div class="panel">
   <!-- status line ABOVE the cards, never instead of them: the layout below is
        always present and goes to em-dashes when idle, so nothing jumps when
@@ -14437,6 +14559,7 @@ __LLMNAV__
     <div class="dcount" id="gCount">—</div>
     <div class="drun" id="gRun">—</div>
     <div class="dmeta" id="gMeta"></div>
+    <div class="dmeta" id="gArch" hidden></div>
     <!-- The rejected pile is the one nothing downstream will ever look at
          again, so the way in has to be here, next to the number that made
          it. -->
@@ -16618,6 +16741,34 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
                               :'judge every detection the sweep committed; resumes where it left off'))
                 : 'no interpreter configured for the '+what;
     }
+    /* Re-run with the promoted model: offered wherever there is a record to
+       replace and nothing in flight. The runner skips every shard on disk,
+       so the old verdicts are moved to an archive first -- never deleted. */
+    var rr=document.getElementById('gateRerun');
+    if(rr&&rr.dataset.busy!=='1'){
+      var best=j.best_model||'',had=Object.keys(j.models||{});
+      var same=had.length===1&&had[0]===best;
+      rr.hidden=!best||!j.rows||!!j.running||!!j.planning||!!waiting;
+      rr.disabled=!j.can_run;
+      rr.textContent=same?'Re-run':'Re-run with '+best;
+      rr.dataset.best=best;
+      rr.dataset.had=had.join(', ')||'an unknown model';
+      rr.dataset.rows=String(j.rows||0);
+      rr.title=(same?'every verdict here is already '+best+
+                     '; this judges every box again with it'
+                    :'judged so far by '+rr.dataset.had+
+                     '; this judges every box again with '+best)+
+               ' — the old verdicts are moved to an archive, not deleted';
+    }
+    var ga=document.getElementById('gArch'),la=j.last_archive;
+    if(ga){
+      ga.hidden=!la;
+      if(la)ga.textContent='previous run ('+
+        (Object.keys(la.models||{}).join(', ')||'unknown model')+
+        ') archived '+(la.archived_at||la.name)+
+        (la.restored?' — since restored'
+                    :' — to put it back: '+(la.restore||''));
+    }
   }
   var gen=0;
   var gfold=document.getElementById('f-detect');
@@ -16664,6 +16815,30 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
       .then(function(j){
         btn.dataset.busy='';btn.disabled=false;
         if(j&&!j.ok&&j.msg)document.getElementById('gMeta').textContent=j.msg;
+        poll();setTimeout(poll,1500);
+      });
+  });
+  var rr=document.getElementById('gateRerun');
+  if(rr)rr.addEventListener('click',function(){
+    var st=window.__stage==='leash'?'leash':'gate';
+    /* one line, for the same reason as the Stop confirm above */
+    if(!confirm('Re-run the '+(st==='leash'?'leash model':'dog-bin gate')+
+      ' with '+rr.dataset.best+'? The '+fmt(Number(rr.dataset.rows))+
+      ' verdicts from '+rr.dataset.had+' are moved to data/'+st+
+      '/archive (not deleted; gate_store.py restore puts them back), and '+
+      'every box is judged again from the start.'+
+      (st==='gate'?' The leash stage reads these verdicts: re-run it after '+
+       'this finishes.':'')))return;
+    rr.dataset.busy='1';rr.disabled=true;
+    rr.textContent='Setting aside…';
+    fetch('/api/gate',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'rerun',stage:st})})
+      .then(function(r){return r.json()})
+      .catch(function(){return {ok:false,msg:'the dashboard did not answer'}})
+      .then(function(j){
+        rr.dataset.busy='';rr.disabled=false;
+        if(j&&j.msg)document.getElementById('gMeta').textContent=j.msg;
         poll();setTimeout(poll,1500);
       });
   });
