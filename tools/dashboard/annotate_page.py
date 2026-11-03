@@ -23,8 +23,25 @@ else's name to a label, and the ledger is append-only.
 
 WHAT IS NOT. Anything a model said. The seed dog a batch was chosen for is
 shown as a hint -- where the gate saw a dog a second earlier, in the next
-frame along -- and is never recorded as a label or copied into the ledger:
-the one thing in this file is what a person drew.
+frame along, or where a second model thinks a dog nobody labelled is -- and
+is never recorded as a label or copied into the ledger: the one thing in this
+file is what a person drew.
+
+WHAT THE PAGE SAYS DEPENDS ON THE BATCH. Two kinds exist, and what is true of
+a frame differs between them, so the sentence over the frame and the hint's
+tooltip come from the frame (see COPY), never from one fixed header:
+
+  neighbours   pick_label_frames.py: the detector drew nothing here, and the
+               hint is where the gate saw a dog a second earlier
+  hidden_dogs  hidden_dogs.py: a person already confirmed one dog here (or
+               rejected the detector's box), and the hint is where a second
+               model thinks there is a dog nobody labelled -- not always right
+
+A batch says which it is in summary.json `kind`; an older batch without one is
+read off its manifest (hidden-dog rows carry a `role`). A single fixed header
+told annotators of the first hidden-dog batch that the detector drew nothing
+and that the hint was the gate's dog, and several boxed only the hinted dog
+and left the confirmed one out.
 
 HOW THE WORK IS SHARED. Every annotator walks a batch in their own order -- a
 hash of their name and the image id -- so two people on one batch rarely meet
@@ -142,6 +159,64 @@ def labels():
         return out
 
     return _cached(('labels', ), LEDGER, load) or {}
+
+
+# What the page says over a frame, by kind of batch and the frame's role.
+# Plain text: the page sets it with textContent. Every one ends by asking for
+# every dog and for the leash, which are true of every batch.
+_EVERY = ('Box every dog you can see, however small — zoom in to look. '
+          'For a dog on a leash, take the leash into the box, as in Label '
+          'Studio.')
+COPY = {
+    'neighbours': {
+        'intro': ('The detector drew nothing on this frame, but a dog was '
+                  'seen a second earlier on the same road. ' + _EVERY +
+                  ' If there is none, mark the frame “no dog”.'),
+        'hint':
+        'the gate saw a dog about here, a second earlier',
+    },
+    'hidden_dogs/addition': {
+        'intro': ('A reviewer already confirmed one dog in this frame, and a '
+                  'second model thinks there is another — the dashed '
+                  'square marks where. Box the confirmed dog too, not only '
+                  'the one in the square. ' + _EVERY),
+        'hint': ('a second model thinks a dog nobody labelled is about here '
+                 '— check it: it is not always a dog'),
+    },
+    'hidden_dogs/background': {
+        'intro': ('A reviewer said the detector’s box in this frame was '
+                  'not a dog, but a second model thinks there is a dog '
+                  '— the dashed square marks where. It is often a cat, '
+                  'a goat or part of the car: if there is no dog anywhere, '
+                  'mark the frame “no dog”. ' + _EVERY),
+        'hint': ('a second model thinks a dog is about here — often it '
+                 'is a cat, a goat or part of the car'),
+    },
+}
+
+
+def batch_kind(batch):
+    """'neighbours' or 'hidden_dogs', from summary.json or the manifest."""
+    d = _batch_dir(batch)
+    if not d:
+        return None
+    try:
+        with open(os.path.join(d, 'summary.json')) as fh:
+            kind = json.load(fh).get('kind')
+        if kind in ('neighbours', 'hidden_dogs'):
+            return kind
+    except (OSError, ValueError, AttributeError):
+        pass
+    rows = manifest(batch) or []
+    return 'hidden_dogs' if any(r.get('role') for r in rows) else 'neighbours'
+
+
+def copy_for(batch, row):
+    """{'intro', 'hint'}: what the page says over this frame."""
+    if batch_kind(batch) == 'hidden_dogs':
+        role = 'background' if row.get('role') == 'background' else 'addition'
+        return COPY['hidden_dogs/' + role]
+    return COPY['neighbours']
 
 
 def batches():
@@ -281,6 +356,10 @@ def frame(batch, i, user=''):
         h,
         'hint':
         _hint(batch, row, w, h),
+        'intro':
+        copy_for(batch, row)['intro'],
+        'hint_title':
+        copy_for(batch, row)['hint'],
         'label': ({
             'boxes': got.get('boxes') or [],
             'empty': bool(got.get('empty')),
@@ -540,11 +619,10 @@ __ACCTCSS__
 <header>
   <div>
     <h1>Annotate</h1>
-    <p class="sub">The detector drew <b>nothing</b> on these frames, but a dog
-    was seen a second earlier on the same road. <b>Box every dog you can see,
-    however small</b> &mdash; zoom in to look &mdash; or mark the frame
-    &ldquo;no dog&rdquo;. For a dog on a leash, <b>take the leash into the
-    box</b>, as in Label Studio.</p>
+    <p class="sub" id="intro"><b>Box every dog you can see, however
+    small</b> &mdash; zoom in to look &mdash; or mark the frame &ldquo;no
+    dog&rdquo;. For a dog on a leash, <b>take the leash into the box</b>, as
+    in Label Studio.</p>
   </div>
   <div class="hdrend"><a class="back" href="/">&larr; dashboard</a>__ACCOUNT__</div>
 </header>
@@ -555,7 +633,7 @@ __ACCTCSS__
     <span id="ptext">&mdash;</span></div>
   <div class="acts">
     <button type="button" class="btn tog" id="bhint" aria-pressed="true"
-      title="Show where the gate saw a dog a second earlier (H)">hint<kbd>H</kbd></button>
+      title="Show or hide the hint: where somebody thinks a dog is (H)">hint<kbd>H</kbd></button>
     <button type="button" class="btn" id="bundo" title="Undo (Ctrl+Z)">undo<kbd>Ctrl Z</kbd></button>
     <button type="button" class="btn" id="bback" title="Reopen the frame you last saved (B)">back<kbd>B</kbd></button>
     <button type="button" class="btn" id="bskip" title="Leave this one for later (S)">skip<kbd>S</kbd></button>
@@ -646,7 +724,7 @@ function draw(){
   if(showHint&&F.hint){var b=F.hint,cx=(b[0]+b[2])/2,cy=(b[1]+b[3])/2,
       r=Math.max(b[2]-b[0],b[3]-b[1])*1.6+12;
     var c=el('rect',{x:cx-r,y:cy-r,width:2*r,height:2*r,rx:r*0.25,'class':'hint'});
-    var t=el('title',{});t.textContent='the gate saw a dog about here, a second earlier';
+    var t=el('title',{});t.textContent=F.hint_title||'somebody thinks a dog is about here';
     c.appendChild(t);gh.appendChild(c)}
   var hs=7*perPx();
   boxes.forEach(function(b,k){
@@ -796,6 +874,7 @@ function show(d,note){
   img.onload=function(){msg('')};img.onerror=function(){msg('<b>The picture would not load.</b>')};
   img.setAttribute('width',d.w);img.setAttribute('height',d.h);
   img.setAttribute('href','/annotate/frame.jpg?batch='+encodeURIComponent(d.batch)+'&i='+d.i);
+  if(d.intro)$('intro').textContent=d.intro;
   fit();info();progress(d.progress);say(note||'',note?'good':'')}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}

@@ -37,6 +37,14 @@ takes an empty one as a background. That is only safe if every link holds:
       leaves out a frame of a val sequence, lets a frame label replace the
       confirmed-box addition of the same frame, and counts what it did; and
       the ledger is a store every dogdet build digests
+  n15 what the page says over a frame is true of that frame: a hidden-dog
+      batch never claims the detector drew nothing or that the hint is the
+      gate's dog, a frame with a confirmed dog asks for that dog too, a
+      rejected frame offers "no dog", a neighbour batch keeps its own
+      sentence, summary.json `kind` wins over the manifest, and the page
+      draws the frame's sentence and tooltip rather than a fixed header
+  n16 a change to the page reaches the running dashboard: annotate_page.py
+      is one of the files its source watcher restarts on
 
 EVERY PATH IS REDIRECTED to a temp directory, and the live ledger is
 fingerprinted before and compared after.
@@ -389,6 +397,57 @@ try:
         'n10 a frame stored on its side is not served and cannot be '
         'labelled',
         ap.frame(B, k_rot, WHO) is None and not got.get('ok'), f'{got}')
+
+    # ── n15 ─────────────────────────────────────────────────────────────
+    H = 'guard_hidden'
+    hdir = os.path.join(ap.BATCHES, H)
+    os.makedirs(hdir)
+    hrows = [dict(rows[0], role='addition'), dict(rows[1], role='background')]
+    with open(os.path.join(hdir, 'manifest.jsonl'), 'w') as fh:
+        fh.write(''.join(json.dumps(r) + '\n' for r in hrows))
+    fa, fb, fn = ap.frame(H, 0, WHO), ap.frame(H, 1, WHO), ap.frame(B, 0, WHO)
+    said = ' '.join(
+        str((x or {}).get(k)) for x in (fa, fb)
+        for k in ('intro', 'hint_title')).lower()
+    check(
+        'n15 a hidden-dog batch never says the detector drew nothing or that '
+        'the hint is the gate\'s dog', fa and fb and 'drew nothing' not in said
+        and 'second earlier' not in said and 'gate saw' not in said,
+        said[:300])
+    check(
+        'n15b a frame with a confirmed dog asks for that dog too; a rejected '
+        'frame offers "no dog"', fa and 'confirmed' in fa['intro'].lower()
+        and fb and 'no dog' in fb['intro'].lower()
+        and fa['intro'] != fb['intro'],
+        f'{(fa or {}).get("intro")!r} / {(fb or {}).get("intro")!r}')
+    check(
+        'n15c a neighbour batch keeps its own sentence and tooltip', fn
+        and 'drew nothing' in fn['intro'].lower()
+        and 'second earlier' in fn['hint_title'].lower(),
+        f'{(fn or {}).get("intro")!r}')
+    with open(os.path.join(hdir, 'summary.json'), 'w') as fh:
+        json.dump({'kind': 'neighbours'}, fh)
+    check('n15d summary.json kind wins over what the manifest suggests',
+          ap.batch_kind(H) == 'neighbours', f'{ap.batch_kind(H)}')
+    os.remove(os.path.join(hdir, 'summary.json'))
+    page = ap.page_html()
+    check(
+        'n15e the page shows the frame\'s own sentence and tooltip, and its '
+        'fixed header claims nothing about the detector',
+        'textContent=d.intro' in page and 'F.hint_title' in page
+        and 'drew <b>nothing</b>' not in page
+        and 'gate saw a dog about here' not in page,
+        'the page still draws a fixed header or tooltip')
+
+    # ── n16 ─────────────────────────────────────────────────────────────
+    dsrc = open(os.path.join(REPO, 'tools', 'dashboard',
+                             'dashboard.py')).read()
+    at = dsrc.find("for _m in ('audit.py'")
+    check(
+        'n16 the dashboard restarts when annotate_page.py changes, so a fix to '
+        'the page reaches annotators', at >= 0
+        and "'annotate_page.py'" in dsrc[at:at + 200],
+        'annotate_page.py is not in the source watcher list')
 
     # ── n11 ─────────────────────────────────────────────────────────────
     led = os.path.join(tmp, 'build_ledger.jsonl')

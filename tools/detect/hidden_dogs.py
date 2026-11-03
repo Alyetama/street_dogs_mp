@@ -257,6 +257,8 @@ def main(argv=None):
     rows, seeds = plan_batch(flagged, labelled, meta, seqs, roots, a.role,
                              a.seed)
     summary = {
+        'kind':
+        'hidden_dogs',
         'batch':
         a.name,
         'planned_at':

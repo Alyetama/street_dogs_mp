@@ -343,6 +343,7 @@ def plan(args):
         for p in picks:
             fh.write(json.dumps(p) + '\n')
     summary = {
+        'kind': 'neighbours',
         'batch': args.batch,
         'planned_at': int(time.time()),
         'asked': args.n,

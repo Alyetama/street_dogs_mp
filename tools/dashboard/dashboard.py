@@ -12385,7 +12385,7 @@ def serve(args):
     # own: an edit to the gate that sits invisible behind a healthy-looking
     # server is a lock somebody believes they changed and did not.
     for _m in ('audit.py', 'datasets.py', 'llm_page.py', 'auth.py',
-               'accounts.py'):
+               'accounts.py', 'annotate_page.py'):
         _q = os.path.join(_src_dir, _m)
         if os.path.exists(_q):
             _watched.add(_q)
