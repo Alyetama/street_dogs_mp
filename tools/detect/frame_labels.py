@@ -33,6 +33,7 @@ REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LEDGER = os.path.join(REPO, 'data', 'frame_labels', 'labels.jsonl')
 SOURCE = 'annotate_page'
+BATCHES = os.path.join(REPO, 'data', 'label_batches')
 
 
 def read(path=LEDGER):
@@ -143,6 +144,59 @@ def plan(recs, seq, val_seqs, have, where, size_of=None):
                 continue
         added.append((iid, src, text))
     return added, skipped
+
+
+def test_sets(batches=None):
+    """The label batches kept out of training to measure the model with.
+
+    A batch is a test set when its summary.json says `"use": "test"`. Its
+    frames never enter a training set, and neither does any other frame of
+    the same Mapillary sequences: frames a second apart are near-copies, and a
+    labelled neighbour in train would hand the model the test scene.
+
+    Returns {'batches': [names], 'ids': {image_id}, 'seqs': {sequence}}. A
+    batch with no summary is not a test set; a summary that is there but
+    cannot be read, a test set with no frames, and a test frame with no
+    sequence are errors, not an empty set -- a build that silently trained on
+    its test set would report a gain that is not one.
+    """
+    batches = BATCHES if batches is None else batches
+    out = {'batches': [], 'ids': set(), 'seqs': set()}
+    try:
+        names = sorted(os.listdir(batches))
+    except OSError:
+        return out
+    for name in names:
+        path = os.path.join(batches, name, 'summary.json')
+        if not os.path.exists(path):
+            continue  # no summary: not a test set
+        try:
+            with open(path) as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as e:
+            raise SystemExit(f'{path} cannot be read ({e}) -- if this batch '
+                             'is a test set, training on it would report a '
+                             'gain that is not one; fix the file first')
+        if not isinstance(doc, dict):
+            raise SystemExit(f'{path} is not a JSON object')
+        if doc.get('use') != 'test':
+            continue
+        with open(os.path.join(batches, name, 'manifest.jsonl')) as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        if not rows:
+            raise SystemExit(f'test set {name} has no frames')
+        # a frame with no sequence cannot have its neighbours held out
+        noseq = [str(r.get('image_id')) for r in rows if not r.get('seq')]
+        if noseq:
+            raise SystemExit(
+                f'test set {name}: {len(noseq)} frame(s) have no sequence '
+                f'(first: {noseq[0]}), so their neighbours cannot be held out '
+                'of training -- add `seq` to those manifest rows')
+        out['batches'].append(name)
+        for r in rows:
+            out['ids'].add(str(r['image_id']))
+            out['seqs'].add(str(r['seq']))
+    return out
 
 
 def image_size(path):

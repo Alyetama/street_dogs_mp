@@ -238,6 +238,17 @@ def main(argv=None):
     print(f'  {len(leaked)} share a sequence with a val frame -> '
           f'{len(have)} left ({len(val_seqs)} val sequences on record)')
 
+    # 3c. nor from a test set, or a sequence one measures on -- the same rule
+    # as val, for the label batches kept out of training (frame_labels.py)
+    import frame_labels
+    test = frame_labels.test_sets()
+    in_test = {i for i in have
+               if i in test['ids'] or seq.get(i) in test['seqs']}
+    for i in in_test:
+        have.pop(i, None)
+    print(f'  {len(in_test)} belong to a test set or share its sequence -> '
+          f'{len(have)} left ({", ".join(test["batches"]) or "no test sets"})')
+
     # 4. one long pass past one goat must not dominate
     by_seq = collections.defaultdict(list)
     for i in sorted(have):
@@ -310,8 +321,11 @@ def main(argv=None):
         'flagged_in_ledger': len(flags),
         'already_in_src': len(flags) - len(cand),
         'multi_detection_skipped': len(cand) - len(safe),
-        'unresolved_to_original': len(safe) - len(have) - len(leaked),
+        'unresolved_to_original': (len(safe) - len(have) - len(leaked) -
+                                   len(in_test)),
         'val_sequence_skipped': len(leaked),
+        'test_set_skipped': sorted(in_test),
+        'test_sets': test['batches'],
         'over_sequence_cap': dropped_cap,
         'added_backgrounds': len(chosen),
         'target_frac': args.target_frac,

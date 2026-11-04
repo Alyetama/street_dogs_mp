@@ -466,6 +466,16 @@ def stage(args):
     man = os.path.join(out, 'manifest.jsonl')
     if not os.path.isfile(man):
         raise SystemExit('no batch %s -- run plan first' % (args.batch, ))
+    try:
+        with open(os.path.join(out, 'summary.json')) as fh:
+            use = (json.load(fh) or {}).get('use')
+    except (OSError, ValueError, AttributeError):
+        use = None
+    if use == 'test':
+        raise SystemExit('%s is a test set (summary.json use: test) -- its '
+                         'frames are for measuring the detector and must '
+                         'never reach Label Studio, where they would become '
+                         'training data' % (args.batch, ))
     with open(man) as fh:
         picks = [json.loads(l) for l in fh if l.strip()]
     dst = os.path.join(label_studio_dir(args.ls_dir), 'new_images')

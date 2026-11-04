@@ -274,6 +274,13 @@ def main(argv=None):
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import frame_labels
     framed = frame_labels.read()
+    # a test set's frames are for measuring, never for training; any other
+    # frame of their sequences is held out below, once sequences are known
+    test = frame_labels.test_sets()
+    test_out = {'frame_labels': sorted(i for i in framed if i in test['ids']),
+                'additions': sorted(i for i in adds if i in test['ids'])}
+    framed = {i: r for i, r in framed.items() if i not in test['ids']}
+    adds -= test['ids']
     # a whole-frame label says more than one confirmed box on the same frame
     adds -= set(framed)
     print(f'{len(adds)} confirmed-positive frames not yet in the dataset, '
@@ -292,6 +299,10 @@ def main(argv=None):
           f'unresolved val -> train: {len(unresolved_val)}', flush=True)
 
     new_train = set(train_ids) | set(leaked) | set(unresolved_val)
+    # a test-set frame already in the hand-labelled source is not trained on
+    # either: it leaves train (val only measures, so it may stay there)
+    base_in_test = sorted(new_train & test['ids'])
+    new_train -= test['ids']
     new_val = set(holdout)
     val_seqs = {seq[i] for i in new_val}
 
@@ -335,6 +346,9 @@ def main(argv=None):
         if seq.get(iid) in val_seqs:
             skipped['val_sequence'] += 1
             continue
+        if seq.get(iid) in test['seqs']:
+            skipped['test_sequence'] = skipped.get('test_sequence', 0) + 1
+            continue
         src = os.path.join(roots.get(drive, ''), cell,
                            'ground_animal_images', f'{iid}.jpg')
         if not os.path.exists(src):
@@ -369,9 +383,15 @@ def main(argv=None):
         if m and m[3] and m[4] in roots:
             where[iid] = os.path.join(roots[m[4]], m[3],
                                       'ground_animal_images', f'{iid}.jpg')
+    in_test_seq = sorted(i for i in framed
+                         if seq.get(i) is not None
+                         and seq.get(i) in test['seqs'])
+    framed = {i: r for i, r in framed.items() if i not in set(in_test_seq)}
     framed_added, framed_skipped = frame_labels.plan(
         framed, seq, val_seqs, have, where,
         size_of=frame_labels.image_size)
+    framed_skipped['test_set'] = len(test_out['frame_labels'])
+    framed_skipped['test_sequence'] = len(in_test_seq)
     print(f'adding {len(framed_added)} whole-frame labels to train '
           f'({sum(1 for *_, t in framed_added if not t)} empty), skipped '
           f'{framed_skipped}', flush=True)
@@ -464,6 +484,22 @@ def main(argv=None):
         'added_frame_label_ids': sorted(i for i, *_ in framed_added),
         'frame_labels_empty': sum(1 for *_, t in framed_added if not t),
         'frame_labels_skipped': framed_skipped,
+        # What was held out for the test sets, and the hand-labelled frames
+        # of the base set that share a sequence with one -- those were in
+        # the source before the test set existed and stay; the scorer leaves
+        # the test frames of those sequences out instead.
+        'test_sets': {
+            'batches': test['batches'],
+            'frames': len(test['ids']),
+            'frame_labels_left_out': test_out['frame_labels'],
+            'additions_left_out': test_out['additions'],
+            'additions_in_a_test_sequence': skipped.get('test_sequence', 0),
+            'frame_labels_in_a_test_sequence': in_test_seq,
+            'base_frames_in_a_test_set_left_out_of_train': base_in_test,
+            'base_frames_sharing_a_test_sequence': sorted(
+                i for i in new_train | new_val
+                if seq.get(i) is not None and seq.get(i) in test['seqs']),
+        },
         'sequences': {i: seq.get(i) for i in sorted(
             new_train | new_val | {x[0] for x in added}
             | {x[0] for x in framed_added})},
