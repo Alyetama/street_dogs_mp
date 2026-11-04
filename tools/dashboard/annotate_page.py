@@ -36,6 +36,14 @@ tooltip come from the frame (see COPY), never from one fixed header:
   hidden_dogs  hidden_dogs.py: a person already confirmed one dog here (or
                rejected the detector's box), and the hint is where a second
                model thinks there is a dog nobody labelled -- not always right
+  recheck      recheck_frames.py: frames somebody ALREADY labelled, served
+               again because a check found a problem with the label; the
+               page shows their boxes, says what was found, and marks where
+               a detector is sure of a dog no box covers
+
+A RECHECK FRAME IS DONE WHEN IT IS SAVED AGAIN, not when it has a label --
+every frame in such a batch had one before the batch existed. Its label
+counts as rechecked once its latest save is no older than the batch.
 
 A batch says which it is in summary.json `kind`; an older batch without one is
 read off its manifest (hidden-dog rows carry a `role`). A single fixed header
@@ -63,7 +71,9 @@ LEDGER_DIR = os.path.join(REPO, 'data', 'frame_labels')
 LEDGER = os.path.join(LEDGER_DIR, 'labels.jsonl')
 SOURCE = 'annotate_page'
 
-BATCH_RE = re.compile(r'^[a-z0-9][a-z0-9_]{2,60}$')
+# \Z, not $: `$` also matches before a trailing newline, which would let
+# 'name\n' through as a second, different-looking batch
+BATCH_RE = re.compile(r'^[a-z0-9][a-z0-9_]{2,60}\Z')
 ID_RE = re.compile(r'^[0-9]{6,24}$')
 # More than this in one street frame is a slip of the mouse, not a pack.
 MAX_BOXES = 60
@@ -194,29 +204,82 @@ COPY = {
     },
 }
 
+# The squares come from more than one source, some sure and some only
+# guessing, so they claim no more than the weakest of them.
+RECHECK_HINT = ('a model thinks there may be a dog here that no box covers '
+                '\u2014 check it: it is not always a dog')
+
+
+def _recheck_intro(row):
+    issues = [str(x) for x in (row.get('issues') or []) if x]
+    found = ('A check found: ' + '; '.join(issues) + '. ') if issues else ''
+    return (
+        'Somebody already labelled this frame, and their boxes are shown. ' +
+        found + 'Fix the label: box every dog that has no box, draw '
+        'one box per dog, delete a box on something that is not a dog, '
+        'then save. The dashed squares mark where a model thinks there may '
+        'be a dog that no box covers \u2014 check each one: it is not '
+        'always a dog. If there really is no dog, mark the frame '
+        '\u201cno dog\u201d. ' + _EVERY)
+
 
 def batch_kind(batch):
-    """'neighbours' or 'hidden_dogs', from summary.json or the manifest."""
+    """'neighbours', 'hidden_dogs' or 'recheck', from summary.json or the
+    manifest."""
     d = _batch_dir(batch)
     if not d:
         return None
     try:
         with open(os.path.join(d, 'summary.json')) as fh:
             kind = json.load(fh).get('kind')
-        if kind in ('neighbours', 'hidden_dogs'):
+        if kind in ('neighbours', 'hidden_dogs', 'recheck'):
             return kind
     except (OSError, ValueError, AttributeError):
         pass
     rows = manifest(batch) or []
+    # a recheck batch whose summary went missing still reads as one: its rows
+    # say which batch they came from
+    if any(r.get('from_batch') for r in rows):
+        return 'recheck'
     return 'hidden_dogs' if any(r.get('role') for r in rows) else 'neighbours'
 
 
 def copy_for(batch, row):
     """{'intro', 'hint'}: what the page says over this frame."""
-    if batch_kind(batch) == 'hidden_dogs':
+    kind = batch_kind(batch)
+    if kind == 'recheck':
+        return {'intro': _recheck_intro(row), 'hint': RECHECK_HINT}
+    if kind == 'hidden_dogs':
         role = 'background' if row.get('role') == 'background' else 'addition'
         return COPY['hidden_dogs/' + role]
     return COPY['neighbours']
+
+
+def _since(batch):
+    """When a recheck batch was made: a save at or after this rechecks a
+    frame. None for any other kind, where any label at all is done."""
+    if batch_kind(batch) != 'recheck':
+        return None
+    d = _batch_dir(batch)
+    try:
+        with open(os.path.join(d, 'summary.json')) as fh:
+            return int(json.load(fh)['planned_at'])
+    except (OSError, ValueError, KeyError, TypeError):
+        # a recheck batch that cannot say when it was made would count every
+        # old label as rechecked and serve nothing; serve everything instead
+        return 1 << 62
+
+
+def _done(image_id, lab, since):
+    got = lab.get(image_id)
+    if got is None:
+        return False
+    if since is None:
+        return True
+    try:
+        return int(got.get('at') or 0) >= since
+    except (TypeError, ValueError):
+        return False
 
 
 def batches():
@@ -231,7 +294,11 @@ def batches():
         rows = manifest(name)
         if not rows:
             continue
-        done = [lab[r['image_id']] for r in rows if r['image_id'] in lab]
+        since = _since(name)
+        done = [
+            lab[r['image_id']] for r in rows
+            if _done(r['image_id'], lab, since)
+        ]
         out.append({
             'batch': name,
             'total': len(rows),
@@ -325,6 +392,28 @@ def _hint(batch, row, w, h):
         return None
 
 
+def _suspects(row, w, h):
+    """A recheck row's suspect boxes -- where a model thinks there may be a
+    dog no box covers. Already in the frame's own pixels (recheck_frames.py
+    checks them against the file), so drawn as they are; one that does not
+    fit the frame is dropped rather than drawn somewhere else. Somewhere to
+    look, never a label."""
+    out = []
+    for b in row.get('suspects') or []:
+        try:
+            x1, y1, x2, y2 = (float(v) for v in b)
+        except (TypeError, ValueError):
+            continue
+        if (all(math.isfinite(v) for v in (x1, y1, x2, y2))
+                and 0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h):
+            out.append(
+                [round(x1, 1),
+                 round(y1, 1),
+                 round(x2, 1),
+                 round(y2, 1)])
+    return out
+
+
 def frame(batch, i, user=''):
     """Everything the page needs to show one frame, or None."""
     rows = manifest(batch)
@@ -339,10 +428,10 @@ def frame(batch, i, user=''):
     row = rows[i]
     lab = labels()
     got = lab.get(row['image_id'])
-    mine = sum(
-        1 for r in rows
-        if r['image_id'] in lab and lab[r['image_id']].get('by') == user)
-    done = sum(1 for r in rows if r['image_id'] in lab)
+    since = _since(batch)
+    mine = sum(1 for r in rows if _done(r['image_id'], lab, since)
+               and lab[r['image_id']].get('by') == user)
+    done = sum(1 for r in rows if _done(r['image_id'], lab, since))
     return {
         'batch':
         batch,
@@ -356,6 +445,8 @@ def frame(batch, i, user=''):
         h,
         'hint':
         _hint(batch, row, w, h),
+        'hints':
+        _suspects(row, w, h),
         'intro':
         copy_for(batch, row)['intro'],
         'hint_title':
@@ -386,8 +477,9 @@ def next_frame(batch, user, after=None):
     if not rows:
         return None
     lab = labels()
+    since = _since(batch)
     todo = sorted((_order(user, r['image_id']), k) for k, r in enumerate(rows)
-                  if r['image_id'] not in lab)
+                  if not _done(r['image_id'], lab, since))
     if not todo:
         return {
             'batch': batch,
@@ -721,11 +813,11 @@ function draw(){
   while(gb.firstChild)gb.removeChild(gb.firstChild);
   while(gh.firstChild)gh.removeChild(gh.firstChild);
   if(!F)return;
-  if(showHint&&F.hint){var b=F.hint,cx=(b[0]+b[2])/2,cy=(b[1]+b[3])/2,
-      r=Math.max(b[2]-b[0],b[3]-b[1])*1.6+12;
+  if(showHint)(F.hint?[F.hint]:[]).concat(F.hints||[]).forEach(function(b){
+    var cx=(b[0]+b[2])/2,cy=(b[1]+b[3])/2,r=Math.max(b[2]-b[0],b[3]-b[1])*1.6+12;
     var c=el('rect',{x:cx-r,y:cy-r,width:2*r,height:2*r,rx:r*0.25,'class':'hint'});
     var t=el('title',{});t.textContent=F.hint_title||'somebody thinks a dog is about here';
-    c.appendChild(t);gh.appendChild(c)}
+    c.appendChild(t);gh.appendChild(c)});
   var hs=7*perPx();
   boxes.forEach(function(b,k){
     var w=b[2]-b[0],h=b[3]-b[1];
