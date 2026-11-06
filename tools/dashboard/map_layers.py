@@ -14,6 +14,16 @@ grid build_map_points() uses):
                         can draw either side or a ratio without a second
                         fetch.
 
+DUPLICATE BOXES ARE TAKEN OUT FIRST. The sweep stored boxes at NMS IoU 0.90,
+so about one dog crop in six was a second box on a dog that already had one
+(a dog box and a dog-plus-leash box, a box and its slightly shifted twin).
+Both layers anti-join tools/detect/box_nms.py's sidecar -- NMS at IoU 0.7,
+within the gate's own call, so a dog crop is only ever dropped by another
+dog crop over it -- and each payload records the rule it applied under
+'dedup'. When that sidecar is missing or was computed from a different store
+or ledger, the layers are built raw and 'dedup' is null: a count with
+duplicates in it says so rather than borrowing another store's suppression.
+
 Everything here is MODEL output -- the gate and leash ledgers under
 data/gate and data/leash are classifier scores, not human verdicts -- so
 each payload carries a 'source' field naming the model(s) that produced it.
@@ -42,6 +52,7 @@ import glob
 import hashlib
 import json
 import os
+import sys
 import time
 
 import duckdb
@@ -120,7 +131,8 @@ def _manifests(snapshot, hide_regions):
                    if r not in hide_regions), dated)
 
 
-def _signature(gate_shards, leash_shards, manifests, snapshot=None):
+def _signature(gate_shards, leash_shards, manifests, snapshot=None,
+               dedup=None):
     """One hash over everything the build reads: shard names, mtimes and
     sizes for both stores, and the manifest set the catalog names -- each
     with the mtime and size the catalog recorded for it.
@@ -146,6 +158,11 @@ def _signature(gate_shards, leash_shards, manifests, snapshot=None):
     # the full path here, not the basename: cell-named manifests repeat
     # across drives and the join reads both. Only the digest is ever stored.
     ent.extend(list(m) for m in manifests)
+    # the duplicate-box sidecar the counts were taken through: a new one (or
+    # losing it) changes every number, so it has to change the signature. A
+    # build without one keys exactly as it always did.
+    if dedup:
+        ent.append(['box_nms', dedup])
     return hashlib.sha256(
         json.dumps(ent, sort_keys=False).encode()).hexdigest()
 
@@ -196,6 +213,26 @@ def _grid(con, table, expr):
     return out
 
 
+def _box_nms(nms_dir, det_root, gate_dir):
+    """tools/detect/box_nms.py's meta if its sidecar matches the store and
+    ledger as they are now, else None. Any failure to tell is None too: the
+    layers then count raw and say so, which is the honest fallback."""
+    try:
+        d = os.path.join(REPO, 'tools', 'detect')
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        import importlib
+        import box_nms
+        # the dashboard imports this module once for its whole life; without
+        # a reload, an edit to the rule or threshold in box_nms.py would leave
+        # the old one here, the signatures would never agree again, and the
+        # layers would stay raw until somebody restarted the server
+        box_nms = importlib.reload(box_nms)
+        return box_nms.current(nms_dir, det_root, gate_dir), box_nms
+    except Exception:
+        return None, None
+
+
 def _models(con, shards, where):
     """'model:a+b' from the rows a layer actually counted, never a constant
     -- a retrain writes a new model tag into the shards and the payload has
@@ -208,7 +245,8 @@ def _models(con, shards, where):
 
 
 def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
-            out_dir=None, hide_regions=None, allow_missing=False):
+            out_dir=None, hide_regions=None, allow_missing=False,
+            nms_dir=None, det_root=None):
     """Build both layer files if anything changed; report either way.
 
     The keyword arguments exist for the guard test, which points them at a
@@ -238,8 +276,10 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
         return {'built': False, 'reason': 'no catalog snapshot',
                 'secs': time.time() - t0}
     named, dated = _manifests(snapshot, hide_regions)
+    nms, bn = _box_nms(nms_dir, det_root, gate_dir)
     sig = _signature(gate_shards, leash_shards, named,
-                     None if dated else snapshot)
+                     None if dated else snapshot,
+                     dedup=nms['sig'] if nms else None)
     if (not force and _stored_sig(dogs_path) == sig
             and _stored_sig(leash_path) == sig):
         return {'built': False, 'reason': 'signature match', 'sig': sig,
@@ -283,11 +323,19 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
         # throughout: that is the ledgers' own type, and the manifest side is
         # cast to match rather than the other way around (lonlat_for() sets
         # the precedent) so a malformed id drops the row, never the build.
+        # a box the duplicate sidecar drops is left out of BOTH ledgers'
+        # counts with the same set, so 'unlocated' (a difference of two
+        # counts) and the leash ratio stay in one unit
+        anti = ''
+        if nms:
+            anti = (f"ANTI JOIN {bn.suppressed_sql(nms, 'gate')} s "
+                    f"ON s.image_id = CAST(g.image_id AS VARCHAR) "
+                    f"AND s.det_idx = g.det_idx")
         if gate_shards:
             con.execute(
                 f"""CREATE TEMP TABLE gate_w AS
-                SELECT CAST(image_id AS VARCHAR) image_id, count(*) crops
-                FROM read_parquet(?) WHERE p_dog >= {P_DOG_MIN}
+                SELECT CAST(g.image_id AS VARCHAR) image_id, count(*) crops
+                FROM read_parquet(?) g {anti} WHERE g.p_dog >= {P_DOG_MIN}
                 GROUP BY 1""", [gate_shards])
             dogs_source = _models(con, gate_shards,
                                   f'p_dog >= {P_DOG_MIN}')
@@ -301,10 +349,11 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
             # said
             con.execute(
                 f"""CREATE TEMP TABLE leash_w AS
-                SELECT CAST(image_id AS VARCHAR) image_id,
-                  count(*) FILTER (WHERE p_leashed >= {P_LEASH_SPLIT}) leashed,
-                  count(*) FILTER (WHERE p_leashed < {P_LEASH_SPLIT}) loose
-                FROM read_parquet(?) GROUP BY 1""", [leash_shards])
+                SELECT CAST(g.image_id AS VARCHAR) image_id,
+                  count(*) FILTER (WHERE g.p_leashed >= {P_LEASH_SPLIT})
+                    leashed,
+                  count(*) FILTER (WHERE g.p_leashed < {P_LEASH_SPLIT}) loose
+                FROM read_parquet(?) g {anti} GROUP BY 1""", [leash_shards])
             leash_source = _models(con, leash_shards,
                                    'p_leashed IS NOT NULL')
         else:
@@ -356,7 +405,10 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
         # is a claim ABOUT those manifests -- these frames carry no
         # coordinates -- so the payload states what it was read against
         # rather than leaving the reader to assume it was everything.
-        seen = {'manifests_named': len(named), 'manifests_found': len(found)}
+        seen = {'manifests_named': len(named), 'manifests_found': len(found),
+                # which duplicate rule these counts went through, or None
+                # for counts that still hold the duplicate boxes
+                'dedup': bn.dedup_note(nms) if nms else None}
         dogs_doc = {
             'schema': SCHEMA, 'layer': 'dogs_gate', 'sig': sig,
             # model output feeding a picture, and it says so
@@ -382,7 +434,7 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
     _atomic_write(dogs_path, dogs_doc)
     _atomic_write(leash_path, leash_doc)
     return {'built': True, 'reason': 'rebuilt', 'sig': sig,
-            'secs': time.time() - t0,
+            'secs': time.time() - t0, 'dedup': bool(nms),
             'manifests_named': len(named), 'manifests_found': len(found),
             'dogs': {'total': dogs_doc['total'],
                      'images': dogs_doc['images'],
@@ -414,7 +466,9 @@ def main():
               f"in {info['secs']:.3f}s")
         return
     d, l = info['dogs'], info['leash']
-    print(f"map_layers: built in {info['secs']:.1f}s "
+    how = ('duplicate boxes removed' if info['dedup']
+           else 'RAW: no current duplicate-box sidecar')
+    print(f"map_layers: built in {info['secs']:.1f}s ({how}) "
           f"from {info['manifests_found']:,} of the "
           f"{info['manifests_named']:,} manifests the catalog names")
     print(f"  dogs : {d['total']:,} crops on {d['images']:,} images "

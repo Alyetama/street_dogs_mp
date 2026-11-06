@@ -847,6 +847,11 @@ MODEL_WORKING = (
     # produced them ('models': gate, leash) -- a summary of model output, with
     # no reviewer's verdict anywhere in it.
     'dashboard/explore.json',
+    # which stored boxes a greedy NMS at IoU 0.7 drops, and its meta, built
+    # by tools/detect/box_nms.py from the detector's boxes and the gate's
+    # calls. Every count above anti-joins it; it holds keys and suppressor
+    # indices, no verdict, and it never touches a human store.
+    'dashboard/box_nms.parquet', 'dashboard/box_nms.json',
     'dashboard/regions_status.json',
     'dashboard/sequence_cache.json', 'dashboard/triage_status.json',
     'dashboard/world.json', 'dashboard/history.duckdb',

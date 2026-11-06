@@ -12282,10 +12282,43 @@ def build(args):
     # not the atlas's 6-hour clock: refresh() signatures on the shard mtimes
     # and answers in ~0.1s when nothing moved, so the interval loop can
     # afford it -- and no page request ever pays for the 32M-row join.
+    # Duplicate boxes first: the sidecar both model layers and the explore
+    # rollup count through (tools/detect/box_nms.py, NMS IoU 0.7 at count
+    # time). A subprocess, because the cold build peaks near 2 GB and this
+    # server is long-lived; it answers in well under a second when neither
+    # the store nor the gate ledger moved. If it fails, the layers notice the
+    # sidecar is not current and publish raw counts that say so.
+    nms_py = os.path.join(REPO, 'tools', 'detect', 'box_nms.py')
+
+    def nms_refresh():
+        if not os.path.exists(nms_py):
+            return False
+        try:
+            r = subprocess.run([sys.executable, nms_py, 'refresh'], cwd=REPO,
+                               capture_output=True, text=True, timeout=1800)
+            if r.returncode != 0:
+                print('duplicate-box sidecar not rebuilt:',
+                      (r.stderr or r.stdout).strip()[-400:])
+                return False
+            if 'skipped' not in r.stdout:
+                print(r.stdout.strip())
+            return True
+        except Exception as e:
+            print('duplicate-box sidecar error:', e)
+            return False
+
+    nms_ok = nms_refresh()
     ml = _map_layers()
     if ml:
         try:
             info = ml.refresh()
+            # A shard landing while the sidecar built leaves it stale before
+            # the layers read it, and they publish raw for the hour. Once,
+            # not in a loop: a store that moves faster than a 4-second
+            # rebuild is a sweep, and raw-and-saying-so is right for it.
+            if nms_ok and info.get('built') and not info.get('dedup'):
+                if nms_refresh():
+                    info = ml.refresh()
             # Two of refresh()'s exits are returns, not raises -- no catalog
             # snapshot, and a manifest set with files missing off it (which
             # is what an unmounted drive looks like, and is refused rather
@@ -15805,6 +15838,14 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
        human's, and the legend says so. */
     var MODEL={gate:{file:'map_layer_dogs.json',doc:null,state:'none'},
                leash:{file:'map_layer_leash.json',doc:null,state:'none'}};
+    /* Whether a layer's counts had the duplicate boxes taken out (NMS at
+       IoU 0.7, tools/detect/box_nms.py). A layer built without the sidecar
+       still holds them, and says so rather than passing for deduplicated. */
+    function dedupNote(d){
+      var x=d&&d.dedup;
+      return x?'duplicate boxes removed (IoU '+x.iou+')'
+              :'duplicate boxes NOT removed';
+    }
     function cellKey(p){return p[0]+'|'+p[1]}
     function clean(){return !cleanTog||cleanTog.checked}
     /* One owner for the outlier control, because it now has two reasons to
@@ -16121,7 +16162,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         minEl.textContent='1';
         maxEl.textContent=fmt(Math.round(Math.pow(10,cur.max)-1));
         labEl.textContent='model-called dog crops kept at p ≥ '+(dg.conf_min!=null?dg.conf_min:0.5)+' per '+cur.res+'° cell · '+(dg.source||'model');
-        statsEl.textContent=fmt(dg.total||0)+' model-called dog crops on '+fmt(dg.images||0)+' frames · '+fmt(dg.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
+        statsEl.textContent=fmt(dg.total||0)+' model-called dog crops on '+fmt(dg.images||0)+' frames · '+fmt(dg.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'° · '+dedupNote(dg);
         return;
       }
       if(layer==='leash'){
@@ -16129,7 +16170,7 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
         minEl.textContent='all unleashed';
         maxEl.textContent='all leashed';
         labEl.textContent='share of model-called crops the leash model called leashed · '+(dl.source||'model');
-        statsEl.textContent=fmt(dl.leashed_total||0)+' model-called leashed · '+fmt(dl.loose_total||0)+' unleashed · '+fmt(dl.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'°';
+        statsEl.textContent=fmt(dl.leashed_total||0)+' model-called leashed · '+fmt(dl.loose_total||0)+' unleashed · '+fmt(dl.unlocated||0)+' unlocated · '+cur.data.length.toLocaleString()+' cells @ '+cur.res+'° · '+dedupNote(dl);
         return;
       }
       if(layer==='rate'){
