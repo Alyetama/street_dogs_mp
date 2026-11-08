@@ -78,42 +78,56 @@ DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
 # crop_search.py and watching the suite still pass. t1c below is what actually
 # holds these two, so the exemption buys silence about the triage file and
 # nothing else.
-ALLOWED = {'triage_crops.py', 'dashboard.py', 'adv_triage_isolation.py',
-           'crop_search.py',
-           # It drives the review page, and the page polls /api/triage for the
-           # guesser strip, so the word is unavoidable there. What t1 is for --
-           # a module quietly growing a path from a guess to a ledger -- is
-           # covered for this file by NO_LEDGER below: a test may READ the
-           # guess API, and may not name a verdict store.
-           'adv_review_render.py',
-           # It exists to prove one guesser's run is never credited to the
-           # other, which cannot be written without naming the status file.
-           'adv_triage_backends.py',
-           # The guard on the LLM tier. It names this file, because its own
-           # allowlist has to say which modules are permitted to know the LLM
-           # store exists and this is one of them; and it names the model's
-           # predictions store, because part of what it asserts is that an
-           # LLM answer can reach neither that nor a human ledger. It cannot
-           # go in NO_LEDGER for the same reason -- it names every ledger on
-           # purpose, to prove each one is refused. t1d below is what pays
-           # for the exemption instead.
-           'adv_llm_tier.py',
-           # The guard on who may operate the machine. /api/triage starts and
-           # stops a guesser, so it is on the admin-only list that guard
-           # checks, and the list cannot be checked without naming it. Same
-           # deal as adv_review_render above: it may name the API, and
-           # NO_LEDGER still forbids it naming a verdict store.
-           'adv_train_page.py'}
+ALLOWED = {
+    'triage_crops.py',
+    'dashboard.py',
+    'adv_triage_isolation.py',
+    'crop_search.py',
+    # It drives the review page, and the page polls /api/triage for the
+    # guesser strip, so the word is unavoidable there. What t1 is for --
+    # a module quietly growing a path from a guess to a ledger -- is
+    # covered for this file by NO_LEDGER below: a test may READ the
+    # guess API, and may not name a verdict store.
+    'adv_review_render.py',
+    # It exists to prove one guesser's run is never credited to the
+    # other, which cannot be written without naming the status file.
+    'adv_triage_backends.py',
+    # The guard on the LLM tier. It names this file, because its own
+    # allowlist has to say which modules are permitted to know the LLM
+    # store exists and this is one of them; and it names the model's
+    # predictions store, because part of what it asserts is that an
+    # LLM answer can reach neither that nor a human ledger. It cannot
+    # go in NO_LEDGER for the same reason -- it names every ledger on
+    # purpose, to prove each one is refused. t1d below is what pays
+    # for the exemption instead.
+    'adv_llm_tier.py',
+    # The guard on who may operate the machine. /api/triage starts and
+    # stops a guesser, so it is on the admin-only list that guard
+    # checks, and the list cannot be checked without naming it. Same
+    # deal as adv_review_render above: it may name the API, and
+    # NO_LEDGER still forbids it naming a verdict store.
+    'adv_train_page.py'
+}
 # The allowlisted modules that have no business writing a verdict. dashboard.py
 # is not here: it owns the ledgers. triage_crops.py is covered by t2.
 NO_LEDGER = ('crop_search.py', 'adv_review_render.py',
              'adv_triage_backends.py')
-LEDGER_WORDS = ('hard_negatives', 'hard_positives', 'labels.jsonl',
-                'label_flags', 'leash.db', 'flag_crop',
-                # the five that grew after this list was written, and that t5
-                # went blind to for the same reason
-                'box_corrections', 'boxes.jsonl', 'reviewed.jsonl',
-                'verdicts.jsonl', 'audit_finds')
+LEDGER_WORDS = (
+    'hard_negatives',
+    'hard_positives',
+    'labels.jsonl',
+    'label_flags',
+    'leash.db',
+    'flag_crop',
+    # the five that grew after this list was written, and that t5
+    # went blind to for the same reason
+    'box_corrections',
+    'boxes.jsonl',
+    'reviewed.jsonl',
+    'verdicts.jsonl',
+    'audit_finds',
+    # the Duel page's blinded answers, added with it
+    'duel_answers')
 
 # The stores are read from here rather than from REPO so that a poisoned COPY
 # can be scanned instead of the real thing. Proving any of t5 bites means
@@ -131,22 +145,26 @@ DATA = os.path.join(STORES, 'data')
 # them. t5g walks data/ and fails on any store that is in none of the lists,
 # so the next one cannot go quiet the same way: classifying it is the review
 # the rule actually needs.
-HUMAN_STORES = ('hard_negatives/labels.jsonl',      # flag verdicts
-                'hard_positives/labels.jsonl',
-                'hard_negatives/reviewed.jsonl',    # looked at and kept
-                'box_corrections/boxes.jsonl',      # hand-drawn geometry
-                'frame_labels/labels.jsonl',        # whole frames, drawn
-                'fn_audit/verdicts.jsonl',          # audit answers
-                'leash_audit/verdicts.jsonl',
-                # not answers, but the denominator of every rate the audit
-                # reports -- a model writing here inflates what it was asked
-                'fn_audit/drawn.jsonl',
-                'leash_audit/drawn.jsonl',
-                'audit_finds/manifest.jsonl',       # the exported dataset
-                'audit_finds_leash/manifest.jsonl')
+HUMAN_STORES = (
+    'hard_negatives/labels.jsonl',  # flag verdicts
+    'hard_positives/labels.jsonl',
+    'hard_negatives/reviewed.jsonl',  # looked at and kept
+    'box_corrections/boxes.jsonl',  # hand-drawn geometry
+    'frame_labels/labels.jsonl',  # whole frames, drawn
+    # blinded dog / not-dog answers from the Duel page, signed
+    # by the session
+    'duel_answers/answers.jsonl',
+    'fn_audit/verdicts.jsonl',  # audit answers
+    'leash_audit/verdicts.jsonl',
+    # not answers, but the denominator of every rate the audit
+    # reports -- a model writing here inflates what it was asked
+    'fn_audit/drawn.jsonl',
+    'leash_audit/drawn.jsonl',
+    'audit_finds/manifest.jsonl',  # the exported dataset
+    'audit_finds_leash/manifest.jsonl')
 LEASH_DB = 'leash_labels/leash.db'
 FLAGS_DB = 'label_flags/label_flags.db'
-MODEL_OWN = ('dashboard/triage.jsonl',)
+MODEL_OWN = ('dashboard/triage.jsonl', )
 # A THIRD KIND OF STORE, and it is neither of the other two. An LLM was asked
 # whether a crop holds a dog and its answers are kept in llm_annotations/ --
 # below a human verdict, and beside rather than under a model's own score,
@@ -155,7 +173,7 @@ MODEL_OWN = ('dashboard/triage.jsonl',)
 # has classified, which is the whole point of that check; the list is separate
 # from the two above so that "classified" never reads as "human". What holds
 # this one apart from the human stores is tools/detect/tests/adv_llm_tier.py.
-LLM_OWN = ('llm_annotations/llm_guesses.jsonl',)
+LLM_OWN = ('llm_annotations/llm_guesses.jsonl', )
 # A FOURTH KIND, and the only thing under data/ that holds nothing about a
 # crop at all: who may open the dashboard. accounts.db carries password
 # hashes, invite tokens and failed-login counters and is written by
@@ -185,7 +203,7 @@ BOXES = 'box_corrections/boxes.jsonl'
 # The surfaces a person can answer from. leash_store stamps every row with the
 # one it was written through, which is the whole point of the column: a batch
 # import of the leash model's own parquet predictions arrives naming itself.
-HUMAN_SOURCES = ('review_page',)
+HUMAN_SOURCES = ('review_page', )
 TRIAGE_FILE = os.path.join(DATA, 'dashboard', 'triage.jsonl')
 
 fails = []
@@ -193,8 +211,8 @@ skipped = []
 
 
 def check(name, ok, detail=''):
-    print(('ok   ' if ok else 'FAIL ') + name + (('  ' + detail) if detail
-                                                 and not ok else ''))
+    print(('ok   ' if ok else 'FAIL ') + name +
+          (('  ' + detail) if detail and not ok else ''))
     if not ok:
         fails.append(name)
 
@@ -272,8 +290,7 @@ def write_opens(text):
         if name != 'open' or len(node.args) < 2:
             continue
         mode = node.args[1]
-        if not (isinstance(mode, ast.Constant)
-                and isinstance(mode.value, str)
+        if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
                 and mode.value[:1] in ('w', 'a', 'x')):
             continue
         out.append((ast.unparse(node.args[0]), mode.value))
@@ -288,8 +305,7 @@ def wrote_it(r):
     carry -- which is the point of making it carry them.
     """
     return (r.get('source') == 'model_suggestion'
-            or r.get('unverified') is True
-            or 'bucket' in r or 'sg' in r)
+            or r.get('unverified') is True or 'bucket' in r or 'sg' in r)
 
 
 # ── t1 nothing but the writer and the filter knows this file exists ────────
@@ -317,9 +333,9 @@ for _name in NO_LEDGER:
                     _ledger_guilty.append(f'{_name} mentions {_w}')
 check('t1c allowlisted search modules touch no ledger', not _ledger_guilty,
       '; '.join(_ledger_guilty))
-check('t1b the allowlist names files that exist', all(
-    any(f in fs for _, _, fs in os.walk(TOOLS)) for f in ALLOWED),
-    'an allowed name matches no file -- the list has rotted')
+check('t1b the allowlist names files that exist',
+      all(any(f in fs for _, _, fs in os.walk(TOOLS)) for f in ALLOWED),
+      'an allowed name matches no file -- the list has rotted')
 # The LLM guard is allowlisted above and names every ledger there is, so the
 # usual counter-check cannot hold it. This one can: it asserts against stores
 # it has REDIRECTED into a temp directory, so no write in it may land under
@@ -437,14 +453,17 @@ _tier_bad, _tier_skip = [], ''
 if _tier_path is None:
     _tier_bad.append('adv_llm_tier.py is missing -- nothing was run')
 else:
-    import subprocess                                           # noqa: E402
-    import tempfile                                             # noqa: E402
+    import subprocess  # noqa: E402
+    import tempfile  # noqa: E402
     _wd = tempfile.mkdtemp(prefix='wguard_')
     _wg, _rep = os.path.join(_wd, 'wg.py'), os.path.join(_wd, 'report.json')
     with open(_wg, 'w', encoding='utf-8') as _fh:
         _fh.write(_WRITE_GUARD)
-    subprocess.run([sys.executable, _wg, os.path.join(REPO, 'data'), _rep,
-                    _tier_path], capture_output=True, text=True)
+    subprocess.run(
+        [sys.executable, _wg,
+         os.path.join(REPO, 'data'), _rep, _tier_path],
+        capture_output=True,
+        text=True)
     try:
         with open(_rep, encoding='utf-8') as _fh:
             _doc = json.load(_fh)
@@ -477,8 +496,8 @@ else:
     # reads. Everything else is a leak. This list is the deliberate review --
     # adding the status file made this check fail until it was named here,
     # which is the check doing its job.
-    OWN = ('args.out', 'OUT_FILE', 'args.status', 'STATUS_FILE',
-           'tmp_status')      # named, not a bare 'tmp' anything could hold
+    OWN = ('args.out', 'OUT_FILE', 'args.status', 'STATUS_FILE', 'tmp_status'
+           )  # named, not a bare 'tmp' anything could hold
     bad = [t for t, _ in writes if not any(o in t for o in OWN)]
     check('t2 the writer only ever writes its own files', not bad,
           'other write targets: ' + '; '.join(bad))
@@ -500,7 +519,7 @@ else:
     # places may hold one -- the read-only helper's body, and the module
     # docstring, which states the rule in prose. A missing helper is a
     # failure, not a pass.
-    import ast                                                   # noqa: E402
+    import ast  # noqa: E402
     _t2b_bad, _helper = [], None
     try:
         _tree = ast.parse(src)
@@ -518,9 +537,9 @@ else:
         for _n in ast.walk(_tree):
             if isinstance(_n, ast.FunctionDef) and _n.name == 'judged_names':
                 _helper = _n
-        _ok_lines = (range(_helper.lineno, (_helper.end_lineno or
-                                            _helper.lineno) + 1)
-                     if _helper else ())
+        _ok_lines = (range(_helper.lineno,
+                           (_helper.end_lineno or _helper.lineno) +
+                           1) if _helper else ())
         if _helper is None:
             _t2b_bad.append('judged_names() is gone -- the one place a ledger '
                             'name is allowed no longer exists, so nothing '
@@ -533,7 +552,7 @@ else:
             if not _w:
                 continue
             if _n is _doc:
-                continue        # the module docstring says what the rule is
+                continue  # the module docstring says what the rule is
             if _n.lineno in _ok_lines:
                 continue
             _t2b_bad.append(f'line {_n.lineno} names {_w[0]}: '
@@ -555,10 +574,11 @@ else:
           'flag_crop mentions the suggestion')
 
     # ── t6 the payload keeps guesses under their own keys ───────────────────
-    check("t6 suggestion fields are separate from 'label'",
-          "'sg': sg.get('b', '')" in dash and "'label'" not in
-          dash.split("'sg': sg.get('b', '')")[1].split('})')[0],
-          'a suggestion is written into the verdict field')
+    check(
+        "t6 suggestion fields are separate from 'label'",
+        "'sg': sg.get('b', '')" in dash and "'label'"
+        not in dash.split("'sg': sg.get('b', '')")[1].split('})')[0],
+        'a suggestion is written into the verdict field')
 
 # ── t4 every record marks itself unverified ─────────────────────────────────
 recs = []
@@ -570,8 +590,10 @@ if os.path.exists(TRIAGE_FILE):
             except ValueError:
                 pass
 if recs:
-    bad = [r for r in recs if r.get('unverified') is not True
-           or r.get('source') != 'model_suggestion']
+    bad = [
+        r for r in recs if r.get('unverified') is not True
+        or r.get('source') != 'model_suggestion'
+    ]
     check(f't4 all {len(recs):,} records marked unverified', not bad,
           f'{len(bad)} records missing the marks')
 else:
@@ -584,9 +606,10 @@ for _rel in HUMAN_STORES:
         n_recs += 1
         if wrote_it(_r):
             led_bad.append(f'{_rel}:{_i}')
-check(f't5 none of the {n_recs:,} records in the {len(HUMAN_STORES)} human '
-      f'stores carries a model suggestion', not led_bad,
-      'suspect records: ' + ', '.join(led_bad[:5]))
+check(
+    f't5 none of the {n_recs:,} records in the {len(HUMAN_STORES)} human '
+    f'stores carries a model suggestion', not led_bad,
+    'suspect records: ' + ', '.join(led_bad[:5]))
 
 # ── t5-llm the LLM's words are in none of them either ──────────────────────
 # wrote_it() above knows the triage writer's marks. This knows the LLM
@@ -601,12 +624,15 @@ llm_bad = []
 for _rel in HUMAN_STORES:
     for _i, _r in records(_rel):
         _hit = [k for k in LLM_KEYS if k in _r]
-        _hit += [f'{k}={v!r}' for k, v in _r.items()
-                 if isinstance(v, str) and v in LLM_WORDS]
+        _hit += [
+            f'{k}={v!r}' for k, v in _r.items()
+            if isinstance(v, str) and v in LLM_WORDS
+        ]
         if _hit:
             llm_bad.append(f'{_rel}:{_i} ({", ".join(sorted(set(_hit))[:3])})')
-check(f't5-llm none of the {n_recs:,} human records carries the LLM tier\'s '
-      f'vocabulary', not llm_bad, 'suspect records: ' + ', '.join(llm_bad[:5]))
+check(
+    f't5-llm none of the {n_recs:,} human records carries the LLM tier\'s '
+    f'vocabulary', not llm_bad, 'suspect records: ' + ', '.join(llm_bad[:5]))
 
 # ── t5h every flag row is one the review page could have written ───────────
 # THE CHECK THAT DOES NOT DEPEND ON A MARK. Everything above recognises a
@@ -627,15 +653,16 @@ for _rel, _label in FLAG_LEDGERS:
         _m = CROP_NAME.match(str(_r.get('crop') or ''))
         _why = ''
         if not all(k in _r for k in FLAG_FIELDS):
-            _why = 'missing ' + ', '.join(k for k in FLAG_FIELDS
-                                          if k not in _r)
+            _why = 'missing ' + ', '.join(k
+                                          for k in FLAG_FIELDS if k not in _r)
         elif not _m:
             _why = f'crop {_r.get("crop")!r} is not a review-page crop name'
         elif str(_r.get('image_id')) != _m.group(2):
             _why = (f'image_id {_r.get("image_id")!r} is not the one in the '
                     f'crop name')
-        elif abs(round(int(_m.group(3)) / 100.0, 2)
-                 - float(_r.get('conf') or -1)) > 1e-9:
+        elif abs(
+                round(int(_m.group(3)) / 100.0, 2) -
+                float(_r.get('conf') or -1)) > 1e-9:
             _why = f'conf {_r.get("conf")!r} is not the crop name\'s score'
         elif _r.get('label') != _label:
             _why = f'label {_r.get("label")!r} in the {_label} store'
@@ -643,9 +670,10 @@ for _rel, _label in FLAG_LEDGERS:
             _why = f'copied {_r.get("copied")!r} is not the flag writer\'s'
         if _why:
             shape_bad.append(f'{_rel}:{_i} {_why}')
-check(f't5h all {n_flags:,} flag rows have the shape the review page writes',
-      not shape_bad, 'rows nothing on the review page could have written: '
-      + '; '.join(shape_bad[:5]))
+check(
+    f't5h all {n_flags:,} flag rows have the shape the review page writes',
+    not shape_bad, 'rows nothing on the review page could have written: ' +
+    '; '.join(shape_bad[:5]))
 
 # ── t5b the two sqlite stores hold human answers only ──────────────────────
 db_bad = []
@@ -661,9 +689,10 @@ _flags = rows(FLAGS_DB, 'SELECT file, class_was, should_be FROM flags')
 for _file, _was, _be in _flags or ():
     if not _be or _be == _was:
         db_bad.append(f'label_flags.db {_file}: should_be {_be!r}')
-check(f't5b the {len(_leash or ())} leash verdicts and {len(_flags or ())} '
-      f'label flags on record are human answers', not db_bad,
-      '; '.join(db_bad[:5]))
+check(
+    f't5b the {len(_leash or ())} leash verdicts and {len(_flags or ())} '
+    f'label flags on record are human answers', not db_bad,
+    '; '.join(db_bad[:5]))
 
 # ── t5c the corrections ledger still says which box, and where ─────────────
 # The only thing that separates a hand-drawn box from the detector's own is
@@ -672,20 +701,23 @@ check(f't5b the {len(_leash or ())} leash verdicts and {len(_flags or ())} '
 # nothing to compare -- it would pass on every record forever without ever
 # reading one.
 _boxes = records(BOXES)
-_shape = [f'{BOXES}:{i}' for i, r in _boxes
-          if not (str(r.get('image_id') or '').isdigit()
-                  and isinstance(r.get('det_idx'), int)
-                  and all(isinstance(r.get(k), (int, float))
-                          for k in ('x1', 'y1', 'x2', 'y2')))]
-check(f't5c all {len(_boxes):,} corrections carry the key and the four '
-      f'numbers a comparison needs', not _shape, '; '.join(_shape[:5]))
+_shape = [
+    f'{BOXES}:{i}' for i, r in _boxes
+    if not (str(r.get('image_id') or '').isdigit()
+            and isinstance(r.get('det_idx'), int) and all(
+                isinstance(r.get(k), (int, float))
+                for k in ('x1', 'y1', 'x2', 'y2')))
+]
+check(
+    f't5c all {len(_boxes):,} corrections carry the key and the four '
+    f'numbers a comparison needs', not _shape, '; '.join(_shape[:5]))
 
 # ── t5d a box on record by the detector's own geometry alone ───────────────
 _hist = {}
 for _i, _r in _boxes:
     if f'{BOXES}:{_i}' not in _shape:
-        _hist.setdefault((str(_r['image_id']), int(_r['det_idx'])),
-                         []).append((_r['x1'], _r['y1'], _r['x2'], _r['y2']))
+        _hist.setdefault((str(_r['image_id']), int(_r['det_idx'])), []).append(
+            (_r['x1'], _r['y1'], _r['x2'], _r['y2']))
 
 
 def detector_boxes(keys):
@@ -704,13 +736,15 @@ def detector_boxes(keys):
     con = duckdb.connect()
     try:
         got = con.execute(
-            'SELECT CAST(image_id AS VARCHAR), det_idx, x1, y1, x2, y2 FROM '
-            + det + ' WHERE CAST(image_id AS VARCHAR) IN ('
-            + ','.join('?' * len(ids)) + ')', ids).fetchall()
+            'SELECT CAST(image_id AS VARCHAR), det_idx, x1, y1, x2, y2 FROM ' +
+            det + ' WHERE CAST(image_id AS VARCHAR) IN (' +
+            ','.join('?' * len(ids)) + ')', ids).fetchall()
     finally:
         con.close()
-    return {(a, int(b)): tuple(round(float(v), 2) for v in (c, d, e, f))
-            for a, b, c, d, e, f in got}
+    return {
+        (a, int(b)): tuple(round(float(v), 2) for v in (c, d, e, f))
+        for a, b, c, d, e, f in got
+    }
 
 
 _model, _why = {}, ''
@@ -729,17 +763,20 @@ if _why:
 else:
     _lone = sorted(k for k, v in _hist.items()
                    if k in _model and all(b == _model[k] for b in v))
-    check('t5d no box is in the corrections store on the detector\'s own '
-          'geometry alone', not _lone,
-          'model geometry wearing a correction\'s clothes: '
-          + ', '.join('%s#%d' % k for k in _lone[:5]))
+    check(
+        't5d no box is in the corrections store on the detector\'s own '
+        'geometry alone', not _lone,
+        'model geometry wearing a correction\'s clothes: ' +
+        ', '.join('%s#%d' % k for k in _lone[:5]))
     # Without this the whole check goes quiet the day the predictions store
     # moves: every key stops resolving, nothing is compared, and t5d prints
     # ok because it found no counterexample among the zero it looked at.
     _seen = [k for k in _hist if k in _model]
-    check(f't5d-b the comparison read the detector back for {len(_seen):,} of '
-          f'the {len(_hist):,} corrected boxes', bool(_seen) or not _hist,
-          'not one correction resolved a prediction -- nothing was compared')
+    check(
+        f't5d-b the comparison read the detector back for {len(_seen):,} of '
+        f'the {len(_hist):,} corrected boxes',
+        bool(_seen) or not _hist,
+        'not one correction resolved a prediction -- nothing was compared')
 
 # ── t5e the review page banks no verdict a person did not make ────────────
 # Paging away IS the positive verdict on everything still on screen, and that
@@ -756,15 +793,17 @@ if dash is not None:
     _beacon = "addEventListener('pagehide'"
     _pg = (dash.split(_beacon, 1)[-1].split('\n});', 1)[0]
            if _beacon in dash else '')
-    _unguarded = [n for n, b in (('markSeen()', _ms),
-                                 ('the pagehide beacon', _pg))
-                  if "mode==='audit'" not in b]
+    _unguarded = [
+        n for n, b in (('markSeen()', _ms), ('the pagehide beacon', _pg))
+        if "mode==='audit'" not in b
+    ]
     check('t5e neither banking path records a verdict in audit mode',
           not _unguarded, ' and '.join(_unguarded) + ' banks unjudged crops')
 
 # ── t5f the audit ledgers hold answers a person could click ────────────────
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
-import fn_audit as fa                                          # noqa: E402
+import fn_audit as fa  # noqa: E402
+
 vd_bad, ex_bad, n_vd = [], [], 0
 for _stage in sorted(fa.STAGES):
     _sp = fa.STAGES[_stage]
@@ -807,41 +846,51 @@ check('t5f-b every exported label is its own verdict', not ex_bad,
 # human decision does land in, and the top level -- every file is enumerated
 # whatever its suffix, so the next verdicts.parquet or answers.sqlite3 has to
 # be classified before this passes.
-BULK_DIRS = ('gate',            # the gate's own shards, one model verdict each
-             'leash',           # the same for the leash stage
-             # camera_parameters / altitude / computed_altitude, fetched from
-             # Mapillary per image_id. Metadata the harvest failed to ask for,
-             # not a verdict about anything: no model looked at a pixel to
-             # produce it and no human chose it.
-             'camera',
-             'detect',          # the parquet predictions store + its status
-             'engines',         # tensorrt engines and their sums
-             'geo',             # natural-earth shapefiles
-             'grids',           # the cell grids the harvest was planned on
-             'harvest',         # harvested crops
-             # the 180 train-30-blind frames two detectors are compared on.
-             # Symlinks into dogdet_v3 plus a dataset.yaml: derived from a
-             # split, holding no decision anybody made.
-             'holdout180',
-             'manifests',       # coverage csv exports
-             'mistakes',        # per-run mistake dumps from run_mistakes.py
-             'missing_worklist', 'missing_worklist_after',
-             'missing_unrecoverable')
+BULK_DIRS = (
+    'gate',  # the gate's own shards, one model verdict each
+    'leash',  # the same for the leash stage
+    # camera_parameters / altitude / computed_altitude, fetched from
+    # Mapillary per image_id. Metadata the harvest failed to ask for,
+    # not a verdict about anything: no model looked at a pixel to
+    # produce it and no human chose it.
+    'camera',
+    'detect',  # the parquet predictions store + its status
+    'engines',  # tensorrt engines and their sums
+    'geo',  # natural-earth shapefiles
+    'grids',  # the cell grids the harvest was planned on
+    'harvest',  # harvested crops
+    # the 180 train-30-blind frames two detectors are compared on.
+    # Symlinks into dogdet_v3 plus a dataset.yaml: derived from a
+    # split, holding no decision anybody made.
+    'holdout180',
+    'manifests',  # coverage csv exports
+    'mistakes',  # per-run mistake dumps from run_mistakes.py
+    'missing_worklist',
+    'missing_worklist_after',
+    'missing_unrecoverable')
 # Files that are not anybody's verdict but sit where the ledgers do. Named one
 # by one on purpose: a NEW one still has to be reviewed before this passes.
 MODEL_WORKING = (
-    'fn_audit/pool.parquet', 'fn_audit/pool.json', 'fn_audit/status.json',
-    'leash_audit/pool.parquet', 'leash_audit/pool.json',
-    'leash_audit/status.json', 'llm_annotations/status.json',
-    'dashboard/board_stats.json', 'dashboard/countries.json',
-    'dashboard/dataset_sizes.json', 'dashboard/distinct_counts.json',
-    'dashboard/drive_smart.json', 'dashboard/map_points.json',
+    'fn_audit/pool.parquet',
+    'fn_audit/pool.json',
+    'fn_audit/status.json',
+    'leash_audit/pool.parquet',
+    'leash_audit/pool.json',
+    'leash_audit/status.json',
+    'llm_annotations/status.json',
+    'dashboard/board_stats.json',
+    'dashboard/countries.json',
+    'dashboard/dataset_sizes.json',
+    'dashboard/distinct_counts.json',
+    'dashboard/drive_smart.json',
+    'dashboard/map_points.json',
     'dashboard/map_points_fine.json',
     # the two model layers on the atlas, built by map_layers.py from the gate
     # and leash shards. Every count in them is a classifier's; each payload
     # names the model that produced it in its 'source' field, which is what
     # keeps them out of HUMAN_STORES.
-    'dashboard/map_layer_dogs.json', 'dashboard/map_layer_leash.json',
+    'dashboard/map_layer_dogs.json',
+    'dashboard/map_layer_leash.json',
     # the explore page's rollup, built by explore_index.py from the same two
     # shard stores. Thresholded counts per country plus the run ids that
     # produced them ('models': gate, leash) -- a summary of model output, with
@@ -851,15 +900,25 @@ MODEL_WORKING = (
     # by tools/detect/box_nms.py from the detector's boxes and the gate's
     # calls. Every count above anti-joins it; it holds keys and suppressor
     # indices, no verdict, and it never touches a human store.
-    'dashboard/box_nms.parquet', 'dashboard/box_nms.json',
+    'dashboard/box_nms.parquet',
+    'dashboard/box_nms.json',
     'dashboard/regions_status.json',
-    'dashboard/sequence_cache.json', 'dashboard/triage_status.json',
-    'dashboard/world.json', 'dashboard/history.duckdb',
-    'dashboard/search_terms.npz', 'dashboard/triage_vecs.npz',
-    'best_models.json', 'confusion.json', 'dogbin_acceptance_set.json',
-    'leash_acceptance_set.json', 'dogbin_v4_clusters.json',
-    'leash_v2_clusters.json', 'leash_label_conflicts.json',
-    'catalog.parquet', 'catalog.duckdb', 'dead_manifest_rows.parquet',
+    'dashboard/sequence_cache.json',
+    'dashboard/triage_status.json',
+    'dashboard/world.json',
+    'dashboard/history.duckdb',
+    'dashboard/search_terms.npz',
+    'dashboard/triage_vecs.npz',
+    'best_models.json',
+    'confusion.json',
+    'dogbin_acceptance_set.json',
+    'leash_acceptance_set.json',
+    'dogbin_v4_clusters.json',
+    'leash_v2_clusters.json',
+    'leash_label_conflicts.json',
+    'catalog.parquet',
+    'catalog.duckdb',
+    'dead_manifest_rows.parquet',
     # frames an independent model (stock COCO detector, class dog) sees a dog
     # in that no label holds, written by hidden_dogs.py import. Tier
     # 'unverified' in the file itself; the builds only use it to leave frames
@@ -868,9 +927,9 @@ MODEL_WORKING = (
 )
 # Suffixes that are never a store wherever they turn up: page assets, logs,
 # plain-text config, sqlite journals, and the .bak/.tmp a rotation leaves.
-NOT_A_STORE = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.txt', '.log',
-               '.md', '.html', '.css', '.js', '.npz.lock', '.db-shm',
-               '.db-wal', '.bak', '.tmp', '.lock')
+NOT_A_STORE = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.txt', '.log', '.md',
+               '.html', '.css', '.js', '.npz.lock', '.db-shm', '.db-wal',
+               '.bak', '.tmp', '.lock')
 _on_disk, _skipped, _bulk_seen = [], 0, set()
 _unknown_dirs = []
 for _d in sorted(os.listdir(DATA) if os.path.isdir(DATA) else ()):
@@ -888,26 +947,28 @@ for _d in sorted(os.listdir(DATA) if os.path.isdir(DATA) else ()):
         _names = [(_d, _p)]
     for _rel, _abs in _names:
         if not os.path.isfile(_abs):
-            continue                      # crops and full frames live below
+            continue  # crops and full frames live below
         if _rel.endswith(NOT_A_STORE) or '.jsonl.' in _rel:
-            _skipped += 1                 # a rotated ledger keeps its suffix
+            _skipped += 1  # a rotated ledger keeps its suffix
             continue
         _on_disk.append(_rel)
-_known = (HUMAN_STORES + MODEL_OWN + LLM_OWN + MODEL_WORKING + ACCOUNT_STORES
-          + (LEASH_DB, FLAGS_DB))
+_known = (HUMAN_STORES + MODEL_OWN + LLM_OWN + MODEL_WORKING + ACCOUNT_STORES +
+          (LEASH_DB, FLAGS_DB))
 _unclassified = [s for s in _on_disk if s not in _known]
-check(f't5g all {len(_on_disk)} files under data/ that could be a store are '
-      f'classified, whatever their suffix ({len(_bulk_seen)} bulk directories '
-      f'named whole, {_skipped} assets/logs skipped)',
-      not _unclassified, 'nobody has said whether these hold human '
-      'decisions: ' + ', '.join(_unclassified[:5]))
+check(
+    f't5g all {len(_on_disk)} files under data/ that could be a store are '
+    f'classified, whatever their suffix ({len(_bulk_seen)} bulk directories '
+    f'named whole, {_skipped} assets/logs skipped)', not _unclassified,
+    'nobody has said whether these hold human '
+    'decisions: ' + ', '.join(_unclassified[:5]))
 # A name in BULK_DIRS that matches nothing is the ALLOWED list's old failure:
 # an exemption for a directory that is not there, quietly covering nothing.
-check('t5g-b every bulk directory named here exists',
-      set(BULK_DIRS) <= _bulk_seen | {d for d in BULK_DIRS
-                                      if not os.path.isdir(DATA)},
-      'named but not on disk: ' + ', '.join(sorted(set(BULK_DIRS)
-                                                   - _bulk_seen)))
+check(
+    't5g-b every bulk directory named here exists',
+    set(BULK_DIRS)
+    <= _bulk_seen | {d
+                     for d in BULK_DIRS if not os.path.isdir(DATA)},
+    'named but not on disk: ' + ', '.join(sorted(set(BULK_DIRS) - _bulk_seen)))
 
 # ── t7 the bucket edges still match the ImageNet class order ────────────────
 if src:
@@ -916,11 +977,12 @@ if src:
     # the block pins -- one per boundary the buckets depend on
     blk = src.split('EDGE = {')[1].split('}')[0] if 'EDGE = {' in src else ''
     edges = re.findall(r"'([^']+)'", blk)
-    check('t7 bucket edges are asserted, not assumed', len(edges) == 4,
-          f'found {len(edges)} edge assertions: {edges}')
+    check('t7 bucket edges are asserted, not assumed',
+          len(edges) == 4, f'found {len(edges)} edge assertions: {edges}')
     check('t7b the writer verifies them before writing',
           'ImageNet class order is not what the buckets' in src,
           'no runtime check of the class order')
+
 
 # ── t8 both backend_of() implementations agree ─────────────────────────────
 # The tool stamps each record with the backend that wrote it; the dashboard
@@ -942,8 +1004,9 @@ def _lift(path, name):
     for node in tree.body:
         if isinstance(node, _ast.FunctionDef) and node.name == name:
             ns = {}
-            exec(compile(_ast.Module(body=[node], type_ignores=[]),
-                         path, 'exec'), ns)
+            exec(
+                compile(_ast.Module(body=[node], type_ignores=[]), path,
+                        'exec'), ns)
             return ns[name]
     return None
 
@@ -955,13 +1018,16 @@ if _a and _b:
     # guesser silently -- which is what happened when the dog-bin gate was
     # added to one side only: 241 of its verdicts turned up in SigLIP's
     # filter, and SigLIP's own coverage absorbed them.
-    probes = ['google/siglip2-so400m-patch14-384',
-              'google/siglip2-base-patch16-224', 'rfdetr', 'rfdetr-large',
-              'rfdetr-nano', 'imagenet', 'efficientnet_v2_s.imagenet1k_v1',
-              'siglip', 'rfdetr-small', 'dogbin', 'dogbin:dogbin_008',
-              'dogbin:anything', '', None, 'something-new']
-    differ = [f'{p!r}: tool={_a(p)!r} dashboard={_b(p)!r}'
-              for p in probes if _a(p) != _b(p)]
+    probes = [
+        'google/siglip2-so400m-patch14-384', 'google/siglip2-base-patch16-224',
+        'rfdetr', 'rfdetr-large', 'rfdetr-nano', 'imagenet',
+        'efficientnet_v2_s.imagenet1k_v1', 'siglip', 'rfdetr-small', 'dogbin',
+        'dogbin:dogbin_008', 'dogbin:anything', '', None, 'something-new'
+    ]
+    differ = [
+        f'{p!r}: tool={_a(p)!r} dashboard={_b(p)!r}' for p in probes
+        if _a(p) != _b(p)
+    ]
     check('t8 the tool and the dashboard agree which backend wrote a record',
           not differ, '; '.join(differ))
     # backend_of() recognises RF-DETR by prefix rather than by the size table,
@@ -973,13 +1039,13 @@ if _a and _b:
           bool(sizes) and all(s.startswith('rfdetr') for s in sizes),
           f'keys: {sizes}')
 else:
-    check('t8 both backend_of() implementations were found',
-          False, f'tool={bool(_a)} dashboard={bool(_b)}')
+    check('t8 both backend_of() implementations were found', False,
+          f'tool={bool(_a)} dashboard={bool(_b)}')
 
 print()
 if fails:
-    raise SystemExit(f'{len(fails)} isolation check(s) FAILED: '
-                     + ', '.join(fails))
+    raise SystemExit(f'{len(fails)} isolation check(s) FAILED: ' +
+                     ', '.join(fails))
 if skipped:
     # said again at the bottom because the one line in the middle of thirty is
     # exactly where a check that never ran gets read as one that passed

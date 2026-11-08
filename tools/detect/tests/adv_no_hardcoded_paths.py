@@ -22,7 +22,8 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
 
 # Files that are committed even though .gitignore's blanket '*/' hides them
 # (they are added with `git add -f`). Keep in sync with what is actually
@@ -41,6 +42,9 @@ EXTRA = (
     'tools/dashboard/accounts.py',
     'tools/detect/tests/adv_auth.py',
     'tools/detect/tests/adv_accounts.py',
+    # The Duel page and its check: new, so untracked until `git add -f`.
+    'tools/dashboard/duel_page.py',
+    'tools/detect/tests/adv_duel.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
@@ -51,8 +55,8 @@ EXTRA = (
 # directory pasted into any of them shipped clean. '.min.js' stays: a
 # vendored minified bundle is upstream's text, not ours, and is the only
 # javascript here nobody wrote by hand.
-SKIP_EXT = ('.min.js', '.png', '.jpg', '.svg', '.ico', '.parquet',
-            '.duckdb', '.engine', '.pt', '.zst', '.gz')
+SKIP_EXT = ('.min.js', '.png', '.jpg', '.svg', '.ico', '.parquet', '.duckdb',
+            '.engine', '.pt', '.zst', '.gz')
 
 # Machine-generated dependency manifests. They are full of upstream build
 # prefixes (/home/conda/... from conda-forge CI) and of version strings that
@@ -72,12 +76,11 @@ SKIP_FILES = re.compile(r'(?:^|/)(?:package(?:-lock)?\.json'
 # produced 20+ hits and zero real leaks, and a check that cries wolf gets
 # switched off.
 PATTERNS = (
-    ('home directory',
-     re.compile(r'/home/[a-z_][a-z0-9_-]*/', re.I),
+    ('home directory', re.compile(r'/home/[a-z_][a-z0-9_-]*/', re.I),
      'names a user account and their layout'),
     ('removable mount',
-     re.compile(r'/(?:media|Volumes)/[a-z_][a-z0-9_-]*/', re.I),
-     "names this host's mount point"),
+     re.compile(r'/(?:media|Volumes)/[a-z_][a-z0-9_-]*/',
+                re.I), "names this host's mount point"),
     # Anchored on address CONTEXT, not on shape. A bare dotted quad is far
     # more often a version than an address: the first cut of this check
     # reported 'autoprefixer: ^10.4.23' as a LAN address 30 times over.
@@ -88,12 +91,12 @@ PATTERNS = (
                 r'\.\d{1,3}\.\d{1,3}\b'),
      'a Tailscale CGNAT address is private network topology'),
     ('LAN address',
-     re.compile(r'(?:://|\bhost[= ]|--host[= ])\s*'
-                r'(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))'
-                r'\.\d{1,3}\.\d{1,3}(?:\.\d{1,3})?\b', re.I),
-     'a private address used as a host is host topology'),
-    ('conda env prefix',
-     re.compile(r'/(?:mini|ana)(?:forge|conda)\d*/envs/'),
+     re.compile(
+         r'(?:://|\bhost[= ]|--host[= ])\s*'
+         r'(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))'
+         r'\.\d{1,3}\.\d{1,3}(?:\.\d{1,3})?\b',
+         re.I), 'a private address used as a host is host topology'),
+    ('conda env prefix', re.compile(r'/(?:mini|ana)(?:forge|conda)\d*/envs/'),
      'an absolute interpreter path'),
 )
 
@@ -104,8 +107,8 @@ PATTERNS = (
 # scrubbed from the repo's history with a literal search-and-replace, and a
 # scanner that spells out what it hunts for gets rewritten along with the
 # leak -- silently disarming itself while still reporting success.
-FORBIDDEN = tuple(a + b for a, b in
-                  (('SDG4', 'JKKR'), ('65GJ', '0P5K'), ('PLG0', 'WNNP')))
+FORBIDDEN = tuple(a + b for a, b in (('SDG4', 'JKKR'), ('65GJ', '0P5K'),
+                                     ('PLG0', 'WNNP')))
 
 # Lines that are allowed to match: they describe the pattern rather than being
 # an instance of it. Marked, not guessed -- an exemption must be visible in the
@@ -122,13 +125,17 @@ def files():
     "189 committed files: clean" while never opening ten of the 199.
     """
     out = subprocess.run(['git', '-C', REPO, 'ls-files'],
-                         capture_output=True, text=True, check=True).stdout
+                         capture_output=True,
+                         text=True,
+                         check=True).stdout
     seen = [p for p in out.splitlines() if p]
     for p in EXTRA:
         if p not in seen and os.path.exists(os.path.join(REPO, p)):
             seen.append(p)
-    keep = [p for p in seen
-            if not p.endswith(SKIP_EXT) and not SKIP_FILES.search(p)]
+    keep = [
+        p for p in seen
+        if not p.endswith(SKIP_EXT) and not SKIP_FILES.search(p)
+    ]
     return keep, [p for p in seen if p not in set(keep)]
 
 
@@ -154,8 +161,11 @@ MUST_NOT_TRACK = (
 
 
 def tracked_secrets():
-    out = subprocess.run(['git', '-C', REPO, 'ls-files'] + list(MUST_NOT_TRACK),
-                         capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(['git', '-C', REPO, 'ls-files'] +
+                         list(MUST_NOT_TRACK),
+                         capture_output=True,
+                         text=True,
+                         check=True).stdout
     return [p for p in out.splitlines() if p]
 
 

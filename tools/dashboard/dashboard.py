@@ -38,7 +38,6 @@ import contextlib
 import functools
 import getpass
 import glob
-import html
 import json
 import math
 import os
@@ -46,14 +45,14 @@ import posixpath
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
-import signal
 import threading
 import time
 from datetime import datetime
-from urllib.parse import parse_qs, quote, unquote, urlparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import duckdb
 
@@ -657,7 +656,6 @@ def country_totals(fine, res):
         return {}
     try:
         import geopandas as gpd
-        import pandas as pd
     except Exception as e:
         print('map: no geopandas, skipping country totals:', e)
         return {}
@@ -676,6 +674,7 @@ def country_totals(fine, res):
         return {}
     try:
         from shapely.geometry import shape
+
         # Built by hand, not gpd.read_file: echarts' map JSON omits the
         # per-feature "type": "Feature", and the GeoJSON reader answers a
         # frame of zero rows for it rather than failing.
@@ -1335,10 +1334,12 @@ FLAG_LABELS = (FLAG_LABEL, POS_LABEL)
 # constant exists to prevent. fn_audit is in-tree and imports nothing but the
 # standard library, so it cannot fail the way an optional dependency can.
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
-import fn_audit as _fn_audit                                   # noqa: E402
+import fn_audit as _fn_audit  # noqa: E402
+
 sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
-import work_strip                                             # noqa: E402
+import work_strip  # noqa: E402
 from fn_audit import AUTHOR_FIELD, LEGACY_AUTHOR, author_of  # noqa: E402,F401
+
 # An annotation nobody can be named for. _gate() answers every request before
 # a route is matched, so a POST that reaches a write path here is signed in by
 # construction: a missing annotator is a PROGRAMMING error -- a route that
@@ -5496,8 +5497,9 @@ def mistake_bytes(key, i):
         except OSError:
             return None
     try:
-        from PIL import Image
         import io
+
+        from PIL import Image
         with Image.open(path) as im:
             W, H = im.size
             x1, y1, x2, y2 = (float(v) for v in box)
@@ -5692,8 +5694,9 @@ def mistake_frame_bytes(key, i):
     if not path:
         return None
     try:
-        from PIL import Image
         import io
+
+        from PIL import Image
         with Image.open(path) as im:
             turned = im.getexif().get(0x0112, 1) not in (0, 1)
             if im.format == 'JPEG' and max(im.size) <= FRAME_MAX and not turned:
@@ -6304,6 +6307,7 @@ def _gate_shards(stage='gate'):
         return doc
     try:
         import glob
+
         import pyarrow.parquet as pq
     except Exception:
         memo.update(at=now, doc=doc)
@@ -8184,6 +8188,7 @@ def refresh_countries():
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import country_index as ci
+
         # the directories THIS server serves crops from, not the index's own
         # guess at them: whatever review_pool_names() walks is what the
         # country filter has to be able to place.
@@ -8218,6 +8223,17 @@ def review_extra_dir():
     # resolved against the REPO, never the cwd: the server is started from
     # wherever, and a relative path that depends on that is a path that works
     # until someone starts it from somewhere else
+    return os.path.join(REPO, d) if d and not os.path.isabs(d) else d
+
+
+# ── the Duel page's review sets ─────────────────────────────────────────────
+# The directory that holds review_<name>/ sets written by a detector
+# comparison's review.py (data/detector_diagnosis/<run>/). Read per call like
+# training_root(), so pointing it somewhere else reaches a running server; a
+# relative value is the repo's, never the cwd's. Unset, the Duel page says
+# which key to set, and none of its routes serve anything.
+def duel_dir():
+    d = cfg('duel_dir', '', env='DUEL_DIR')
     return os.path.join(REPO, d) if d and not os.path.isabs(d) else d
 
 
@@ -9072,7 +9088,6 @@ def search_scores(term):
         return None, 'mismatch'
     if term not in terms:
         return None, 'unknown'
-    import numpy as np
     sims = vecs.astype('float32') @ terms[term].astype('float32')
     return {names[i]: float(sims[i]) for i in range(len(names))}, None
 
@@ -9884,7 +9899,7 @@ def _gate_plan(stage, sp):
                 'msg': f'planning the {sp["title"]} — a few minutes over the '
                        f'whole store; the Run button appears when it lands'}
     try:
-        import duckdb                                       # noqa: F401
+        import duckdb  # noqa: F401
     except ImportError:
         return {'ok': False, 'running': False,
                 'msg': f'no plan yet, and this interpreter has no duckdb to '
@@ -10501,7 +10516,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
     # a query, /audit/crop/<key>.jpg is a path with the key IN it.
     AUTH_IMAGE_PATHS = frozenset({'/hq', '/orig', '/flagged',
                                   '/datasets/thumb', '/datasets/image',
-                                  '/annotate/frame.jpg'})
+                                  '/annotate/frame.jpg', '/duel/img'})
     AUTH_IMAGE_DIRS = ('/audit/crop/', '/audit/frame/') + STATIC_DIRS
 
     def end_headers(self):
@@ -10639,6 +10654,59 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 return True
         except Exception as ex:           # noqa: BLE001 - a page, not a 500
             self._json({'error': '%s: %s' % (type(ex).__name__, ex)})
+            return True
+        return False
+
+    def _duel_get(self, path):
+        """The Duel page's reads. True when it answered.
+
+        Every item is named by its set and its number -- duel_page.py looks
+        the set up among the directories that exist and builds the file name
+        itself, so nothing the client sends is joined onto a path. The
+        annotator is the session's, never one named in the query string.
+
+        An error answers with the exception's TYPE only, unlike the pages
+        around it: the text of an exception raised while reading a key.json
+        can quote the key, and the key is exactly what this page is blinded
+        to.
+        """
+        m = _duel_page()
+        if m is None:
+            self._json({'error': 'the duel page would not load'})
+            return True
+        q = parse_qs(urlparse(self.path).query)
+        name = q.get('set', [''])[0]
+        who = self._annotator()
+        try:
+            if path == '/api/duel/sets':
+                self._json(m.sets(duel_dir(), who))
+                return True
+            if path == '/api/duel/set':
+                self._json(m.set_view(duel_dir(), name, who))
+                return True
+            if path == '/api/duel/export':
+                self._json(m.export(duel_dir(), name, who))
+                return True
+            if path == '/duel/img':
+                got = m.image_path(duel_dir(), name, q.get('n', [''])[0],
+                                   q.get('v', [''])[0])
+                if not got:
+                    self.send_error(404)
+                    return True
+                with open(got, 'rb') as fh:
+                    body = fh.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(body)))
+                # an hour, not a day: a set rebuilt in place puts a different
+                # picture behind the same item number
+                self.send_header('Cache-Control', 'private, max-age=3600')
+                self.end_headers()
+                self.wfile.write(body)
+                return True
+        except Exception as ex:           # noqa: BLE001 - a page, not a 500
+            self._json({'error': 'the duel page failed (%s)'
+                        % (type(ex).__name__, )})
             return True
         return False
 
@@ -11313,6 +11381,26 @@ class BoardHandler(SimpleHTTPRequestHandler):
         if _p.startswith('/api/annotate/') or _p == '/annotate/frame.jpg':
             if self._annotate_get(_p):
                 return
+        # ── Duel ─────────────────────────────────────────────────────────
+        # Every signed-in account, like Annotate: judging a box is
+        # annotating, and the answer is signed with the session's name.
+        if _p == '/duel':
+            m = _duel_page()
+            if m is None:
+                self.send_error(503, 'the duel page would not load')
+                return
+            body = m.page_html(account=account_strip(self.session)) \
+                .encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if _p.startswith('/api/duel/') or _p == '/duel/img':
+            if self._duel_get(_p):
+                return
         if _p == '/audit/review':
             body = REVIEW_HTML.encode('utf-8')
             self.send_response(200)
@@ -11707,6 +11795,7 @@ class BoardHandler(SimpleHTTPRequestHandler):
             body, self._NAV_OPEN, self._NAV_CLOSE,
             lambda: (render_explore_nav(getattr(self, 'session', None))
                      + render_annotate_nav(getattr(self, 'session', None))
+                     + render_duel_nav(getattr(self, 'session', None))
                      + render_datasets_nav(getattr(self, 'session', None))
                      + render_train_nav(getattr(self, 'session', None))
                      + render_account_nav(getattr(self, 'session', None))))
@@ -11929,6 +12018,34 @@ class BoardHandler(SimpleHTTPRequestHandler):
                              by=self._annotator())
             except Exception as e:        # noqa: BLE001 - a reply, not a 500
                 got = {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+            self._json(got, 200 if got.get('ok') else 400)
+            return
+        if _p == '/api/duel/answer':
+            # JSON only. A form or text/plain POST is one a page on another
+            # site can send without asking first; application/json makes the
+            # browser ask (a CORS preflight), and nothing here answers yes.
+            # The SameSite=Lax cookie already keeps such a POST signed out --
+            # this is the second lock on the one door that writes.
+            ctype = str(self.headers.get('Content-Type', '') or '')
+            if ctype.split(';', 1)[0].strip().lower() != 'application/json':
+                self._json({'ok': False,
+                            'error': 'send the answer as application/json'},
+                           415)
+                return
+            data = self._body()
+            if data is None:
+                return
+            m = _duel_page()
+            if m is None:
+                self._json({'ok': False,
+                            'error': 'the duel page would not load'})
+                return
+            try:
+                got = m.save(duel_dir(), data.get('set'), data.get('n'),
+                             data.get('answer'), by=self._annotator())
+            except Exception as e:        # noqa: BLE001 - a reply, not a 500
+                got = {'ok': False, 'error': 'not saved (%s)'
+                       % (type(e).__name__, )}
             self._json(got, 200 if got.get('ok') else 400)
             return
         if self.path.split('?', 1)[0] == '/api/audit/box':
@@ -12418,7 +12535,7 @@ def serve(args):
     # own: an edit to the gate that sits invisible behind a healthy-looking
     # server is a lock somebody believes they changed and did not.
     for _m in ('audit.py', 'datasets.py', 'llm_page.py', 'auth.py',
-               'accounts.py', 'annotate_page.py'):
+               'accounts.py', 'annotate_page.py', 'duel_page.py'):
         _q = os.path.join(_src_dir, _m)
         if os.path.exists(_q):
             _watched.add(_q)
@@ -12528,6 +12645,7 @@ _JOBS = {'mod': None, 'tried': False}
 
 _EXPLORE = {'tried': False, 'mod': None}
 _ANNOTATE = {'tried': False, 'mod': None}
+_DUEL = {'tried': False, 'mod': None}
 
 
 def _train_page():
@@ -12575,6 +12693,22 @@ def _annotate_page():
             sys.stderr.write('annotate page unavailable: %s\n' % (e,))
             _ANNOTATE['mod'] = None
     return _ANNOTATE['mod']
+
+
+def _duel_page():
+    """The Duel page, imported once and only when asked for -- a dashboard
+    that cannot import it still serves the rest. duel_page.py never imports
+    this module: the review-set directory is resolved here and passed in."""
+    if not _DUEL['tried']:
+        _DUEL['tried'] = True
+        try:
+            sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
+            import duel_page as _d
+            _DUEL['mod'] = _d
+        except Exception as e:            # noqa: BLE001 - a page, not the gate
+            sys.stderr.write('duel page unavailable: %s\n' % (e,))
+            _DUEL['mod'] = None
+    return _DUEL['mod']
 
 
 def _jobs():
@@ -12901,6 +13035,16 @@ def render_annotate_nav(session):
     return ('<a class="hnav" href="/annotate" title="Box every dog in a '
             'whole frame \u2014 the ones the detector missed">'
             '<span class="hnf">&#9635;</span>Annotate</a>')
+
+
+def render_duel_nav(session):
+    """The way to the Duel page, for the action row. Everyone with a
+    session, like Annotate: saying whether a box holds a dog is annotating."""
+    if not session:
+        return ''
+    return ('<a class="hnav" href="/duel" title="Two detectors disagree '
+            '\u2014 say, blind, whether each box holds a dog">'
+            '<span class="hnf">&#9878;</span>Duel</a>')
 
 
 def render_account_nav(session):
