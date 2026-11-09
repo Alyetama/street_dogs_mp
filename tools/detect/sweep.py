@@ -52,6 +52,43 @@ SHARD = 4000  # images per shard (section 6.1)
 # rates every 60 s from live remaining counts (closed-loop waterfill, §6.5).
 CAP = {'lynx': 71.0, 'capybara': 71.1, 'jackal': 32.5, 'bobcat': 22.9}
 READERS = {'lynx': 1, 'capybara': 1, 'jackal': 1, 'bobcat': 8}
+DECODERS = 4  # cv2 decode threads (GIL released inside imdecode)
+
+
+def parse_drive_map(pairs, cast, flag):
+    """['jackal=8', 'bobcat=16'] -> {'jackal': 8, 'bobcat': 16}.
+
+    The per-drive read capacities and reader counts above were measured once,
+    in August; a drive measured again reads very differently (jackal 32.5
+    then, ~95 img/s with 8 readers in November), so a run can override them
+    without an edit to a tracked file. A malformed pair is an error, never a
+    silent default."""
+    out = {}
+    for pr in pairs or ():
+        name, sep, val = str(pr).partition('=')
+        if not sep or not name:
+            raise SystemExit(f'{flag}: expected drive=value, got {pr!r}')
+        try:
+            v = cast(val)
+        except ValueError:
+            raise SystemExit(f'{flag}: bad value in {pr!r}')
+        if v <= 0:
+            raise SystemExit(f'{flag}: {pr!r} must be positive')
+        out[name] = v
+    return out
+
+
+def finish_time(rem, cap, gpu_cap=None):
+    """Seconds until the slowest lane is done: each drive at its read cap,
+    and all of them together no faster than the GPU can take. Without the
+    GPU term, drives whose caps sum past what the engine can infer are each
+    told to read faster than they will be served, and the slowest-to-finish
+    lane gets no more of the GPU than the others."""
+    t = max(rem[d] / cap.get(d, 50.0) for d in rem)
+    if gpu_cap:
+        t = max(t, sum(rem.values()) / gpu_cap)
+    return t
+
 RAW_BYTES = 4 << 30
 
 
@@ -421,7 +458,21 @@ class PreviewWriter:
 
 
 def cmd_run(args):
+    # callers that build the namespace by hand (tests, other tools) predate
+    # the pacing overrides; their absence means the defaults, not a crash
+    for k, v in dict(cap=None,
+                     readers=None,
+                     decoders=DECODERS,
+                     consumers=1,
+                     ring_slots=None,
+                     gpu_cap=None).items():
+        if not hasattr(args, k):
+            setattr(args, k, v)
     cfg = load_cfg()
+    cap = dict(CAP, **parse_drive_map(args.cap, float, '--cap'))
+    readers = dict(READERS, **parse_drive_map(args.readers, int, '--readers'))
+    print(f'pacing: caps {cap}, readers {readers}, decoders {args.decoders}, '
+          f'consumers {args.consumers}, gpu cap {args.gpu_cap or "none"}')
     if args.engine:
         # a re-run with a promoted detector, or the resume of one: the run
         # must keep loading the engine it started with, whatever the config
@@ -544,7 +595,8 @@ def cmd_run(args):
                           base_region=base_region,
                           base_positives=base_positives,
                           base_boxes=base_boxes)
-    ring = engine.BatchRing(torch)
+    ring = engine.BatchRing(torch, slots=args.ring_slots
+                            or engine.RING_SLOTS)
     stop_ev = threading.Event()
     signal.signal(signal.SIGINT, lambda *a: stop_ev.set())
     signal.signal(signal.SIGTERM, lambda *a: stop_ev.set())
@@ -575,22 +627,30 @@ def cmd_run(args):
         coll.add(m['key'], m['pos'], img, dets)
 
     preview = None if args.no_preview else PreviewWriter()
-    consumer = engine.Consumer(cfg['engine'],
-                               ring,
-                               sink,
-                               conf=cfg['conf'],
-                               iou=cfg['iou'],
-                               max_det=cfg['max_det'],
-                               preview_fn=preview)
-    ct = threading.Thread(target=consumer.run, daemon=True)
-    ct.start()
+    # Several consumers, each with its own execution context and buffers,
+    # take batches from the one ring: while one is in NMS and the sink (CPU
+    # work, GPU idle) another's batch is on the GPU. Output is per image and
+    # the collector is locked, so the order batches finish in does not matter.
+    consumers = [
+        engine.Consumer(cfg['engine'],
+                        ring,
+                        sink,
+                        conf=cfg['conf'],
+                        iou=cfg['iou'],
+                        max_det=cfg['max_det'],
+                        preview_fn=preview)
+        for _ in range(max(1, args.consumers))
+    ]
+    cts = [threading.Thread(target=c.run, daemon=True) for c in consumers]
+    for ct in cts:
+        ct.start()
 
     rawqs = {d: queue.Queue() for d in lanes}
     budgets = {d: engine.ByteBudget(RAW_BYTES) for d in lanes}
     dts = [
         threading.Thread(target=engine.decoder_loop,
                          args=(ring, rawqs, budgets, stop_ev, sink),
-                         daemon=True) for _ in range(4)
+                         daemon=True) for _ in range(max(1, args.decoders))
     ]
     for t in dts:
         t.start()
@@ -641,7 +701,7 @@ def cmd_run(args):
                     except StopIteration:
                         return
 
-        for _ in range(READERS.get(d, 1)):
+        for _ in range(readers.get(d, 1)):
             r = engine.DriveReader(d,
                                    locked(),
                                    rawqs[d],
@@ -659,7 +719,7 @@ def cmd_run(args):
                 d: max(1, todo[d] - coll.drive_done.get(d, 0))
                 for d in lanes
             }
-            t_fin = max(rem[d] / CAP.get(d, 50.0) for d in lanes)
+            t_fin = finish_time(rem, cap, args.gpu_cap)
             for d in lanes:
                 buckets[d].set_rate(args.rate_cap or rem[d] / t_fin)
             time.sleep(60)
@@ -676,8 +736,10 @@ def cmd_run(args):
     # batches' sink() calls have LANDED before prefixes are flushed -- an
     # empty-queue check races the consumer's in-flight NMS/sink work.
     ring.batq.join()
-    consumer.stopping.set()
-    ct.join(timeout=60)
+    for c in consumers:
+        c.stopping.set()
+    for ct in cts:
+        ct.join(timeout=60)
     coll.flush_prefixes()
     status.stop(state='stopped' if stop_ev.is_set() else 'done')
     print(f'run finished: {coll.done_imgs:,} images, {coll.boxes:,} boxes, '
@@ -711,6 +773,24 @@ def main():
     r.add_argument('--engine',
                    help='the TensorRT engine to load instead of the '
                         'configured one (absolute, or relative to the repo)')
+    r.add_argument('--cap',
+                   nargs='+',
+                   metavar='DRIVE=IMG_S',
+                   help='override a drive\'s measured read capacity')
+    r.add_argument('--readers',
+                   nargs='+',
+                   metavar='DRIVE=N',
+                   help='override a drive\'s reader thread count')
+    r.add_argument('--decoders', type=int, default=DECODERS)
+    r.add_argument('--consumers',
+                   type=int,
+                   default=1,
+                   help='GPU consumers, each its own TensorRT context')
+    r.add_argument('--ring-slots', type=int)
+    r.add_argument('--gpu-cap',
+                   type=float,
+                   help='img/s the engine sustains; the pacer never plans '
+                   'past it')
     r.add_argument('--no-preview',
                    action='store_true',
                    help='disable the live detection-crop preview')

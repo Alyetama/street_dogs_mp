@@ -431,6 +431,13 @@ class Consumer:
 
     def run(self):
         torch, ops = self.torch, self.ops
+        # Everything this thread queues outside the two explicit stream
+        # blocks (the NMS, the .cpu() copies) goes on its own exec stream, not
+        # the legacy default stream: with several consumers, default-stream
+        # work in one thread waits on every other thread's kernels, and the
+        # overlap the extra consumers exist for is lost. The current stream
+        # is per thread, so this touches no other consumer.
+        torch.cuda.set_stream(self.exec_stream)
         while True:
             try:
                 s, n, metas = self.ring.batq.get(timeout=0.5)
