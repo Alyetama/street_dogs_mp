@@ -77,6 +77,12 @@ def main():
                            160.0)
     check('p7 read-bound: priority lane at its cap',
           abs(got['jack'] - 100.0) < 1e-6, got)
+    got = sweep.plan_rates(rem, {'capy': 0, 'jack': 1, 'bob': 0}, cap,
+                           160.0)
+    check('p7b a lane with a sliver of priority work still gets spare GPU',
+          got['jack'] > 50.0, got)
+    got = sweep.plan_rates(rem, {'capy': 0, 'jack': 500, 'bob': 0}, cap,
+                           160.0)
     check('p7 the rest share the 60 img/s left over',
           abs(got['capy'] + got['bob'] - 60.0) < 1e-6
           and got['capy'] > 0 and got['bob'] > 0, got)
@@ -102,6 +108,16 @@ def main():
     check('p9 stop releases a paused bucket', done.wait(2.0))
     check('p9 None is still unlimited',
           sweep.engine.TokenBucket().take() is None)
+    rem = {'capy': 14.6e6, 'jack': 8.0e6, 'bob': 3.75e6, 'lynx': 3.38e6}
+    cap = {'lynx': 71.0, 'capy': 45.0, 'jack': 32.0, 'bob': 60.0}
+    got = sweep.plan_rates(rem, {'capy': 7.8e6, 'jack': 5.45e6, 'bob': 0,
+                                 'lynx': 60}, cap, 126.0)
+    check('p10 read-bound priority: the whole GPU is planned',
+          abs(sum(got.values()) - 126.0) < 1e-6, got)
+    check('p10 no lane over its cap',
+          all(got[d] <= cap[d] + 1e-9 for d in got), got)
+    check('p10 priority lanes keep their pace',
+          abs(got['capy'] - 45.0) < 1e-6 and got['jack'] >= 31.4, got)
     print(f'{len(FAILS)} failed' if FAILS else 'all pacing checks passed')
     sys.exit(1 if FAILS else 0)
 

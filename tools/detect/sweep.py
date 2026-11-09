@@ -95,25 +95,42 @@ def plan_rates(rem, prio_rem, cap, gpu_cap=None):
 
     No priority work left: every lane is paced to finish together, as
     always. Otherwise the lanes still holding priority-region images are
-    paced to finish THAT work together, and the other lanes get only the GPU
-    the priority lanes cannot use (their read caps, not the engine, being the
-    limit), split the same way. Without a GPU cap there is no measure of
-    spare GPU, so the other lanes wait.
+    paced to finish THAT work together, and the GPU they cannot use (their
+    read caps, not the engine, being the limit) is split over every lane's
+    spare read capacity the same way. Without a GPU cap there is no measure
+    of spare GPU, so lanes without priority work wait.
     """
     live = {d: r for d, r in prio_rem.items() if r > 0 and d in rem}
     if not live:
         t = finish_time(rem, cap, gpu_cap)
         return {d: rem[d] / t for d in rem}
     t = finish_time(live, cap, gpu_cap)
-    rates = {d: live[d] / t for d in live}
-    rest = {d: rem[d] for d in rem if d not in live}
-    if not rest:
-        return rates
+    rates = {d: 0.0 for d in rem}
+    rates.update({d: live[d] / t for d in live})
     left = gpu_cap - sum(rates.values()) if gpu_cap else 0.0
-    if left < 1.0:
-        return dict(rates, **{d: 0.0 for d in rest})
-    tr = finish_time(rest, cap, left)
-    return dict(rates, **{d: rest[d] / tr for d in rest})
+    # Whatever GPU the priority work cannot use goes to EVERY lane with read
+    # capacity to spare, priority lanes included: a lane holding only a few
+    # priority images (lynx has 64 of North America's 13M) would otherwise
+    # crawl through them at the priority pace and do nothing else for days.
+    spare = {d: cap.get(d, 50.0) - rates[d] for d in rem}
+    spare = {d: c for d, c in spare.items() if c > 1e-9}
+    if left < 1.0 or not spare:
+        return rates
+    # water-fill: split what is left in proportion to each lane's remaining
+    # work, never past a lane's spare read capacity, and hand any excess on
+    pool = dict(spare)
+    while pool and left > 1e-9:
+        tot = sum(rem[d] for d in pool)
+        share = {d: left * rem[d] / tot for d in pool}
+        full = [d for d in pool if share[d] >= pool[d]]
+        if not full:
+            for d in pool:
+                rates[d] += share[d]
+            break
+        for d in full:
+            rates[d] += pool.pop(d)
+            left -= spare[d]
+    return rates
 
 RAW_BYTES = 4 << 30
 
@@ -769,12 +786,20 @@ def cmd_run(args):
         wlock = threading.Lock()
 
         def locked(work=work, wlock=wlock):
+            # Take the next item under the lane lock, then yield it with the
+            # lock RELEASED. Yielding inside the `with` held the lock for as
+            # long as the reader spent reading that file, so a lane's readers
+            # took turns instead of reading in parallel (bobcat's 8 were one),
+            # and a reader that returned on stop could leave its suspended
+            # generator holding the lock forever: the other readers of the
+            # lane blocked, the join never returned, and a graceful stop hung.
             while True:
                 with wlock:
                     try:
-                        yield next(work)
+                        item = next(work)
                     except StopIteration:
                         return
+                yield item
 
         for _ in range(readers.get(d, 1)):
             r = engine.DriveReader(d,
