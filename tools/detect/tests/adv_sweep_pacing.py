@@ -9,6 +9,9 @@
   p6 GPU-bound priority phase: priority lanes share the GPU, others pause
   p7 read-bound priority phase: others get only the GPU left over
   p8 no GPU cap: others pause; a lane whose priority work is done joins them
+  p11 adapt_caps: a lane that fell short drops toward what it delivered, one
+      that kept up grows back (never past its configured cap), a paused
+      lane is untouched
   p9 a paused TokenBucket blocks, resumes on a rate, and returns on stop
 
     python tools/detect/tests/adv_sweep_pacing.py
@@ -118,6 +121,23 @@ def main():
           all(got[d] <= cap[d] + 1e-9 for d in got), got)
     check('p10 priority lanes keep their pace',
           abs(got['capy'] - 45.0) < 1e-6 and got['jack'] >= 31.4, got)
+    cap = {'a': 90.0, 'b': 90.0, 'c': 60.0}
+    eff = dict(cap)
+    sweep.adapt_caps(eff, cap, {'a': 74.0, 'b': 50.0, 'c': 0.0},
+                     {'a': 26.0, 'b': 49.0, 'c': 0.0})
+    check('p11 a disk-bound lane drops toward what it delivered',
+          abs(eff['a'] - (45.0 + 14.3)) < 1e-6, eff)
+    check('p11 a lane that kept up stays at its cap', eff['b'] == 90.0, eff)
+    check('p11 a paused lane is untouched', eff['c'] == 60.0, eff)
+    for _ in range(20):
+        sweep.adapt_caps(eff, cap, {'a': eff['a']}, {'a': 26.0})
+    check('p11 converges near the delivered rate',
+          26.0 < eff['a'] < 30.0, eff)
+    sweep.adapt_caps(eff, cap, {'a': eff['a']}, {'a': eff['a']})
+    check('p11 grows back when it keeps up', eff['a'] > 30.0, eff)
+    for _ in range(20):
+        sweep.adapt_caps(eff, cap, {'a': eff['a']}, {'a': eff['a']})
+    check('p11 never past the configured cap', eff['a'] == 90.0, eff)
     print(f'{len(FAILS)} failed' if FAILS else 'all pacing checks passed')
     sys.exit(1 if FAILS else 0)
 

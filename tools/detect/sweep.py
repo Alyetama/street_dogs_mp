@@ -90,6 +90,31 @@ def finish_time(rem, cap, gpu_cap=None):
     return t
 
 
+def adapt_caps(eff, cap, planned, observed):
+    """Read capacities as the drives actually deliver them, updated in place.
+
+    A drive's speed changes from cell to cell (file sizes, where they sit on
+    the platter): North America on capybara read at 44 img/s in one stretch
+    and 26 in the next. A cap set once is wrong somewhere, and the planner
+    trusts it: too high and it plans GPU work a disk cannot feed while the
+    other lanes wait; too low and a disk with room is held back. So: a lane
+    that delivered under 85% of its planned rate is disk-bound, and its cap
+    moves halfway to what it delivered (+10%); a lane that kept up may be
+    worth more, and its cap grows 25% a step, never past the configured one.
+    Paused lanes say nothing about their drive and are left alone.
+    """
+    for d, p in planned.items():
+        if not p or p <= 0 or d not in observed:
+            continue
+        top = cap.get(d, 50.0)
+        cur = eff.get(d, top)
+        if observed[d] < 0.85 * p:
+            eff[d] = max(1.0, 0.5 * cur + 0.5 * observed[d] * 1.1)
+        else:
+            eff[d] = min(top, cur * 1.25)
+    return eff
+
+
 def plan_rates(rem, prio_rem, cap, gpu_cap=None):
     """{drive: img/s} for the token buckets; 0 pauses a lane.
 
@@ -754,6 +779,9 @@ def cmd_run(args):
                                 drive_code=drive_codes.get(drive, 255)),
                            os.path.join(base, f'{iid}.jpg'))
 
+    eff = dict(cap)  # adaptive read capacities (adapt_caps)
+    pace_state = {'t': None, 'done': {}, 'planned': {}}
+
     def repace():
         if args.max_images and issued[0] >= args.max_images:
             # every lane must reach lane_work to see the limit and return;
@@ -768,7 +796,17 @@ def cmd_run(args):
             d: max(0, prio_todo[d] - coll.drive_done.get(d, 0))
             for d in lanes
         }
-        rates = plan_rates(rem, prio_rem, cap, args.gpu_cap)
+        now = time.monotonic()
+        done = {d: coll.drive_done.get(d, 0) for d in lanes}
+        if pace_state['t'] is not None and now - pace_state['t'] > 5:
+            dt = now - pace_state['t']
+            observed = {
+                d: (done[d] - pace_state['done'].get(d, 0)) / dt
+                for d in lanes
+            }
+            adapt_caps(eff, cap, pace_state['planned'], observed)
+        rates = plan_rates(rem, prio_rem, eff, args.gpu_cap)
+        pace_state.update(t=now, done=done, planned=dict(rates))
         for d in lanes:
             buckets[d].set_rate(args.rate_cap or rates[d])
 
