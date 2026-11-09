@@ -86,6 +86,33 @@ def default_status_path():
     return os.path.join(detect_root(), 'status.json')
 
 
+def side_status_paths(root=None):
+    """status.json of every side store beside the live one.
+
+    A candidate detector sweeps into its own store (DETECT_ROOT pointing at a
+    sibling ``detect_*`` directory) so the live store stays untouched. The
+    dashboard reads the live root only, so without this that sweep is
+    invisible there. Sorted, never the live root itself, only paths that
+    exist.
+    """
+    root = (root or detect_root()).rstrip('/')
+    parent = os.path.dirname(root)
+    try:
+        names = sorted(os.listdir(parent))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        d = os.path.join(parent, name)
+        if not name.startswith('detect_') or os.path.realpath(
+                d) == os.path.realpath(root):
+            continue
+        p = os.path.join(d, 'status.json')
+        if os.path.isfile(p):
+            out.append(p)
+    return out
+
+
 def _r1(v):
     """Round to 1 dp for the wire; None passes through (JSON null)."""
     return None if v is None else round(float(v), 1)

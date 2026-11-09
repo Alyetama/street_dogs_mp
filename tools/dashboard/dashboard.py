@@ -1185,6 +1185,79 @@ try:
     from status import read_status as _read_detect_status
 except Exception:  # detect tooling absent -> off
     _read_detect_status = None
+try:
+    from status import side_status_paths as _side_status_paths
+    from status import default_status_path as _live_status_path
+except Exception:  # older detect tooling: the live store only
+    _side_status_paths = None
+    _live_status_path = None
+
+
+def _status_ts(path):
+    """Publish time of a status document, or None when it has no usable one.
+
+    The age read_status reports is relative to now, so the publish time is
+    rebuilt from it; a document with no age (missing, unparsable) or an
+    unusable one is None and can never be chosen. Never raises: one bad file
+    beside the live store must not blank the panel."""
+    try:
+        d = _read_detect_status(path, stale_after=1e12) or {}
+        ts = d.get('ts')
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            if 'age_s' not in d:
+                return None
+            ts = time.time() - float(d['age_s'])
+        ts = float(ts)
+        return ts if math.isfinite(ts) else None
+    except Exception:
+        return None
+
+
+def _detect_status_path():
+    """(path, side) of the status document the sweep panel shows.
+
+    A candidate detector sweeps into its own store (a sibling detect_*
+    directory) so the live store stays untouched; the panel reads the live
+    store only, so that sweep was invisible and the panel kept showing the
+    run that ended. Whichever document was published LAST is the sweep there
+    is to watch: a side store's while it runs, and still after it pauses,
+    crashes or finishes -- falling back to a months-old finished run the
+    moment a multi-day sweep paused hid exactly the event worth seeing. Once
+    the side store is promoted it becomes the live root, and the old store
+    beside it is older, so the panel follows it there with no special case.
+    Ties go to the live store.
+    """
+    if _side_status_paths is None or _live_status_path is None:
+        return None, False
+    live = _live_status_path()
+    best, best_ts = None, _status_ts(live)
+    try:
+        sides = _side_status_paths()
+    except Exception:
+        sides = []
+    for p in sides:
+        ts = _status_ts(p)
+        if ts is not None and (best_ts is None or ts > best_ts):
+            best, best_ts = p, ts
+    return (best, True) if best else (live, False)
+
+
+def _side_model():
+    """The model the shown side store's newest run loaded, or None while
+    the panel shows the live store. Never raises."""
+    try:
+        path, side = _detect_status_path()
+        if not side:
+            return None
+        cur = _sweep_archive().current_model(os.path.dirname(path)) or {}
+        return {'panel_store': os.path.basename(os.path.dirname(path)),
+                'panel_model': (cur.get('comet_run') or cur.get('sha8')
+                                or (os.path.basename(cur['engine'])
+                                    if cur.get('engine') else None)),
+                'panel_started': cur.get('run_started')}
+    except Exception:
+        return None
+
 
 _detect_lock = threading.Lock()
 _detect_memo = {'t': 0.0, 'body': None}
@@ -1210,7 +1283,15 @@ def detect_payload():
                 # are permanent facts: the run ended, it did not un-happen.
                 # Only the instantaneous fields go, because those would be
                 # lies about a process that is not running.
-                body = dict(_read_detect_status(stale_after=1e12) or {})
+                path, side = _detect_status_path()
+                body = dict(
+                    _read_detect_status(path, stale_after=1e12) or {})
+                # Which store this document came from: a side store is a
+                # candidate's sweep, and its numbers are not the counts the
+                # rest of the page shows, so the panel has to say so.
+                body['side_store'] = side
+                body['store'] = (os.path.basename(os.path.dirname(path))
+                                 if path else None)
                 # A missing or unparsable status.json collapses to the same
                 # {'running': False} a genuinely idle sweep gets, and the
                 # panel drew that as "sweep idle -- 0 of 17 complete" over a
@@ -11585,6 +11666,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
             # what wrote the store beside what is promoted, for the re-run
             # button; never the reason the Stop/Resume answer goes missing
             try:
+                # the panel may be showing a candidate's side store: name the
+                # model that is writing THOSE numbers, not the live store's
+                doc.update(_side_model() or {})
                 doc.update(sweep_model_state())
                 got = _sweep_archive().archives(_detect_root())
                 doc['last_archive'] = ({
@@ -17446,6 +17530,10 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     }
     /* muted run meta */
     var g=j.gpu,meta=[];
+    /* a candidate detector sweeping its own store: these are not the counts
+       the rest of the page shows, and the line has to say whose they are */
+    if(j.side_store)meta.push('<b>separate store '+esc(j.store||'')+
+      '</b> \\u2014 not the live counts');
     if(j.run_id)meta.push('run '+esc(j.run_id)+(j.gen!=null?' \\u00b7 gen '+j.gen:''));
     if(g)meta.push('GPU '+(g.util!=null?g.util+'%':'\\u2014')+(g.temp!=null?' \\u00b7 '+g.temp+'\\u00b0C':''));
     if(j.boxes_per_img!=null)meta.push(j.boxes_per_img+' boxes/img');
@@ -17658,9 +17746,17 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
   function paintModel(j){
     var dm=document.getElementById('detModel');
     if(!dm)return;
-    dm.hidden=!j.store_model&&!j.best_model;
-    dm.innerHTML=modelLine('Last sweep',j.store_model,
-      j.store_started?'started '+j.store_started:'',j.best_model);
+    dm.hidden=!j.store_model&&!j.best_model&&!j.panel_store;
+    /* the numbers below are a candidate's side store: say whose they are,
+       and keep what wrote the live store on the same line */
+    dm.innerHTML=j.panel_store
+      ?modelLine('Candidate sweep',j.panel_model,
+         j.panel_started?'started '+j.panel_started:'',null)+
+       ' \\u00b7 live store: <b>'+String(j.store_model||'unknown')
+         .replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;',
+           '>':'&gt;','"':'&quot;'}[c]})+'</b>'
+      :modelLine('Last sweep',j.store_model,
+         j.store_started?'started '+j.store_started:'',j.best_model);
   }
   function poll(){
     fetch('/api/sweep').then(function(x){return x.json()})
