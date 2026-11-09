@@ -588,9 +588,12 @@ class ByteBudget:
 class TokenBucket:
     """Closed-loop pacing (section 6.5): rate is set externally every 60 s."""
 
-    def __init__(self, rate=None):
+    def __init__(self, rate=None, stop=None):
         self.lock = threading.Lock()
-        self.rate = rate  # img/s or None = unlimited
+        # img/s; None = unlimited; 0 = paused (a lane held back while
+        # priority regions on other drives finish -- see sweep.plan_rates)
+        self.rate = rate
+        self.stop = stop  # threading.Event: a paused take() returns on stop
         self._next = time.monotonic()
 
     def set_rate(self, rate):
@@ -598,6 +601,17 @@ class TokenBucket:
             self.rate = rate
 
     def take(self):
+        while True:
+            with self.lock:
+                r = self.rate
+            if r is None:
+                return
+            if r > 0:
+                break
+            # paused: never block a graceful stop, which joins the readers
+            if self.stop is not None and self.stop.is_set():
+                return
+            time.sleep(0.5)
         with self.lock:
             r = self.rate
             if not r:

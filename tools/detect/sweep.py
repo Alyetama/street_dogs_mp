@@ -89,6 +89,32 @@ def finish_time(rem, cap, gpu_cap=None):
         t = max(t, sum(rem.values()) / gpu_cap)
     return t
 
+
+def plan_rates(rem, prio_rem, cap, gpu_cap=None):
+    """{drive: img/s} for the token buckets; 0 pauses a lane.
+
+    No priority work left: every lane is paced to finish together, as
+    always. Otherwise the lanes still holding priority-region images are
+    paced to finish THAT work together, and the other lanes get only the GPU
+    the priority lanes cannot use (their read caps, not the engine, being the
+    limit), split the same way. Without a GPU cap there is no measure of
+    spare GPU, so the other lanes wait.
+    """
+    live = {d: r for d, r in prio_rem.items() if r > 0 and d in rem}
+    if not live:
+        t = finish_time(rem, cap, gpu_cap)
+        return {d: rem[d] / t for d in rem}
+    t = finish_time(live, cap, gpu_cap)
+    rates = {d: live[d] / t for d in live}
+    rest = {d: rem[d] for d in rem if d not in live}
+    if not rest:
+        return rates
+    left = gpu_cap - sum(rates.values()) if gpu_cap else 0.0
+    if left < 1.0:
+        return dict(rates, **{d: 0.0 for d in rest})
+    tr = finish_time(rest, cap, left)
+    return dict(rates, **{d: rest[d] / tr for d in rest})
+
 RAW_BYTES = 4 << 30
 
 
@@ -461,6 +487,7 @@ def cmd_run(args):
     # callers that build the namespace by hand (tests, other tools) predate
     # the pacing overrides; their absence means the defaults, not a crash
     for k, v in dict(cap=None,
+                     regions_first=None,
                      readers=None,
                      decoders=DECODERS,
                      consumers=1,
@@ -498,12 +525,34 @@ def cmd_run(args):
     lanes, corpus, region_corpus = lane_plan(detect_root, args.gen)
     if args.drives:
         lanes = {d: v for d, v in lanes.items() if d in args.drives}
+    first = set(args.regions_first or ())
+    unknown = first - set(region_corpus)
+    if unknown:
+        print(f'--regions-first: no such region {sorted(unknown)}; known: '
+              f'{sorted(region_corpus)}', file=sys.stderr)
+        return 1
+    if first:
+        # stable: within each group the worklist order is kept, so a resume
+        # walks the same shards in the same order
+        lanes = {
+            d: sorted(v, key=lambda it: it[0]['region'] not in first)
+            for d, v in lanes.items()
+        }
     todo = {
         d:
         sum((sh[2] - sh[1]) - sum(e - s for s, e in sh[3])
             for _, _, shards in v for sh in shards)
         for d, v in lanes.items()
     }
+    prio_todo = {
+        d: sum((sh[2] - sh[1]) - sum(e - s for s, e in sh[3])
+               for pr, _, shards in v if pr['region'] in first
+               for sh in shards)
+        for d, v in lanes.items()
+    }
+    if first:
+        print(f'regions first: {sorted(first)}, '
+              f'{sum(prio_todo.values()):,} images: {prio_todo}')
     todo_region = defaultdict(int)
     for v in lanes.values():
         for pr, _, shards in v:
@@ -656,7 +705,7 @@ def cmd_run(args):
         t.start()
 
     drive_codes = {d: i for i, d in enumerate(sorted(CAP))}
-    buckets = {d: engine.TokenBucket() for d in lanes}
+    buckets = {d: engine.TokenBucket(stop=stop_ev) for d in lanes}
     issued = [0]
     issued_lock = threading.Lock()
 
@@ -688,6 +737,32 @@ def cmd_run(args):
                                 drive_code=drive_codes.get(drive, 255)),
                            os.path.join(base, f'{iid}.jpg'))
 
+    def repace():
+        if args.max_images and issued[0] >= args.max_images:
+            # every lane must reach lane_work to see the limit and return;
+            # a paused lane never would, and the run would never end
+            for d in lanes:
+                buckets[d].set_rate(None)
+            return
+        rem = {d: max(1, todo[d] - coll.drive_done.get(d, 0)) for d in lanes}
+        # lanes are ordered priority-first, so what a lane has done comes
+        # off its priority work before anything else
+        prio_rem = {
+            d: max(0, prio_todo[d] - coll.drive_done.get(d, 0))
+            for d in lanes
+        }
+        rates = plan_rates(rem, prio_rem, cap, args.gpu_cap)
+        for d in lanes:
+            buckets[d].set_rate(args.rate_cap or rates[d])
+
+    def pacer():
+        while not stop_ev.is_set():
+            time.sleep(60 if not args.max_images else 2)
+            repace()
+
+    # rates are in place BEFORE the first reader starts: an unset bucket is
+    # unlimited, and a lane meant to wait would read a burst first
+    repace()
     rthreads = []
     for d, items in lanes.items():
         work = lane_work(d, items)
@@ -712,17 +787,6 @@ def cmd_run(args):
             t = threading.Thread(target=r.run, daemon=True)
             t.start()
             rthreads.append(t)
-
-    def pacer():
-        while not stop_ev.is_set():
-            rem = {
-                d: max(1, todo[d] - coll.drive_done.get(d, 0))
-                for d in lanes
-            }
-            t_fin = finish_time(rem, cap, args.gpu_cap)
-            for d in lanes:
-                buckets[d].set_rate(args.rate_cap or rem[d] / t_fin)
-            time.sleep(60)
 
     threading.Thread(target=pacer, daemon=True).start()
 
@@ -791,6 +855,11 @@ def main():
                    type=float,
                    help='img/s the engine sustains; the pacer never plans '
                    'past it')
+    r.add_argument('--regions-first',
+                   nargs='+',
+                   metavar='REGION',
+                   help='sweep these regions before any other: lanes '
+                        'without them wait unless the GPU has room')
     r.add_argument('--no-preview',
                    action='store_true',
                    help='disable the live detection-crop preview')
