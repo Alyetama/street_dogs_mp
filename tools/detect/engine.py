@@ -33,6 +33,32 @@ Runs under the *yolo* env (python 3.11, torch cu128, ultralytics pinned
 8.3.165 -- 8.4 switches yolo26 to NMS-free decode and ignores ``iou``,
 invalidating every measured threshold curve; tensorrt pinned 10.12 -- the
 TRT 11 pip default targets CUDA 13 and its Builder returns null here).
+
+TWO KINDS OF ENGINE, told apart by the output tensor's shape:
+
+* one-to-many (the 8.3.165 export, ``yolo26x_train30.engine``): output
+  (BS, 4+nc, anchors), every anchor's box. Decoded by ultralytics'
+  ``non_max_suppression`` at ``iou`` (0.90 in the sweep config).
+
+* end-to-end (an 8.4 export of a yolo26 model, the only kind 8.4 makes by
+  default): output (BS, max_det, 6) -- x1, y1, x2, y2, conf, cls in
+  network pixels, the one-to-one head's top ``max_det`` boxes, surest first.
+  8.3.165's ``non_max_suppression`` sees a last dimension of 6, takes the
+  end-to-end shortcut and runs NO NMS at all, so this module never hands it
+  one: ``e2e_nms`` filters at ``conf`` and runs NMS at ``iou`` itself.
+
+The SAME ``iou`` for both kinds, on purpose. The store keeps boxes at a
+loose NMS (0.90 in the sweep config) and the duplicates are taken out at
+count time, at 0.7, only between boxes the gate put in the same class
+(tools/detect/box_nms.py). Running 0.7 here, before the gate, would let a
+surer box the gate later rejects delete a dog box under it: on production's
+own stored boxes (200k random frames) that order loses 3.6% of the dogs. An
+end-to-end engine therefore stores exactly as the one-to-many engine does,
+and both go through one counting rule.
+
+An 8.4 export also keeps YOLO26's SPPF residual, which 8.3.165 drops when it
+builds the graph (its SPPF ignores ``add``): the same weights exported by
+the two versions are not the same network.
 """
 
 import json
@@ -118,6 +144,67 @@ def boxes_to_original(xyxy, m):
     out[:, [1, 3]] = (out[:, [1, 3]] - m['top']) / m['s'] * (m['h0'] / m['hd'])
     out[:, [0, 2]] = out[:, [0, 2]].clip(0, m['w0'])
     out[:, [1, 3]] = out[:, [1, 3]].clip(0, m['h0'])
+    return out
+
+
+def read_engine_meta(path):
+    """The JSON header of an ultralytics-exported .engine, without TensorRT.
+
+    The header is a little-endian uint32 length and that many bytes of JSON.
+    Returns {} for a file with no readable header (a bare TRT plan).
+    """
+    try:
+        with open(path, 'rb') as f:
+            hlen = struct.unpack('<I', f.read(4))[0]
+            if not 0 < hlen < (1 << 20):
+                return {}
+            meta = json.loads(f.read(hlen).decode('utf-8'))
+        return meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError, struct.error, UnicodeDecodeError):
+        return {}
+
+
+def is_end2end(out_shape, meta=None):
+    """True for an end-to-end engine's (BS, max_det, 6) output.
+
+    A one-to-many output is (BS, 4+nc, anchors) and anchors is in the
+    thousands, so its last dimension is never 6. The header's ``end2end``
+    (written by 8.4 exports, absent from 8.3) must agree with the shape when
+    it is present -- an engine whose header and graph disagree is refused
+    rather than decoded the wrong way.
+    """
+    shape = tuple(int(v) for v in out_shape)
+    if len(shape) != 3:
+        raise RuntimeError(f'unexpected engine output shape {shape}')
+    e2e = shape[2] == 6
+    said = (meta or {}).get('end2end')
+    if said is not None and bool(said) != e2e:
+        raise RuntimeError(
+            f'engine header says end2end={said} but its output is {shape}')
+    return e2e
+
+
+def e2e_nms(pred, conf, iou, max_det):
+    """Decode an end-to-end output: (BS, K, 6) -> list of (n, 6) tensors.
+
+    Per image: keep conf > ``conf`` (strictly, as non_max_suppression does),
+    then greedy NMS at ``iou`` within each class (a box is dropped when its
+    IoU with a kept, surer box of its class is above ``iou``; for the
+    one-class detector this is plain NMS), then the first ``max_det``. Rows
+    come back surest first, so det_idx 0 is the frame's surest box -- the
+    order store.py and box_nms.py rely on.
+    """
+    import torch
+    import torchvision
+    out = []
+    for p in pred:
+        p = p[torch.isfinite(p).all(1) & (p[:, 4] > conf)]
+        if len(p):
+            keep = torchvision.ops.batched_nms(p[:, :4].float(), p[:,
+                                                                   4].float(),
+                                               p[:, 5].long(), iou)
+            p = p[keep[:max_det]]
+        out.append(p)
     return out
 
 
@@ -278,6 +365,10 @@ class Consumer:
     ``sink(meta, status, boxes, confs)`` receives one call per image; boxes
     are float32 (n,4) in ORIGINAL pixels, confs float32 (n,), both empty for
     negatives; status uses the section 5.3 codes (0 ok, 4 infer_error).
+
+    ``iou`` is the store's NMS threshold for either kind of engine; which
+    decode runs it is decided by the engine's output shape, not by the
+    caller (see the module docstring).
     """
 
     def __init__(self,
@@ -288,6 +379,7 @@ class Consumer:
                  iou=0.90,
                  max_det=300,
                  preview_fn=None):
+        import tensorrt as trt
         import torch
         from ultralytics.utils import ops
         self.torch = torch
@@ -301,10 +393,23 @@ class Consumer:
             self.engine.get_tensor_name(i)
             for i in range(self.engine.num_io_tensors)
         ]
+        if len(names) != 2:
+            raise RuntimeError(f'expected one input and one output tensor, '
+                               f'got {names}')
         self.in_name, self.out_name = names[0], names[1]
         in_shape = tuple(self.ctx.get_tensor_shape(self.in_name))
         out_shape = tuple(self.ctx.get_tensor_shape(self.out_name))
         assert in_shape == (BS, 3, IMGSZ, IMGSZ), in_shape
+        # both buffers below are float32; an fp16-I/O engine would read them
+        # as garbage without a word
+        for nm in names:
+            dt = self.engine.get_tensor_dtype(nm)
+            if dt != trt.float32:
+                raise RuntimeError(f'engine tensor {nm} is {dt}, not float32')
+        self.e2e = is_end2end(out_shape, self.trt_meta)
+        if self.e2e and out_shape[0] != BS:
+            raise RuntimeError(f'end-to-end output {out_shape} is not '
+                               f'batch {BS}')
         self.inp = torch.zeros(in_shape, dtype=torch.float32, device='cuda')
         self.out = torch.zeros(out_shape, dtype=torch.float32, device='cuda')
         self.ctx.set_tensor_address(self.in_name, self.inp.data_ptr())
@@ -357,14 +462,19 @@ class Consumer:
                     self.ring.release(s)
                 self.ring.batq.task_done()
                 continue
-            # section 4.6: max_time_img pinned huge; if ultralytics ever
-            # prints its time-limit warning the run must die, not degrade.
-            dets = ops.non_max_suppression(pred,
-                                           conf_thres=self.conf,
-                                           iou_thres=self.iou,
-                                           max_det=self.max_det,
-                                           max_time_img=1e9,
-                                           agnostic=False)
+            if self.e2e:
+                # never through ops.non_max_suppression: 8.3.165 runs no NMS
+                # on a (BS, K, 6) output (module docstring)
+                dets = e2e_nms(pred[:n], self.conf, self.iou, self.max_det)
+            else:
+                # section 4.6: max_time_img pinned huge; if ultralytics ever
+                # prints its time-limit warning the run must die, not degrade.
+                dets = ops.non_max_suppression(pred,
+                                               conf_thres=self.conf,
+                                               iou_thres=self.iou,
+                                               max_det=self.max_det,
+                                               max_time_img=1e9,
+                                               agnostic=False)
             for j in range(n):
                 m = metas[j]
                 d = dets[j]

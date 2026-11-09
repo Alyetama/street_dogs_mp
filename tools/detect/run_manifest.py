@@ -85,20 +85,34 @@ MEASURED_LATE = 'measured_after_the_fact'
 ATTESTED = 'attested'
 # a person states which model ran. Nothing about the run was measured.
 
-BASIS = {MEASURED_AT_START: 'measured', MEASURED_LATE: 'hashed-late',
-         ATTESTED: 'ATTESTED', None: 'unknown'}
+BASIS = {
+    MEASURED_AT_START: 'measured',
+    MEASURED_LATE: 'hashed-late',
+    ATTESTED: 'ATTESTED',
+    None: 'unknown'
+}
 
 
-def write_for_run(repo, gen, run_id, cfg, engine=None, force=True,
+def write_for_run(repo,
+                  gen,
+                  run_id,
+                  cfg,
+                  engine=None,
+                  force=True,
                   started=None):
     """Entry point for sweep.py -- same record, no argparse round trip.
 
     Called at run start, before a box exists, so the digest it takes is of the
     engine this run is about to load: measured_at_start.
     """
-    ns = argparse.Namespace(repo=repo, gen=gen, run_id=run_id,
-                            engine=engine or cfg.get('engine'), force=force,
-                            started=started, at_start=True, _cfg=cfg)
+    ns = argparse.Namespace(repo=repo,
+                            gen=gen,
+                            run_id=run_id,
+                            engine=engine or cfg.get('engine'),
+                            force=force,
+                            started=started,
+                            at_start=True,
+                            _cfg=cfg)
     return cmd_write(ns)
 
 
@@ -146,8 +160,9 @@ def derive_start(root, gen, run_id):
     Returns (None, None, reason) when it cannot be derived, never a guess.
     """
     try:
-        import duckdb
         import statistics
+
+        import duckdb
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import store as _store
         src = _store._sql_src(_store._store_globs(root, 'img')).replace(
@@ -193,6 +208,33 @@ def derive_start(root, gen, run_id):
             f'which would invalidate this derivation.')
 
 
+def _inference_settings(cfg, engine_path, repo):
+    """The settings that change what a stored box means, and which decode
+    ran them.
+
+    engine.py runs the same ``iou`` for both kinds of engine, but the decode
+    differs (ultralytics' NMS over every anchor, or its own NMS over the
+    one-to-one head's top boxes), so the record names it. The header says
+    which: 8.4 exports write ``end2end``; 8.3 exports, all one-to-many,
+    write nothing. Anything else is recorded as unknown rather than guessed
+    (engine.py itself decides from the output shape, which only TensorRT can
+    read).
+    """
+    d = os.path.join(repo, 'tools', 'detect')
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    import engine as _engine
+    out = {k: cfg.get(k) for k in ('conf', 'iou', 'max_det', 'imgsz')}
+    h = _engine.read_engine_meta(engine_path)
+    if 'end2end' in h:
+        out['decode'] = 'end2end' if h['end2end'] else 'one2many'
+    elif str(h.get('version', '')).startswith('8.3.'):
+        out['decode'] = 'one2many'
+    else:
+        out['decode'] = 'unknown'
+    return out
+
+
 def cmd_write(args):
     cfg = getattr(args, '_cfg', None)
     if cfg is None:
@@ -205,9 +247,11 @@ def cmd_write(args):
     digest = sha256_of(engine)
     key, run, proj = comet_key_for(digest, args.repo)
     if not key:
-        print(f'WARNING: no entry in data/best_models.json has '
-              f'sha256_engine={digest[:16]}... -- this run is writing boxes '
-              f'from a model the registry does not know about', file=sys.stderr)
+        print(
+            f'WARNING: no entry in data/best_models.json has '
+            f'sha256_engine={digest[:16]}... -- this run is writing boxes '
+            f'from a model the registry does not know about',
+            file=sys.stderr)
 
     vers = {}
     for mod in ('ultralytics', 'torch', 'tensorrt'):
@@ -225,15 +269,18 @@ def cmd_write(args):
         started, unc = float(args.started), 0
         src_note = 'operator-supplied via --started'
     elif at_start:
-        started, unc, src_note = time.time(), 0, 'read from the clock at run start'
+        started, unc, src_note = time.time(
+        ), 0, 'read from the clock at run start'
     else:
         started, unc, src_note = time.time(), 0, 'clock at write time'
     # run_id IS int(start) & 0xFFFF. A start that fails that congruence is not
     # this run's start, and saying so beats recording it as though it were.
     if int(started) & 0xFFFF != int(args.run_id) & 0xFFFF:
-        print(f'WARNING: run_started {int(started)} & 0xFFFF = '
-              f'{int(started) & 0xFFFF}, but run_id is {args.run_id} -- this '
-              f'is not the second the run began', file=sys.stderr)
+        print(
+            f'WARNING: run_started {int(started)} & 0xFFFF = '
+            f'{int(started) & 0xFFFF}, but run_id is {args.run_id} -- this '
+            f'is not the second the run began',
+            file=sys.stderr)
         src_note += ' (fails the run_id congruence)'
     doc = {
         'schema': SCHEMA,
@@ -257,8 +304,7 @@ def cmd_write(args):
             'comet_project': proj,
         },
         # these change what a box MEANS, so they belong with the model
-        'inference': {k: cfg.get(k) for k in
-                      ('conf', 'iou', 'max_det', 'imgsz')},
+        'inference': _inference_settings(cfg, engine, args.repo),
         'versions': vers,
     }
     d = runs_dir(args.repo, args.gen)
@@ -305,10 +351,14 @@ def cmd_attest(args):
     who = args.by
     if not who:
         try:
-            n = subprocess.run(['git', 'config', 'user.name'], cwd=args.repo,
-                               capture_output=True, text=True).stdout.strip()
-            e = subprocess.run(['git', 'config', 'user.email'], cwd=args.repo,
-                               capture_output=True, text=True).stdout.strip()
+            n = subprocess.run(['git', 'config', 'user.name'],
+                               cwd=args.repo,
+                               capture_output=True,
+                               text=True).stdout.strip()
+            e = subprocess.run(['git', 'config', 'user.email'],
+                               cwd=args.repo,
+                               capture_output=True,
+                               text=True).stdout.strip()
             who = f'{n} <{e}>' if n else ''
         except OSError:
             who = ''
@@ -343,60 +393,102 @@ def cmd_attest(args):
     # record that lies about its own scope.
     planned, written = [], []
     for rid in covered:
-        started, unc, how = derive_start(_detect_root(args.repo), args.gen, rid)
+        started, unc, how = derive_start(_detect_root(args.repo), args.gen,
+                                         rid)
         c = corr.get(rid)
         doc = {
-            'schema': SCHEMA,
-            'provenance_class': ATTESTED,
-            'gen': args.gen,
-            'run_id': rid,
-            'run_started_epoch': started,
-            'run_started': (time.strftime('%Y-%m-%d %H:%M:%S',
-                                          time.localtime(started))
-                            if started else None),
-            'run_started_source': how,
-            'run_started_uncertainty_s': unc,
-            'written_at': stamp,
+            'schema':
+            SCHEMA,
+            'provenance_class':
+            ATTESTED,
+            'gen':
+            args.gen,
+            'run_id':
+            rid,
+            'run_started_epoch':
+            started,
+            'run_started':
+            (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started))
+             if started else None),
+            'run_started_source':
+            how,
+            'run_started_uncertainty_s':
+            unc,
+            'written_at':
+            stamp,
             # RESERVED FOR MEASUREMENT. All-null, and present rather than
             # absent so a reader looking for a digest finds nothing instead of
             # something plausible.
-            'model': {'engine': None, 'sha256': None, 'sha8': None,
-                      'comet_key': None, 'comet_run': None,
-                      'comet_project': None},
+            'model': {
+                'engine': None,
+                'sha256': None,
+                'sha8': None,
+                'comet_key': None,
+                'comet_run': None,
+                'comet_project': None
+            },
             'attested_model': {
-                'comet_run': run, 'comet_project': proj, 'comet_key': key,
+                'comet_run':
+                run,
+                'comet_project':
+                proj,
+                'comet_key':
+                key,
                 'comet_key_source': ('data/best_models.json, matched on the '
                                      'ATTESTED RUN NAME; no engine digest was '
                                      'available to match on'),
                 # the person knows the model; nobody knows the binary
-                'engine_sha256': None, 'engine_sha8': None,
-                'weights_sha256': None,
+                'engine_sha256':
+                None,
+                'engine_sha8':
+                None,
+                'weights_sha256':
+                None,
             },
             'attestation': {
-                'id': att_id, 'statement': args.statement, 'by': who,
-                'at': stamp, 'measured': False,
-                'method': 'operator statement; no artifact of this run was '
-                          'measured',
+                'id':
+                att_id,
+                'statement':
+                args.statement,
+                'by':
+                who,
+                'at':
+                stamp,
+                'measured':
+                False,
+                'method':
+                'operator statement; no artifact of this run was '
+                'measured',
                 # one statement, one id -- ten ids would make a single claim
                 # look like ten independent corroborations
-                'covers_run_ids': covered,
-                'covers_fields': ['attested_model.comet_run',
-                                  'attested_model.comet_project'],
+                'covers_run_ids':
+                covered,
+                'covers_fields':
+                ['attested_model.comet_run', 'attested_model.comet_project'],
             },
             # measured, and the only thing in this file that is -- so it
             # carries its own status. "we compared and found nothing" and
             # "the comparison never ran" are different facts and a reader
             # must never have to guess which one a zero means.
-            'corroboration': _corroboration(corr_status, corr.get(rid)),
+            'corroboration':
+            _corroboration(corr_status, corr.get(rid)),
             # unknowable for a historical run. NOT today's config values:
             # the override file is untracked, and the env has since moved.
-            'inference': {'conf': None, 'iou': None, 'max_det': None,
-                          'imgsz': None},
-            'versions': {'ultralytics': None, 'torch': None, 'tensorrt': None},
+            'inference': {
+                'conf': None,
+                'iou': None,
+                'max_det': None,
+                'imgsz': None
+            },
+            'versions': {
+                'ultralytics': None,
+                'torch': None,
+                'tensorrt': None
+            },
         }
-        name = (f'run_{rid}_'
-                + (time.strftime('%Y%m%dT%H%M%S', time.localtime(started))
-                   if started else 'unknown') + '.attested.json')
+        name = (f'run_{rid}_' +
+                (time.strftime('%Y%m%dT%H%M%S', time.localtime(started))
+                 if started else 'unknown') + '.attested.json')
         out = os.path.join(root, name)
         if os.path.exists(out) and not args.force:
             raise SystemExit(f'{out} exists; pass --force')
@@ -423,7 +515,7 @@ def cmd_attest(args):
             os.fsync(fh.fileno())
         os.replace(tmp, out)
         written.append((rid, out, c))
-    try:                                  # the rename itself must be durable
+    try:  # the rename itself must be durable
         fd = os.open(root, os.O_RDONLY)
         os.fsync(fd)
         os.close(fd)
@@ -443,21 +535,29 @@ def cmd_attest(args):
 
 
 def _corroboration(status, c):
-    base = {'status': status,
-            'method': ('one row per (run, image_id, det_idx) after collapsing '
-                       'cell twins; boxes compared between runs that both '
-                       'processed the same image_id, within the same gen')}
+    base = {
+        'status':
+        status,
+        'method': ('one row per (run, image_id, det_idx) after collapsing '
+                   'cell twins; boxes compared between runs that both '
+                   'processed the same image_id, within the same gen')
+    }
     if status != 'measured':
-        base.update(identical=None, differing=None, shares_with_run_ids=None,
+        base.update(identical=None,
+                    differing=None,
+                    shares_with_run_ids=None,
                     note=('the comparison did not run, so this says nothing '
                           'either way'))
         return base
     if not c:
-        base.update(identical=0, differing=0, shares_with_run_ids=[],
+        base.update(identical=0,
+                    differing=0,
+                    shares_with_run_ids=[],
                     note=('measured: no image in this run was processed by '
                           'any other run, so nothing corroborates it'))
         return base
-    base.update(identical=c['identical'], differing=c['differing'],
+    base.update(identical=c['identical'],
+                differing=c['differing'],
                 shares_with_run_ids=sorted(c['with']))
     return base
 
@@ -582,8 +682,10 @@ def cmd_show(args):
     # union_by_name can only union what has been written, so until a run
     # writes with the new schema, selecting it is a binder error rather than
     # a column of NULLs. Probe instead of assuming.
-    cols = {r[0] for r in con.execute(
-        f'DESCRIBE SELECT * FROM {src}').fetchall()}
+    cols = {
+        r[0]
+        for r in con.execute(f'DESCRIBE SELECT * FROM {src}').fetchall()
+    }
     has = 'model_sha8' in cols
     sha = 'model_sha8' if has else "CAST(NULL AS VARCHAR)"
     rows = con.execute(
@@ -599,7 +701,9 @@ def cmd_show(args):
     for gen, rid, sha8, n in rows:
         docs = man.get((int(gen), int(rid)), [])
         if sha8:
-            hit = [d for d in docs if (d.get('model') or {}).get('sha8') == sha8]
+            hit = [
+                d for d in docs if (d.get('model') or {}).get('sha8') == sha8
+            ]
             if not hit and docs:
                 # NOT a fallback to docs. A row whose digest matches no
                 # manifest is the single most important thing on this screen;
@@ -652,32 +756,37 @@ def main():
     w.add_argument('--run-id', type=int, required=True)
     w.add_argument('--gen', type=int, default=1)
     w.add_argument('--engine', help='defaults to the sweep config engine')
-    w.add_argument('--started', type=float,
+    w.add_argument('--started',
+                   type=float,
                    help='unix time the run began (ts_off is relative to it). '
-                        'Defaults to now, which is only right if the run is '
-                        'starting; for one already running, pass its real '
-                        'start: ps -o lstart= -p <pid>')
+                   'Defaults to now, which is only right if the run is '
+                   'starting; for one already running, pass its real '
+                   'start: ps -o lstart= -p <pid>')
     w.add_argument('--force', action='store_true')
-    w.add_argument('--at-start', action='store_true',
+    w.add_argument('--at-start',
+                   action='store_true',
                    help='the run is starting NOW and has written no box yet, '
-                        'so hashing the engine measures what it will load. '
-                        'Without this the record is classed '
-                        'measured_after_the_fact, because hashing an engine '
-                        'later measures the file today, not the process that '
-                        'ran.')
+                   'so hashing the engine measures what it will load. '
+                   'Without this the record is classed '
+                   'measured_after_the_fact, because hashing an engine '
+                   'later measures the file today, not the process that '
+                   'ran.')
     w.set_defaults(func=cmd_write)
 
     a = sub.add_parser('attest',
                        help='record a human statement about runs nothing '
-                            'measured')
+                       'measured')
     a.add_argument('--gen', type=int, default=1)
     a.add_argument('--run-ids', type=int, nargs='+', required=True)
-    a.add_argument('--run', required=True,
+    a.add_argument('--run',
+                   required=True,
                    help='the model run name being asserted, e.g. train-30')
     a.add_argument('--project', default=None)
-    a.add_argument('--statement', required=True,
+    a.add_argument('--statement',
+                   required=True,
                    help='what the person actually said, in their words')
-    a.add_argument('--by', default=None,
+    a.add_argument('--by',
+                   default=None,
                    help='defaults to the repo git identity')
     a.add_argument('--id', default=None)
     a.add_argument('--no-corroborate', action='store_true')
