@@ -246,11 +246,16 @@ def cmd_write(args):
         raise SystemExit(f'engine not found: {engine}')
     digest = sha256_of(engine)
     key, run, proj = comet_key_for(digest, args.repo)
-    if not key:
+    if not run:
         print(
             f'WARNING: no entry in data/best_models.json has '
             f'sha256_engine={digest[:16]}... -- this run is writing boxes '
             f'from a model the registry does not know about',
+            file=sys.stderr)
+    elif not key:
+        print(
+            f'note: registry entry {run} has no Comet key, so the manifest '
+            f'cannot link to its training curve',
             file=sys.stderr)
 
     vers = {}

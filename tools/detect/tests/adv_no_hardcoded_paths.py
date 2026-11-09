@@ -45,6 +45,7 @@ EXTRA = (
     # The Duel page and its check: new, so untracked until `git add -f`.
     'tools/dashboard/duel_page.py',
     'tools/detect/tests/adv_duel.py',
+    'tools/detect/tests/adv_detect_root_env.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked

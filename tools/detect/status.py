@@ -66,7 +66,11 @@ ERROR_KEYS = ('read', 'decode', 'missing', 'infer', 'mount_lost')
 
 
 def detect_root():
-    """Sweep output root from the gitignored pointer file (with fallback)."""
+    """Sweep output root: the DETECT_ROOT env var (as store.get_detect_root
+    honours it), else the gitignored pointer file (with fallback)."""
+    env = os.environ.get('DETECT_ROOT', '').strip()
+    if env and os.path.isabs(env):
+        return env.rstrip('/')
     try:
         with open(DETECT_ROOT_FILE) as f:
             for line in f:

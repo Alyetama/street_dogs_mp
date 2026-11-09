@@ -94,9 +94,13 @@ def read_lines_file(path):
 
 
 def resolve_detect_root(args):
-    """DETECT_ROOT from --detect-root, else the gitignored data/detect_root.txt."""
+    """DETECT_ROOT from --detect-root, else the DETECT_ROOT env var (as
+    store.get_detect_root honours it), else the gitignored data/detect_root.txt."""
     if args.detect_root:
         return args.detect_root
+    env = os.environ.get('DETECT_ROOT', '').strip()
+    if env and os.path.isabs(env):
+        return env.rstrip('/')
     if os.path.exists(DEFAULT_DETECT_ROOT_FILE):
         lines = read_lines_file(DEFAULT_DETECT_ROOT_FILE)
         if lines:

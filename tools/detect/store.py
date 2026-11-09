@@ -235,12 +235,22 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 def get_detect_root(repo_root=None):
     """DETECT_ROOT from the gitignored ``data/detect_root.txt`` (§5.2).
 
+    A ``DETECT_ROOT`` environment variable wins over the file. It lets one
+    process -- a sweep with a candidate detector -- write a separate store
+    while everything else (the dashboard, the counts) keeps reading the
+    store the file names.
+
     Returns:
         Absolute path string.
 
     Raises:
-        StoreError: if the config file is missing.
+        StoreError: if the config file is missing (and no env override).
     """
+    env = os.environ.get('DETECT_ROOT', '').strip()
+    if env:
+        if not os.path.isabs(env):
+            raise StoreError(f'DETECT_ROOT must be absolute, got {env!r}')
+        return env.rstrip('/')
     root = Path(repo_root) if repo_root else _REPO_ROOT
     cfg = root / 'data' / 'detect_root.txt'
     if not cfg.is_file():
@@ -973,8 +983,8 @@ def _run_queries(queries):
         raise StoreError(f'duckdb helper failed: {proc.stderr.strip()}')
     doc = _last_json_object(proc.stdout)
     if doc is None:
-        raise StoreError('duckdb helper returned no JSON; stdout began: '
-                         + repr((proc.stdout or '')[:200]))
+        raise StoreError('duckdb helper returned no JSON; stdout began: ' +
+                         repr((proc.stdout or '')[:200]))
     return {n: [tuple(r) for r in rows] for n, rows in doc.items()}
 
 
