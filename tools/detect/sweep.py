@@ -115,20 +115,50 @@ def adapt_caps(eff, cap, planned, observed):
     return eff
 
 
+def gpu_ceiling(gpu, gpu_cap, planned, observed):
+    """The GPU throughput to plan against, and whether this step was
+    GPU-bound (so adapt_caps must not run on it).
+
+    plan_rates trusts --gpu-cap, but the engine is not always ours alone:
+    another job on the card cuts what we get. Then the decoder, serving the
+    raw queues in turn, shares the shortfall over every lane that asked for
+    more than its turn -- the slowest drive, the one that sets the finish,
+    included -- and adapt_caps would read that as several disks being slow
+    and cut them below what they can read. A disk falls short alone; the
+    GPU makes two or more lanes fall short at once. Such a step plans
+    against what was delivered and leaves the drive caps alone. Otherwise
+    the ceiling probes back up 5% a step, never past --gpu-cap.
+    """
+    if not gpu_cap:
+        return None, False
+    lanes = [d for d, p in planned.items() if p and p > 0 and d in observed]
+    tot_p = sum(planned[d] for d in lanes)
+    tot_o = sum(observed[d] for d in lanes)
+    short = [d for d in lanes if observed[d] < 0.85 * planned[d]]
+    if tot_o < 0.92 * tot_p and (len(short) >= 2 or short == lanes):
+        return max(1.0, min(gpu_cap, tot_o)), True
+    return min(gpu_cap, (gpu or gpu_cap) * 1.05), False
+
+
 def plan_rates(rem, prio_rem, cap, gpu_cap=None):
     """{drive: img/s} for the token buckets; 0 pauses a lane.
 
-    No priority work left: every lane is paced to finish together, as
-    always. Otherwise the lanes still holding priority-region images are
-    paced to finish THAT work together, and the GPU they cannot use (their
-    read caps, not the engine, being the limit) is split over every lane's
-    spare read capacity the same way. Without a GPU cap there is no measure
-    of spare GPU, so lanes without priority work wait.
+    The lanes still holding priority-region images are paced to finish
+    THAT work together, and the GPU they cannot use (their read caps, not
+    the engine, being the limit) is split over every lane's spare read
+    capacity the same way. No priority work left: every lane is the
+    priority, so each is paced to finish together and the GPU the slowest
+    drive cannot use still goes to the others. Pacing them DOWN to the
+    slowest drive's finish only idled the GPU: after North America,
+    capybara at 23 img/s held jackal (43 -> 15) and bobcat with it. Without
+    a GPU cap there is no measure of spare GPU, so lanes without priority
+    work wait, and with none left at all it is the plain finish-together.
     """
     live = {d: r for d, r in prio_rem.items() if r > 0 and d in rem}
     if not live:
-        t = finish_time(rem, cap, gpu_cap)
-        return {d: rem[d] / t for d in rem}
+        live = {d: r for d, r in rem.items() if r > 0}
+        if not live:
+            return {d: 0.0 for d in rem}
     t = finish_time(live, cap, gpu_cap)
     rates = {d: 0.0 for d in rem}
     rates.update({d: live[d] / t for d in live})
@@ -138,7 +168,8 @@ def plan_rates(rem, prio_rem, cap, gpu_cap=None):
     # priority images (lynx has 64 of North America's 13M) would otherwise
     # crawl through them at the priority pace and do nothing else for days.
     spare = {d: cap.get(d, 50.0) - rates[d] for d in rem}
-    spare = {d: c for d, c in spare.items() if c > 1e-9}
+    # a finished lane has nothing to read: no GPU goes to it
+    spare = {d: c for d, c in spare.items() if c > 1e-9 and rem[d] > 0}
     if left < 1.0 or not spare:
         return rates
     # water-fill: split what is left in proportion to each lane's remaining
@@ -780,7 +811,7 @@ def cmd_run(args):
                            os.path.join(base, f'{iid}.jpg'))
 
     eff = dict(cap)  # adaptive read capacities (adapt_caps)
-    pace_state = {'t': None, 'done': {}, 'planned': {}}
+    pace_state = {'t': None, 'done': {}, 'planned': {}, 'gpu': None}
 
     def repace():
         if args.max_images and issued[0] >= args.max_images:
@@ -789,7 +820,7 @@ def cmd_run(args):
             for d in lanes:
                 buckets[d].set_rate(None)
             return
-        rem = {d: max(1, todo[d] - coll.drive_done.get(d, 0)) for d in lanes}
+        rem = {d: max(0, todo[d] - coll.drive_done.get(d, 0)) for d in lanes}
         # lanes are ordered priority-first, so what a lane has done comes
         # off its priority work before anything else
         prio_rem = {
@@ -804,9 +835,21 @@ def cmd_run(args):
                 d: (done[d] - pace_state['done'].get(d, 0)) / dt
                 for d in lanes
             }
-            adapt_caps(eff, cap, pace_state['planned'], observed)
-        rates = plan_rates(rem, prio_rem, eff, args.gpu_cap)
-        pace_state.update(t=now, done=done, planned=dict(rates))
+            gpu, gpu_bound = gpu_ceiling(pace_state['gpu'], args.gpu_cap,
+                                         pace_state['planned'], observed)
+            pace_state['gpu'] = gpu
+            if not gpu_bound:
+                adapt_caps(eff, cap, pace_state['planned'], observed)
+        # a lane with nothing left is not planned (no GPU is set aside for
+        # it) but is not paused either: a reader that still holds an item
+        # (the done count lags the reads) must never wait on a 0 rate
+        work_rem = {d: r for d, r in rem.items() if r > 0}
+        rates = plan_rates(work_rem, prio_rem, eff,
+                           pace_state['gpu'] or args.gpu_cap)
+        rates.update({d: None for d in lanes if d not in work_rem})
+        pace_state.update(t=now, done=done,
+                          planned={d: r for d, r in rates.items()
+                                   if r is not None})
         for d in lanes:
             buckets[d].set_rate(args.rate_cap or rates[d])
 
