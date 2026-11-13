@@ -9,8 +9,8 @@
   d6 phys_offset reads a real file's extent and is None for a missing one
   d7 DirInodes takes inode numbers from the directory listing
   d8 --disk-order parses DRIVE=WINDOW and refuses a bad window
-  d9 an error in the worklist reaches the reader; a set stop ends it early
-  d10 the next window is looked up while this one is read (no idle drive)
+  d9 an error in the worklist reaches the reader; a set stop cuts a lookup
+  d10 no lookup runs while a window is being read (the head stays put)
 
     python tools/detect/tests/adv_disk_order.py
 """
@@ -103,30 +103,27 @@ def main():
         check('d9 a worklist error reaches the reader',
               'worklist broke' in str(e))
     import threading
-    import time
     ev = threading.Event()
     ev.set()
     got = list(sweep.disk_ordered(iter(work), 10, phys, ino.get, stop=ev))
-    check('d9 a set stop ends the lookahead early', len(got) < n, len(got))
+    check('d9 a set stop skips the lookup, still yields every item',
+          len(got) == n and got[:10] == work[:10], len(got))
 
-    # d10: while the reader holds window 1, window 2's lookup must proceed
+    # d10: the next window is NOT looked up while this one is read
     seen = []
 
-    def slow(p):
+    def counted(p):
         seen.append(p)
-        time.sleep(0.002)
         return off.get(p) or 0
 
     off['/x/5.jpg'] = 5
-    g = sweep.disk_ordered(iter(work), 50, slow, ino.get)
-    next(g)
-    t0 = time.time()
-    while len(seen) < 100 and time.time() - t0 < 10:
-        time.sleep(0.05)
-    check('d10 the next window is looked up while this one is read',
-          len(seen) >= 100, len(seen))
+    g = sweep.disk_ordered(iter(work), 50, counted, ino.get)
+    for _ in range(50):
+        next(g)
+    check('d10 no lookup runs while a window is being read', len(seen) == 50,
+          len(seen))
     rest = list(g)
-    check('d10 and nothing is lost', len(rest) == n - 1)
+    check('d10 and nothing is lost', len(rest) == n - 50)
 
     print(f'{len(FAILS)} failed' if FAILS else 'all disk-order checks passed')
     sys.exit(1 if FAILS else 0)

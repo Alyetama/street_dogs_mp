@@ -245,16 +245,21 @@ def disk_ordered(work, window, phys=phys_offset, inode=None, stop=None):
     scattered over the whole 20 TB platter, so consecutive reads were
     full-stroke seeks: 16.6 img/s against 38.6 for the same files sorted by
     block (40,000 at a time, measured while the sweep ran). Offsets are
-    looked up in inode order, which keeps that lookup near-sequential too,
-    and a window's lookup (~2 min for 40,000 under load) runs in a
-    background thread while the previous window is being read, so the drive
-    never sits idle waiting for it -- an idle minute would read to the pacer
-    as a dead disk. Every item is yielded exactly once; only the order
-    changes, and the collector already takes a shard's results in any
-    order -- but a graceful stop commits only each shard's contiguous
-    prefix, so up to a window of read-but-scattered work is redone after a
-    restart. A file whose offset cannot be had sorts first and reports itself
-    when it is read. ``stop`` (an Event) ends the lookahead early.
+    looked up in inode order, which keeps that lookup near-sequential, and
+    the lookup also leaves the inodes cached for the reads that follow.
+
+    The lookup runs between windows, never during one: done in a thread
+    while the previous window was read (tried live), the head swung between
+    the inode tables and the data and the drive held ~40 img/s -- no better
+    than id order. The lane reads nothing during a lookup, so run it with
+    --rate-cap (a pacer step would take the pause for a slow disk).
+
+    Every item is yielded exactly once; only the order changes, and the
+    collector already takes a shard's results in any order -- but a graceful
+    stop commits only each shard's contiguous prefix, so up to a window of
+    read-but-scattered work is redone after a restart. A file whose offset
+    cannot be had sorts first and reports itself when it is read. ``stop``
+    (an Event) cuts a lookup short; what is left is yielded unsorted.
     """
     if not window or window <= 1:
         yield from work
@@ -265,43 +270,20 @@ def disk_ordered(work, window, phys=phys_offset, inode=None, stop=None):
         offs = {}
         for i in sorted(range(len(buf)), key=lambda i: inode(buf[i][1])):
             if stop is not None and stop.is_set():
-                return buf  # unsorted is fine: nothing more will be read
+                return buf
             offs[i] = phys(buf[i][1])
         order = sorted(range(len(buf)),
                        key=lambda i: (offs[i] is not None, offs[i] or 0, i))
         return [buf[i] for i in order]
 
-    # the reader's window, one sorted and queued, one being sorted: lane_work
-    # counts an item issued when it is pulled here, so --max-images sees up
-    # to three windows go at once (smoke runs: keep the window small)
-    q = queue.Queue(maxsize=1)
-    END = object()
-
-    def ahead():
-        try:
+    buf = []
+    for item in work:
+        buf.append(item)
+        if len(buf) >= window:
+            yield from ordered(buf)
             buf = []
-            for item in work:
-                buf.append(item)
-                if len(buf) >= window:
-                    q.put(ordered(buf))
-                    buf = []
-                    if stop is not None and stop.is_set():
-                        break
-            if buf:
-                q.put(ordered(buf))
-        except BaseException as e:  # noqa: BLE001 -- surfaced to the reader
-            q.put(e)
-            return
-        q.put(END)
-
-    threading.Thread(target=ahead, daemon=True, name='disk-order').start()
-    while True:
-        got = q.get()
-        if got is END:
-            return
-        if isinstance(got, BaseException):
-            raise got
-        yield from got
+    if buf:
+        yield from ordered(buf)
 
 
 def load_cfg():
