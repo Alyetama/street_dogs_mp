@@ -22,6 +22,7 @@ import json
 import os
 import queue
 import signal
+import struct
 import sys
 import threading
 import time
@@ -189,6 +190,118 @@ def plan_rates(rem, prio_rem, cap, gpu_cap=None):
     return rates
 
 RAW_BYTES = 4 << 30
+
+FS_IOC_FIEMAP = 0xC020660B
+
+
+def phys_offset(path):
+    """Byte offset of a file's first extent on its block device (FIEMAP),
+    or None when it cannot be had (missing file, no FIEMAP support)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        # struct fiemap (32 B) + one struct fiemap_extent (56 B)
+        buf = bytearray(88)
+        struct.pack_into('QQIIII', buf, 0, 0, (1 << 63) - 1, 0, 0, 1, 0)
+        fcntl.ioctl(fd, FS_IOC_FIEMAP, buf)
+        if struct.unpack_from('I', buf, 20)[0] < 1:  # no extent mapped
+            return None
+        return struct.unpack_from('Q', buf, 40)[0]
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+class DirInodes:
+    """name -> inode number from the directory entries alone (scandir's
+    d_ino needs no inode read), for the last couple of directories."""
+
+    def __init__(self, keep=2):
+        self.keep = keep
+        self.maps = {}
+
+    def __call__(self, path):
+        d, name = os.path.split(path)
+        m = self.maps.get(d)
+        if m is None:
+            try:
+                m = {e.name: e.inode() for e in os.scandir(d)}
+            except OSError:
+                m = {}
+            while len(self.maps) >= self.keep:
+                self.maps.pop(next(iter(self.maps)))
+            self.maps[d] = m
+        return m.get(name, 0)
+
+
+def disk_ordered(work, window, phys=phys_offset, inode=None, stop=None):
+    """Re-yield (meta, path) work so each run of ``window`` items is read in
+    on-disk order.
+
+    The worklist is in image-id order, and on capybara a cell's files are
+    scattered over the whole 20 TB platter, so consecutive reads were
+    full-stroke seeks: 16.6 img/s against 38.6 for the same files sorted by
+    block (40,000 at a time, measured while the sweep ran). Offsets are
+    looked up in inode order, which keeps that lookup near-sequential too,
+    and a window's lookup (~2 min for 40,000 under load) runs in a
+    background thread while the previous window is being read, so the drive
+    never sits idle waiting for it -- an idle minute would read to the pacer
+    as a dead disk. Every item is yielded exactly once; only the order
+    changes, and the collector already takes a shard's results in any
+    order -- but a graceful stop commits only each shard's contiguous
+    prefix, so up to a window of read-but-scattered work is redone after a
+    restart. A file whose offset cannot be had sorts first and reports itself
+    when it is read. ``stop`` (an Event) ends the lookahead early.
+    """
+    if not window or window <= 1:
+        yield from work
+        return
+    inode = inode or DirInodes()
+
+    def ordered(buf):
+        offs = {}
+        for i in sorted(range(len(buf)), key=lambda i: inode(buf[i][1])):
+            if stop is not None and stop.is_set():
+                return buf  # unsorted is fine: nothing more will be read
+            offs[i] = phys(buf[i][1])
+        order = sorted(range(len(buf)),
+                       key=lambda i: (offs[i] is not None, offs[i] or 0, i))
+        return [buf[i] for i in order]
+
+    # the reader's window, one sorted and queued, one being sorted: lane_work
+    # counts an item issued when it is pulled here, so --max-images sees up
+    # to three windows go at once (smoke runs: keep the window small)
+    q = queue.Queue(maxsize=1)
+    END = object()
+
+    def ahead():
+        try:
+            buf = []
+            for item in work:
+                buf.append(item)
+                if len(buf) >= window:
+                    q.put(ordered(buf))
+                    buf = []
+                    if stop is not None and stop.is_set():
+                        break
+            if buf:
+                q.put(ordered(buf))
+        except BaseException as e:  # noqa: BLE001 -- surfaced to the reader
+            q.put(e)
+            return
+        q.put(END)
+
+    threading.Thread(target=ahead, daemon=True, name='disk-order').start()
+    while True:
+        got = q.get()
+        if got is END:
+            return
+        if isinstance(got, BaseException):
+            raise got
+        yield from got
 
 
 def load_cfg():
@@ -565,14 +678,17 @@ def cmd_run(args):
                      decoders=DECODERS,
                      consumers=1,
                      ring_slots=None,
-                     gpu_cap=None).items():
+                     gpu_cap=None,
+                     disk_order=None).items():
         if not hasattr(args, k):
             setattr(args, k, v)
     cfg = load_cfg()
     cap = dict(CAP, **parse_drive_map(args.cap, float, '--cap'))
     readers = dict(READERS, **parse_drive_map(args.readers, int, '--readers'))
+    disk_window = parse_drive_map(args.disk_order, int, '--disk-order')
     print(f'pacing: caps {cap}, readers {readers}, decoders {args.decoders}, '
-          f'consumers {args.consumers}, gpu cap {args.gpu_cap or "none"}')
+          f'consumers {args.consumers}, gpu cap {args.gpu_cap or "none"}, '
+          f'disk order {disk_window or "none"}')
     if args.engine:
         # a re-run with a promoted detector, or the resume of one: the run
         # must keep loading the engine it started with, whatever the config
@@ -863,7 +979,8 @@ def cmd_run(args):
     repace()
     rthreads = []
     for d, items in lanes.items():
-        work = lane_work(d, items)
+        work = disk_ordered(lane_work(d, items), disk_window.get(d, 0),
+                            stop=stop_ev)
         wlock = threading.Lock()
 
         def locked(work=work, wlock=wlock):
@@ -951,6 +1068,11 @@ def main():
                    nargs='+',
                    metavar='DRIVE=N',
                    help='override a drive\'s reader thread count')
+    r.add_argument('--disk-order',
+                   nargs='+',
+                   metavar='DRIVE=WINDOW',
+                   help='read each run of WINDOW images on a drive in '
+                        'on-disk order (FIEMAP) instead of image-id order')
     r.add_argument('--decoders', type=int, default=DECODERS)
     r.add_argument('--consumers',
                    type=int,
