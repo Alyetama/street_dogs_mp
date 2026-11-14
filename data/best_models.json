@@ -13,7 +13,7 @@
     "A model's 'deployed' flag means the sweep actually runs it right now, which is not the same as being promoted. Only stage 1 is deployed today; the gate and leash classifier are accepted but not yet wired into sweep.py."
   ],
   "workspace": "alyetama",
-  "updated_at": "2026-11-09",
+  "updated_at": "2026-11-14",
   "projects": {
     "dogdetection": {
       "role": "detector - finds dogs in street imagery, one class (the sweep runs this). The HARVEST collects ground animals; this model is trained single_cls on a set whose only class is \"target\" = dog, so a non-dog animal in its output is a false positive, which is what the dog-bin gate downstream exists to catch.",
@@ -60,22 +60,48 @@
     "dog-bin": {
       "role": "binary gate - dog vs not_dog, runs before the leash classifier",
       "best": {
-        "run": "dogbin_008",
-        "key": "6ebc449070cc450283fc2253319556b4",
-        "date": "2026-08-06",
-        "dataset": "dogbin_v5",
-        "weights": "dog-bin/dogbin_008/weights/best.pt",
+        "run": "dogbin_20261012_2b86d1_20261012-170519",
+        "key": null,
+        "date": "2026-10-12",
+        "dataset": "dogbin_20261012_2b86d1",
+        "weights": "runs/classify/dog-bin/dogbin_20261012_2b86d1_20261012-170519/weights/best.pt",
+        "imgsz": 640,
         "metrics": {
-          "accuracy_top1": 0.9393,
-          "roc_auc_val": 0.9794,
-          "acceptance_roc_auc": 0.9756,
-          "acceptance_rejected_at_full_dog_recall": 0.5093,
-          "acceptance_rejected_at_t0.5": 0.8925,
-          "acceptance_rejected_at_t0.9": 0.9393
+          "fn_audit_clean_weighted_dog_recall_t0.5": 0.9564,
+          "fn_audit_clean_weighted_notdog_reject_t0.5": 0.859,
+          "fn_audit_clean_weighted_roc_auc": 0.9774,
+          "acceptance_rejected_at_t0.5": 0.9159,
+          "acceptance_rejected_at_t0.9": 0.9626,
+          "acceptance_rejected_at_t0.5_sequence_clean": 0.9155
         },
-        "why": "Promoted over dogbin_004 on the SAME 214 reserved crops -- 214 of 214 scored, 0 excluded by the contamination guard, so dogbin_v5 provably never saw them. At a fixed threshold, which is the comparison that is actually like for like between two models trained on different splits, it discards 89.3% [0.844,0.927] of real flagged false positives at t=0.5 against dogbin_004's 81.3%, and 93.9% at t=0.9. Acceptance-set ROC AUC 0.9756 against 0.9685. ONE metric moved the wrong way and it is the one this project used to promote on: rejection at full dog recall, 50.9% [0.443,0.576] against dogbin_004's 52.3%. That row is NOT comparable between these two models -- its threshold is anchored on each model's own val split, and dogbin_004 was cut from dogbin_v4 while this was cut from dogbin_v5 -- and it is set by the single worst-scoring val dog, both models needing t=0.0000 to keep every one. dogbin_004's 52.3% sits inside this model's interval, so on 214 crops the two are indistinguishable there. The fixed-threshold rates, measured on identical crops, are not. Converged: early-stopped at epoch 227, best 127, patience 100. The gain is the annotations, not the recipe -- dogbin_004's command unchanged apart from the dataset."
+        "why": "Promoted 2026-11-14 over dogbin_008 on production-protocol scoring (full-resolution crop cut as gate_store.cut_crops, imgsz 640 = its train size). On the 9,368 spread-drawn fn_audit human verdicts clean of every compared model's train/val images and sequences, band-weighted to the gen-1 pool: dog recall@0.5 0.956 [0.944,0.966] vs dogbin_008 0.807 [0.785,0.828]; not-dog rejection 0.859 [0.836,0.880] vs 0.763; AUC 0.977 vs 0.869; ahead in every p band. On the 214 reserved acceptance negatives: rejects 0.916 at t=0.5 and 0.963 at t=0.9 vs 0.893 / 0.944 (1 crop shares a sequence with its train/val; sequence-clean 0.9155 / 0.9624). Caveats: its own val is 6.8% sequence-leaked through ls_ crops pinned to train (sequence-clean val top-1 0.925, AUC 0.977); no gen-2-only boxes were scored; audit crops were answered at 42-62% per sheet, so absolute rates likely flatter all models equally. Numbers: independently re-derived by a second pass (max score diff 5e-7)."
       },
       "candidates": [
+        {
+          "run": "dogbin_008",
+          "key": "6ebc449070cc450283fc2253319556b4",
+          "date": "2026-08-06",
+          "dataset": "dogbin_v5",
+          "weights": "dog-bin/dogbin_008/weights/best.pt",
+          "metrics": {
+            "accuracy_top1": 0.9393,
+            "roc_auc_val": 0.9794,
+            "acceptance_roc_auc": 0.9756,
+            "acceptance_rejected_at_full_dog_recall": 0.5093,
+            "acceptance_rejected_at_t0.5": 0.8925,
+            "acceptance_rejected_at_t0.9": 0.9439
+          },
+          "why": "[superseded 2026-11-14 by dogbin_20261012_2b86d1] Promoted over dogbin_004 on the SAME 214 reserved crops -- 214 of 214 scored, 0 excluded by the contamination guard, so dogbin_v5 provably never saw them. At a fixed threshold, which is the comparison that is actually like for like between two models trained on different splits, it discards 89.3% [0.844,0.927] of real flagged false positives at t=0.5 against dogbin_004's 81.3%, and 93.9% at t=0.9. Acceptance-set ROC AUC 0.9756 against 0.9685. ONE metric moved the wrong way and it is the one this project used to promote on: rejection at full dog recall, 50.9% [0.443,0.576] against dogbin_004's 52.3%. That row is NOT comparable between these two models -- its threshold is anchored on each model's own val split, and dogbin_004 was cut from dogbin_v4 while this was cut from dogbin_v5 -- and it is set by the single worst-scoring val dog, both models needing t=0.0000 to keep every one. dogbin_004's 52.3% sits inside this model's interval, so on 214 crops the two are indistinguishable there. The fixed-threshold rates, measured on identical crops, are not. Converged: early-stopped at epoch 227, best 127, patience 100. The gain is the annotations, not the recipe -- dogbin_004's command unchanged apart from the dataset.",
+          "rescore_2026_11_14": {
+            "fn_audit_clean_weighted": {
+              "dog_recall@0.5": 0.8071,
+              "notdog_reject@0.5": 0.763,
+              "roc_auc": 0.8688,
+              "n": 9368
+            },
+            "note": "production protocol (full crop, imgsz 640). In production until 2026-11-14 at the 224 squash, where its stored verdicts score dog recall 0.177 on the same audit set."
+          }
+        },
         {
           "run": "dogbin_004",
           "key": "5bc8a36218be426ca89ab800fb986afa",
