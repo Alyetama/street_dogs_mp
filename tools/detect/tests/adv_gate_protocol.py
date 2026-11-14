@@ -25,6 +25,8 @@ What has to hold:
       with the same model name and shard count
   g9  the legacy refusal fires before the model or work list loads (the
       dashboard reads a spawn as started after ~2.5 s)
+  g10 $GATE_ROOT moves the stage directories (a not-yet-live store is judged
+      without touching data/gate); an explicit repo ignores it
   g6  (yolo env + weights) a PIL crop handed to predict() scores exactly what
       the same pixels score when read from a lossless file -- the eval path
 
@@ -254,6 +256,32 @@ def g9(bad):
                    'load -- the dashboard reports the run as started')
 
 
+def g10(bad):
+    old = os.environ.get('GATE_ROOT')
+    try:
+        os.environ['GATE_ROOT'] = '/x/gen2'
+        if gs.stages_root() != '/x/gen2':
+            bad.append('g10: GATE_ROOT ignored')
+        if gs._stage_dir('leash', '/r') != '/r/data/leash':
+            bad.append('g10: an explicit repo followed GATE_ROOT')
+        os.environ['GATE_ROOT'] = 'data/g2'
+        if gs.stages_root() != os.path.join(gs.REPO, 'data/g2'):
+            bad.append('g10: a relative GATE_ROOT is not anchored at the repo')
+        gs.use('leash')
+        if gs.OUT_DIR != os.path.join(gs.REPO, 'data/g2', 'leash'):
+            bad.append(f'g10: use() put the leash stage at {gs.OUT_DIR}')
+        del os.environ['GATE_ROOT']
+        gs.use('gate')
+        if gs.OUT_DIR != os.path.join(gs.REPO, 'data', 'gate'):
+            bad.append(f'g10: default gate dir is {gs.OUT_DIR}')
+    finally:
+        if old is None:
+            os.environ.pop('GATE_ROOT', None)
+        else:
+            os.environ['GATE_ROOT'] = old
+        gs.use('gate')
+
+
 def g6(bad):
     try:
         from ultralytics import YOLO
@@ -293,7 +321,7 @@ def g6(bad):
 
 def main():
     bad = []
-    for g in (g1, g2, g3, g4, g5, g7, g8, g9, g6):
+    for g in (g1, g2, g3, g4, g5, g7, g8, g9, g10, g6):
         g(bad)
     if bad:
         for b in bad:

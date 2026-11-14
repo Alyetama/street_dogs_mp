@@ -82,7 +82,25 @@ STAGES = {
     },
 }
 STAGE = 'gate'
-OUT_DIR = os.path.join(REPO, 'data', 'gate')
+
+
+def stages_root(repo=None):
+    """Where the stage directories live: data/ by default, or $GATE_ROOT.
+
+    A separate root is how a store that is not live yet gets judged without
+    touching the live record: the gen-2 gate writes under its own root while
+    the dashboard keeps reading gen-1 detections beside gen-1 verdicts. Mixing
+    them in one directory would join one detector's det_idx to the other's
+    boxes. An explicit `repo` (the tests, the dashboard) always means
+    <repo>/data, whatever the environment says.
+    """
+    env = os.environ.get('GATE_ROOT')
+    if env and repo is None:
+        return env if os.path.isabs(env) else os.path.join(REPO, env)
+    return os.path.join(repo or REPO, 'data')
+
+
+OUT_DIR = os.path.join(stages_root(), 'gate')
 PLAN_FILE = os.path.join(OUT_DIR, 'plan.json')
 # What the run is doing RIGHT NOW. Progress was read off the written shards
 # alone, and a shard is 20,000 frames -- so for the first several minutes of a
@@ -121,7 +139,7 @@ def use(stage):
         raise SystemExit(f'unknown stage {stage!r} -- '
                          f'one of {", ".join(sorted(STAGES))}')
     STAGE = stage
-    OUT_DIR = os.path.join(REPO, 'data', STAGES[stage]['dir'])
+    OUT_DIR = os.path.join(stages_root(), STAGES[stage]['dir'])
     PLAN_FILE = os.path.join(OUT_DIR, 'plan.json')
     BEAT_FILE = os.path.join(OUT_DIR, 'progress.json')
 
@@ -255,7 +273,7 @@ def upstream_state(stage=None):
     up = spec(stage)['feeds_on']
     if not up:
         return None
-    d = os.path.join(REPO, 'data', STAGES[up]['dir'])
+    d = os.path.join(stages_root(), STAGES[up]['dir'])
     planned = 0
     try:
         with open(os.path.join(d, 'plan.json')) as fh:
@@ -337,7 +355,10 @@ def plan(args):
            'stage': STAGE, 'model': sp['title'],
            # the runner cannot look these up for itself; see _roots()
            'roots': _resolve_roots(),
-           'shard_rows': SHARD_ROWS, 'created': time.strftime('%F %T')}
+           'shard_rows': SHARD_ROWS, 'created': time.strftime('%F %T'),
+           # which store's boxes this list names: det_idx means nothing
+           # without it
+           'detect_root': os.path.abspath(root)}
     with open(PLAN_FILE + '.tmp', 'w') as fh:
         json.dump(doc, fh)
         fh.write('\n')
@@ -897,7 +918,7 @@ PLAN_FILES = ('plan.json', 'work.parquet', 'shard_size')
 
 
 def _stage_dir(stage, repo=None):
-    return os.path.join(repo or REPO, 'data', STAGES[stage]['dir'])
+    return os.path.join(stages_root(repo), STAGES[stage]['dir'])
 
 
 def _verdict_files(stage, repo=None):
