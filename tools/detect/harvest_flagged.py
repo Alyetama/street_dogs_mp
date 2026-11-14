@@ -20,6 +20,11 @@ That is possible because the predictions store already holds, for every
 detection, ``x1,y1,x2,y2`` in ORIGINAL pixels (spec section 5.3). So a flag
 only has to persist an image_id; the geometry is looked up here.
 
+Framing is production's: gate_store.cut_crops, imported, on the PIL-decoded
+full-resolution frame -- the dataset builder (build_dataset.py, through
+crop_sources.py) cuts the same way and no longer runs this tool; it stays for
+cutting a ledger by hand.
+
 Output is laid out for ``yolo classify``, so the crops can be dropped straight
 into an existing dataset's negative class:
 
@@ -62,7 +67,17 @@ CORRECTIONS = os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl')
 
 
 def read_corrections(path):
-    """{(image_id, det_idx): (x1, y1, x2, y2)} -- last write wins."""
+    """{(image_id, det_idx): (x1, y1, x2, y2)} -- the REVIEW page's redraws.
+
+    Last write wins. Records whose `crop` starts with 'audit:' are skipped:
+    the audit pages write their redraws into the same file under the same
+    (image_id, det_idx) key, and they mean something else. A leash-audit
+    redraw takes in the leash and often the person holding it (92% of them
+    enlarge the box for exactly that); applied to a review-page flag it would
+    turn a dog-bin hard positive into a crop of a dog, a leash and a person.
+    The audit redraws are read by crop_sources.read_audit_corrections, per
+    stage, for the audit rows they belong to.
+    """
     out = {}
     try:
         with open(path) as f:
@@ -75,6 +90,8 @@ def read_corrections(path):
                 except ValueError:
                     continue
                 if not isinstance(r, dict) or not r.get('image_id'):
+                    continue
+                if str(r.get('crop') or '').startswith('audit:'):
                     continue
                 try:
                     out[(str(r['image_id']), int(r.get('det_idx') or 0))] = (
@@ -208,15 +225,25 @@ def main():
                    '(e.g. dogbin_v3/train/not_dog)')
     p.add_argument('--roots-file',
                    default=os.path.join(REPO, 'data', 'catalog_dirs.txt'))
-    p.add_argument('--pad',
-                   type=float,
-                   default=0.15,
-                   help='context padding as a fraction of box size, matching '
-                   'build_crop_dataset.py so crops are comparable')
+    # NO --pad. The crop is framed by gate_store.cut_crops, imported, so it is
+    # framed the way production frames the box it will be judging. The old
+    # default here was a wider margin than production's own, which meant
+    # every harvested crop showed the model more context than any crop it
+    # is ever asked about. Passing the
+    # old flag is an error rather than silently ignored.
+    p.add_argument('--pad', help=argparse.SUPPRESS)
     p.add_argument('--min-size',
                    type=int,
-                   default=64,
-                   help='skip crops whose short side is under this')
+                   default=0,
+                   help='skip boxes whose short side is under this (default '
+                   '0: keep everything gate_store.cut_crops keeps, which is '
+                   'what production judges -- the old 64-px floor dropped '
+                   '657 false positives and 202 true positives, while 35%% '
+                   'of the gen-2 boxes are under 48 px)')
+    p.add_argument('--detect-root',
+                   help='the store whose det_idx and confidences the ledger '
+                   'was recorded against (default data/detect_root.txt; a '
+                   'disagreeing $DETECT_ROOT is refused)')
     p.add_argument('--max-conf',
                    type=float,
                    help='only harvest flags below this detector confidence')
@@ -239,8 +266,14 @@ def main():
                    'entries, minutes of I/O the running sweep needs)')
     p.add_argument('--execute', action='store_true')
     args = p.parse_args()
+    if args.pad is not None:
+        p.error('--pad is gone: crops are framed by gate_store.cut_crops '
+                '(PAD_FRAC, PAD_PX), the production framing')
 
-    import cv2
+    import gate_store
+    import crop_sources
+    from PIL import Image
+    detect_root = args.detect_root or crop_sources.default_detect_root()
 
     ledger = args.flags or LEDGERS[args.label]
     cls_dir = 'dog' if args.label == 'true_positive' else 'not_dog'
@@ -262,7 +295,7 @@ def main():
         print('pass --out or --append-to', file=sys.stderr)
         return 2
 
-    boxes = boxes_for(list(flags), store.get_detect_root())
+    boxes = boxes_for(list(flags), detect_root)
     print(f'  {len(boxes):,} found in the predictions store')
     missing_store = [i for i in flags if i not in boxes]
     if missing_store:
@@ -331,7 +364,7 @@ def main():
     # from the running sweep and several GB of RAM, to look up ~300 ids.
     # --scan-corpus keeps that fallback for images the store has no row for.
     idx = {}
-    placed = cells_for(list(boxes), store.get_detect_root())
+    placed = cells_for(list(boxes), detect_root)
     by_drive = roots_by_drive(roots)
     for iid, (cell, drive) in placed.items():
         root = by_drive.get(drive)
@@ -355,24 +388,30 @@ def main():
         if not path:
             n_noimg += 1
             continue
-        img = cv2.imread(path) if args.execute else None
+        img = None
+        if args.execute:
+            try:
+                img = Image.open(path)
+                img.load()
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+            except Exception:             # noqa: BLE001 - counted below
+                img = None
+        keep = []
         for di, x1, y1, x2, y2, conf in dets:
             w, h = x2 - x1, y2 - y1
             if min(w, h) < args.min_size:
                 n_small += 1
                 continue
             n_ok += 1
-            if not args.execute or img is None:
-                continue
-            pad = args.pad * max(w, h)
-            a = int(max(0, x1 - pad))
-            b = int(max(0, y1 - pad))
-            c = int(min(img.shape[1], x2 + pad))
-            d = int(min(img.shape[0], y2 + pad))
-            if c - a < 8 or d - b < 8:
-                continue
-            cv2.imwrite(os.path.join(dst, f'{iid}_{di}.jpg'), img[b:d, a:c],
-                        [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            keep.append((di, x1, y1, x2, y2))
+        if not args.execute or img is None:
+            continue
+        # production's own cutter: same margin, same MIN_SIDE, full resolution
+        for di, crop in gate_store.cut_crops(img, keep):
+            crop.save(os.path.join(dst, f'{iid}_{di}.jpg'), 'JPEG',
+                      quality=95)
+        img.close()
     verb = 'wrote' if args.execute else 'would write'
     kind = 'positive' if args.label == 'true_positive' else 'negative'
     print(f'\n{verb} {n_ok:,} full-res {kind} crops -> {dst}')

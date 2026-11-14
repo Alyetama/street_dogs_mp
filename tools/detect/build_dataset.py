@@ -20,10 +20,24 @@ about splitting, de-duplication and leakage stays where it was made.
                                     quarter of the train split they buy
                                     precision with recall, and recall is what
                                     this detector is selected on.
-    dogbin   rebuild_crop_dataset   dogbin_v5 + the review queue's verdicts
-                                    and the gate audit's finds
-    leash    rebuild_crop_dataset   leash_v2 + the leash audit's finds and the
-                                    review page's leash calls
+    dogbin   crop_sources           every human-labelled box -- the drawn
+             + rebuild_crop_dataset boxes, the review queue's verdicts, every
+                                    gate audit answer -- re-cut with
+                                    production's own framing, de-duplicated
+                                    across sources, split by sequence group,
+                                    with the acceptance and test sets held out
+    leash    crop_sources           the same for the leash model: drawn
+             + rebuild_crop_dataset leashed/unleashed boxes, the leash audit
+                                    and the review page's leash calls
+
+THE CROP MODELS ARE NOT BUILT FROM A BASE ANY MORE. They used to be a copy of
+dogbin_v5 / leash_v2 plus extra crops staged by filename, and the filenames
+were the only identity a crop had -- which is how 2,933 crops of
+dogbin_20261012 lost their sequence, how four framings ended up in one
+dataset, and how the leash acceptance set would have gone back into training.
+Each crop is now re-derived from a human ledger by crop_sources.py and carries
+a manifest row (crops.jsonl, kept in the dataset and the bundle). The base is
+read only to report how much of it the ledgers reproduce.
 
 EVERY BUILD IS A NEW DIRECTORY, named for the family, the day and six hex
 characters. Nothing is ever built over: a dataset is the evidence for whatever
@@ -117,6 +131,16 @@ def D(*parts):
 # previous build: deriving from the last one compounds every decision it made
 # and makes an undone verdict permanent, so each build goes back to the base
 # and re-applies everything on record.
+#
+# For the crop models `base` is only what the reproduction report compares
+# against (see the module docstring). `reserves` are the files whose image_ids
+# AND sequences may never enter a split: FIRST the permanent acceptance set,
+# THEN the frozen test set drawn from the audit verdicts (reserve_test_set.py).
+# A missing one is fatal -- a build with no held-out set is how dogbin_v3 was
+# accepted on crops it had trained on -- unless --no-reserve says so on the
+# record. The acceptance set can never be replaced from the command line;
+# --test-set replaces the second, --reserve adds more (family_reserves). `max_per_sequence` matches the dataset each family is compared with
+# (dogbin_v5's 3, leash_v2's 5).
 FAMILIES = {
     'dogdet': {
         'title': 'the detector',
@@ -131,6 +155,8 @@ FAMILIES = {
         'base': 'dogbin_v5',
         'classes': ('dog', 'not_dog'),
         'what': 'crops, dog against not a dog',
+        'reserves': ('dogbin_acceptance_set.json', 'dogbin_test_v1.json'),
+        'max_per_sequence': 3,
     },
     'leash': {
         'title': 'the leash model',
@@ -138,6 +164,8 @@ FAMILIES = {
         'base': 'leash_v2',
         'classes': ('leashed', 'unleashed'),
         'what': 'crops of dogs, leashed against unleashed',
+        'reserves': ('leash_acceptance_set.json', 'leash_test_v1.json'),
+        'max_per_sequence': 5,
     },
 }
 
@@ -145,25 +173,50 @@ FAMILIES = {
 # so the manifest can digest all of them without a second list going stale.
 STORES = {
     'hard_negatives': {'ledger': D('hard_negatives', 'labels.jsonl'),
-                       'crops': D('hard_negatives', 'crops'),
-                       'for': ('dogdet', 'dogbin')},
+                       'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
     'hard_positives': {'ledger': D('hard_positives', 'labels.jsonl'),
-                       'crops': D('hard_positives', 'crops'),
-                       'for': ('dogdet', 'dogbin')},
+                       'crops': None, 'for': ('dogdet', 'dogbin')},
+    # the review page's redraws AND the audit page's ("audit:<stage>"), so
+    # every crop family reads it
     'box_corrections': {'ledger': D('box_corrections', 'boxes.jsonl'),
-                        'crops': None, 'for': ('dogdet',)},
+                        'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
+    # the annotate page: dog boxes for the detector and the dog-bin, and
+    # "no dog in this frame" as a veto for both crop families
     'frame_labels': {'ledger': D('frame_labels', 'labels.jsonl'),
-                     'crops': None, 'for': ('dogdet',)},
+                     'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
+    # THE AUDIT CROPS ARE READ WHERE THE PAGE CUT THEM: full/ (the detector's
+    # box, production framing) and edited/ (a person's redraw). The
+    # audit_finds*/ exports are NOT inputs -- their manifests had gone stale
+    # (62 lines over 35,810 files), and the leash one had never been written.
+    # each audit is read by BOTH crop families: its own as labels, the other
+    # one's as vetoes on the same boxes (crop_sources.other_family_vetoes)
     'gate_audit': {'ledger': D('fn_audit', 'verdicts.jsonl'),
-                   'crops': None, 'for': ('dogdet', 'dogbin')},
-    'gate_audit_finds': {'ledger': D('audit_finds', 'manifest.jsonl'),
-                         'crops': D('audit_finds'), 'for': ('dogbin',)},
+                   'crops': D('fn_audit', 'full'),
+                   'for': ('dogdet', 'dogbin', 'leash')},
+    'gate_audit_edited': {'ledger': D('fn_audit', 'pool.parquet'),
+                          'crops': D('fn_audit', 'edited'),
+                          'for': ('dogbin',)},
     'leash_audit': {'ledger': D('leash_audit', 'verdicts.jsonl'),
-                    'crops': None, 'for': ('leash',)},
-    'leash_audit_finds': {'ledger': D('audit_finds_leash', 'manifest.jsonl'),
-                          'crops': D('audit_finds_leash'), 'for': ('leash',)},
+                    'crops': D('leash_audit', 'full'),
+                    'for': ('leash', 'dogbin')},
+    'leash_audit_edited': {'ledger': D('leash_audit', 'pool.parquet'),
+                           'crops': D('leash_audit', 'edited'),
+                           'for': ('leash',)},
     'leash_calls': {'ledger': D('leash_labels', 'leash.db'),
-                    'crops': D('leash_labels', 'crops'), 'for': ('leash',)},
+                    'crops': None, 'for': ('leash', 'dogbin')},
+    # what takes a label OUT, digested like what puts one in
+    'label_flags': {'ledger': D('label_flags', 'label_flags.db'),
+                    'crops': None, 'for': ('dogbin', 'leash')},
+    'leash_label_conflicts': {'ledger': D('leash_label_conflicts.json'),
+                              'crops': None, 'for': ('leash',)},
+    'dogbin_acceptance_set': {'ledger': D('dogbin_acceptance_set.json'),
+                              'crops': None, 'for': ('dogbin',)},
+    'dogbin_test_set': {'ledger': D('dogbin_test_v1.json'),
+                        'crops': None, 'for': ('dogbin',)},
+    'leash_acceptance_set': {'ledger': D('leash_acceptance_set.json'),
+                             'crops': None, 'for': ('leash',)},
+    'leash_test_set': {'ledger': D('leash_test_v1.json'),
+                       'crops': None, 'for': ('leash',)},
 }
 
 
@@ -632,108 +685,6 @@ class Runner:
             pass
 
 
-# ── the extras each crop model gets ─────────────────────────────────────────
-
-def _copy_into(src_dir, dst_dir, seen):
-    """Copy crops into a staged class directory, skipping repeats by name.
-
-    A crop can be in two stores at once -- flagged in the review queue and
-    found again in the audit -- and it is one example either way.
-    """
-    n = 0
-    for name in listing(src_dir) or []:
-        src = os.path.join(src_dir, name)
-        if not os.path.isfile(src) or name in seen:
-            continue
-        os.makedirs(dst_dir, exist_ok=True)
-        shutil.copy2(src, os.path.join(dst_dir, name))
-        seen.add(name)
-        n += 1
-    return n
-
-
-def stage_extras(family, stage, run, duckdb_python, crop_python,
-                 ls_tasks=None):
-    """Every new crop for a classify family, staged one directory per class.
-
-    rebuild_crop_dataset takes ONE directory per class, and the annotations
-    arrive in several stores, so they are gathered here rather than by
-    teaching that builder about each of them.
-    """
-    got = {c: 0 for c in FAMILIES[family]['classes']}
-    seen = {c: set() for c in got}
-    # THE HAND-DRAWN BOXES FIRST, because they are the best labels here: a
-    # person drew them, rather than agreeing with a detector that had already
-    # drawn one. For the gate that means the negatives are goats somebody
-    # boxed as goats, not only the ones the detector mistook for dogs.
-    if ls_tasks:
-        want = ls_wanted(family)
-        cut, _missing = ls_crops(ls_tasks, want,
-                                 os.path.join(stage, 'extras'), run=run)
-        for klass, n in cut.items():
-            got[klass] = got.get(klass, 0) + n
-            for name in listing(os.path.join(stage, 'extras', klass)) or []:
-                seen.setdefault(klass, set()).add(name)
-        run.say('label studio crops: %s'
-                % (', '.join('%s %d' % kv for kv in sorted(cut.items())),))
-    if family == 'dogbin':
-        # the review queue's own verdicts, cut from the original frames
-        harvest = os.path.join(stage, 'harvest')
-        for label, klass in (('false_positive', 'not_dog'),
-                             ('true_positive', 'dog')):
-            # --execute, or it prints what it WOULD cut and writes nothing:
-            # the build then succeeds against an empty extras directory and
-            # produces a dataset with none of the new annotations in it.
-            # harvest_flagged finds duckdb through its own interpreter, so it
-            # takes no --duckdb-python and must not be handed one.
-            run.run('harvest %s' % (label,),
-                    [crop_python, os.path.join(DETECT,
-                                               'harvest_flagged.py'),
-                     '--label', label, '--out', harvest, '--execute'],
-                    # cv2 lives in the training env and duckdb does not, so
-                    # the cutter runs there and reaches the store through the
-                    # helper interpreter it already knows how to spawn.
-                    env={'DETECT_DUCKDB_PYTHON': duckdb_python})
-            got[klass] += _copy_into(os.path.join(harvest, klass),
-                                     os.path.join(stage, 'extras', klass),
-                                     seen[klass])
-        for klass in got:
-            got[klass] += _copy_into(D('audit_finds', klass),
-                                     os.path.join(stage, 'extras', klass),
-                                     seen[klass])
-    elif family == 'leash':
-        for klass in got:
-            got[klass] += _copy_into(D('audit_finds_leash', klass),
-                                     os.path.join(stage, 'extras', klass),
-                                     seen[klass])
-        # the review page's leash calls: the crop is already on disk, and the
-        # verdict that names its class is in the database beside it
-        try:
-            sys.path.insert(0, DETECT)
-            import leash_store
-            con = leash_store.connect()
-            try:
-                rows = con.execute(
-                    'SELECT crop, label FROM leash').fetchall()
-            finally:
-                con.close()
-            for crop, label in rows:
-                if label not in got:
-                    continue
-                src = os.path.join(leash_store.CROPS_OUT, str(crop))
-                if not os.path.isfile(src) or crop in seen[label]:
-                    continue
-                dst = os.path.join(stage, 'extras', label)
-                os.makedirs(dst, exist_ok=True)
-                shutil.copy2(src, os.path.join(dst, str(crop)))
-                seen[label].add(crop)
-                got[label] += 1
-        except Exception as e:            # noqa: BLE001 - a store, not the run
-            run.say('leash calls unavailable (%s: %s) — building without them'
-                    % (type(e).__name__, e))
-    return got
-
-
 # ── counting what came out ──────────────────────────────────────────────────
 
 def inventory(out, family):
@@ -995,8 +946,144 @@ def _shape_of(path):
     return ('classify', classes) if classes else (None, set())
 
 
+def _read_json(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _bundle_crop_record(out, stage, bundle, base, reserve_paths):
+    """Copy a crop build's own records into the bundle; return their summary.
+
+    crops.jsonl (one row per crop: what it is, where it came from), the
+    conflicts (both the collector's and the splitter's), the size report,
+    the reserves with their digests, and how much of the old base the
+    ledgers reproduce -- informational, the base is no longer a source.
+    """
+    for name in ('crops.jsonl', 'reserves.json', 'reserved_crops.json'):
+        src = os.path.join(out, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(bundle, name))
+    for name in ('collect_counts.json', 'size_ref.json'):
+        src = os.path.join(stage, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(bundle, name))
+    split_conf = _read_json(os.path.join(out, 'conflicts.json'))
+    conflicts = {'collect': _read_json(os.path.join(
+                     stage, 'collect_conflicts.json')) or [],
+                 'split': split_conf.get('conflicts') or [],
+                 'reported_not_dropped': split_conf.get('reported') or []}
+    with open(os.path.join(bundle, 'conflicts.json'), 'w') as fh:
+        json.dump(conflicts, fh, indent=1, sort_keys=True)
+    rm = _read_json(os.path.join(out, 'rebuild_manifest.json'))
+    sizes = rm.get('sizes') or {}
+    sizes['note'] = (
+        'No gen-2-only box carries a human label, so the box distribution is '
+        'gen-1\'s even though the framing is production\'s. Label Studio '
+        '"other animal" boxes are much smaller than its dog boxes: a "small '
+        'means not a dog" shortcut is available to the gate and should be '
+        'checked per size band at evaluation.')
+    with open(os.path.join(bundle, 'size_report.json'), 'w') as fh:
+        json.dump(sizes, fh, indent=1, sort_keys=True)
+    # how much of the old base the ledgers re-derive, by image_id
+    repro = {'base': base, 'present': os.path.isdir(base)}
+    if repro['present']:
+        sys.path.insert(0, DETECT)
+        from crop_sources import parse_name
+        have = set()
+        try:
+            with open(os.path.join(stage, 'crops.jsonl')) as fh:
+                have = {json.loads(line)['image_id'] for line in fh
+                        if line.strip()}
+        except (OSError, ValueError):
+            pass
+        n = hit = 0
+        unread = 0
+        for split in ('train', 'val', 'test'):
+            for klass in listing(os.path.join(base, split)) or []:
+                for f in listing(os.path.join(base, split, klass)) or []:
+                    n += 1
+                    got = parse_name(f)
+                    if got is None:
+                        unread += 1
+                    elif got[0] in have:
+                        hit += 1
+        repro.update({'crops': n, 'image_id_reproduced': hit,
+                      'unparsed': unread,
+                      'share': round(hit / n, 4) if n else None})
+    with open(os.path.join(bundle, 'base_reproduction.json'), 'w') as fh:
+        json.dump(repro, fh, indent=1, sort_keys=True)
+    collect = _read_json(os.path.join(stage, 'collect_counts.json'))
+    return {
+        'framing': 'gate_store.cut_crops on full-resolution PIL-decoded '
+                   'frames; audit crops reused from the audit page (same '
+                   'constants), checked by re-cutting a sample',
+        'roots': collect.get('roots'),
+        'collect': {k: collect.get(k) for k in ('sources', 'dropped', 'rows',
+                                                 'by_source_label', 'noseq',
+                                                 'exclusion_digests',
+                                                 'cross_family_verdicts',
+                                                 'empty_frames',
+                                                 'allowed_empty_sources')},
+        'reserves': [{'path': p, 'sha256': sha256(p)} for p in reserve_paths],
+        'conflicts': {k: len(v) for k, v in conflicts.items()},
+        'size_warnings': sizes.get('warnings'),
+        'base_reproduction': repro,
+        'rebuild': {k: rm.get(k) for k in ('dedup', 'over_sequence_cap',
+                                           'kept', 'counts', 'groups',
+                                           'groups_pinned_noseq',
+                                           'noseq_crops', 'by_source',
+                                           'max_per_sequence',
+                                           'max_noseq_frac', 'keep_noseq',
+                                           'noseq_rows', 'noseq_dropped',
+                                           'reserved_rows_removed',
+                                           'reserved_bytes_mates_removed',
+                                           'reserved_dhash_mates_removed',
+                                           'reserve_hamming')},
+    }
+
+
+def family_reserves(family, extra=None, no_reserve=False, test_set=None):
+    """The reserve files a crop build must exclude -- all of them, or a refusal.
+
+    ALWAYS the family's acceptance set (the first of FAMILIES[family]
+    ['reserves']); then its test set -- `test_set` (--test-set) in place of
+    the default one, for a scratch build against a test set drawn somewhere
+    else; then every `extra` file (--reserve), ADDED to those. --reserve used
+    to REPLACE the list, so passing just a new test set dropped the
+    acceptance set from the exclusion and put all 312 leash acceptance images
+    back into train/val with every assertion passing -- defect D2 again, one
+    flag away. Only --no-reserve builds with nothing held out.
+    """
+    if no_reserve:
+        return []
+    names = list(FAMILIES[family].get('reserves') or ())
+    if not names:
+        raise SystemExit('%s has no reserves configured' % (family,))
+    paths = [D(names[0])]
+    paths += [test_set] if test_set else [D(n) for n in names[1:]]
+    for p in extra or ():
+        if os.path.abspath(p) not in {os.path.abspath(q) for q in paths}:
+            paths.append(p)
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        raise SystemExit(
+            'reserve file(s) missing: %s\n  a crop build excludes its '
+            'acceptance and test sets by image_id and sequence; draw the test '
+            'set first (tools/detect/reserve_test_set.py --family %s), or '
+            'pass --no-reserve to build with none, on the record'
+            % (', '.join(missing), family))
+    return paths
+
+
 def build(family, out=None, by='', duckdb_python=None, crop_python=None,
-          keep_stage=False, no_export=False, no_embed_dedup=False, now=None):
+          keep_stage=False, no_export=False, no_embed_dedup=False, now=None,
+          ls_export_path=None, detect_root=None, s3_python=None, workers=4,
+          allow_missing_frames=0, no_reserve=False, max_noseq_frac=0.02,
+          reserves=None, size_ref_root=None, dedup_device='auto',
+          test_set=None, allow_no_ls=False, keep_noseq=False):
     """Build one dataset. Returns the manifest it wrote."""
     if family not in FAMILIES:
         raise SystemExit('no such model: %s (try %s)'
@@ -1004,7 +1091,10 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     root = training_root()
     spec = FAMILIES[family]
     base = os.path.join(root, spec['base'])
-    if not os.path.isdir(base):
+    # The detector still derives from its base. A crop model does not -- it is
+    # re-cut from the ledgers -- so its base is only read, if it is there, for
+    # the reproduction report.
+    if spec['kind'] == 'detect' and not os.path.isdir(base):
         raise SystemExit('the base dataset is missing: %s\n'
                          '  every build starts from it, so there is nothing '
                          'to derive from' % (base,))
@@ -1013,6 +1103,22 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     if os.path.exists(out):
         raise SystemExit('%s already exists — a dataset is the evidence for '
                          'what trained on it and is never built over' % (out,))
+    reserve_paths = []
+    if spec['kind'] == 'classify':
+        reserve_paths = family_reserves(family, reserves, no_reserve,
+                                        test_set)
+        if no_export and not ls_export_path and not allow_no_ls:
+            raise SystemExit(
+                '--no-export with no --ls-export: the hand-drawn boxes would '
+                'not be in this build. Pass --ls-export PATH (a bundle\'s '
+                'label_studio_export.json will do), or --allow-no-ls to '
+                'build without them, on the record')
+        if ls_export_path and not os.path.isfile(ls_export_path):
+            raise SystemExit('no such export: %s' % (ls_export_path,))
+        if detect_root is None:
+            sys.path.insert(0, DETECT)
+            import crop_sources
+            detect_root = crop_sources.default_detect_root()
     duckdb_python = duckdb_python or sys.executable
     # The crops are cut with cv2, which lives in the training environment;
     # duckdb lives in the dashboard's. Neither has both, which is why the
@@ -1050,18 +1156,25 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         run.progress(0, 'exporting the hand-drawn boxes')
         ls_path = ls_tasks = None
         ls_counts = None
-        if not no_export:
+        if ls_export_path:
+            # AN EXPORT IN HAND -- a bundle's own, say -- read instead of a
+            # fresh one, so a build can be re-run against exactly the boxes
+            # an earlier one saw. Copied into the stage like a fresh export.
+            ls_path = os.path.join(stage, 'label_studio_export.json')
+            shutil.copy2(ls_export_path, ls_path)
+            run.say('label studio: the export given, %s' % (ls_export_path,))
+        elif not no_export:
             ls_path = ls_export(stage, run)
-            if ls_path:
-                ls_tasks, ls_counts = ls_read(ls_path)
-                run.say('label studio: %d tasks, %d boxes (%s), %d background'
-                        % (ls_counts['tasks'], ls_counts['boxes'],
-                           ', '.join('%s %d' % kv for kv in
-                                     sorted(ls_counts['classes'].items())),
-                           ls_counts['background']))
-            else:
-                run.say('no export script at the training root — building '
-                        'without the hand-drawn boxes')
+        if ls_path:
+            ls_tasks, ls_counts = ls_read(ls_path)
+            run.say('label studio: %d tasks, %d boxes (%s), %d background'
+                    % (ls_counts['tasks'], ls_counts['boxes'],
+                       ', '.join('%s %d' % kv for kv in
+                                 sorted(ls_counts['classes'].items())),
+                       ls_counts['background']))
+        elif not no_export:
+            run.say('no export script at the training root — building '
+                    'without the hand-drawn boxes')
         run.progress(0, 'reading the annotations')
         if family == 'dogdet':
             mid = os.path.join(stage, 'detect')
@@ -1129,59 +1242,98 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
             if os.path.isfile(first):
                 shutil.copy2(first, os.path.join(out, 'split_manifest.json'))
         else:
-            run.progress(1, 'gathering new crops')
-            extras = stage_extras(family, stage, run,
-                                  duckdb_python, crop_python,
-                                  ls_tasks=ls_tasks)
-            run.say('staged extras: %s'
-                    % (', '.join('%s %d' % (k, v)
-                                 for k, v in sorted(extras.items())) or 'none'))
+            run.progress(1, 'cutting every human-labelled crop')
+            if ls_path is None:
+                # A REFUSAL, not a warning: the base dataset is no longer a
+                # source, so a build without an export is a build without
+                # every hand-drawn box (48% of the leash rows) that would
+                # otherwise call itself clean.
+                if not allow_no_ls:
+                    raise SystemExit(
+                        'no Label Studio export (--no-export, or no export '
+                        'script at the training root): the hand-drawn boxes '
+                        'would not be in this build. Pass --ls-export PATH '
+                        '(a bundle\'s label_studio_export.json will do), or '
+                        '--allow-no-ls to build without them, on the record')
+                run.say('WARNING: no Label Studio export -- the drawn boxes '
+                        'are not in this build (--allow-no-ls)')
+            collect = [sys.executable, os.path.join(DETECT, 'crop_sources.py'),
+                       'collect', '--family', family, '--stage', stage,
+                       '--detect-root', detect_root,
+                       '--workers', str(int(workers)),
+                       '--duckdb-python', duckdb_python]
+            if ls_path:
+                collect += ['--ls-export', ls_path]
+            else:
+                collect += ['--allow-empty-source', 'ls_box']
+            # boto3 is in the training environment, not this one: the few
+            # Label Studio frames no drive holds are fetched by a child
+            # process there. The old path imported boto3 here, failed, and
+            # cut 2,190 crops from resized copies while printing "no bucket".
+            s3_python = s3_python or _cfg('dogbin_python')
+            if s3_python:
+                collect += ['--s3-python', s3_python]
+            if allow_missing_frames:
+                collect += ['--allow-missing-frames',
+                            str(int(allow_missing_frames))]
+            run.run('crop_sources', collect)
+            manifest_rows = os.path.join(stage, 'crops.jsonl')
+            # THE YARDSTICK, the store the model will be judging. Without a
+            # configured one this is the gen-1 store, said out loud.
+            size_root = size_ref_root or _cfg('size_ref_root') or detect_root
+            if size_root == detect_root:
+                run.say('size reference: the ledgers\' own store (%s) -- set '
+                        'size_ref_root to the store production judges'
+                        % (detect_root,))
+            size_ref = os.path.join(stage, 'size_ref.json')
+            run.run('size_reference',
+                    [sys.executable, os.path.join(DETECT, 'crop_sources.py'),
+                     'size-ref', '--detect-root', size_root,
+                     '--out', size_ref])
             argv = [sys.executable,
                     os.path.join(DETECT, 'rebuild_crop_dataset.py'),
-                    '--src', base, '--out', out,
+                    '--manifest', manifest_rows, '--out', out,
                     '--duckdb-python', duckdb_python,
                     '--pos-class', spec['classes'][0],
-                    '--neg-class', spec['classes'][1]]
-            pos = os.path.join(stage, 'extras', spec['classes'][0])
-            neg = os.path.join(stage, 'extras', spec['classes'][1])
-            if os.path.isdir(pos):
-                argv += ['--extra-positives', pos]
-            if os.path.isdir(neg):
-                argv += ['--extra-negatives', neg]
-            # THE DUPLICATES dHASH CANNOT SEE. The rebuilder always collapses
-            # near-identical framings (dHash) and assigns whole sequences to
-            # one split -- but the same dog turns up in TWO sequences (two
-            # passes, two cameras), one frame later or three metres closer,
-            # and dHash is blind to that by construction. Those pairs are
-            # exactly what leaks a subject across the train/val boundary, and
-            # the rebuilder has taken an embedding cluster file for them since
-            # dogbin_v4 -- which every build from this page then failed to
-            # pass, so the one leak the whole rebuild exists to stop stayed
-            # open from the dashboard. 0.93 is the calibrated threshold the
-            # promoted datasets were built at, not the tool's default: it was
-            # read off real pair sheets, and a build should match the
-            # datasets it will be compared against.
+                    '--neg-class', spec['classes'][1],
+                    '--max-per-sequence', str(spec['max_per_sequence']),
+                    '--max-noseq-frac', str(max_noseq_frac),
+                    '--size-ref', size_ref]
+            if keep_noseq:
+                argv += ['--keep-noseq']
+            for rp in reserve_paths:
+                argv += ['--reserve', rp]
+            if no_reserve:
+                argv += ['--no-reserve']
+            # THE DUPLICATES dHASH CANNOT SEE. The same dog turns up in TWO
+            # sequences (two passes, two cameras), one frame later or three
+            # metres closer, and dHash is blind to that by construction.
+            # Those pairs are what leaks a subject across the train/val
+            # boundary; the rebuilder joins every embedding cluster into one
+            # split group. 0.93 is the calibrated threshold the promoted
+            # datasets were built at, read off real pair sheets.
             clusters = os.path.join(stage, 'clusters.json')
             if no_embed_dedup:
                 run.say('embedding dedup SKIPPED (--no-embed-dedup) -- '
                         'near-duplicates that dHash cannot see may cross '
                         'the split')
             else:
-                dirs = [d for d in
-                        (os.path.join(base, sp, c)
-                         for sp in ('train', 'val', 'test')
-                         for c in spec['classes'])
-                        if os.path.isdir(d)]
-                dirs += [d for d in (pos, neg) if os.path.isdir(d)]
                 run.progress(2, 'clustering near-duplicates')
                 run.run('dedup_crops',
                         [crop_python, os.path.join(DETECT, 'dedup_crops.py'),
-                         'cluster'] + dirs +
-                        ['--threshold', '0.93', '--device', 'auto',
+                         'cluster', os.path.join(stage, 'crops'),
+                         '--threshold', '0.93', '--device', dedup_device,
                          '--out', clusters])
                 argv += ['--dup-clusters', clusters]
-            run.progress(3, 're-splitting by sequence')
+            run.progress(3, 'de-duplicating and splitting by sequence group')
             run.run('rebuild_crop_dataset', argv + ['--execute'])
+            # ...and once more from the outside, on what is actually on disk,
+            # in a process that shares nothing with the one that wrote it
+            run.run('verify_dataset',
+                    [sys.executable,
+                     os.path.join(DETECT, 'rebuild_crop_dataset.py'),
+                     '--verify-only', out])
+            extras = _read_json(os.path.join(stage, 'collect_counts.json'))
         run.progress(steps_total - 1, 'listing what came out')
         files, counts = inventory(out, family)
         bundle = os.path.join(out, 'bundle')
@@ -1201,6 +1353,10 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         if ls_path and os.path.isfile(ls_path):
             shutil.copy2(ls_path,
                          os.path.join(bundle, 'label_studio_export.json'))
+        crop_record = {}
+        if spec['kind'] == 'classify':
+            crop_record = _bundle_crop_record(out, stage, bundle, base,
+                                              reserve_paths)
         inputs_path = os.path.join(bundle, 'inputs.json')
         with open(inputs_path, 'w') as fh:
             json.dump({'id': name, 'built_at': started, 'stores': inputs},
@@ -1219,6 +1375,11 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
             'out': out, 'base': base,
             'counts': counts,
             'extras_staged': extras,
+            # THE CROP MODELS' OWN RECORD: which store the ledgers' boxes were
+            # matched against, which drives the frames came off, which
+            # reserves were held out (with digests), and the framing used.
+            'crops': crop_record or None,
+            'detect_root': detect_root,
             'steps': run.steps,
             # WHAT WAS RUN, exactly. Reproducing a build means running the
             # same argv under the same interpreters against the same
@@ -1233,6 +1394,12 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
             # know that from the record, not from the shell history.
             'embed_dedup': (None if spec['kind'] != 'classify' else
                             'skipped' if no_embed_dedup else 'clustered'),
+            # ...and so is a source left out, or a rule relaxed
+            'allow_no_ls': bool(allow_no_ls) if spec['kind'] == 'classify'
+            else None,
+            'keep_noseq': bool(keep_noseq) if spec['kind'] == 'classify'
+            else None,
+            'test_set': test_set,
             'label_studio': (None if not ls_path else {
                 'file': 'bundle/label_studio_export.json',
                 'sha256': sha256(ls_path),
@@ -1323,6 +1490,50 @@ def main(argv=None):
                          'with no reach to the server -- and it is recorded, '
                          'so a dataset built without the hand-drawn boxes '
                          'says so')
+    ap.add_argument('--ls-export', metavar='PATH',
+                    help='use this Label Studio export (for instance a '
+                         'bundle\'s label_studio_export.json) instead of '
+                         'fetching a fresh one')
+    ap.add_argument('--detect-root',
+                    help='crop models: the store the ledgers\' det_idx and '
+                         'confidences belong to (default data/detect_root.txt'
+                         '; a disagreeing $DETECT_ROOT is refused)')
+    ap.add_argument('--size-ref-root',
+                    help='crop models: the store production judges, for the '
+                         'size report (default: the size_ref_root config key, '
+                         'else --detect-root)')
+    ap.add_argument('--s3-python',
+                    help='crop models: interpreter with boto3, for the few '
+                         'Label Studio frames no drive holds (default: the '
+                         'dogbin_python config key)')
+    ap.add_argument('--workers', type=int, default=4,
+                    help='crop models: frame decoders (run at low priority)')
+    ap.add_argument('--allow-missing-frames', type=int, default=0,
+                    metavar='N',
+                    help='crop models: build even if up to N boxes have no '
+                         'full-resolution frame (counted in the manifest)')
+    ap.add_argument('--reserve', action='append', default=[],
+                    help='crop models: another reserve file to hold out, ON '
+                         'TOP of the acceptance and test sets (repeatable)')
+    ap.add_argument('--test-set', metavar='PATH',
+                    help='crop models: the frozen test set to hold out in '
+                         'place of data/<family>_test_v1.json (the '
+                         'acceptance set is held out regardless)')
+    ap.add_argument('--allow-no-ls', action='store_true',
+                    help='crop models: build without a Label Studio export '
+                         '(refused otherwise: the drawn boxes would be '
+                         'missing). Recorded.')
+    ap.add_argument('--keep-noseq', action='store_true',
+                    help='crop models: keep crops whose sequence no manifest '
+                         'knows, pinned to train (default: dropped and '
+                         'counted)')
+    ap.add_argument('--no-reserve', action='store_true',
+                    help='crop models: hold nothing out, on the record')
+    ap.add_argument('--max-noseq-frac', type=float, default=0.02,
+                    help='crop models: fail if more than this share of crops '
+                         'has no sequence in any manifest')
+    ap.add_argument('--dedup-device', default='auto',
+                    help='crop models: device for the embedding dedup')
     ap.add_argument('--list', action='store_true',
                     help='what can be built, and what it would read')
     ap.add_argument('--dry-run', action='store_true',
@@ -1360,7 +1571,14 @@ def main(argv=None):
         return 0
     build(a.family, out=a.out, by=a.by, duckdb_python=a.duckdb_python,
           crop_python=a.crop_python, keep_stage=a.keep_stage,
-          no_export=a.no_export, no_embed_dedup=a.no_embed_dedup)
+          no_export=a.no_export, no_embed_dedup=a.no_embed_dedup,
+          ls_export_path=a.ls_export, detect_root=a.detect_root,
+          s3_python=a.s3_python, workers=a.workers,
+          allow_missing_frames=a.allow_missing_frames,
+          no_reserve=a.no_reserve, max_noseq_frac=a.max_noseq_frac,
+          reserves=a.reserve or None, size_ref_root=a.size_ref_root,
+          dedup_device=a.dedup_device, test_set=a.test_set,
+          allow_no_ls=a.allow_no_ls, keep_noseq=a.keep_noseq)
     return 0
 
 

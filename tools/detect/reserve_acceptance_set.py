@@ -34,18 +34,22 @@ import argparse
 import json
 import os
 import random
-import re
 import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_OUT = os.path.join(REPO, 'data', 'dogbin_acceptance_set.json')
-NAME_RE = re.compile(r'^(?:flag_|pos_)?(?:le|un|no|nd)?_?(\d{6,})[_.]')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# THE one crop-name parser (crop_sources.parse_name). This file had its own
+# regex, which could not read a Label Studio crop ('pos_ls_<id>_<k>.jpg') and
+# read a leash-call crop's leading timestamp as its image_id; a crop it could
+# not read was silently left out of the draw.
+from crop_sources import parse_name  # noqa: E402
 
 
 def image_id_of(fname):
-    m = NAME_RE.match(os.path.basename(fname))
-    return m.group(1) if m else None
+    got = parse_name(os.path.basename(fname))
+    return got[0] if got else None
 
 
 def union_find_groups(keys, edges):
@@ -103,10 +107,18 @@ def main():
         files += [os.path.join(root, n) for n in names
                   if n.lower().endswith(('.jpg', '.jpeg', '.png'))]
     ids = {}
+    unread = []
     for f in files:
         i = image_id_of(f)
         if i:
             ids.setdefault(i, []).append(f)
+        else:
+            unread.append(os.path.basename(f))
+    # Fatal, not skipped: a crop that cannot be placed is a crop the
+    # reservation cannot protect, and a dataset built later would train on it.
+    if unread:
+        raise SystemExit(f'{len(unread)} crop name(s) give no image_id, e.g. '
+                         f'{sorted(unread)[:10]}')
     if not ids:
         raise SystemExit(f'no parseable crops under {args.crops}')
     print(f'{len(files)} crops, {len(ids)} distinct image_ids')
@@ -163,7 +175,7 @@ def main():
         'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'purpose': 'Permanent acceptance set for the dog-bin gate. These '
                    'image_ids must NEVER enter any training or validation '
-                   'split. rebuild_crop_dataset.py --exclude-ids reads this '
+                   'split. rebuild_crop_dataset.py --reserve reads this '
                    'file; eval_dogbin.py scores against it.',
         'source': os.path.relpath(args.crops, REPO),
         'frac_requested': args.frac,
@@ -171,6 +183,10 @@ def main():
         'groups_total': len(groups),
         'groups_reserved': len(held),
         'image_ids': sorted(held_ids),
+        # The sequences those ids sit in, so a build can exclude by SEQUENCE
+        # without a catalog lookup of its own. An id with no sequence on
+        # record is held by its id alone.
+        'sequences': sorted({seq[i] for i in held_ids if seq.get(i)}),
     }
     with open(args.out, 'w') as f:
         json.dump(out, f, indent=1)

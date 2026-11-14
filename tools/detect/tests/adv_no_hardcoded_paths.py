@@ -51,6 +51,11 @@ EXTRA = (
     'tools/detect/tests/adv_disk_order.py',
     'tools/detect/tests/adv_gate_protocol.py',
     'tools/detect/tests/adv_side_gate_panel.py',
+    # The ledger-native crop dataset build: the collector, the test-set
+    # reservation and the check that holds both. New, so `git add -f`.
+    'tools/detect/crop_sources.py',
+    'tools/detect/reserve_test_set.py',
+    'tools/detect/tests/adv_crop_dataset_integrity.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked

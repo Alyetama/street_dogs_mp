@@ -504,13 +504,27 @@ def refusal_checks(bad, bd):
             if 'exists' not in str(e):
                 bad.append('building over a directory failed for the wrong '
                            'reason: %s' % (e,))
-        # a missing base is a sentence, not a traceback halfway through
+        # a missing base is a sentence, not a traceback halfway through --
+        # for the detector, which still derives from one
         try:
-            bd.build('leash')
+            bd.build('dogdet')
             bad.append('a build ran with no base dataset to derive from')
         except SystemExit as e:
             if 'base' not in str(e).lower():
                 bad.append('a missing base said: %s' % (e,))
+        # A CROP MODEL WITH NOTHING HELD OUT IS REFUSED. The leash build used
+        # to exclude the DOGBIN acceptance set, so all 312 leash acceptance
+        # images would have gone back into training without one error.
+        real_d = bd.D
+        bd.D = lambda *p: os.path.join(tmp, 'no_data', *p)
+        try:
+            bd.build('leash')
+            bad.append('a crop build ran with its reserve files missing')
+        except SystemExit as e:
+            if 'reserve' not in str(e).lower():
+                bad.append('missing reserves said: %s' % (e,))
+        finally:
+            bd.D = real_d
     except AssertionError as e:
         bad.append(str(e))
     finally:
@@ -556,8 +570,16 @@ def composition_checks(bad, bd):
     old_env = os.environ.get('TRAINING_ROOT')
     os.environ['TRAINING_ROOT'] = root
     real_run = bd.Runner.run
-    real_stage = bd.stage_extras
     real_head = bd.git_head
+    # the reserve files a crop build must be handed, stood in for
+    reserves = {}
+    for fam in ('dogbin', 'leash'):
+        reserves[fam] = []
+        for name in bd.FAMILIES[fam]['reserves']:
+            got = os.path.join(tmp, name)
+            with open(got, 'w') as fh:
+                json.dump({'image_ids': ['1'], 'sequences': ['s']}, fh)
+            reserves[fam].append(got)
     calls = []
     # A detector build spends twenty-five minutes fetching frames, and work
     # carries on in the repo while it does. This stands in for a commit landing
@@ -637,7 +659,6 @@ def composition_checks(bad, bd):
     try:
         bd.Runner.run = fake_run
         bd.git_head = lambda: {'commit': head_now[0], 'dirty': False}
-        bd.stage_extras = lambda *a, **k: {'dog': 1, 'not_dog': 2}
         man = bd.build('dogdet', by='admin')
         got = (man.get('git') or {}).get('commit')
         if got != 'the-commit-the-build-started-from':
@@ -829,17 +850,34 @@ def composition_checks(bad, bd):
             bad.append('the staging directory was left behind')
 
         calls[:] = []
-        man = bd.build('dogbin')
+        real_d = bd.D
+        bd.D = lambda *p: os.path.join(tmp, *p)
+        man = bd.build('dogbin', detect_root=os.path.join(tmp, 'gen1'))
 
         def argv_named(want):
             for c in calls:
                 if c['name'] == want:
                     return c['argv']
             return []
+        order = [c['name'] for c in calls]
+        # THE CROPS ARE RE-CUT FROM THE LEDGERS, then split from a manifest:
+        # no base copied by filename, no harvest staged by name.
+        if 'harvest false_positive' in order or 'harvest true_positive' in \
+                order:
+            bad.append('the crop build still runs the old harvest staging: '
+                       '%r' % (order,))
+        cs = argv_named('crop_sources')
         argv = argv_named('rebuild_crop_dataset')
+        if not cs:
+            bad.append('a crop build never collected the human-labelled '
+                       'crops: %r' % (order,))
+        elif cs[cs.index('--family') + 1] != 'dogbin' or \
+                '--detect-root' not in cs:
+            bad.append('the collector was not told the family and the store '
+                       'its ledgers belong to: %r' % (cs,))
         if not argv:
             bad.append('a crop build never ran the crop builder: %r'
-                       % ([c['name'] for c in calls],))
+                       % (order,))
         elif '--execute' not in argv:
             bad.append('rebuild_crop_dataset ran without --execute')
         else:
@@ -847,16 +885,29 @@ def composition_checks(bad, bd):
                     argv[argv.index('--neg-class') + 1] != 'not_dog':
                 bad.append('the dog-bin build names the wrong classes: %r'
                            % (argv,))
-            if argv[argv.index('--src') + 1] != os.path.join(root,
-                                                             'dogbin_v5'):
-                bad.append('the dog-bin build derives from the wrong base')
-        # THE DUPLICATES dHASH CANNOT SEE. The rebuilder has taken an
-        # embedding cluster file since dogbin_v4, and every build from the
-        # dashboard failed to pass one -- so the same dog, seen again from
-        # another distance or in a second sequence, could land on both sides
-        # of the train/val split. The composer must cluster first and hand
-        # the file over, at the calibrated threshold rather than the tool's
-        # default, in the interpreter that has torch.
+            if '--src' in argv:
+                bad.append('the dog-bin build still copies a base dataset by '
+                           'filename: %r' % (argv,))
+            if '--manifest' not in argv or not argv[
+                    argv.index('--manifest') + 1].endswith('crops.jsonl'):
+                bad.append('the dog-bin split is not driven by the collected '
+                           'manifest: %r' % (argv,))
+            got = sorted(os.path.basename(argv[i + 1])
+                         for i, x in enumerate(argv) if x == '--reserve')
+            if got != sorted(bd.FAMILIES['dogbin']['reserves']):
+                bad.append('the dog-bin build holds out %r' % (got,))
+            if argv[argv.index('--max-per-sequence') + 1] != '3':
+                bad.append('the dog-bin cap is not 3')
+            if order.index('crop_sources') > order.index(
+                    'rebuild_crop_dataset'):
+                bad.append('the split ran before the crops were collected')
+        if 'verify_dataset' not in order or order.index('verify_dataset') < \
+                order.index('rebuild_crop_dataset'):
+            bad.append('nothing re-verifies the written dataset from the '
+                       'outside: %r' % (order,))
+        # THE DUPLICATES dHASH CANNOT SEE. The composer must cluster first and
+        # hand the file over, at the calibrated threshold rather than the
+        # tool's default, in the interpreter that has torch.
         dd = argv_named('dedup_crops')
         if not dd:
             bad.append('a crop build never clusters near-duplicates, so a '
@@ -866,15 +917,20 @@ def composition_checks(bad, bd):
             if 'cluster' not in dd:
                 bad.append('dedup_crops ran without its cluster verb: %r'
                            % (dd,))
-            if '--threshold' not in dd or                     dd[dd.index('--threshold') + 1] != '0.93':
+            if '--threshold' not in dd or \
+                    dd[dd.index('--threshold') + 1] != '0.93':
                 bad.append('the cluster threshold is not the calibrated '
                            '0.93 the promoted datasets were built at')
             if dd[0] == sys.executable:
                 bad.append('dedup_crops runs on the composer\'s own '
                            'interpreter, which has no torch -- it must use '
                            'crop_python')
-            order = [c['name'] for c in calls]
-            if order.index('dedup_crops') >                     order.index('rebuild_crop_dataset'):
+            if not any(x.endswith(os.path.join('.stage', 'crops'))
+                       for x in dd):
+                bad.append('dedup_crops does not cluster the collected '
+                           'crops: %r' % (dd,))
+            if order.index('dedup_crops') > \
+                    order.index('rebuild_crop_dataset'):
                 bad.append('the clusters are computed AFTER the split used '
                            'them')
             if '--dup-clusters' not in argv:
@@ -882,7 +938,8 @@ def composition_checks(bad, bd):
                            'to the rebuilder')
         # ...and the escape hatch is recorded as a fact about the dataset
         calls[:] = []
-        man2 = bd.build('dogbin', no_embed_dedup=True)
+        man2 = bd.build('dogbin', no_embed_dedup=True,
+                        detect_root=os.path.join(tmp, 'gen1'))
         if argv_named('dedup_crops'):
             bad.append('--no-embed-dedup still ran the embedding pass')
         if man2.get('embed_dedup') != 'skipped':
@@ -891,22 +948,35 @@ def composition_checks(bad, bd):
         if man.get('embed_dedup') != 'clustered':
             bad.append('a build WITH the embedding pass does not record it: '
                        '%r' % (man.get('embed_dedup'),))
+        if man.get('detect_root') != os.path.join(tmp, 'gen1'):
+            bad.append('the manifest does not name the store the ledgers\' '
+                       'boxes were matched against')
+        for name in ('conflicts.json', 'size_report.json',
+                     'base_reproduction.json'):
+            if not os.path.isfile(os.path.join(man['out'], 'bundle', name)):
+                bad.append('the crop bundle has no %s' % (name,))
         calls[:] = []
-        man = bd.build('leash')
+        man = bd.build('leash', detect_root=os.path.join(tmp, 'gen1'))
+        bd.D = real_d
         argv = argv_named('rebuild_crop_dataset')
         if not argv:
             bad.append('the leash build never ran the crop builder')
-            argv = ['--pos-class', '?', '--neg-class', '?', '--src', '?']
+            argv = ['--pos-class', '?', '--neg-class', '?',
+                    '--max-per-sequence', '?']
         if argv[argv.index('--pos-class') + 1] != 'leashed' or \
                 argv[argv.index('--neg-class') + 1] != 'unleashed':
             bad.append('the leash build names the wrong classes: %r' % (argv,))
-        if argv[argv.index('--src') + 1] != os.path.join(root, 'leash_v2'):
-            bad.append('the leash build derives from the wrong base')
+        got = sorted(os.path.basename(argv[i + 1])
+                     for i, x in enumerate(argv) if x == '--reserve')
+        if got != ['leash_acceptance_set.json', 'leash_test_v1.json']:
+            bad.append('the leash build holds out %r -- not the leash '
+                       'acceptance and test sets' % (got,))
+        if argv[argv.index('--max-per-sequence') + 1] != '5':
+            bad.append('the leash cap is not leash_v2\'s 5')
     except Exception as e:                # noqa: BLE001 - report, not die
         bad.append('composition threw %s: %s' % (type(e).__name__, e))
     finally:
         bd.Runner.run = real_run
-        bd.stage_extras = real_stage
         bd.git_head = real_head
         if old_env is None:
             os.environ.pop('TRAINING_ROOT', None)
@@ -916,71 +986,24 @@ def composition_checks(bad, bd):
 
 
 def harvest_checks(bad, bd):
-    """How the crops get cut, which the composition check stubs past.
+    """The old staging is gone, and nothing reaches the cutter by filename.
 
-    Three flags decide whether this step does anything at all, and getting any
-    of them wrong produces a build that SUCCEEDS with an empty extras
-    directory -- a dataset with none of the new annotations in it, and nothing
-    on screen to say so.
+    The crop builds used to run harvest_flagged.py once per review ledger and
+    stage its output by NAME next to the audit exports and the leash calls --
+    which is how one box arrived twice under two names, and how a crop with
+    a name the splitter could not parse lost its sequence. crop_sources.py
+    re-derives every crop from its ledger now; the harvester is kept for
+    cutting by hand, and must cut the way production cuts.
     """
-    tmp = tempfile.mkdtemp(prefix='adv_bd_harvest_')
-    calls = []
-
-    class FakeRun:
-        steps = []
-
-        def say(self, text):
-            pass
-
-        def run(self, name, argv, cwd=None, env=None):
-            calls.append({'name': name, 'argv': argv, 'env': env or {}})
-            # leave the crops the real cutter would have written
-            out = argv[argv.index('--out') + 1]
-            for klass in ('dog', 'not_dog'):
-                d = os.path.join(out, klass)
-                os.makedirs(d, exist_ok=True)
-                open(os.path.join(d, 'cut_%s.jpg' % (klass,)), 'w').close()
-            return 0
-
-    try:
-        got = bd.stage_extras('dogbin', tmp, FakeRun(), '/duck/python',
-                              '/crop/python')
-        if len(calls) != 2:
-            bad.append('the crop cutter ran %d times, not once per verdict '
-                       'ledger' % (len(calls),))
-        for call in calls:
-            argv = call['argv']
-            if '--execute' not in argv:
-                bad.append('harvest_flagged ran without --execute -- it '
-                           'prints what it WOULD cut and writes nothing, so '
-                           'the build succeeds with no new crops in it')
-            if '--duckdb-python' in argv:
-                bad.append('harvest_flagged was handed --duckdb-python, '
-                           'which it does not take: it exits 2 and the whole '
-                           'build fails')
-            if argv[0] != '/crop/python':
-                bad.append('the crop cutter did not run in the interpreter '
-                           'that has cv2: %r' % (argv[0],))
-            if call['env'].get('DETECT_DUCKDB_PYTHON') != '/duck/python':
-                bad.append('the cutter cannot reach the store: no helper '
-                           'interpreter in its environment (%r)'
-                           % (call['env'],))
-        if not got or sum(got.values()) == 0:
-            bad.append('nothing was staged from a cutter that wrote crops')
-        for klass in ('dog', 'not_dog'):
-            if not os.path.isdir(os.path.join(tmp, 'extras', klass)):
-                bad.append('no staged directory for %r, so the builder is '
-                           'given nothing to add' % (klass,))
-        # ONE CROP IS ONE EXAMPLE. A crop flagged in the queue and found again
-        # in the audit is the same picture, and staging it twice weights it
-        # twice.
-        seen = os.listdir(os.path.join(tmp, 'extras', 'dog'))
-        if len(seen) != len(set(seen)):
-            bad.append('a crop was staged twice')
-    except Exception as e:                # noqa: BLE001
-        bad.append('harvest staging threw %s: %s' % (type(e).__name__, e))
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    if hasattr(bd, 'stage_extras'):
+        bad.append('build_dataset still has stage_extras: crops staged by '
+                   'filename are back')
+    src = open(os.path.join(DETECT, 'harvest_flagged.py')).read()
+    if 'gate_store.cut_crops' not in src:
+        bad.append('harvest_flagged does not cut with gate_store.cut_crops')
+    if 'cv2' in src:
+        bad.append('harvest_flagged still decodes with cv2, not PIL as '
+                   'production does')
 
 
 def labelstudio_checks(bad, bd):

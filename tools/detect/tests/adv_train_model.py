@@ -826,16 +826,21 @@ def promoted_fallback_checks(bad, tm):
     os.environ['TRAINING_ROOT'] = tmp
     try:
         # the promoted run, where best_models.json says dogbin's weights live
-        run = os.path.join(tmp, 'dog-bin', 'dogbin_008')
+        # -- read from the registry, not spelled here: the promoted run moves
+        # every time a better one is promoted
+        with open(os.path.join(REPO, 'data', 'best_models.json')) as fh:
+            rel = json.load(fh)['projects']['dog-bin']['best']['weights']
+        run = os.path.dirname(os.path.dirname(os.path.join(tmp, rel)))
+        name = os.path.basename(run)
         os.makedirs(os.path.join(run, 'weights'))
         open(os.path.join(run, 'weights', 'best.pt'), 'w').close()
         with open(os.path.join(run, 'results.csv'), 'w') as fh:
             fh.write('epoch,metrics/accuracy_top1\n1,0.9\n')
         with open(os.path.join(run, 'args.yaml'), 'w') as fh:
             fh.write('epochs: 500\npatience: 100\nerasing: 0.4\n'
-                     'data: /gone/dogbin_v5\nname: dogbin_008\n')
+                     'data: /gone/dogbin_v5\nname: %s\n' % name)
         got, src, _ = tm.last_args('dogbin')
-        if not src or 'dogbin_008' not in src:
+        if not src or name not in src:
             bad.append('an empty project directory fell back to %r, not the '
                        'promoted run' % (src,))
         elif got.get('epochs') != '500':
@@ -844,21 +849,21 @@ def promoted_fallback_checks(bad, tm):
         # ...and a run in the project directory takes the slot by SCORING
         # better, not by being newer: the promoted run reached 0.9, and a
         # fresh run that reached 0.5 is a worse recipe however recent it is.
-        newer = os.path.join(tmp, 'runs', 'classify', 'dog-bin', 'dogbin_x')
+        newer = os.path.join(tmp, 'runs', 'classify', 'dog-bin', 'dogbin_zz_newer')
         os.makedirs(os.path.join(newer, 'weights'))
         open(os.path.join(newer, 'weights', 'best.pt'), 'w').close()
         with open(os.path.join(newer, 'results.csv'), 'w') as fh:
             fh.write('epoch,metrics/accuracy_top1\n1,0.5\n')
         with open(os.path.join(newer, 'args.yaml'), 'w') as fh:
-            fh.write('epochs: 42\nname: dogbin_x\n')
+            fh.write('epochs: 42\nname: dogbin_zz_newer\n')
         got, src, _ = tm.last_args('dogbin')
-        if not src or 'dogbin_008' not in src:
+        if not src or name not in src:
             bad.append('a newer run that scored 0.5 took the recipe from the '
                        'promoted run that scored 0.9: %r' % (src,))
         with open(os.path.join(newer, 'results.csv'), 'w') as fh:
             fh.write('epoch,metrics/accuracy_top1\n1,0.95\n')
         got, src, _ = tm.last_args('dogbin')
-        if not src or 'dogbin_x' not in src:
+        if not src or 'dogbin_zz_newer' not in src:
             bad.append('a run that beat the promoted model still lost to it: '
                        '%r' % (src,))
     finally:
