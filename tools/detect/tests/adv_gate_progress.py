@@ -50,7 +50,7 @@ def reader_checks(bad):
     tmp = tempfile.mkdtemp()
     # the panel resolves a stage to a directory; point that one function at
     # the fixture rather than at data/gate, which is a live twelve-hour run
-    d.gate_dir = lambda stage='gate': tmp
+    d.gate_dir = lambda stage='gate', root=None: tmp
     beat_p = os.path.join(tmp, 'progress.json')
     with open(os.path.join(tmp, 'plan.json'), 'w') as fh:
         json.dump(PLAN, fh)

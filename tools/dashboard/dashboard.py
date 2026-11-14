@@ -6367,18 +6367,57 @@ _GATE_FILES = {}
 GATE_TTL_S = 2
 
 
-def gate_dir(stage='gate'):
-    return os.path.join(REPO, 'data', GATE_STAGES[stage]['dir'])
+def gate_dir(stage='gate', root=None):
+    """A stage's directory: under data/, or under `root` for a pass over a
+    store that is not live yet (gate_store's $GATE_ROOT)."""
+    return os.path.join(root or os.path.join(REPO, 'data'),
+                        GATE_STAGES[stage]['dir'])
 
 
-def _gate_shards(stage='gate'):
+def _gate_activity(d):
+    """Newest mtime of anything a run writes in a stage dir, 0 if none."""
+    import glob
+    newest = 0.0
+    for f in ([os.path.join(d, 'plan.json'), os.path.join(d, 'progress.json')]
+              + glob.glob(os.path.join(d, '*-*.parquet'))):
+        try:
+            newest = max(newest, os.path.getmtime(f))
+        except OSError:
+            pass
+    return newest
+
+
+def side_gate_root(stage='gate'):
+    """The stages root of a gate/leash pass over a side store, or None.
+
+    A candidate detector's boxes are judged under their own root
+    (data/gate_<store>/, gate_store's $GATE_ROOT) so data/gate keeps the live
+    store's verdicts. The panel read data/ only, so that pass was invisible.
+    Shown -- the way the sweep panel shows a side-store sweep -- while it is
+    running or newer than the live record; never a root without a plan.
+    """
+    import glob
+    data = os.path.join(REPO, 'data')
+    live = _gate_activity(gate_dir(stage))
+    best, best_t = None, 0.0
+    for r in sorted(glob.glob(os.path.join(data, 'gate_*'))):
+        if not os.path.isfile(os.path.join(gate_dir(stage, r), 'plan.json')):
+            continue
+        t = _gate_activity(gate_dir(stage, r))
+        if (gate_pids(stage, r) or t > live) and t >= best_t:
+            best, best_t = r, t
+    return best
+
+
+def _gate_shards(stage='gate', root=None):
     """The written record, read incrementally."""
     now = time.time()
-    memo = _GATE.setdefault(stage, {'at': 0.0, 'doc': None})
-    files = _GATE_FILES.setdefault(stage, {})
+    key = stage if root is None else f'{stage}@{root}'
+    memo = _GATE.setdefault(key, {'at': 0.0, 'doc': None})
+    files = _GATE_FILES.setdefault(key, {})
     if memo['doc'] is not None and now - memo['at'] < GATE_TTL_S:
         return memo['doc']
-    d, pre = gate_dir(stage), GATE_STAGES[stage]['dir']
+    d, pre = gate_dir(stage, root), GATE_STAGES[stage]['dir']
     doc = None
     try:
         with open(os.path.join(d, 'plan.json')) as fh:
@@ -6485,7 +6524,7 @@ def _gate_shards(stage='gate'):
     return doc
 
 
-def _gate_beat(stage='gate'):
+def _gate_beat(stage='gate', root=None):
     """What the run is doing BETWEEN shards.
 
     A shard is 20,000 frames, so on a cold start the footers say nothing for
@@ -6497,7 +6536,7 @@ def _gate_beat(stage='gate'):
     it is the one part of this panel that changes by the second.
     """
     try:
-        with open(os.path.join(gate_dir(stage), 'progress.json')) as fh:
+        with open(os.path.join(gate_dir(stage, root), 'progress.json')) as fh:
             b = json.load(fh)
     except (OSError, ValueError):
         return None
@@ -6510,7 +6549,7 @@ def _gate_beat(stage='gate'):
     return b if fresh else None
 
 
-def gate_upstream(stage):
+def gate_upstream(stage, root=None):
     """How far the stage this one FEEDS ON has got, or None.
 
     The leash model judges the gate's dogs, so it cannot be planned until the
@@ -6521,7 +6560,7 @@ def gate_upstream(stage):
     up = GATE_STAGES[stage]['feeds_on']
     if not up:
         return None
-    s = _gate_shards(up)
+    s = _gate_shards(up, root)
     if s is None:
         return {'stage': up, 'title': GATE_STAGES[up]['title'],
                 'rows': 0, 'total': 0, 'shards': 0, 'shards_total': 0,
@@ -6532,17 +6571,17 @@ def gate_upstream(stage):
             'ready': s['done']}
 
 
-def gate_progress(stage='gate'):
+def gate_progress(stage='gate', root=None):
     """How far a stage has got: the shards it has written, plus the shard it
     is in the middle of."""
     if stage not in GATE_STAGES:
         return {'ever': False, 'error': f'unknown stage {stage}'}
-    shards = _gate_shards(stage)
-    up = gate_upstream(stage)
+    shards = _gate_shards(stage, root)
+    up = gate_upstream(stage, root)
     if shards is None:
         return {'ever': False, 'stage': stage, 'upstream': up,
                 'planned': False}
-    beat = _gate_beat(stage) or {}
+    beat = _gate_beat(stage, root) or {}
     rows = shards['rows'] + int(_num_or(beat.get('rows_flight'), 0))
     total, dogs, seen = shards['total'], shards['dogs'], shards['seen']
     rate, sus = shards['rate'], shards['sustained']
@@ -9944,7 +9983,24 @@ def _triage_control(action, backend='siglip'):
     return {'ok': False, 'msg': 'unknown action'}
 
 
-def gate_pids(stage='gate'):
+def _pid_gate_root(pid):
+    """The stages root a gate_store process writes under: its $GATE_ROOT
+    (anchored at the repo, as gate_store anchors it), or data/."""
+    data = os.path.realpath(os.path.join(REPO, 'data'))
+    try:
+        with open(f'/proc/{pid}/environ', 'rb') as f:
+            env = dict(kv.split('=', 1) for kv in
+                       f.read().decode('utf-8', 'replace').split('\0')
+                       if '=' in kv)
+    except OSError:
+        return data
+    r = env.get('GATE_ROOT')
+    if not r:
+        return data
+    return os.path.realpath(r if os.path.isabs(r) else os.path.join(REPO, r))
+
+
+def gate_pids(stage='gate', root=None):
     """PIDs running gate_store.py for THIS stage.
 
     Both stages are the same script with the same subcommand, so matching on
@@ -9967,7 +10023,11 @@ def gate_pids(stage='gate'):
                 got = argv[i + 1]
             elif a.startswith('--stage='):
                 got = a.split('=', 1)[1]
-        if got == stage:
+        # and the ROOT: a pass over a side store is the same script, stage
+        # and subcommand, and counting it here showed it as the live gate --
+        # with a Stop button that would have killed it
+        want = os.path.realpath(root or os.path.join(REPO, 'data'))
+        if got == stage and _pid_gate_root(pid) == want:
             out.append(pid)
     return out
 
@@ -11695,17 +11755,26 @@ class BoardHandler(SimpleHTTPRequestHandler):
                 stage = (q.get('stage', ['gate'])[0]
                          if q.get('stage', ['gate'])[0] in GATE_STAGES
                          else 'gate')
-                doc = gate_progress(stage)
+                # a pass over a side store, while it runs or is newer than
+                # the live record; its numbers are not the live verdicts and
+                # the controls act on data/ only, so it is shown read-only
+                side = side_gate_root(stage)
+                doc = gate_progress(stage, side)
                 # liveness from the process table, not from the file dates:
                 # a run killed mid-shard leaves recent mtimes behind
-                doc['running'] = bool(gate_pids(stage))
+                doc['running'] = bool(gate_pids(stage, side))
                 doc['planning'] = gate_planning()
                 # what a re-run would judge with, beside what judged so far
                 doc['best_model'] = stage_best(stage)
-                doc['models'] = (_gate_shards(stage) or {}).get('models') or {}
-                doc['last_archive'] = gate_last_archive(stage)
-                doc['last_shard_at'] = (_gate_shards(stage) or {}).get('last')
-                doc['can_run'] = bool(DOGBIN_PYTHON) and (
+                doc['models'] = (_gate_shards(stage, side) or {}).get(
+                    'models') or {}
+                doc['last_archive'] = None if side else gate_last_archive(
+                    stage)
+                doc['last_shard_at'] = (_gate_shards(stage, side) or {}).get(
+                    'last')
+                doc['side_store'] = bool(side)
+                doc['store'] = os.path.basename(side) if side else None
+                doc['can_run'] = (not side) and bool(DOGBIN_PYTHON) and (
                     not doc.get('upstream')
                     or doc['upstream']['ready'])
                 self._json(doc)
@@ -17115,7 +17184,13 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
        an error: a stage waiting on the one upstream, a stage that has never
        been planned, and a run that has started but not yet closed a shard. */
     var up=j.upstream, waiting=up&&!up.ready;
-    document.getElementById('gMeta').textContent=j.error||
+    /* a pass over a candidate detector's store: not the live verdicts, and
+       the buttons act on the live record only, so they go */
+    var gctl=document.getElementById('gateCtl');
+    if(gctl&&window.__stage!=='detect')gctl.hidden=!!j.side_store;
+    document.getElementById('gMeta').textContent=(j.side_store
+      ? 'separate store '+(j.store||'')+' \u2014 a candidate detector\u2019s '+
+        'boxes, not the live verdicts. ':'')+(j.error||
       (waiting
         ? 'waiting on the '+up.title+' \u2014 '+fmt(up.rows)+' of '+
           fmt(up.total)+' boxes judged. This stage reads its verdicts, so it '+
@@ -17128,7 +17203,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
           : j.running&&j.images_done==null&&!j.rows
             ? 'running \u2014 nothing is written until the first shard '+
               'closes at 20,000 frames'
-            : '');
+            : ''));
     var pill=document.getElementById('gateState'),
         btn=document.getElementById('gateBtn');
     if(pill){

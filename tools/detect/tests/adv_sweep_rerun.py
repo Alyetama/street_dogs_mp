@@ -824,7 +824,7 @@ try:
     src_d = open(d.__file__).read()
     check(
         'v3 the gate panel is told when its newest shard landed',
-        "doc['last_shard_at'] = (_gate_shards(stage) or {}).get('last')"
+        "doc['last_shard_at'] = (_gate_shards(stage, side) or {}).get("
         in src_d and "j.last_shard_at" in page, 'last_shard_at not wired')
 finally:
     for k, v in real.items():

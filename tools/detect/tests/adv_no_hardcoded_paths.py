@@ -50,6 +50,7 @@ EXTRA = (
     'tools/detect/tests/adv_sweep_pacing.py',
     'tools/detect/tests/adv_disk_order.py',
     'tools/detect/tests/adv_gate_protocol.py',
+    'tools/detect/tests/adv_side_gate_panel.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
