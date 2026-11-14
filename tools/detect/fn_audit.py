@@ -267,6 +267,10 @@ def build(args):
     with open(os.path.join(P['out'], 'pool.json'), 'w') as fh:
         json.dump({'stage': stage, 'built': time.time(), 'rows': int(n),
                    'shards': len(glob.glob(shards)),
+                   # HOW those verdicts were made: a re-run at another imgsz
+                   # keeps the model name and can keep the shard count, so
+                   # the count alone cannot tell the pool is out of date
+                   'protocol': _protocol_now(P),
                    'sequences': int(seqs)}, fh)
     for i, (lo, hi) in enumerate(BANDS):
         c = con.execute(f"SELECT count(*), count(DISTINCT seq) "
@@ -275,6 +279,13 @@ def build(args):
         print(f"  {sp['p_col']} {lo:.1f}-{hi:.1f}  {c[0]:>10,} boxes  "
               f"{c[1]:>9,} sequences")
     return 0
+
+
+def _protocol_now(P):
+    """The stage store's protocol tag, the runner's own reading of it."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import gate_store
+    return gate_store.protocol_tag(P['store'])
 
 
 def pool_info(stage=DEFAULT_STAGE):
@@ -297,7 +308,11 @@ def pool_info(stage=DEFAULT_STAGE):
     # what establishes it either way.
     doc['unknown'] = 'shards' not in doc
     then = int(doc.get('shards') or 0)
-    doc['stale'] = (not doc['unknown']) and now > then
+    # a pool cut before the key existed was cut from the legacy 224 verdicts
+    doc['protocol_now'] = _protocol_now(P)
+    proto_moved = doc.get('protocol', 'legacy') != doc['protocol_now'] \
+        and doc['protocol_now'] != ''
+    doc['stale'] = (not doc['unknown']) and (now > then or proto_moved)
     doc['behind'] = max(0, now - then) if not doc['unknown'] else 0
     return doc
 

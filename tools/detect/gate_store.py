@@ -475,6 +475,36 @@ def _init(roots):
     _ROOTS = roots
 
 
+def cut_crops(im, boxes):
+    """[(det_idx, x1, y1, x2, y2)] on a decoded RGB frame -> [(det_idx, crop)].
+
+    Each crop is the padded box at FULL resolution -- never resized here.
+    The models were trained and accepted on crop files that ultralytics
+    resized itself (shortest side to the train imgsz, then centre-cropped), so
+    handing predict() the same un-resized crop is what makes a store verdict
+    the verdict the acceptance numbers describe. The old path squashed every
+    crop to 224x224 and predicted at 224 against models trained at 640;
+    measured on dogbin_008, that took v5-val dog recall@0.5 from 0.936 to
+    0.330 and leash_v2_001 acceptance balanced accuracy from 0.895 to 0.718.
+    """
+    w, h = im.size
+    out = []
+    for di, x1, y1, x2, y2 in boxes:
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        pad = int(PAD_FRAC * max(x2 - x1, y2 - y1)) + PAD_PX
+        a, b = max(0, x1 - pad), max(0, y1 - pad)
+        c, d = min(w, x2 + pad), min(h, y2 + pad)
+        if c - a < MIN_SIDE or d - b < MIN_SIDE:
+            continue
+        # a crop, not the frame: a decoded 8000x4000 frame is 96 MB and must
+        # never cross the process boundary. crop() is lazy, so load() it
+        # before the frame is closed.
+        cr = im.crop((a, b, c, d))
+        cr.load()
+        out.append((di, cr))
+    return out
+
+
 def _cut(job):
     """(image_id, cell, drive, [(det_idx, box)]) -> [(det_idx, crop)]."""
     from PIL import Image
@@ -490,21 +520,157 @@ def _cut(job):
             im = im.convert('RGB')
     except Exception:
         return iid, [], 'unreadable'
-    w, h = im.size
-    out = []
-    for di, x1, y1, x2, y2 in boxes:
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        pad = int(PAD_FRAC * max(x2 - x1, y2 - y1)) + PAD_PX
-        a, b = max(0, x1 - pad), max(0, y1 - pad)
-        c, d = min(w, x2 + pad), min(h, y2 + pad)
-        if c - a < MIN_SIDE or d - b < MIN_SIDE:
-            continue
-        # returned as bytes, not a PIL handle: a decoded 8000x4000 frame is
-        # 96 MB and must never cross the process boundary
-        out.append((di, im.crop((a, b, c, d)).resize((224, 224),
-                                                     Image.BILINEAR)))
+    out = cut_crops(im, boxes)
     im.close()
     return iid, out, ''
+
+
+def model_imgsz(model):
+    """The imgsz a classifier was TRAINED at, from its own checkpoint.
+
+    Never a constant here: a constant is what let the runner predict at 224
+    for months against models trained at 640. None when the checkpoint does
+    not say, and the caller refuses rather than guessing.
+    """
+    for src in ((getattr(model, 'ckpt', None) or {}).get('train_args'),
+                getattr(model, 'overrides', None)):
+        try:
+            v = (src or {}).get('imgsz')
+        except AttributeError:
+            v = None
+        if isinstance(v, (list, tuple)) and v:
+            v = max(v)
+        if isinstance(v, int) and v > 0:
+            return v
+    return None
+
+
+def auto_batch(imgsz, at224=128):
+    """Crops per predict call, holding pixels per batch to what 128 crops at
+    224 used. Measured: --batch 128 at imgsz 640 asks for 12.8 GB and OOMs
+    the 16 GB card."""
+    v = int(at224 * (224 / imgsz) ** 2 + 0.5)
+    return v // 8 * 8 if v >= 8 else max(1, v)
+
+
+# How the verdicts in a stage directory were produced. Pinned on a job's first
+# run, like the shard size: shards from two protocols in one directory would
+# read as one model's opinion when they are two different measurements.
+PROTOCOL_FILE = 'protocol.json'
+CROP_MODE = 'full'
+
+
+def check_protocol(want, out_dir=None, shards=None):
+    """'' or the message refusing to mix protocols in one stage directory.
+
+    `want` is {'crop': ..., 'imgsz': ...}. Shards already on disk with no
+    protocol file were written by the legacy runner (224x224 squash, predict
+    at 224), so they are refused too: resuming that job would append 640
+    verdicts to 224 ones under one model name.
+    """
+    d = out_dir or OUT_DIR
+    have_shards = done_shards() if shards is None else shards
+    try:
+        with open(os.path.join(d, PROTOCOL_FILE)) as fh:
+            pinned = json.load(fh)
+    except (OSError, ValueError):
+        pinned = None
+    if pinned is None and have_shards:
+        pinned = {'crop': 'squash224', 'imgsz': 224, 'legacy': True}
+    if pinned is None or not have_shards:
+        return ''
+    if {k: pinned.get(k) for k in want} == want:
+        return ''
+    return (f'{len(have_shards)} shards in {os.path.relpath(d, REPO)}/ were '
+            f'written with crop={pinned.get("crop")} imgsz={pinned.get("imgsz")}'
+            f'{" (the legacy runner)" if pinned.get("legacy") else ""}; this run '
+            f'would add crop={want["crop"]} '
+            f'imgsz={want["imgsz"] or "<as trained>"} to the same '
+            f'record. Set the old verdicts aside first: '
+            + (f'`gate_store.py archive --stage {STAGE} --replan`, then '
+               f'`plan` again.' if STAGES[STAGE]['feeds_on'] else
+               f'`gate_store.py archive --stage {STAGE}`.'))
+
+
+def pin_protocol(want, out_dir=None):
+    d = out_dir or OUT_DIR
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, PROTOCOL_FILE + '.tmp')
+    with open(tmp, 'w') as fh:
+        json.dump(want, fh)
+        fh.write('\n')
+    os.replace(tmp, os.path.join(d, PROTOCOL_FILE))
+
+
+def protocol_tag(out_dir):
+    """'<crop>@<imgsz>' for the verdicts in a stage directory: 'legacy' for a
+    record written before protocol.json existed (224 squash), '' for none."""
+    try:
+        with open(os.path.join(out_dir, PROTOCOL_FILE)) as fh:
+            p = json.load(fh)
+        return f"{p.get('crop')}@{p.get('imgsz')}"
+    except (OSError, ValueError, AttributeError):
+        pre = os.path.basename(os.path.normpath(out_dir)) + '-'
+        try:
+            legacy = any(f.startswith(pre) and f.endswith('.parquet')
+                         for f in os.listdir(out_dir))
+        except OSError:
+            legacy = False
+        return 'legacy' if legacy else ''
+
+
+def stale_plan(stage=None, repo=None):
+    """'' or why this stage's work list is older than what it was built from.
+
+    The leash list is the gate's dogs at plan time. Re-run the gate -- with a
+    new model, or at the right imgsz -- and the list still names the OLD
+    gate's dogs; a leash run over it writes a complete-looking record that
+    never judges any dog only the new gate found, and nothing reports the
+    gap. The dashboard's re-run replans on the same test (_gate_stale_plan);
+    this is the one the CLI and the runner apply.
+    """
+    stage = stage or STAGE
+    up = STAGES[stage]['feeds_on']
+    if not up:
+        return ''
+    d = _stage_dir(stage, repo)
+    try:
+        made = os.path.getmtime(os.path.join(d, 'work.parquet'))
+    except OSError:
+        return ''
+    ud = _stage_dir(up, repo)
+    newest = 0.0
+    for f in _verdict_files(up, repo):
+        try:
+            newest = max(newest, os.path.getmtime(os.path.join(ud, f)))
+        except OSError:
+            pass
+    if newest > made:
+        return (f'the {STAGES[stage]["title"]} work list was built '
+                f'{time.strftime("%F %T", time.localtime(made))}, before the '
+                f'{STAGES[up]["title"]} verdicts it reads were last written '
+                f'({time.strftime("%F %T", time.localtime(newest))})')
+    return ''
+
+
+def live_runner(out_dir=None):
+    """The pid of a runner still writing this stage, or None. Read off the
+    heartbeat, and only believed if that pid is alive AND is a gate_store
+    process -- a stale file names a pid the kernel may have reused."""
+    d = out_dir or OUT_DIR
+    try:
+        with open(os.path.join(d, 'progress.json')) as fh:
+            pid = int(json.load(fh).get('pid') or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if pid <= 0 or pid == os.getpid():
+        return None
+    try:
+        with open(f'/proc/{pid}/cmdline', 'rb') as fh:
+            cmd = fh.read().replace(b'\0', b' ').decode('utf-8', 'replace')
+    except OSError:
+        return None
+    return pid if 'gate_store' in cmd else None
 
 
 def run(args):
@@ -515,6 +681,15 @@ def run(args):
 
     if not os.path.exists(os.path.join(OUT_DIR, 'work.parquet')):
         raise SystemExit('no plan yet -- run `gate_store.py plan` first')
+    # Both refusals come BEFORE the model and the 4.7M-row work list load: the
+    # dashboard waits ~2.5 s after spawning a run to see whether it died, and
+    # a refusal that lands after that is reported as a run that started.
+    if done_shards() and protocol_tag(OUT_DIR) == 'legacy':
+        raise SystemExit(check_protocol({'crop': CROP_MODE, 'imgsz': None}))
+    _no = stale_plan()
+    if _no:
+        raise SystemExit(f'{_no}. Re-plan first: `gate_store.py archive '
+                         f'--stage {STAGE} --replan`, then `plan`.')
     work = pq.read_table(os.path.join(OUT_DIR, 'work.parquet')).to_pydict()
     n = len(work['image_id'])
 
@@ -530,6 +705,19 @@ def run(args):
     pos = sp['positive']
     dog_idx = [k for k, v in names.items() if v == pos][0]
     other = next(c for c in sp['classes'] if c != pos)
+
+    imgsz = args.imgsz or model_imgsz(model)
+    if not imgsz:
+        raise SystemExit(f'{weights} does not record the imgsz it was trained '
+                         f'at -- pass --imgsz explicitly')
+    want = {'crop': CROP_MODE, 'imgsz': int(imgsz)}
+    if not args.batch:
+        args.batch = auto_batch(imgsz)
+    _no = check_protocol(want)
+    if _no:
+        raise SystemExit(_no)
+    print(f'{sp["title"]}: {run_name}, full-resolution crops, '
+          f'predict at imgsz={imgsz}, batch {args.batch}')
 
     # group into images, keeping the plan's order
     #
@@ -576,6 +764,7 @@ def run(args):
           f'{len(skip)} already done'
           + (f'; stopping after shard {stop - 1}' if stop is not None else ''))
 
+    pin_protocol(want)
     roots = _roots()
     t0, seen, bad = time.time(), 0, 0
     # frames the shards on disk already account for -- `seen` counts only what
@@ -591,7 +780,7 @@ def run(args):
               images=base + seen, images_total=len(jobs),
               rows_flight=flight, boxes=boxes_run, bad=bad,
               img_s=round(seen / el, 2), box_s=round(boxes_run / el, 2),
-              dogs=dogs_run,
+              dogs=dogs_run, imgsz=imgsz,
               dog_share=(dogs_run / boxes_run) if boxes_run else None)
 
     # The first one goes out BEFORE any frame is read: the model is already
@@ -614,7 +803,7 @@ def run(args):
                     return
                 for res, (iid, di) in zip(
                         model.predict(batch, verbose=False,
-                                      device=args.device, imgsz=224), meta):
+                                      device=args.device, imgsz=imgsz), meta):
                     p = float(res.probs.data[dog_idx])
                     rows['image_id'].append(iid)
                     rows['det_idx'].append(int(di))
@@ -737,6 +926,10 @@ def archive_run(stage, models, best, replan=False, reason='', repo=None,
     moving = _verdict_files(stage, repo)
     if os.path.exists(os.path.join(d, 'progress.json')):
         moving.append('progress.json')
+    # the protocol describes the verdicts, so it travels with them -- left
+    # behind, it would pin the next job to the old one's crop and imgsz
+    if os.path.exists(os.path.join(d, PROTOCOL_FILE)):
+        moving.append(PROTOCOL_FILE)
     if replan:
         moving += [f for f in PLAN_FILES if os.path.exists(os.path.join(d, f))]
     if not moving:
@@ -796,6 +989,48 @@ def restore_run(stage, name, repo=None, now=None):
     return {'restored': files, 'set_aside': current and current['name']}
 
 
+def shard_models():
+    """{model run: rows} over this stage's verdict shards, for the archive
+    note -- so an archive says what wrote it without anybody opening one."""
+    import pyarrow.parquet as pq
+    got = {}
+    for f in _verdict_files(STAGE):
+        try:
+            col = pq.read_table(os.path.join(OUT_DIR, f), columns=['model'])
+        except Exception:
+            continue
+        for m in col['model'].to_pylist():
+            got[m] = got.get(m, 0) + 1
+    return got
+
+
+def archive(args):
+    """CLI: set a stage's verdicts aside so the next run starts clean."""
+    best = None
+    try:
+        best = gate_weights()[1]
+    except SystemExit:
+        pass
+    pid = live_runner()
+    if pid:
+        raise SystemExit(f'the {spec()["title"]} is running (pid {pid}) -- '
+                         f'stop it first; archiving under a live run splits '
+                         f'its record in two')
+    replan = args.replan
+    why = stale_plan()
+    if why and not replan:
+        print(f'{why} -- moving the work list too (--replan)')
+        replan = True
+    note = archive_run(STAGE, shard_models(), best, replan=replan,
+                       reason=args.reason or 'archived from the CLI')
+    if not note:
+        print(f'nothing to archive in {os.path.relpath(OUT_DIR, REPO)}/')
+        return 0
+    print(f"archived {len(note['files'])} files to "
+          f"{os.path.relpath(note['path'], REPO)}\n  undo: {note['restore']}")
+    return 0
+
+
 def restore(args):
     """CLI: list the archives, or put one back."""
     base = os.path.join(OUT_DIR, ARCHIVE)
@@ -835,9 +1070,14 @@ def main(argv=None):
                         'reached')
     r = sub.add_parser('run'); r.set_defaults(fn=run)
     r.add_argument('--workers', type=int, default=max(2, (os.cpu_count() or 4)))
-    r.add_argument('--batch', type=int, default=128)
+    r.add_argument('--batch', type=int, default=0,
+                   help='crops per predict call; default scales with imgsz '
+                        '(128 at 224, 16 at 640 -- 128 at 640 OOMs a 16 GB card)')
     r.add_argument('--shard', type=int, default=SHARD_ROWS)
     r.add_argument('--device', default=0)
+    r.add_argument('--imgsz', type=int, default=0,
+                   help='predict at this size instead of the one the '
+                        'model was trained at (for experiments only)')
     r.add_argument('--limit', type=int, default=0,
                    help='stop after this many BOXES (for a trial run)')
     s = sub.add_parser('status'); s.set_defaults(fn=status)
@@ -846,9 +1086,16 @@ def main(argv=None):
     rs.set_defaults(fn=restore)
     rs.add_argument('--archive', default=None,
                     help='the archive to put back (omit to list them)')
+    ar = sub.add_parser('archive', help="move a stage's verdicts (and with "
+                        '--replan its work list) into archive/<when>/')
+    ar.set_defaults(fn=archive)
+    ar.add_argument('--replan', action='store_true',
+                    help='also move plan.json/work.parquet/shard_size, for a '
+                         'store or upstream that has changed')
+    ar.add_argument('--reason', default='')
     # every subcommand takes it, and it has to be applied before any of them
     # touches a path
-    for sp_ in (p, r, s, rs):
+    for sp_ in (p, r, s, rs, ar):
         sp_.add_argument('--stage', default='gate', choices=sorted(STAGES),
                          help='which pass over the store to work on')
     a = ap.parse_args(argv)

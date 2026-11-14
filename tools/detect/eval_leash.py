@@ -136,7 +136,10 @@ def main():
                          'train-set number with nothing to flag it. Measured: '
                          'leash_03_jun_26-3 scores 0.9334 balanced accuracy on '
                          'a set whose 312 ids are all in its own training data.')
-    ap.add_argument('--imgsz', type=int, default=640)
+    # default: the size the model was TRAINED at, read from its checkpoint --
+    # the same lookup tools/detect/gate_store.py predicts with, so an
+    # acceptance number and a store verdict are made at one size
+    ap.add_argument('--imgsz', type=int, default=0)
     ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--device', default='0')
     ap.add_argument('--json', help='also write the metrics here')
@@ -147,6 +150,14 @@ def main():
 
     model = YOLO(args.weights)
     print(f'model   : {args.weights}')
+    if not args.imgsz:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gate_store import model_imgsz
+        args.imgsz = model_imgsz(model)
+        if not args.imgsz:
+            raise SystemExit('the checkpoint does not record its train '
+                             'imgsz -- pass --imgsz')
+    print(f'imgsz   : {args.imgsz}')
     print(f'classes : {model.names}')
 
     def score(d):

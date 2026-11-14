@@ -198,7 +198,10 @@ def main():
                                          'not_dog'),
                     help='full-resolution harvest dir the reserved ids are '
                          'drawn from')
-    ap.add_argument('--imgsz', type=int, default=640)
+    # default: the size the model was TRAINED at, read from its checkpoint --
+    # the same lookup tools/detect/gate_store.py predicts with, so an
+    # acceptance number and a store verdict are made at one size
+    ap.add_argument('--imgsz', type=int, default=0)
     # small by default on purpose: this tool is meant to be run WHILE the
     # 32.5M-image sweep holds most of the GPU, and a batch of 64 OOMs there
     ap.add_argument('--batch', type=int, default=8)
@@ -215,6 +218,14 @@ def main():
         raise SystemExit('pass --data or set $DOGBIN_DATASET')
     model = YOLO(args.weights)
     print(f'model   : {args.weights}')
+    if not args.imgsz:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gate_store import model_imgsz
+        args.imgsz = model_imgsz(model)
+        if not args.imgsz:
+            raise SystemExit('the checkpoint does not record its train '
+                             'imgsz -- pass --imgsz')
+    print(f'imgsz   : {args.imgsz}')
     print(f'classes : {model.names}')
 
     root = os.path.join(args.data, args.split)
