@@ -449,6 +449,19 @@ def save_correction(key, box, stage=DEFAULT_STAGE, by=None):
         return {'ok': False, 'msg': 'malformed box'}
     if x2 - x1 < MIN_SIDE or y2 - y1 < MIN_SIDE:
         return {'ok': False, 'msg': f'a box under {MIN_SIDE}px is not a box'}
+    # The detector's own box, untouched, is nobody's geometry. Written here
+    # it reads to every consumer as "a person framed this", which is how
+    # twelve unmoved editors became corrections in Oct 2026. It is still
+    # taken when a correction is already on record: there, writing the
+    # model's box back is how a reviewer withdraws their redraw (last write
+    # wins), and refusing it would leave the withdrawn box in force.
+    same = all(round(v, 2) == round(float(cand[k]), 2)
+               for v, k in zip((x1, y1, x2, y2), ('x1', 'y1', 'x2', 'y2')))
+    if same and (str(cand['image_id']),
+                 int(cand['det_idx'])) not in corrections():
+        return {'ok': False,
+                'msg': "that is the model's own box, unchanged -- nothing "
+                       "to save"}
     rec = {'crop': f"audit:{stage}", 'image_id': str(cand['image_id']),
            'det_idx': int(cand['det_idx']),
            'x1': round(x1, 2), 'y1': round(y1, 2),
@@ -1153,6 +1166,7 @@ __DATECSS__
 .lbcap button{background:var(--panel2);border:1px solid var(--bd);
   color:var(--mut);border-radius:7px;padding:4px 9px;font-size:11.5px;
   cursor:pointer;font-family:inherit}
+.lbcap button:disabled{opacity:.4;cursor:default}
 .undotoast{position:fixed;right:24px;bottom:24px;display:flex;gap:12px;
   align-items:center;background:var(--panel2);border:1px solid var(--bd);
   border-radius:12px;padding:10px 12px;z-index:60;
@@ -2198,7 +2212,8 @@ function edStart(){
          was never asked for, holding this one's offsets. */
       var now=page&&page.items[cur];
       if(lb.hidden||!now||now.key!==it.key){URL.revokeObjectURL(pair[1]);return}
-      EDIT.meta=m;EDIT.box=m.box.slice();
+      EDIT.meta=m;EDIT.box=m.box.slice();EDIT.start=m.box.slice();
+      edDirty();
       if(EDIT.url)URL.revokeObjectURL(EDIT.url);
       EDIT.url=pair[1];
       /* Show the editor when the picture is measurable, however it gets
@@ -2222,15 +2237,35 @@ function edStop(){
      appended to the shared corrections store, re-cut, and re-filed into the
      dataset if the crop had already been judged. */
   lbimg.onload=null;lbimg.onerror=null;
-  EDIT.meta=null;EDIT.box=null;EDIT.drag=null;
+  EDIT.meta=null;EDIT.box=null;EDIT.drag=null;EDIT.start=null;
   edShow(false);
   if(EDIT.url){URL.revokeObjectURL(EDIT.url);EDIT.url=null}
   var it=page&&page.items[cur];
   if(it)lbimg.src=cropSrc(it);
 }
+/* The editor opens on the box already on record -- the detector's, until
+   somebody redraws it -- so Save before any drag sent that box straight
+   back, and the corrections store took the model's geometry as a person's.
+   Twelve boxes went in that way (Oct 2026), each one Save or Enter pressed
+   on an editor nobody had touched. Compared in ORIGINAL pixels at the
+   ledger's two decimals, the precision the server rounds to. */
+function edOrig(b){var m=EDIT.meta;return [m.off_x+b[0]/m.scale,
+  m.off_y+b[1]/m.scale,m.off_x+b[2]/m.scale,m.off_y+b[3]/m.scale]}
+function edMoved(){
+  if(!EDIT.meta||!EDIT.box||!EDIT.start)return false;
+  var a=edOrig(EDIT.box),s=edOrig(EDIT.start);
+  for(var i=0;i<4;i++)if(Math.round(a[i]*100)!==Math.round(s[i]*100))return true;
+  return false;
+}
+function edDirty(){
+  var s=document.getElementById('lbsave'),on=edMoved();
+  s.disabled=!on;
+  s.title=on?'':'drag a corner or the box first -- nothing has changed';
+}
 function edSave(){
   var it=page&&page.items[cur],m=EDIT.meta,b=EDIT.box;
   if(!it||!m||!b)return;
+  if(!edMoved()){toast('the box has not moved -- nothing to save');return}
   fetch('/api/audit/box?stage='+STAGE,{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({key:it.key,box:[
@@ -2282,7 +2317,7 @@ document.addEventListener('mousemove',function(e){
     if(b[2]-b[0]<4)b[2]=Math.min(W,b[0]+4);
     if(b[3]-b[1]<4)b[3]=Math.min(H,b[1]+4);
   }
-  EDIT.box=b;edPaint();
+  EDIT.box=b;edPaint();edDirty();
 });
 document.addEventListener('mouseup',function(){EDIT.drag=null});
 window.addEventListener('resize',function(){if(EDIT.on)edPaint()});

@@ -793,6 +793,54 @@ def correction_checks(bad):
         bad.append(f'cutting a corrected box threw {type(e).__name__}: {e}')
     finally:
         audit.fa.paths = real_paths
+    # Save on an editor nobody touched sent the detector's box straight back,
+    # and twelve boxes sit in the corrections store that way: the model's
+    # geometry, filed as a person's. The server refuses it while nothing is
+    # on record for the box, and takes it once something is -- that write is
+    # how a redraw is withdrawn. The page must not send it in the first place.
+    import tempfile as _tf3
+    t3 = _tf3.mkdtemp()
+    bf3, row3, cut3, seen3 = (audit.BOX_FILE, audit._pool_row,
+                              audit._cut_one, audit.fa.read_verdicts)
+    audit.BOX_FILE = os.path.join(t3, 'boxes.jsonl')
+    audit._pool_row = lambda key, stage='gate': {
+        'key': '5#0', 'image_id': '5', 'det_idx': 0,
+        'x1': 100.123, 'y1': 200.0, 'x2': 300.0, 'y2': 400.0}
+    audit._cut_one = lambda *a, **k: False
+    audit.fa.read_verdicts = lambda **k: []
+
+    def _n3():
+        try:
+            return sum(1 for ln in open(audit.BOX_FILE) if ln.strip())
+        except OSError:
+            return 0
+    try:
+        same = audit.save_correction('5#0', [100.12, 200, 300, 400], by='t')
+        if same.get('ok') or _n3():
+            bad.append('the detector\'s own box, unchanged, was saved as a '
+                       'correction -- the model\'s geometry reads as a '
+                       'person\'s to every consumer of the store')
+        n = _n3()
+        moved = audit.save_correction('5#0', [90, 200, 300, 400], by='t')
+        if not moved.get('ok') or _n3() != n + 1:
+            bad.append(f'a moved box was not saved: {moved}')
+        n = _n3()
+        back = audit.save_correction('5#0', [100.12, 200, 300, 400], by='t')
+        if not back.get('ok') or _n3() != n + 1:
+            bad.append('putting the model\'s box back over a redraw was '
+                       'refused, so a redraw can never be withdrawn: '
+                       f'{back}')
+    except Exception as e:                     # noqa: BLE001
+        bad.append(f'the unchanged-box guard threw {type(e).__name__}: {e}')
+    finally:
+        (audit.BOX_FILE, audit._pool_row, audit._cut_one,
+         audit.fa.read_verdicts) = bf3, row3, cut3, seen3
+    asrc3 = open(os.path.join(REPO, 'tools', 'dashboard', 'audit.py')).read()
+    es = asrc3.split('function edSave(){', 1)[-1].split('\n}', 1)[0]
+    if 'function edSave(){' not in asrc3 or 'edMoved()' not in es:
+        bad.append('edSave() no longer checks the box moved -- Save or Enter '
+                   'on an untouched editor sends the detector\'s box back as '
+                   'a correction')
     # The two paths that file a crop must pick the same one. place() runs on
     # every verdict and export() rebuilds from the ledger; if only one of them
     # preferred the hand-drawn cut, the dataset depended on which ran last.

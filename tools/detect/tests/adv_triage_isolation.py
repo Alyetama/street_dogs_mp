@@ -713,11 +713,41 @@ check(
     f'numbers a comparison needs', not _shape, '; '.join(_shape[:5]))
 
 # ── t5d a box on record by the detector's own geometry alone ───────────────
-_hist = {}
+# The twelve that are already on disk, and how they got there. The audit
+# page's editor opens on the box on record -- the detector's, for a box nobody
+# has redrawn -- and Save (or Enter) was live before any drag, so pressing it
+# on an untouched editor sent the model's box back as a correction. One from
+# the gate audit (Oct 1) and eleven from the leash audit (Oct 23-29), each
+# with a real verdict on the same box from the same minute: the person judged
+# the crop, and the geometry is the model's. Byte-for-byte the detector box,
+# so no crop cut from them differs from the model's cut; what is wrong is
+# only that they read as hand-framed. They are kept -- the store is
+# append-only and human-written -- and named here by key AND saved_at, so
+# the exemption covers exactly these records and nothing written after them.
+# audit.save_correction() and the page's edSave() now refuse the unmoved box
+# (adv_fn_audit.py), so this list should never grow.
+UNMOVED_AUDIT_SAVES = frozenset({
+    ('1015722804036486', 0, 1790871353),  # audit:gate
+    ('5687866867932210', 0, 1792773950),  # audit:leash, and the rest below
+    ('803677174835062', 0, 1792774426),
+    ('4356092561149191', 0, 1792776060),
+    ('619900810728847', 0, 1793043715),
+    ('222311080767028', 0, 1793044757),
+    ('1238716521723797', 0, 1793215511),
+    ('1149173890014065', 0, 1793215533),
+    ('1136191257201224', 0, 1793215550),
+    ('1858939291110519', 0, 1793215703),
+    ('694843286413510', 0, 1793305862),
+    ('1131613731178198', 1, 1793307697),
+})
+_hist, _known_unmoved = {}, {}
 for _i, _r in _boxes:
     if f'{BOXES}:{_i}' not in _shape:
-        _hist.setdefault((str(_r['image_id']), int(_r['det_idx'])), []).append(
+        _k = (str(_r['image_id']), int(_r['det_idx']))
+        _hist.setdefault(_k, []).append(
             (_r['x1'], _r['y1'], _r['x2'], _r['y2']))
+        _known_unmoved.setdefault(_k, []).append(
+            _k + (int(_r.get('saved_at') or 0), ) in UNMOVED_AUDIT_SAVES)
 
 
 def detector_boxes(keys):
@@ -762,7 +792,8 @@ if _why:
           'was compared against the box it corrects: ' + _why)
 else:
     _lone = sorted(k for k, v in _hist.items()
-                   if k in _model and all(b == _model[k] for b in v))
+                   if k in _model and all(b == _model[k] for b in v)
+                   and not all(_known_unmoved[k]))
     check(
         't5d no box is in the corrections store on the detector\'s own '
         'geometry alone', not _lone,

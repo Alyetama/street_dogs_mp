@@ -351,7 +351,9 @@ def new_record_checks(bad):
                 'det_idx': 0, 'x1': 1.0, 'y1': 2.0, 'x2': 30.0, 'y2': 40.0}
             audit._cut_one = lambda *a, **k: False
             try:
-                out = audit.save_correction(MARK + '#0', [1, 2, 30, 40],
+                # a box that MOVED: the pool's own box, unchanged, is
+                # refused as nobody's geometry
+                out = audit.save_correction(MARK + '#0', [1, 2, 31, 41],
                                             by=WHO)
                 rows = _lines(audit.BOX_FILE)
                 if not out.get('ok') or not rows:
@@ -801,7 +803,7 @@ def refusal_checks(bad):
                      lay['verdicts']),
                     ('audit.save_correction',
                      lambda: audit.save_correction(MARK + '#0',
-                                                   [1, 2, 30, 40], by=nobody),
+                                                   [1, 2, 31, 41], by=nobody),
                      audit.BOX_FILE),
                     ('leash_store.record',
                      lambda: ls.record(CROP, 'leashed', path=db,
@@ -1005,8 +1007,9 @@ def route_checks(bad):
                                                    'verdict': 'dog',
                                                    'band': 3, 'p_dog': 0.31},
                  lambda: _lines(lay['verdicts'])),
+                # moved off the pool's box: the unchanged one is refused
                 ('/api/audit/box?stage=gate', {'key': MARK + '#0',
-                                               'box': [1, 2, 30, 40]},
+                                               'box': [1, 2, 31, 41]},
                  lambda: _lines(audit.BOX_FILE)),
                 ('/api/review/leash', {'name': CROP, 'label': 'leashed'},
                  lambda: [dict(r) for r in
