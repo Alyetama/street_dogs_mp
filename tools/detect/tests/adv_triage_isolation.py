@@ -924,6 +924,27 @@ MODEL_WORKING = (
     # 'unverified' in the file itself; the builds only use it to leave frames
     # OUT, and its boxes reach the Annotate page as a hint, never a label.
     'hidden_dogs/flagged.json',
+    # the frozen test sets reserve_test_set.py draws from the two audit
+    # ledgers. Each item's label is COPIED from fn_audit/ or leash_audit/
+    # verdicts.jsonl (whose sha256 the file records) beside the model's own
+    # p_model for banding: a snapshot read for evaluation and for --reserve,
+    # never a place a reviewer's answer is first written.
+    'dogbin_test_v1.json',
+    'leash_test_v1.json',
+    # the side store a candidate detector sweeps into (DETECT_ROOT), named
+    # file by file rather than as a bulk directory because it is meant to
+    # go away at switch-over. status.json is the sweep's progress publisher
+    # (tools/detect/status.py): counts, rates and drive health, no verdict.
+    'detect_dogdet20261104/status.json',
+    # the October detector diagnosis: context.json holds the weights paths
+    # and the val/added/background image_id lists it compared on, jobs.json
+    # (and the .orig it was edited from) the inference jobs built from that,
+    # infer.py the script that ran them into out/. Inputs and tooling for a
+    # model-vs-model comparison; nobody's verdict is in any of them.
+    'detector_diagnosis/context.json',
+    'detector_diagnosis/jobs.json',
+    'detector_diagnosis/jobs.json.orig',
+    'detector_diagnosis/infer.py',
 )
 # Suffixes that are never a store wherever they turn up: page assets, logs,
 # plain-text config, sqlite journals, and the .bak/.tmp a rotation leaves.
