@@ -10489,11 +10489,7 @@ def sweep_model_state():
     except Exception:
         cur = {}
     best = detector_best()
-    same = bool(best) and bool(cur) and (
-        (best['sha256'] and best['sha256'] == cur.get('sha256'))
-        or (bool(best['engine']) and bool(cur.get('engine'))
-            and os.path.realpath(best['engine']) == os.path.realpath(
-                os.path.join(REPO, cur['engine']))))
+    same = _same_detector(best, cur)
     return {'store_model': (cur.get('comet_run') or cur.get('sha8')
                             or (os.path.basename(cur['engine'])
                                 if cur.get('engine') else None)),
@@ -10501,7 +10497,46 @@ def sweep_model_state():
             'store_started': cur.get('run_started'),
             'best_model': best and best['run'],
             'best_engine_ok': bool(best and best['engine_ok']),
-            'same': same}
+            'same': same,
+            'best_side_store': None if same else promoted_side_store(best)}
+
+
+def _same_detector(best, cur):
+    """True when the store record `cur` was written by the promoted `best`:
+    same engine digest, or the same engine file."""
+    return bool(best) and bool(cur) and bool(
+        (best['sha256'] and best['sha256'] == cur.get('sha256'))
+        or (bool(best['engine']) and bool(cur.get('engine'))
+            and os.path.realpath(best['engine']) == os.path.realpath(
+                os.path.join(REPO, cur['engine']))))
+
+
+def promoted_side_store(best=None):
+    """The side store (a sibling detect_* directory) the promoted detector
+    has already swept into, or None.
+
+    A detector is promoted BEFORE it goes live: dogdet_20261104 swept all
+    32.5M images into data/detect_dogdet20261104 while the live store stayed
+    train-30's, and it goes live at switch-over (detect_root.txt repointed),
+    after the gate and leash have judged that store. In that window the
+    live store and the promoted model differ, and 'Re-run with <promoted>'
+    would set the live store aside and spend ~4 days of GPU sweeping again
+    what the side store already holds. Never raises."""
+    best = best if best is not None else detector_best()
+    if not best or _side_status_paths is None:
+        return None
+    try:
+        live = os.path.realpath(_detect_root())
+        for p in _side_status_paths():
+            root = os.path.dirname(p)
+            if os.path.realpath(root) == live:
+                continue
+            cur = _sweep_archive().current_model(root) or {}
+            if _same_detector(best, cur):
+                return os.path.basename(root)
+    except Exception:
+        return None
+    return None
 
 
 def _sweep_spawn(engine=None):
@@ -10571,6 +10606,14 @@ def sweep_control(action):
         # the same model again is allowed: the page says so before the
         # click is confirmed, and it is the operator's GPU to spend
         st = sweep_model_state()
+        if st.get('best_side_store'):
+            return {'ok': False, 'running': False,
+                    'msg': f'{best["run"]} has already swept into '
+                           f'data/{st["best_side_store"]} -- sweeping the '
+                           f'live store again would repeat days of work. '
+                           f'Switch over instead: run the gate and leash on '
+                           f'that store, then point data/detect_root.txt '
+                           f'at it.'}
         try:
             root = _detect_root()
             note = _sweep_archive().archive_store(
@@ -17851,7 +17894,9 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
   function paintRerun(j){
     if(!rr||rr.dataset.busy==='1')return;
     var best=j.best_model||'';
-    rr.hidden=!best||!!j.running;
+    /* the promoted detector already swept into its own store: the next
+       step is the switch-over, not a re-sweep of the live store */
+    rr.hidden=!best||!!j.running||!!j.best_side_store;
     rr.disabled=false;
     rr.textContent=j.same?'Re-run':'Re-run with '+best;
     rr.dataset.best=best;

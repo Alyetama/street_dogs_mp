@@ -18,20 +18,21 @@
     "dogdetection": {
       "role": "detector - finds dogs in street imagery, one class (the sweep runs this). The HARVEST collects ground animals; this model is trained single_cls on a set whose only class is \"target\" = dog, so a non-dog animal in its output is a false positive, which is what the dog-bin gate downstream exists to catch.",
       "best": {
-        "run": "train-30",
-        "key": "ef4a85c3c1ee4bfc8d6805fb413c43f3",
-        "date": "2026-06-05",
+        "run": "dogdet_20261104_77b733_20261104-1708",
+        "key": null,
+        "date": "2026-11-04",
         "metrics": {
-          "mAP50": 0.8708,
-          "mAP50-95": 0.4973,
-          "precision": 0.8977,
-          "recall": 0.8764
+          "mAP50": 0.9151,
+          "mAP50-95": 0.5184,
+          "precision": 0.9025,
+          "recall": 0.8674
         },
-        "weights": "data/engines/yolo26x_train30.pt",
-        "engine": "data/engines/yolo26x_train30.engine",
-        "sha256_engine": "ac98daeecefa24406f2f776348f0eb7101f94b7fc1267ef6d7fbde19950f0803",
-        "why": "In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page.",
-        "deployed": true
+        "weights": "data/engines/yolo26x_dogdet_20261104.pt",
+        "engine": "data/engines/yolo26x_dogdet_20261104.engine",
+        "sha256_engine": "047b6268df683427eb2a648d2e7b916468c59910df3cffb372ae0d02e3993343",
+        "count_conf_min": 0.25,
+        "why": "Promoted 2026-11-15. Fine-tune of the 0923 model on the Nov 2026 labels (last.pt, epoch 25; metrics are on its own val set, not comparable to train-30's). Exported end to end with ultralytics 8.4.115. On 100k random frames, with its dogs counted only at detector conf > 0.25, it counts about +330 more real dogs than train-30 at about the same number of false ones (blinded review, 2026-11-09). Being re-swept as gen 2 into a separate store; it becomes 'best' and deployed once that store goes live. NOT wired in yet: the live store (data/detect_root.txt) and every count on the page are still train-30's. dogdet_20261104 has swept all 32.5M images into its own store (data/detect_dogdet20261104); it goes live at switch-over, once the gen-2 gate and leash runs over that store are done.",
+        "deployed": false
       },
       "stage": 1,
       "short": "Detector",
@@ -39,21 +40,20 @@
       "key_metric": "recall",
       "candidates": [
         {
-          "run": "dogdet_20261104_77b733_20261104-1708",
-          "key": null,
-          "date": "2026-11-04",
+          "run": "train-30",
+          "key": "ef4a85c3c1ee4bfc8d6805fb413c43f3",
+          "date": "2026-06-05",
           "metrics": {
-            "mAP50": 0.9151,
-            "mAP50-95": 0.5184,
-            "precision": 0.9025,
-            "recall": 0.8674
+            "mAP50": 0.8708,
+            "mAP50-95": 0.4973,
+            "precision": 0.8977,
+            "recall": 0.8764
           },
-          "weights": "data/engines/yolo26x_dogdet_20261104.pt",
-          "engine": "data/engines/yolo26x_dogdet_20261104.engine",
-          "sha256_engine": "047b6268df683427eb2a648d2e7b916468c59910df3cffb372ae0d02e3993343",
-          "count_conf_min": 0.25,
-          "why": "Fine-tune of the 0923 model on the Nov 2026 labels (last.pt, epoch 25; metrics are on its own val set, not comparable to train-30's). Exported end to end with ultralytics 8.4.115. On 100k random frames, with its dogs counted only at detector conf > 0.25, it counts about +330 more real dogs than train-30 at about the same number of false ones (blinded review, 2026-11-09). Being re-swept as gen 2 into a separate store; it becomes 'best' and deployed once that store goes live.",
-          "deployed": false
+          "weights": "data/engines/yolo26x_train30.pt",
+          "engine": "data/engines/yolo26x_train30.engine",
+          "sha256_engine": "ac98daeecefa24406f2f776348f0eb7101f94b7fc1267ef6d7fbde19950f0803",
+          "why": "[still in production until the gen-2 switch-over; superseded as the promoted detector 2026-11-15 by dogdet_20261104] In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page.",
+          "deployed": true
         }
       ]
     },

@@ -61,6 +61,7 @@ EXTRA = (
     'tools/detect/tests/adv_split_twins.py',
     'tools/detect/tests/adv_bundle_record.py',
     'tools/detect/tests/adv_eval_leash_testset.py',
+    'tools/detect/tests/adv_promoted_side_store.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
