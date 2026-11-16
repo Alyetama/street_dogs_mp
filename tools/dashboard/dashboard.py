@@ -4392,6 +4392,62 @@ METRIC_GLOSSARY = {
     'sweep_fp_rejected_at_full_dog_recall': (
         'false positives removed, at zero dog loss',
         'Share discarded at the strictest threshold that keeps every val dog.', 'held-out flags'),
+    # The frozen test sets (data/dogbin_test_v1.json, data/leash_test_v1.json):
+    # human audit verdicts on detector-box crops, sequence-disjoint, held out
+    # of every compared model's training. Since 2026-11-15 promotions are
+    # decided on these, at threshold 0.5, unweighted.
+    'test_v1_balanced_accuracy_t0.5': (
+        'accuracy on the test set, both classes weighted equally',
+        'The promotion number. Mean of the two class recalls at threshold 0.5 '
+        'on the frozen test set: human audit verdicts on the crop production '
+        'cuts, held out of every compared model\'s training and split by '
+        'Mapillary sequence.', 'frozen test set'),
+    'test_v1_dog_recall_t0.5': (
+        'dogs kept',
+        'Share of real dogs the gate passes at 0.5, on the frozen test set. A '
+        'dog lost here never reaches the leash classifier.', 'frozen test set'),
+    'test_v1_notdog_reject_t0.5': (
+        'non-dogs removed',
+        'Share of detector boxes on things that are not dogs that the gate '
+        'discards at 0.5, on the frozen test set.', 'frozen test set'),
+    'test_v1_roc_auc': (
+        'separation on the test set',
+        'Ranking quality on the frozen test set, independent of any '
+        'threshold.', 'frozen test set'),
+    'test_v1_leashed_recall_t0.5': (
+        'leashed dogs caught',
+        'Share of leashed dogs called leashed at 0.5, on the frozen test '
+        'set.', 'frozen test set'),
+    'test_v1_unleashed_recall_t0.5': (
+        'unleashed dogs caught',
+        'Share of unleashed dogs called unleashed at 0.5, on the frozen test '
+        'set.', 'frozen test set'),
+    'acceptance_rejected_at_t0.9': (
+        'false positives removed, at 0.9',
+        'Reserved crops again, at a strict threshold: a crop counts as a dog '
+        'only when the gate is 90% sure.', 'reserved crops'),
+    'acceptance_rejected_at_t0.5_sequence_clean': (
+        'false positives removed, at 0.5, leak removed',
+        'The 0.5 rate after dropping reserved crops that share a Mapillary '
+        'sequence with this model\'s training data.', 'reserved crops'),
+    'val_accuracy_top1': (
+        'plain accuracy, tuning split',
+        'Top-1 on the val split that drove early stopping and checkpoint '
+        'choice. Shown for reference; not what the model was promoted on.',
+        'tuning split'),
+    'fn_audit_clean_weighted_dog_recall_t0.5': (
+        'dogs kept, audit verdicts',
+        'Dog recall at 0.5 on the false-negative audit\'s human verdicts, '
+        'clean of the compared models\' training images and sequences, '
+        'weighted to the gen-1 box population.', 'audit verdicts'),
+    'fn_audit_clean_weighted_notdog_reject_t0.5': (
+        'non-dogs removed, audit verdicts',
+        'Not-dog rejection at 0.5 on the same clean, population-weighted '
+        'audit verdicts.', 'audit verdicts'),
+    'fn_audit_clean_weighted_roc_auc': (
+        'separation, audit verdicts',
+        'Ranking quality on the same clean, population-weighted audit '
+        'verdicts.', 'audit verdicts'),
 }
 
 
