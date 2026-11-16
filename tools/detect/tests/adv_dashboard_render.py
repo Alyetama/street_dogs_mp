@@ -94,12 +94,24 @@ def real_payload(tmp):
     return st.read_status(path, stale_after=120)
 
 
+def _prev_char(src, lo, j):
+    """The last non-blank character before ``j``, not looking below ``lo``."""
+    k = j - 1
+    while k >= lo and src[k].isspace():
+        k -= 1
+    return src[k] if k >= lo else '('
+
+
 def _take_fn(src, start):
     """Return the whole `function ...{...}` beginning at ``start``.
 
     Brace-counts from the declaration's first `{`, skipping over string
-    literals and comments so a `{` inside either cannot end the function
-    early. Enough for hand-written page JS; not a real parser.
+    literals, regex literals and comments so a `{` -- or a quote -- inside
+    any of them cannot end the function early. modelLine() escapes with
+    ``/[&<>"]/g``, and that ``"`` read as the start of a string swallowed the
+    rest of the page. A ``/`` opens a regex where an operand is expected:
+    after an operator, an opening bracket or nothing at all. Enough for
+    hand-written page JS; not a real parser.
     """
     i = src.index('{', start)
     depth, j, n = 0, i, len(src)
@@ -117,6 +129,16 @@ def _take_fn(src, start):
             j = src.find('*/', j) + 1
             if j < 1:
                 break
+        elif c == '/' and _prev_char(src, i, j) in '(,=:[!&|?{};+-*%<>~^':
+            j, cls = j + 1, False
+            while j < n and src[j] != '\n' and (cls or src[j] != '/'):
+                if src[j] == '\\':
+                    j += 1
+                elif src[j] == '[':
+                    cls = True
+                elif src[j] == ']':
+                    cls = False
+                j += 1
         elif c == '{':
             depth += 1
         elif c == '}':
@@ -136,7 +158,9 @@ def extract_snippets(html):
     # second line to pctColor() left a dangling half-function in the harness
     # and every panel check died on a SyntaxError, reporting nothing about
     # the page it was meant to be grading.
-    for name in ('fmt', 'pctColor', 'esc'):
+    # modelLine() is how the gate and sweep panels name the model behind
+    # their results; the gate IIFE calls it while painting.
+    for name in ('fmt', 'pctColor', 'esc', 'modelLine'):
         m = re.search(r'^function %s\(' % name, script, re.M)
         if not m:
             raise SystemExit(f'helper {name}() not found at top level '
@@ -2758,6 +2782,12 @@ def hidden_that_still_shows(html, src=''):
     css = re.sub(r'/\*.*?\*/', ' ', css, flags=re.S)
     if re.search(r'(?:^|[,}])\s*\[hidden\]\s*\{[^{}]*display\s*:\s*none', css):
         return []                       # a global rule covers everything
+    # Keyed by the leaf's WHOLE compound, not by each class in it: a rule
+    # reaches an element only when the element wears every class and id the
+    # leaf names. ``.rbtn.nav{display:inline-flex}`` styles the nav links and
+    # nothing else -- reading it as ``.rbtn`` flagged ``<button class="rbtn
+    # sw" hidden>``, which no display rule touches. Same for the guards:
+    # ``.a.b[hidden]`` hides an element that is both, not every ``.a``.
     shows, hides = {}, set()
     for sel, decls in re.findall(r'([^{}]+)\{([^{}]*)\}', css):
         disp = re.search(r'(?:^|;)\s*display\s*:\s*([a-z-]+)', decls)
@@ -2767,11 +2797,15 @@ def hidden_that_still_shows(html, src=''):
             if not one.strip():
                 continue
             leaf = re.split(r'[\s>+~]+', one.strip())[-1]
-            for tok in re.findall(r'[.#][A-Za-z0-9_-]+', leaf):
-                if '[hidden]' in leaf and disp.group(1) == 'none':
-                    hides.add(tok)
-                elif disp.group(1) != 'none':
-                    shows.setdefault(tok, one.strip())
+            # what is inside :not(...)/:is(...) is not worn by the element
+            toks = frozenset(re.findall(r'[.#][A-Za-z0-9_-]+',
+                                        re.sub(r'\([^()]*\)', '', leaf)))
+            if not toks:
+                continue
+            if '[hidden]' in leaf and disp.group(1) == 'none':
+                hides.add(toks)
+            elif disp.group(1) != 'none':
+                shows.setdefault(toks, one.strip())
 
     if 'REVIEW_HTML = r"""' in src:
         i = src.index('REVIEW_HTML = r"""')
@@ -2825,12 +2859,14 @@ def hidden_that_still_shows(html, src=''):
 
     out, seen = [], set()
     for tk, why in hideable:
-        if any(t in hides for t in tk):
-            continue                    # one guarded class covers the element
-        for t in tk:
-            if t in shows and t not in seen:
-                seen.add(t)
-                out.append((t, f'{shows[t]} names a display; {why}'))
+        worn = set(tk)
+        if any(h <= worn for h in hides):
+            continue                    # one guard that matches covers it
+        for need, sel in shows.items():
+            if need <= worn and need not in seen:
+                seen.add(need)
+                out.append((''.join(sorted(need)),
+                            f'{sel} names a display; {why}'))
                 break
     return out, sorted(set(unresolved))
 
