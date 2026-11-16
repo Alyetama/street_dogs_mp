@@ -13,7 +13,7 @@
     "A model's 'deployed' flag means the sweep actually runs it right now, which is not the same as being promoted. Only stage 1 is deployed today; the gate and leash classifier are accepted but not yet wired into sweep.py."
   ],
   "workspace": "alyetama",
-  "updated_at": "2026-11-15",
+  "updated_at": "2026-11-16",
   "projects": {
     "dogdetection": {
       "role": "detector - finds dogs in street imagery, one class (the sweep runs this). The HARVEST collects ground animals; this model is trained single_cls on a set whose only class is \"target\" = dog, so a non-dog animal in its output is a false positive, which is what the dog-bin gate downstream exists to catch.",
@@ -215,23 +215,67 @@
     "leash-models": {
       "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
       "best": {
-        "run": "leash_v2_001",
-        "key": "e0ce94c019a64d9e9962b339dd1547da",
-        "date": "2026-08-03",
-        "dataset": "leash_v2",
-        "weights": "leash-models/leash_v2_001/weights/best.pt",
+        "run": "leash_20261115_bbf19d_20261115-1958",
+        "key": null,
+        "date": "2026-11-16",
+        "dataset": "leash_20261115_bbf19d",
+        "weights": "runs/classify/leash-models/leash_20261115_bbf19d_20261115-1958/weights/best.pt",
+        "imgsz": 640,
         "metrics": {
-          "balanced_accuracy_acceptance": 0.8951,
-          "roc_auc_acceptance": 0.9591,
-          "recall_leashed_acceptance": 0.8874,
-          "recall_unleashed_acceptance": 0.9029,
-          "balanced_accuracy_val": 0.91,
-          "accuracy_top1_val": 0.9115
+          "test_v1_balanced_accuracy_t0.5": 0.8102,
+          "test_v1_leashed_recall_t0.5": 0.8483,
+          "test_v1_unleashed_recall_t0.5": 0.7721,
+          "test_v1_roc_auc": 0.8755,
+          "balanced_accuracy_acceptance": 0.869,
+          "roc_auc_acceptance": 0.9451,
+          "balanced_accuracy_val": 0.8622
         },
-        "why": "First leash model measured on data it provably never saw: 397 crops over 312 image_ids reserved into data/leash_acceptance_set.json BEFORE leash_v2 was split, so absent from train AND val -- and val here drives early stopping, which makes it a tuning set rather than an independent one. Balanced accuracy 0.8951 against a 0.5592 majority baseline, with the two class recalls within 1.6 points of each other (leashed 0.8874, unleashed 0.9029), so it is not leaning on the majority class. ROC AUC 0.9591. Converged: early-stopped at epoch 350, best 250, patience 100. Promoted on BALANCED accuracy, not top-1: the two errors here cost the same (a mislabelled animal either way), unlike the gate upstream where a missed dog is unrecoverable.",
-        "caveat": "No like-for-like predecessor comparison exists and none can be made. The previous best, leash_03_jun_26-3, cannot be scored on this acceptance set: all 312 reserved ids are in its own training data, and eval_leash.py now refuses the run rather than printing the 0.9334 it used to. The fairest available comparison is each model on its own honest population -- leash_v2_001 0.8951 balanced / 0.9591 AUC over 397 crops (baseline 0.5592) versus leash_03_jun_26-3 0.8721 balanced / 0.9352 AUC over the 137-image sequence-clean remainder of its own val (baseline 0.7591, only 33 unleashed, so wide intervals). Better on both metrics, on a larger and better-balanced set, against a harder baseline -- but different populations, so treat the margin as directional."
+        "why": "Promoted 2026-11-16 over leash_v2_001 on the frozen data/leash_test_v1.json (628 leash-audit human verdicts: 356 leashed / 272 unleashed, withheld by key, image_id and sequence before any current split; full/ production detector-box crops, sha256-verified, imgsz 640, unweighted, t=0.5): balanced accuracy 0.810 vs 0.681, paired bootstrap 95% CI of the difference [+0.087, +0.169], McNemar exact p<1e-6 (134 items only this model gets right vs 50). Also ahead of leash_v2_003 (0.705; CI [+0.065, +0.144]). Leashed recall 0.848 vs 0.688, unleashed 0.772 vs 0.673, AUC 0.876 vs 0.743; ahead in every size band, largest on small crops (<=64 px: leashed recall 0.68 vs 0.23). Chosen over its rebalanced sibling leash_20261115_2965b7 (same recipe, creator cap 65 + size-band balance, 2,827 crops): 0.810 vs 0.800, CI [-0.022, +0.042], p=0.69 -- a tie, settled by the key metric and the larger training set; the sibling is better on the 71 audit-redrawn items (0.672 vs 0.505) and AUC (0.883 vs 0.876). Trained on leash_20261115_bbf19d (3,744 human-labelled crops re-cut at production framing = the detector box, sequence-split with capture twins joined, per-sequence cap 5, test and acceptance sets reserved); early-stopped at epoch 180, best epoch 80, patience 100.",
+        "caveat": "On the older acceptance set (data/leash_acceptance_set.json, scored on harvest/leash_src crops -- the leash_v2-era framing, partly leash-inclusive redraws) it scores 0.869 balanced / 0.945 AUC against leash_v2_001's recorded 0.895 / 0.959. That set is framed the way leash_v2 was trained, not the way production cuts crops, which is why the frozen test set (production framing) decides. Known weak slices: audit items whose redraw left the leash outside the detector box (32 items, BA 0.27 -- every model fails these), East Asia (11 items) and Southeast Asia (69 items, BA 0.68). Not yet scored on gen-2-only boxes."
       },
       "candidates": [
+        {
+          "run": "leash_20261115_2965b7_20261116-0000",
+          "key": null,
+          "date": "2026-11-16",
+          "dataset": "leash_20261115_2965b7",
+          "weights": "runs/classify/leash-models/leash_20261115_2965b7_20261116-0000/weights/best.pt",
+          "imgsz": 640,
+          "metrics": {
+            "test_v1_balanced_accuracy_t0.5": 0.7997,
+            "test_v1_leashed_recall_t0.5": 0.8567,
+            "test_v1_unleashed_recall_t0.5": 0.7426,
+            "test_v1_roc_auc": 0.8831,
+            "balanced_accuracy_acceptance": 0.8515,
+            "roc_auc_acceptance": 0.9407,
+            "balanced_accuracy_val": 0.843
+          },
+          "note": "Rebalanced sibling of the promoted model (--max-per-creator, --balance-size-bands; size-only AUC ~0.50 vs 0.585). Tied with it on the frozen test set (0.800 vs 0.810, p=0.69); better on audit-redrawn items and AUC, worse on unleashed recall (0.743 vs 0.772)."
+        },
+        {
+          "run": "leash_v2_001",
+          "key": "e0ce94c019a64d9e9962b339dd1547da",
+          "date": "2026-08-03",
+          "dataset": "leash_v2",
+          "weights": "leash-models/leash_v2_001/weights/best.pt",
+          "metrics": {
+            "balanced_accuracy_acceptance": 0.8951,
+            "roc_auc_acceptance": 0.9591,
+            "recall_leashed_acceptance": 0.8874,
+            "recall_unleashed_acceptance": 0.9029,
+            "balanced_accuracy_val": 0.91,
+            "accuracy_top1_val": 0.9115
+          },
+          "why": "[superseded 2026-11-16 by leash_20261115_bbf19d] First leash model measured on data it provably never saw: 397 crops over 312 image_ids reserved into data/leash_acceptance_set.json BEFORE leash_v2 was split, so absent from train AND val -- and val here drives early stopping, which makes it a tuning set rather than an independent one. Balanced accuracy 0.8951 against a 0.5592 majority baseline, with the two class recalls within 1.6 points of each other (leashed 0.8874, unleashed 0.9029), so it is not leaning on the majority class. ROC AUC 0.9591. Converged: early-stopped at epoch 350, best 250, patience 100. Promoted on BALANCED accuracy, not top-1: the two errors here cost the same (a mislabelled animal either way), unlike the gate upstream where a missed dog is unrecoverable.",
+          "caveat": "No like-for-like predecessor comparison exists and none can be made. The previous best, leash_03_jun_26-3, cannot be scored on this acceptance set: all 312 reserved ids are in its own training data, and eval_leash.py now refuses the run rather than printing the 0.9334 it used to. The fairest available comparison is each model on its own honest population -- leash_v2_001 0.8951 balanced / 0.9591 AUC over 397 crops (baseline 0.5592) versus leash_03_jun_26-3 0.8721 balanced / 0.9352 AUC over the 137-image sequence-clean remainder of its own val (baseline 0.7591, only 33 unleashed, so wide intervals). Better on both metrics, on a larger and better-balanced set, against a harder baseline -- but different populations, so treat the margin as directional.",
+          "test_v1_2026_11_16": {
+            "balanced_accuracy": 0.6805,
+            "leashed_recall@0.5": 0.6882,
+            "unleashed_recall@0.5": 0.6728,
+            "roc_auc": 0.7434,
+            "n": 628
+          }
+        },
         {
           "run": "leash_03_jun_26-3",
           "key": "d390653dce5640f6aa7beb4f948ce29b",
@@ -265,8 +309,8 @@
       "stage": 3,
       "short": "Leash classifier",
       "emits": "leashed / unleashed",
-      "key_metric": "balanced_accuracy_acceptance",
-      "dataset": "leash_v2 (built 2026-08-03; 1,509 crops, 694/510 train, 175/130 val)"
+      "key_metric": "test_v1_balanced_accuracy_t0.5",
+      "dataset": "leash_20261115_bbf19d (built 2026-11-15; 3,744 crops, 1,526/1,468 train, 382/368 val; detector-box framing)"
     }
   },
   "url_template": "https://www.comet.com/{workspace}/{project}/{key}"
