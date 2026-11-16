@@ -119,6 +119,21 @@ MIN_SIDE = 8
 # images one drive contributes before the plan moves to the next. Sized
 # so a worker's chunk falls inside one block and stays on one disk.
 INTERLEAVE_BLOCK = 256
+# Reader threads per drive (--readers overrides). Three of the four drives
+# answer one request at a time (queue depth 1), and the old feed put 4-8
+# decoders on each, which seeked between their files: capybara and jackal
+# held ~15 MB/s at 100% busy while lynx sat idle 65% of the time, waiting its
+# turn in a fixed order. Two readers keep one request queued behind the one
+# being served; bobcat queues 30 deep and takes more, as in the sweep.
+READERS = {'bobcat': 8}
+READERS_DEFAULT = 2
+# How many shards past the lowest unfinished one a drive may read. A fast
+# drive runs ahead instead of waiting for the slowest at every shard, but a
+# shard is only written whole and they fill side by side, so a stop throws
+# away up to AHEAD + 1 partly-scored shards (5 x 20,000 frames by default),
+# not the one shard the in-order feed used to lose. Lower it with --ahead
+# when the run will be stopped often.
+AHEAD = 4
 
 
 def spec(stage=None):
@@ -489,11 +504,14 @@ def done_shards():
 
 # ── the worker: decode one frame, cut every box on it ──────────────────────
 _ROOTS = {}
+# classify_spec() for the fast path; None hands back PIL crops for predict()
+_PREP = None
 
 
-def _init(roots):
-    global _ROOTS
+def _init(roots, prep=None):
+    global _ROOTS, _PREP
     _ROOTS = roots
+    _PREP = prep
 
 
 def cut_crops(im, boxes):
@@ -526,24 +544,356 @@ def cut_crops(im, boxes):
     return out
 
 
-def _cut(job):
-    """(image_id, cell, drive, [(det_idx, box)]) -> [(det_idx, crop)]."""
+def _cut(task):
+    """(shard, image_id, [(det_idx, box)], jpeg bytes, err) ->
+    (shard, image_id, [(det_idx, crop)], err).
+
+    The bytes were read by the drive's reader thread in the parent (see
+    DriveLanes), so a decoder never waits on a disk. A crop is a PIL image
+    for --legacy-predict and otherwise prep_crop()'s uint8 array: the resize
+    to 640 was the largest piece of the parent's per-crop work, and here it
+    runs on sixteen cores instead of one.
+    """
+    import io
     from PIL import Image
-    iid, cell, drive, boxes = job
-    r = _ROOTS.get(drive)
-    if not r:
-        return iid, [], 'no_root'
-    src = os.path.join(r, cell, 'ground_animal_images', f'{iid}.jpg')
+    si, iid, boxes, raw, err = task
+    if err:
+        return si, iid, [], err
     try:
-        im = Image.open(src)
+        im = Image.open(io.BytesIO(raw))
         im.load()
         if im.mode != 'RGB':
             im = im.convert('RGB')
     except Exception:
-        return iid, [], 'unreadable'
+        return si, iid, [], 'unreadable'
     out = cut_crops(im, boxes)
     im.close()
-    return iid, out, ''
+    if _PREP is not None:
+        out = [(di, prep_crop(c, _PREP)) for di, c in out]
+    return si, iid, out, ''
+
+
+def frame_path(root, cell, iid):
+    return os.path.join(root, cell, 'ground_animal_images', f'{iid}.jpg')
+
+
+def read_frame(path):
+    """A frame's bytes, dropped from the page cache once read: 7 TB of JPEG
+    passes through here, and none of it is read twice."""
+    with open(path, 'rb') as fh:
+        raw = fh.read()
+        try:
+            os.posix_fadvise(fh.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
+    return raw
+
+
+# ── the fast path: ultralytics' classify preprocessing, split in two ───────
+# predict() on a list of PIL crops does, per crop, in the parent process:
+# PIL -> BGR array -> RGB PIL, Resize(short side 640), CenterCrop(640),
+# ToTensor, Normalize, then a Results object per crop. Measured at ~3.4 ms a
+# crop on one core, in series with the GPU. The fast path keeps every pixel
+# of that and moves it: the geometry (Resize + CenterCrop, which is PIL work)
+# runs in the decoder that cut the crop, the value mapping (ToTensor +
+# Normalize, which is a function of one 8-bit value and its channel) runs on
+# the GPU through a 256-entry table computed BY those transforms, and the
+# forward is the predictor's own fused AutoBackend. run() checks the result
+# against predict() on the live device before it judges anything.
+
+def classify_spec(transforms, imgsz):
+    """The geometry half of the predictor's classify transform, as plain data
+    a decoder can apply with PIL alone.
+
+    Raises ValueError for anything but the Resize(short side) -> CenterCrop
+    -> ToTensor -> Normalize chain ultralytics builds (classify_transforms),
+    at `imgsz`, with a crop no larger than the short side -- the only shape
+    prep_crop() reproduces. The caller refuses rather than approximates.
+    """
+    ts = list(getattr(transforms, 'transforms', None) or [])
+    names = [type(t).__name__ for t in ts]
+    if names != ['Resize', 'CenterCrop', 'ToTensor', 'Normalize']:
+        raise ValueError(f'the predictor transforms are {names}, not the '
+                         f'Resize/CenterCrop/ToTensor/Normalize chain the '
+                         f'fast path reproduces')
+    rs, cc = ts[0], ts[1]
+    size = rs.size
+    if isinstance(size, (list, tuple)) and len(size) == 1:
+        size = size[0]
+    if not isinstance(size, int) or getattr(rs, 'max_size', None) is not None:
+        raise ValueError(f'Resize(size={rs.size!r}, max_size='
+                         f'{getattr(rs, "max_size", None)!r}) is not a '
+                         f'short-side resize')
+    if size != int(imgsz):
+        raise ValueError(f'the predictor resizes to {size}, not imgsz {imgsz}')
+    crop = cc.size
+    if isinstance(crop, int):
+        crop = (crop, crop)
+    crop = tuple(int(v) for v in crop)
+    if len(crop) != 2 or crop[0] > size or crop[1] > size:
+        raise ValueError(f'CenterCrop{crop} would pad a {size}px short side')
+    from torchvision.transforms.functional import pil_modes_mapping
+    return {'short': size, 'crop': crop,
+            'resample': int(pil_modes_mapping[rs.interpolation])}
+
+
+def prep_crop(crop, spec):
+    """PIL RGB crop -> HxWx3 uint8 array, pixel for pixel what torchvision's
+    Resize + CenterCrop make of it (transforms/functional.py: resize via
+    _compute_resized_output_size, then center_crop), with PIL alone so a
+    decoder process never imports torch."""
+    import numpy as np
+    w, h = crop.size
+    s = spec['short']
+    short, long = (w, h) if w <= h else (h, w)
+    new_short, new_long = s, int(s * long / short)
+    nw, nh = (new_short, new_long) if w <= h else (new_long, new_short)
+    if (nh, nw) != (h, w):
+        crop = crop.resize((nw, nh), spec['resample'])
+    ch, cw = spec['crop']
+    if (ch, cw) != (nh, nw):
+        top = int(round((nh - ch) / 2.0))
+        left = int(round((nw - cw) / 2.0))
+        crop = crop.crop((left, top, left + cw, top + ch))
+    return np.array(crop, dtype=np.uint8)
+
+
+def value_lut(transforms):
+    """(3, 256) float tensor: what the predictor's ToTensor + Normalize make
+    of each 8-bit value in each channel, computed by those transforms
+    themselves on the CPU. Both are per-element, per-channel maps, so a
+    lookup in this table is the transform -- on any device, bit for bit."""
+    import numpy as np
+    from PIL import Image
+    ramp = np.repeat(np.arange(256, dtype=np.uint8)[None, :, None], 3, axis=2)
+    x = Image.fromarray(ramp, 'RGB')
+    for t in list(transforms.transforms)[2:]:
+        x = t(x)
+    return x[:, 0, :].contiguous()
+
+
+def batch_input(arrs, lut, half=False):
+    """[HxWx3 uint8] -> the (B, 3, H, W) tensor the predictor would build, on
+    `lut`'s device. Eight bits a value cross the bus instead of 32."""
+    import numpy as np
+    import torch
+    u8 = torch.from_numpy(np.stack(arrs))
+    if lut.device.type == 'cuda':
+        u8 = u8.pin_memory().to(lut.device, non_blocking=True)
+    u8 = u8.permute(0, 3, 1, 2)
+    x = torch.empty(u8.shape, dtype=lut.dtype, device=lut.device)
+    for c in range(3):
+        x[:, c] = lut[c][u8[:, c].long()]
+    # ClassificationPredictor.preprocess: half when the backend is fp16
+    return x.half() if half else x.float()
+
+
+def forward_probs(backend, x):
+    """The predictor's inference + postprocess without the Results objects:
+    the AutoBackend forward under inference mode, first output (the softmax
+    the Classify head returns in eval). Asynchronous on CUDA until read."""
+    import torch
+    with torch.inference_mode():
+        y = backend(x)
+    return y[0] if isinstance(y, (list, tuple)) else y
+
+
+def probe_crops():
+    """Deterministic synthetic crops in the shapes the store holds: small
+    upscaled boxes, wide and tall ones, one already at the short side."""
+    import numpy as np
+    from PIL import Image
+    rng = np.random.RandomState(20261115)
+    out = []
+    for w, h in ((93, 98), (166, 61), (40, 220), (640, 700), (13, 9),
+                 (301, 300), (1200, 800), (97, 641)):
+        yy, xx = np.mgrid[0:h, 0:w]
+        a = np.stack([(xx * 7) % 256, (yy * 5) % 256, (xx + yy) % 256], -1)
+        a = (a + rng.randint(0, 40, a.shape)) % 256
+        out.append(Image.fromarray(a.astype(np.uint8), 'RGB'))
+    return out
+
+
+def fast_path_check(model, spec, lut, imgsz, device, batch, half=False,
+                    tol=1e-5):
+    """Max |p_fast - p_predict| over probe_crops(), in batches of `batch` on
+    the run's own device. Raises ValueError when they disagree past `tol`
+    or flip a verdict at 0.5 -- the run must not start on a path that judges
+    differently from the one the acceptance numbers describe."""
+    crops = probe_crops()
+    worst = 0.0
+    for i in range(0, len(crops), batch):
+        part = crops[i:i + batch]
+        ref = [r.probs.data.float().cpu() for r in model.predict(
+            part, verbose=False, device=device, imgsz=imgsz)]
+        got = forward_probs(model.predictor.model, batch_input(
+            [prep_crop(c, spec) for c in part], lut, half)).float().cpu()
+        for j, r in enumerate(ref):
+            d = float((got[j] - r).abs().max())
+            worst = max(worst, d)
+            if d > tol or bool(((got[j] >= 0.5) != (r >= 0.5)).any()):
+                raise ValueError(
+                    f'probe crop {i + j} ({part[j].size[0]}x{part[j].size[1]})'
+                    f': fast path {got[j].tolist()} vs predict() '
+                    f'{r.tolist()}')
+    return worst
+
+
+def drive_map(pairs, flag):
+    """['jackal=2', 'bobcat=8'] -> {'jackal': 2, 'bobcat': 8}; a malformed
+    pair is an error, never a silent default."""
+    out = {}
+    for pr in pairs or ():
+        name, sep, val = str(pr).partition('=')
+        try:
+            n = int(val) if sep and name else 0
+        except ValueError:
+            n = 0
+        if n <= 0:
+            raise SystemExit(f'{flag}: expected drive=N with N > 0, '
+                             f'got {pr!r}')
+        out[name] = n
+    return out
+
+
+def reader_counts(pairs, drives):
+    """{drive: reader threads} from READERS and `--readers drive=N`."""
+    want = dict(READERS, **drive_map(pairs, '--readers'))
+    return {d: want.get(d, READERS_DEFAULT) for d in sorted(drives)}
+
+
+class DriveLanes:
+    """Per-drive reader threads in front of the decoder pool.
+
+    The old feed was one imap over each shard's list, in its fixed
+    drive-interleaved order, with the decoders reading their own frames: ~512
+    images of look-ahead pushed every drive to the same image rate, so 4-8
+    decoders queued on each slow disk while the fast one waited, and the pool
+    drained to empty at every shard boundary. Here each drive is walked in
+    plan order by its own readers, as fast as that drive goes, and the bytes
+    go to whichever decoder is free. The stream runs across shards, so no
+    boundary drains it; a drive may run up to `ahead` shards past the lowest
+    unfinished one, and `slots` bounds the frames held between a reader and
+    the parent's loop, so a GPU that falls behind slows the readers instead
+    of filling memory.
+
+    feed() yields exactly one task per job; consumed() must be called once
+    per result.
+    """
+
+    def __init__(self, shards, todo, roots, readers, ahead=AHEAD, slots=64,
+                 disk_order=None):
+        import queue
+        import threading
+        self.shards, self.todo, self.roots = shards, list(todo), roots
+        self.disk_order = dict(disk_order or {})
+        self.rank = {si: k for k, si in enumerate(self.todo)}
+        self.left = {si: len(shards[si]) for si in self.todo}
+        self.total = sum(self.left.values())
+        self.ahead, self.lo = max(0, int(ahead)), 0
+        self.cond = threading.Condition()
+        self.slots = threading.BoundedSemaphore(max(1, int(slots)))
+        self.q = queue.Queue()
+        self.stop = threading.Event()
+        self.threads = []
+        drives = {j[2] for si in self.todo for j in shards[si]}
+        # frames each drive has delivered: the heartbeat carries them, so the
+        # lane that holds the run back is visible without a profiler
+        self.read = {d: 0 for d in sorted(drives)}
+        self._count = threading.Lock()
+        for d in sorted(drives):
+            it, lock = self._lane(d), threading.Lock()
+            for _ in range(max(1, int(readers.get(d, READERS_DEFAULT)))):
+                t = threading.Thread(target=self._reader, args=(d, it, lock),
+                                     daemon=True)
+                self.threads.append(t)
+
+    def _lane(self, drive):
+        """(shard, job) for one drive, in plan order -- or, with a disk-order
+        window, sorted by where the files sit on the platter. Measured on this
+        plan, consecutive frames of a drive's lane are a median 78-1500 GiB
+        apart on disk, so every read is a long seek; sorted, the median jump
+        is 0.04-0.14 GiB. The sort never crosses a shard boundary: the lane
+        stays monotone in shard, which is what keeps the look-ahead from
+        deadlocking (a reader holding a far shard's frame can then never be
+        what the lowest shard is waiting on)."""
+        win = int(self.disk_order.get(drive) or 0)
+        root = self.roots.get(drive)
+        for si in self.todo:
+            mine = [job for job in self.shards[si] if job[2] == drive]
+            if win > 1 and root and mine:
+                from sweep import disk_ordered
+                items = (((si, j), frame_path(root, j[1], j[0]))
+                         for j in mine)
+                for meta, _ in disk_ordered(items, win, stop=self.stop):
+                    yield meta
+            else:
+                for job in mine:
+                    yield si, job
+
+    def _reader(self, drive, it, lock):
+        try:
+            while not self.stop.is_set():
+                with lock:
+                    item = next(it, None)
+                if item is None:
+                    return
+                si, (iid, cell, _, boxes) = item
+                with self.cond:
+                    while (not self.stop.is_set()
+                           and self.rank[si] > self.lo + self.ahead):
+                        self.cond.wait(1.0)
+                while not self.slots.acquire(timeout=1.0):
+                    if self.stop.is_set():
+                        return
+                root = self.roots.get(drive)
+                raw, err = None, ''
+                if not root:
+                    err = 'no_root'
+                else:
+                    try:
+                        raw = read_frame(frame_path(root, cell, iid))
+                    except OSError:
+                        err = 'unreadable'
+                with self._count:
+                    self.read[drive] += 1
+                self.q.put((si, iid, boxes, raw, err))
+        except BaseException as e:       # surfaced through feed(), never lost
+            self.q.put(e)
+
+    def feed(self):
+        import queue
+        for t in self.threads:
+            t.start()
+        for _ in range(self.total):
+            while True:
+                try:
+                    item = self.q.get(timeout=1.0)
+                    break
+                except queue.Empty:
+                    if self.stop.is_set():
+                        return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+    def consumed(self, si):
+        """One result is in the parent's hands: free its slot, and move the
+        look-ahead on when it finished the lowest shard's reads."""
+        self.slots.release()
+        with self.cond:
+            self.left[si] -= 1
+            moved = False
+            while (self.lo < len(self.todo)
+                   and self.left[self.todo[self.lo]] == 0):
+                self.lo += 1
+                moved = True
+            if moved:
+                self.cond.notify_all()
+
+    def lowest(self):
+        """The lowest shard this run still has frames to take for."""
+        return self.todo[min(self.lo, len(self.todo) - 1)] if self.todo else 0
 
 
 def model_imgsz(model):
@@ -785,94 +1135,173 @@ def run(args):
           f'{len(skip)} already done'
           + (f'; stopping after shard {stop - 1}' if stop is not None else ''))
 
+    # One predict() before anything else: it is what picks the device, fuses
+    # the model and chooses the transforms, and the fast path reuses all
+    # three rather than rebuilding any of them.
+    model.predict(probe_crops()[:1], verbose=False, device=args.device,
+                  imgsz=imgsz)
+    backend = model.predictor.model
+    prep = lut = None
+    half = bool(getattr(backend, 'fp16', False))
+    if not args.legacy_predict:
+        try:
+            prep = classify_spec(model.predictor.transforms, imgsz)
+            lut = value_lut(model.predictor.transforms).to(backend.device)
+            gap = fast_path_check(model, prep, lut, imgsz, args.device,
+                                  args.batch, half)
+        except ValueError as e:
+            raise SystemExit(f'the fast path does not reproduce predict() '
+                             f'here: {e}\n  run with --legacy-predict')
+        print(f'fast path: decoders resize, GPU normalises, '
+              f'{backend.device} {"fp16" if half else "fp32"}; '
+              f'matches predict() to {gap:.1e} on the probe crops')
+    else:
+        print('legacy predict(): PIL crops, preprocessed in this process')
+
     pin_protocol(want)
     roots = _roots()
+    todo = [si for si in range(len(shards))
+            if si not in skip and (stop is None or si < stop)]
+    readers = reader_counts(args.readers,
+                            {j[2] for si in todo for j in shards[si]})
+    disk_order = drive_map(args.disk_order, '--disk-order')
+    print(f'batch {args.batch}, readers {readers}, {args.workers} decoders, '
+          f'{args.ahead} shards look-ahead, '
+          f'disk order {disk_order or "off"}')
     t0, seen, bad = time.time(), 0, 0
     # frames the shards on disk already account for -- `seen` counts only what
     # THIS process walked, and a resumed run starts it at zero
     base = sum(len(shards[i]) for i in skip if i < len(shards))
     boxes_run = dogs_run = 0
     last_beat = 0.0
+    # Shards fill side by side now: the drives move at their own pace, so a
+    # shard is written when its last frame is in AND its last crop is scored,
+    # in whatever order that happens.
+    rows = {si: {'image_id': [], 'det_idx': [], 'label': [], 'p': []}
+            for si in todo}
+    pend = {si: 0 for si in todo}          # crops taken in, not yet scored
+    closing = set()                        # every frame in, maybe not scored
+    batch, meta, inflight = [], [], []
 
-    def beat(si, flight):
+    def beat(si, flight, drives=None):
         el = max(1e-9, time.time() - t0)
         _beat(pid=os.getpid(), started=t0, updated=time.time(),
+              drives_read=dict(drives or {}),
               shard=si, shards_total=len(shards),
               images=base + seen, images_total=len(jobs),
               rows_flight=flight, boxes=boxes_run, bad=bad,
               img_s=round(seen / el, 2), box_s=round(boxes_run / el, 2),
-              dogs=dogs_run, imgsz=imgsz,
+              dogs=dogs_run, imgsz=imgsz, batch=args.batch,
               dog_share=(dogs_run / boxes_run) if boxes_run else None)
 
-    # The first one goes out BEFORE any frame is read: the model is already
-    # loaded by here, so this is the moment the panel can stop saying nothing
-    # is happening. Everything in it is zero, which is true and is not the
-    # same as unknown.
-    beat(next((i for i in range(len(shards)) if i not in skip), 0), 0)
-    with mp.get_context('spawn').Pool(args.workers, _init, (roots,)) as pool:
-        for si, shard in enumerate(shards):
-            if stop is not None and si >= stop:
-                break
-            if si in skip:
+    def launch():
+        """Score what is batched. The fast path only queues the work on the
+        GPU; settle() reads it, so the next batch is gathered meanwhile."""
+        if not batch:
+            return
+        if prep is None:
+            got = [float(r.probs.data[dog_idx]) for r in model.predict(
+                batch, verbose=False, device=args.device, imgsz=imgsz)]
+        else:
+            got = forward_probs(backend, batch_input(batch, lut, half))
+            got = got[:, dog_idx]
+        inflight.append((got, list(meta)))
+        batch.clear()
+        meta.clear()
+
+    def settle(keep=0):
+        nonlocal boxes_run, dogs_run
+        while len(inflight) > keep:
+            got, mt = inflight.pop(0)
+            if not isinstance(got, list):
+                got = got.float().cpu().tolist()
+            for p, (si, iid, di) in zip(got, mt):
+                r = rows[si]
+                r['image_id'].append(iid)
+                r['det_idx'].append(int(di))
+                r['label'].append(pos if p >= 0.5 else other)
+                r['p'].append(round(p, 5))
+                pend[si] -= 1
+                boxes_run += 1
+                dogs_run += p >= 0.5
+
+    def write_done(lanes):
+        """Write every shard whose frames are all in and crops all scored."""
+        nonlocal last_beat
+        for si in sorted(closing):
+            if lanes.left[si] or pend[si]:
                 continue
-            rows = {'image_id': [], 'det_idx': [], 'label': [], 'p': []}
-            batch, meta = [], []
-
-            def flush():
-                nonlocal boxes_run, dogs_run
-                if not batch:
-                    return
-                for res, (iid, di) in zip(
-                        model.predict(batch, verbose=False,
-                                      device=args.device, imgsz=imgsz), meta):
-                    p = float(res.probs.data[dog_idx])
-                    rows['image_id'].append(iid)
-                    rows['det_idx'].append(int(di))
-                    rows['label'].append(pos if p >= 0.5 else other)
-                    rows['p'].append(round(p, 5))
-                    boxes_run += 1
-                    dogs_run += p >= 0.5
-                batch.clear()
-                meta.clear()
-
-            for iid, crops, err in pool.imap_unordered(_cut, shard,
-                                                       chunksize=32):
-                seen += 1
-                if err:
-                    bad += 1
-                for di, crop in crops:
-                    batch.append(crop)
-                    meta.append((iid, di))
-                    if len(batch) >= args.batch:
-                        flush()
-                if time.time() - last_beat >= BEAT_EVERY_S:
-                    beat(si, len(rows['label']))
-                    last_beat = time.time()
-            flush()
-            _no = refuse_short_shard(si, len(shard), len(shards), size)
+            closing.discard(si)
+            _no = refuse_short_shard(si, len(shards[si]), len(shards), size)
             if _no:
                 raise SystemExit(_no)
+            r = rows.pop(si)
             tmp = os.path.join(OUT_DIR, f'.{shard_name(si)}.tmp')
             pq.write_table(pa.table({
-                'image_id': pa.array(rows['image_id'], pa.string()),
-                'det_idx': pa.array(rows['det_idx'], pa.int32()),
-                'label': pa.array(rows['label'], pa.string()),
-                sp['p_col']: pa.array(rows['p'], pa.float32()),
+                'image_id': pa.array(r['image_id'], pa.string()),
+                'det_idx': pa.array(r['det_idx'], pa.int32()),
+                'label': pa.array(r['label'], pa.string()),
+                sp['p_col']: pa.array(r['p'], pa.float32()),
                 # stamped on every row: this is a model's opinion, and nothing
                 # that builds a training set may read it as a verdict
-                'unverified': pa.array([True] * len(rows['label']), pa.bool_()),
-                'model': pa.array([run_name] * len(rows['label']), pa.string()),
+                'unverified': pa.array([True] * len(r['label']), pa.bool_()),
+                'model': pa.array([run_name] * len(r['label']), pa.string()),
             }), tmp)
             os.replace(tmp, os.path.join(OUT_DIR, shard_name(si)))
             el = time.time() - t0
             print(f'  shard {si + 1}/{len(shards)}  {seen:,} images  '
                   f'{seen / el:.0f} img/s  '
-                  f'eta {(len(jobs) - seen) / max(1e-9, seen / el) / 3600:.1f} h',
+                  f'eta {(len(jobs) - seen) / max(1e-9, seen / el) / 3600:.1f} h'
+                  f'  read ' + ' '.join(f'{d} {v / el:.0f}/s'
+                                        for d, v in lanes.read.items()),
                   flush=True)
             # the shard is on disk now, so its rows are no longer in flight --
             # counting them in both places would double them for one tick
-            beat(si, 0)
+            beat(lanes.lowest(), flying(), lanes.read)
             last_beat = time.time()
+
+    def flying():
+        return sum(len(r['label']) for r in rows.values())
+
+    # The first one goes out BEFORE any frame is read: the model is already
+    # loaded by here, so this is the moment the panel can stop saying nothing
+    # is happening. Everything in it is zero, which is true and is not the
+    # same as unknown.
+    beat(todo[0] if todo else 0, 0)
+    with mp.get_context('spawn').Pool(args.workers, _init,
+                                      (roots, prep)) as pool:
+        lanes = DriveLanes(shards, todo, roots, readers, ahead=args.ahead,
+                           slots=max(32, 4 * args.workers),
+                           disk_order=disk_order)
+        try:
+            for si, iid, crops, err in pool.imap_unordered(
+                    _cut, lanes.feed(), chunksize=1):
+                lanes.consumed(si)
+                seen += 1
+                if err:
+                    bad += 1
+                for di, crop in crops:
+                    batch.append(crop)
+                    meta.append((si, iid, di))
+                    pend[si] += 1
+                    if len(batch) >= args.batch:
+                        launch()
+                        settle(keep=1)
+                if not lanes.left[si]:
+                    closing.add(si)
+                if closing:
+                    write_done(lanes)
+                if time.time() - last_beat >= BEAT_EVERY_S:
+                    beat(lanes.lowest(), flying(), lanes.read)
+                    last_beat = time.time()
+            launch()
+            settle()
+            write_done(lanes)
+        finally:
+            lanes.stop.set()
+        if rows:
+            raise SystemExit(f'the feed ended with shards {sorted(rows)} '
+                             f'unfinished -- nothing was written for them')
     # The record is the shards; a heartbeat outliving the process would be a
     # claim about a run that is over. A kill leaves it behind, which is why
     # the reader also ages it out.
@@ -1093,7 +1522,10 @@ def main(argv=None):
     r.add_argument('--workers', type=int, default=max(2, (os.cpu_count() or 4)))
     r.add_argument('--batch', type=int, default=0,
                    help='crops per predict call; default scales with imgsz '
-                        '(128 at 224, 16 at 640 -- 128 at 640 OOMs a 16 GB card)')
+                        '(128 at 224, 16 at 640 -- 128 at 640 OOMs a 16 GB '
+                        'card). cuDNN picks its kernels per batch size, so p '
+                        'can move by up to ~0.01 between sizes: resume a '
+                        'stage at the batch it started with')
     r.add_argument('--shard', type=int, default=SHARD_ROWS)
     r.add_argument('--device', default=0)
     r.add_argument('--imgsz', type=int, default=0,
@@ -1101,6 +1533,25 @@ def main(argv=None):
                         'model was trained at (for experiments only)')
     r.add_argument('--limit', type=int, default=0,
                    help='stop after this many BOXES (for a trial run)')
+    r.add_argument('--legacy-predict', action='store_true',
+                   help='score PIL crops through model.predict() in this '
+                        'process, as before the fast path (for comparison). '
+                        'Only the scoring: frames still come through the '
+                        'per-drive readers. The old feed too means the '
+                        'gate_store.py from before the fast path, from git')
+    r.add_argument('--readers', action='append', default=[],
+                   metavar='DRIVE=N',
+                   help=f'reader threads for one drive (repeatable); default '
+                        f'{READERS_DEFAULT}, {READERS}')
+    r.add_argument('--disk-order', action='append', default=[],
+                   metavar='DRIVE=WINDOW',
+                   help="read a drive's frames in on-disk (FIEMAP) order, "
+                        'WINDOW at a time within each shard -- the sweep\'s '
+                        'disk_ordered(); the lane pauses for each lookup')
+    r.add_argument('--ahead', type=int, default=AHEAD,
+                   help='shards a drive may read past the lowest unfinished '
+                        'one; a stop throws away up to AHEAD+1 partly-scored '
+                        'shards, so lower it if the run is stopped often')
     s = sub.add_parser('status'); s.set_defaults(fn=status)
     rs = sub.add_parser('restore', help='list the archived runs of a stage, '
                         'or put one back')

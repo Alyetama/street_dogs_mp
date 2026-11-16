@@ -62,6 +62,8 @@ EXTRA = (
     'tools/detect/tests/adv_bundle_record.py',
     'tools/detect/tests/adv_eval_leash_testset.py',
     'tools/detect/tests/adv_promoted_side_store.py',
+    # The gate fast path's parity check (2026-11-15). New, so `git add -f`.
+    'tools/detect/tests/adv_gate_fastpath.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
