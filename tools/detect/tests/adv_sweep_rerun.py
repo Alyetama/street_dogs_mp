@@ -741,7 +741,8 @@ try:
         'id="sweepRerun"' in adm and "action:'rerun'" in js
         and 'e.preventDefault()' in js and 'sweep_archive.py restore' in js
         and 'rr.disabled=false;' in paint_ and 'rr.disabled=!' not in paint_
-        and 'rr.hidden=!best||!!j.running;' in paint_, 'page text changed')
+        and 'rr.hidden=!best||!!j.running||!!j.best_side_store;' in paint_,
+        'page text changed')
     check(
         's11b its confirm says when the model is the same one, and a '
         'disabled sweep control looks disabled',
