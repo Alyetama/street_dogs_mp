@@ -115,7 +115,9 @@ LEGACY_RE = re.compile(
 # answer, which is the worse of the two -- so this form is refused outright.
 TS_LED_RE = re.compile(r'^\d{13}_')
 
-# `box` is what the crop was cut from (a person's redraw, if there is one);
+# `box` is what the crop was cut from: a person's redraw on the gate family
+# when there is one, and always the detector's box on leash (EDITED_WINS --
+# the leash redraw is kept only as provenance.redraw_box);
 # `pool_box` is the DETECTOR's box for the same det_key, unedited, which is
 # what a drawn box is joined against -- a redraw that takes in a leash
 # overlaps the Label Studio box of the same dog at IoU 0.4, the detector box
@@ -134,9 +136,17 @@ FAMILY_SOURCES = {
                'frame_label'),
     'leash': ('ls_box', 'leash_audit', 'leash_call'),
 }
+# Whether a person's redraw of a detector box is the crop a family trains on,
+# per audit stage (audit_candidates) -- the gate yes, the leash model no: it
+# trains on the detector box production cuts, and keeps the redraw only as
+# provenance.redraw_box. leash_call_candidates follows the leash rule too.
+EDITED_WINS = {'gate': True, 'leash': False}
 CONF_TOL = 0.006          # the review ledgers round conf to two decimals
 LS_IOU = 0.5              # a drawn box IS a detector box at this overlap
 JPEG_Q = 95               # what audit.py writes its full/ crops at
+EDITED_TOL_PX = 1         # an edited/ crop's size vs its re-cut, per axis
+                          # (framing_check_audit: the redraw is ledgered
+                          # rounded, the file cut unrounded)
 
 
 def D(*parts):
@@ -374,18 +384,32 @@ def pool_rows(stage, keys, con=None):
 def exclusions(family, training_root=None):
     """{image_id: reason} -- images whose label a person has said is wrong.
 
-    Three records, each an input whose digest goes in the bundle:
+    Two records, each an input whose digest goes in the bundle:
 
       label_flags        a crop flagged as mislabelled from the run panel
       manual_fixes       a crop removed by hand from an old base dataset,
                          read out of every <training root>/*/manual_fixes.jsonl
                          whose class belongs to this family
-      leash conflicts    (leash only) images whose leash label disagreed
-                         between two Label Studio lineages
 
     WHOLE IMAGES, because the record names a crop of an old dataset whose box
     index cannot be mapped onto today's rows -- the safe reading of "this
     crop of this frame is mislabelled" is "do not learn from this frame".
+
+    RETIRED, BUT STILL DIGESTED: data/leash_label_conflicts.json. It named 19
+    crops on 10 images whose leash label "disagreed" between leash_3class_v2
+    and leash_human_v1, and its own commit (de27f267) called that a
+    detection-index misalignment, not annotator disagreement -- a stopgap.
+    Measured on leash_20261115_18b269: the two lineages numbered boxes
+    differently (detector matching at IoU 0.5 vs annotation order), every dog
+    in all 10 images carries the same label in both once the crops are put
+    side by side, and today's Label Studio rows key on the export's own b<k>
+    with the label bound to the box, so the misalignment cannot recur. Applied,
+    it dropped 34 good ls_box rows (16 leashed, 18 unleashed), and they were
+    10 of the only 13 Label Studio scenes holding a leashed and an unleashed
+    dog together -- the best contrast there is against a scene shortcut. So
+    it no longer excludes anything; its sha256 is still recorded (with a
+    'leash_label_conflicts:status' line saying it was consulted and retired)
+    so a reader of the bundle can see the file was there and was not used.
     """
     out, digests = {}, {}
     try:
@@ -422,18 +446,18 @@ def exclusions(family, training_root=None):
                                      % (path, r['removed']))
                 out.setdefault(iid, 'manual_fixes')
     if family == 'leash':
+        # consulted, recorded, not applied (see the docstring)
         p = D('leash_label_conflicts.json')
         digests['leash_label_conflicts'] = sha256_or_none(p)
         try:
             with open(p) as fh:
-                for name in json.load(fh) or []:
-                    iid = image_id_of(name)
-                    if iid is None:
-                        raise SystemExit('%s names a crop no parser can '
-                                         'read: %r' % (p, name))
-                    out.setdefault(iid, 'leash_label_conflicts')
-        except OSError:
-            pass
+                named = {image_id_of(n) for n in json.load(fh) or []} - {None}
+            digests['leash_label_conflicts:status'] = (
+                'retired: names %d image_id(s), none excluded -- an '
+                'index-alignment artifact (de27f267), not a label '
+                'disagreement' % (len(named),))
+        except (OSError, ValueError, TypeError):
+            digests['leash_label_conflicts:status'] = 'retired: unreadable'
     return out, digests
 
 
@@ -574,9 +598,26 @@ def audit_candidates(stage, con=None):
 
     full/<key>.jpg is cut by audit.py with gate_store's constants from the
     full-resolution frame -- production framing already, so it is reused, not
-    re-cut. A person's redraw (edited/) wins for training, exactly as
-    fn_audit.export decides. The framing check in collect() re-cuts a sample
-    of both from the frame to prove that claim on today's files.
+    re-cut. The framing check in collect() re-cuts a sample of both from the
+    frame to prove that claim on today's files.
+
+    WHICH CROP TRAINS DEPENDS ON THE FAMILY (EDITED_WINS):
+
+      gate    a person's redraw (edited/) wins, exactly as fn_audit.export
+              decides: the gate is asked "is this a dog", and a redraw that
+              fixes a box cut through the dog is the better example of one.
+      leash   the DETECTOR's box (full/) wins, always -- the redraw is kept
+              only as metadata (provenance.redraw_box). Production cuts the
+              leash crop from the detector box and never from a redraw, and
+              the leash audit's redraws are not neutral corrections. Of the
+              270 collected on 2026-11-15, 261 (97%) enlarge the box to take
+              in the leash and the handler (median 1.71x the detector box's
+              area), and 249 are on leashed dogs against 21 on unleashed. So
+              "big, handler in frame" came to mean leashed in train and val
+              and in nothing production ever shows the model. User decision,
+              2026-11-15. The Label Studio LABELS are not touched -- a
+              leashed box there still takes in the leash on purpose; this
+              only chooses which crop of an audited box the classifier sees.
     """
     import fn_audit as fa
     sp, P = fa.spec(stage), fa.paths(stage)
@@ -600,24 +641,35 @@ def audit_candidates(stage, con=None):
             continue
         picked.append((v, cls, iid, int(di)))
     pool = pool_rows(stage, [(iid, di) for _, _, iid, di in picked], con)
+    edited_wins = EDITED_WINS[stage]
     rows = []
     for v, cls, iid, di in picked:
         name = '%s_%d.jpg' % (iid, di)
         ed, fu = os.path.join(edited_dir, name), os.path.join(P['full'], name)
         prow = pool.get((iid, di))
-        if os.path.isfile(ed):
+        redraw = corr.get((iid, di))
+        has_ed = os.path.isfile(ed)
+        if has_ed and edited_wins:
             path, framing = ed, 'audit_edited'
-            box = corr.get((iid, di))
+            box = redraw
             if box is None:
                 c['edited_without_correction_record'] += 1
         elif os.path.isfile(fu):
             path, framing = fu, 'audit_full'
             box = prow[:4] if prow else None
+            if has_ed:
+                # leash: the redraw exists and is deliberately not trained on
+                c['edited_not_used_detector_box_wins'] += 1
         else:
             c['audit_missing_crop'] += 1
             continue
         if prow is None:
             c['no_pool_row'] += 1
+        prov = {'ledger': P['verdicts'], 'key_or_task_id': str(v['key']),
+                'by': v.get('by'), 'ts': v.get('ts')}
+        if redraw is not None and framing != 'audit_edited':
+            # metadata only: the crop above is the detector box's
+            prov['redraw_box'] = [float(x) for x in redraw]
         rows.append({
             'source': source, 'label': cls, 'image_id': iid,
             'det_key': 'd%d' % di,
@@ -628,9 +680,7 @@ def audit_candidates(stage, con=None):
             'band': v.get('band'), 'p_model': v.get(sp['p_col'])
             if v.get(sp['p_col']) is not None else v.get('p_dog'),
             'aimed': str(v['key']) in aimed, 'verdict_seq': v.get('seq'),
-            'provenance': {'ledger': P['verdicts'],
-                           'key_or_task_id': str(v['key']),
-                           'by': v.get('by'), 'ts': v.get('ts')}})
+            'provenance': prov})
     c['rows'] = len(rows)
     return rows, c
 
@@ -643,12 +693,16 @@ def leash_call_candidates(detect_root, corrections=None):
     The box is the one gen-1 detection within CONF_TOL of the stored conf; a
     call that matches none or several is dropped and counted.
 
-    THE REVIEWER'S REDRAW WINS, as it does for the dog-bin flags: the review
-    page writes one box correction per (image_id, det_idx) whichever question
-    it was asking, and the hard positive cut from the same box already uses
-    it. Cutting the leash crop from the raw detector box instead framed one
-    box two ways in two datasets -- and 10 of the 11 calls that survive have
-    a redraw, at IoU 0.61-0.93 with the detector's box.
+    THE DETECTOR'S BOX IS CUT, NOT THE REVIEWER'S REDRAW (since 2026-11-15,
+    user decision; EDITED_WINS['leash']). Production cuts the leash crop from
+    the detector box, and the review page's redraws of leash calls move it
+    off that framing: 12 of the 13 calls collected on 2026-11-15 had one, at
+    IoU 0.61-0.94 with the detector's box, and a leash-question redraw takes
+    in the leash. The redraw stays on the row as
+    provenance.redraw_box. The dog-bin's hard positive cut from the same
+    box still uses the redraw (the gate's rule), so one box is framed two
+    ways in the two families -- on purpose: each family trains on what its
+    own question is asked about in production.
 
     ONE CALL PER BOX. leash.db is keyed by the crop's FILE name, which leads
     with the time the crop was queued; the pool rotates, so one detection can
@@ -687,18 +741,17 @@ def leash_call_candidates(detect_root, corrections=None):
             continue
         di, x1, y1, x2, y2, _ = hit[0]
         det_box = [x1, y1, x2, y2]
-        box = list(det_box)
         fixed = corr.get((iid, di))
+        box = list(det_box)
+        prov = {'ledger': leash_store.DB_PATH, 'key_or_task_id': crop,
+                'by': by, 'ts': at}
         if fixed:
-            box = [float(v) for v in fixed]
+            prov['redraw_box'] = [float(v) for v in fixed]
         per_box[(iid, di)].append({
             'source': 'leash_call', 'label': label,
             'image_id': iid, 'det_key': 'd%d' % di,
             'box': box, 'pool_box': det_box, 'framing': 'cut_crops',
-            '_corrected': bool(fixed),
-            'provenance': {'ledger': leash_store.DB_PATH,
-                           'key_or_task_id': crop, 'by': by,
-                           'ts': at}})
+            '_corrected': bool(fixed), 'provenance': prov})
     rows, conflicts = [], []
     for key in sorted(per_box):
         lst = per_box[key]
@@ -717,7 +770,8 @@ def leash_call_candidates(detect_root, corrections=None):
         best = max(lst, key=lambda r: (r['provenance']['ts'] or 0,
                                        r['provenance']['key_or_task_id']))
         if best.pop('_corrected'):
-            c['box_corrected'] += 1
+            # on record as provenance.redraw_box, not cut (see above)
+            c['redraw_recorded_not_cut'] += 1
         rows.append(best)
     return rows, c, conflicts
 
@@ -884,13 +938,30 @@ def apply_box_vetoes(rows, vetoes, drop_labels, kind):
     detector box (pool_box, else its box) overlaps the veto's at IoU >=
     LS_IOU. Only rows whose label is in `drop_labels` are dropped; each drop
     is a conflict naming both records.
+
+    TWO DETECTOR KEYS THAT DIFFER can still be one object: the gen-1 store
+    double-boxes, and a key-only match let it through. On 2020931115336701
+    the gate audit called d0 not_dog and the leash audit called d1
+    unleashed, IoU 0.889 -- a bird, which trained leash_20261115_18b269 as
+    an unleashed dog; on 934932528930690 (six near-identical dets) snow and
+    a pole trained as a leashed one, at IoU 0.645. So differing d-keys are
+    ALSO one box when the row's pool_box -- the detector's box, never a
+    person's redraw, which takes in the leash -- overlaps the veto's at IoU
+    >= LS_IOU; a row without a pool_box is matched by key only. The rule is
+    both families': dogbin_20261114_06c6b6 loses the same two pairs from the
+    other side (ga_..._d0 and ga_..._d5, not_dog vs the leash verdict), and
+    there the gate audit was right -- they were correct hard negatives. That
+    matches the equal-key policy of dropping the box rather than picking a
+    side. Those drops are recorded as kind '<kind>_overlap' (only when every
+    hit was such an overlap), so a dense multi-dog frame where two real dogs
+    overlap that much can be found and looked at.
     """
     by_img = collections.defaultdict(list)
     for v in vetoes:
         by_img[v['image_id']].append(v)
     keep, conf = [], []
     for row in rows:
-        hits = []
+        hits, n_overlap = [], 0
         if row['label'] in drop_labels:
             rk = str(row.get('det_key') or '')
             rb = row.get('pool_box') or row.get('box')
@@ -899,10 +970,16 @@ def apply_box_vetoes(rows, vetoes, drop_labels, kind):
                 if rk.startswith('d') and vk.startswith('d'):
                     if rk == vk:
                         hits.append(v)
+                    elif (row.get('pool_box') and v.get('box')
+                          and iou(row['pool_box'], v['box']) >= LS_IOU):
+                        hits.append(v)
+                        n_overlap += 1
                 elif rb and v.get('box') and iou(rb, v['box']) >= LS_IOU:
                     hits.append(v)
         if hits:
-            conf.append({'kind': kind,
+            # '_overlap' only when nothing but a differing-key overlap hit
+            conf.append({'kind': kind + '_overlap' if n_overlap == len(hits)
+                         else kind,
                          'members': [{'uid': row['uid'], 'label': row['label'],
                                       'source': row['source']}]
                          + [{'uid': v['uid'], 'label': v['label'],
@@ -1375,7 +1452,7 @@ def collect(family, stage, tasks, export_path, detect_root=None, roots=None,
 
     # ---- 5. the audit framing check --------------------------------------
     if framing_check:
-        framing_check_audit(rows, say=say)
+        counts['framing_check'] = framing_check_audit(rows, say=say)
 
     # ---- 6. vetoes: another human record says this box is not this --------
     if vetoes:
@@ -1489,9 +1566,22 @@ def framing_check_audit(rows, frac=0.01, minimum=50, seed=20261114,
     A seeded sample (1%, at least 50) of the audit rows is re-cut from its
     frame with gate_store.cut_crops -- from the pool box for full/, from the
     page's last recorded redraw for edited/ -- and the size has to match the
-    file exactly. A mismatch means the page cut with constants that are not
+    file. A mismatch means the page cut with constants that are not
     production's, which would put every reused crop on the wrong framing; it
     fails the collection rather than shipping a set that only looks matched.
+
+    EXACT for full/, WITHIN EDITED_TOL_PX PER AXIS for edited/. The page
+    records a redraw rounded to 2 decimals but cuts edited/ from the
+    unrounded floats, and cut_crops truncates with int(), so 1937.996 is
+    1937 on the page and 1938.0 in the ledger. Re-cutting all 270
+    audit_edited rows of the leash ledger found exactly 2 one-pixel
+    differences (la_2000627870347514_d0 304 vs 303, la_655750269776741_d0
+    334 vs 333) and every full/ row exact. With a seeded 1% sample an exact
+    test aborted each rebuild after a ledger change with odds of a few
+    percent, on a rounding gap, not a framing drift. A real drift (other
+    PAD_FRAC/PAD_PX) moves a crop by far more than 1 px. Tolerated
+    mismatches are counted and named in the return value and the log line,
+    never passed silently.
     """
     aud = sorted((r for r in rows if r['framing'] in
                   ('audit_full', 'audit_edited') and r.get('box')),
@@ -1501,7 +1591,7 @@ def framing_check_audit(rows, frac=0.01, minimum=50, seed=20261114,
     k = min(len(aud), max(minimum, int(round(frac * len(aud)))))
     sample = random.Random(seed).sample(aud, k)
     from PIL import Image
-    bad, skipped = [], 0
+    bad, tolerated, skipped = [], [], 0
     from concurrent.futures import ThreadPoolExecutor
 
     def one(row):
@@ -1520,11 +1610,21 @@ def framing_check_audit(rows, frac=0.01, minimum=50, seed=20261114,
                 continue
             with Image.open(row['path']) as im:
                 have = tuple(im.size)
-            if got != have:
+            if got == have:
+                continue
+            if (row['framing'] == 'audit_edited' and got and len(got) == 2
+                    and all(abs(g - h) <= EDITED_TOL_PX
+                            for g, h in zip(got, have))):
+                tolerated.append((row['uid'], have, got))
+            else:
                 bad.append((row['uid'], have, got))
-    say('framing check: %d audit crops re-cut from their frames, %d match, '
-        '%d frames unavailable' % (len(sample) - skipped,
-                                   len(sample) - skipped - len(bad), skipped))
+    say('framing check: %d audit crops re-cut from their frames, %d match '
+        'exactly, %d edited/ within %d px (redraw rounding)%s, %d frames '
+        'unavailable' % (len(sample) - skipped,
+                         len(sample) - skipped - len(bad) - len(tolerated),
+                         len(tolerated), EDITED_TOL_PX,
+                         (' e.g. %s' % (tolerated[:3],)) if tolerated else '',
+                         skipped))
     if bad:
         raise SystemExit('%d audit crop(s) are not framed the way '
                          'gate_store.cut_crops frames them, e.g. %s'
@@ -1533,7 +1633,10 @@ def framing_check_audit(rows, frac=0.01, minimum=50, seed=20261114,
         raise SystemExit('framing check: %d of %d sampled frames could not '
                          'be read -- the check proved nothing'
                          % (skipped, len(sample)))
-    return {'checked': len(sample) - skipped, 'skipped': skipped}
+    return {'checked': len(sample) - skipped, 'skipped': skipped,
+            'tolerated': len(tolerated),
+            'tolerated_uids': [u for u, _, _ in tolerated],
+            'edited_tol_px': EDITED_TOL_PX}
 
 
 def apply_vetoes(rows, vetoes):
@@ -1543,6 +1646,16 @@ def apply_vetoes(rows, vetoes):
     the size it recorded, which for every Label Studio frame is the
     full-resolution size (the store's orig_w matched it for all 2,971 that
     have a store row).
+
+    BOTH of the row's boxes are tried, and either one overlapping the veto at
+    IoU >= LS_IOU drops it. `box` alone (as it was) misses a redraw: an
+    audit_edited or leash_call redraw takes in the leash, median 1.6x the
+    detector box's area, and the file's own measure is IoU ~0.4 against the
+    Label Studio box of the same animal -- under LS_IOU. `pool_box` alone
+    would miss the other way, a person's correction of a badly placed
+    detector box. Nothing escaped in leash_20261115_18b269 (no redrawn row
+    shares a frame with an "other animal" box; the 60 row/veto pairs that
+    share one peak at IoU 0.121), so this closes a latent miss.
     """
     by_img = collections.defaultdict(list)
     for v in vetoes:
@@ -1552,8 +1665,9 @@ def apply_vetoes(rows, vetoes):
         by_img[v['image_id']].append((v, ls_pixel_box(v['pct'], ow, oh)))
     keep, conf = [], []
     for row in rows:
+        mine = [b for b in (row.get('pool_box'), row.get('box')) if b]
         hits = [v for v, vb in by_img.get(row['image_id'], ())
-                if row.get('box') and iou(row['box'], vb) >= LS_IOU]
+                if any(iou(b, vb) >= LS_IOU for b in mine)]
         if hits:
             conf.append({'kind': 'leash_vs_ls_not_dog',
                          'members': [{'uid': row['uid'], 'label': row['label'],

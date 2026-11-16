@@ -39,7 +39,10 @@ a manifest row from crop_sources.py -- image_id, sequence, source, provenance
   every row that is a copy of a reserved crop under another name: the same
   bytes, or a dHash within max(2, --hamming) of one -- the reserved rows'
   own, and the crops a reserve file records. Their hashes are written to
-  ``reserved_crops.json`` so the on-disk check can repeat it;
+  ``reserved_crops.json`` so the on-disk check can repeat it; and every row
+  whose image is a CAPTURE TWIN of a reserved image (``capture_twins``: same
+  creator, within 60 s and 30 m -- the same moment filed under another
+  sequence);
 * drop every row whose sequence no manifest knows, unless ``--keep-noseq``
   pins them to train on the record: such a row cannot be held disjoint from
   a reserved sequence, so by default it is not trained on at all;
@@ -48,8 +51,14 @@ a manifest row from crop_sources.py -- image_id, sequence, source, provenance
   the same box drop the box, and are written down;
 * cap the crops kept per (sequence, class);
 * assign whole SPLIT GROUPS to train/val -- a group is every sequence joined
-  by a shared image, a shared file or a near-duplicate, so a dog seen in two
-  passes cannot sit on both sides;
+  by a shared image, a shared file, a near-duplicate or a capture twin, so a
+  dog seen in two passes cannot sit on both sides. The cap and the split are
+  ordered by sha256(seed:item), so one row more or less moves its own group,
+  not 700 others;
+* OPT-IN, after the split: cap the crops kept per (creator, class)
+  (``--max-per-creator``), then balance each split's positive rate per
+  crop short-side band (``--balance-size-bands``) -- see ``rebalance_plan``.
+  Off by default; the manifest records ``variant`` plain or rebalanced;
 * assert all of it on the plan (``check_rows``), write, and assert it again on
   what is on disk (``verify_dataset``). A failure removes the output.
 
@@ -110,7 +119,8 @@ def _parse_name_fallback(fname):
 
 try:
     from crop_sources import (parse_name, HUMAN_SOURCES, FORBIDDEN_PATH_RE,
-                              FRAMINGS, DRAWN_SOURCES)
+                              FRAMINGS, DRAWN_SOURCES, FAMILY_CLASSES,
+                              LS_IOU)
 except Exception:                         # pragma: no cover - see above
     parse_name = _parse_name_fallback
     HUMAN_SOURCES = frozenset({'ls_box', 'hard_negative', 'hard_positive',
@@ -121,6 +131,39 @@ except Exception:                         # pragma: no cover - see above
         r'(?:^|/)data/(?:gate(?:_[^/]*)?|leash)(?:/|$)'
         r'|llm_[a]nnotations|tri[a]ge|guess|mistakes|hidden_dogs|confusion')
     FRAMINGS = frozenset({'cut_crops', 'audit_full', 'audit_edited'})
+    FAMILY_CLASSES = {'dogbin': ('dog', 'not_dog'),
+                      'leash': ('leashed', 'unleashed')}
+    LS_IOU = 0.5
+
+
+# Crop short-side bands, (lo, hi] in px: THE ONE DEFINITION. The leash audit
+# measured its size skew in these bands, build_dataset's size diagnostic
+# (size_shortcut) reports in them, and --balance-size-bands balances in them
+# -- a diagnostic and a fix that cut the axis differently would each be
+# measuring something the other did not change.
+SIZE_BANDS = ((None, 64, '<=64'), (64, 96, '64-96'), (96, 128, '96-128'),
+              (128, 192, '128-192'), (192, None, '>192'))
+
+
+def size_band(short, bands=None):
+    """The SIZE_BANDS name a crop's short side (px) falls in."""
+    bands = bands or SIZE_BANDS
+    for lo, hi, name in bands:
+        if (lo is None or short > lo) and (hi is None or short <= hi):
+            return name
+    return bands[-1][2]
+
+
+def family_of(row):
+    """'leash', 'dogbin' or None: the row's own `family` (crop_sources
+    writes it on every row), else read off its label."""
+    fam = row.get('family')
+    if fam:
+        return fam
+    for name, classes in FAMILY_CLASSES.items():
+        if row.get('label') in classes:
+            return name
+    return None
 
 
 def image_id_of(fname):
@@ -222,6 +265,239 @@ json.dump({i: s for i, s in rows}, open(spec["out"], "w"))
             return json.load(f)
 
 
+# ── capture twins: one moment, two sequences ────────────────────────────────
+#
+# The same dog shot at the same moment can sit in TWO Mapillary sequences: a
+# multi-camera rig, a split upload, one photo filed under two image_ids. The
+# sequence split cannot see it, and neither can the pixel dedup -- one twin is
+# a Label Studio box that takes in the leash, the other the detector's box, so
+# their dHash sits 8 or more bits apart (the build collapses at 6) and their
+# embeddings at cos 0.88 (it joins at 0.93). Measured on leash_20261115_18b269
+# (2026-11-15): 4 val crops had a twin in train at 0 s / 0-6 m, and 10 of the
+# 312 leash acceptance images (12 of its 397 crops) had one in train -- the
+# same dog in about 10 of the 12 pairs by eye. 22 (creator, captured_at) keys
+# spanned more than one sequence of that dataset.
+#
+# So two images are TWINS when the same creator took them within
+# TWIN_SECONDS of each other and within TWIN_METRES -- or, when either has no
+# geometry (18 of 4,566 ids), within TWIN_SECONDS_NOGEO on time alone. The
+# windows stay small on purpose: twins are unioned SINGLE-LINK, so a wide
+# window would chain one creator's whole walk into one split group. At 300 s
+# / 50 m the counts grow only to 15 acceptance images and 5 val crops.
+TWIN_SECONDS = 60
+TWIN_METRES = 30.0
+TWIN_SECONDS_NOGEO = 10
+
+
+def _capture_ts(v):
+    """Epoch seconds of a captured_at, or None. The ground_animals parquets
+    carry 'YYYY-MM-DD HH:MM:SS' strings (4,700 of 4,701 ids looked up; the
+    other is NULL); epoch milliseconds and ISO forms are read too. Read as
+    UTC either way: only differences between two of them are ever used."""
+    import datetime
+    if v is None or v == '':
+        return None
+    if isinstance(v, (int, float)):
+        x = float(v)
+        return x / 1000.0 if x > 1e11 else x
+    s = str(v).strip()
+    if re.fullmatch(r'-?\d+(\.\d+)?', s):
+        return _capture_ts(float(s))
+    try:
+        d = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=datetime.timezone.utc)
+    return d.timestamp()
+
+
+def _capture_of(captured_at, geometry, creator):
+    """{creator, ts, lon, lat} from one parquet row's raw fields, or None
+    when there is no creator.
+
+    A creator with no time is KEPT, with ts None: it joins no twin
+    (capture_twins and is_capture_twin skip ts None) but the creator cap
+    still counts it -- otherwise an image's NULL captured_at would exempt it
+    from --max-per-creator. (1 of the 4,701 ground_animals ids looked up has
+    a NULL captured_at.)"""
+    ts = _capture_ts(captured_at)
+    if not creator:
+        return None
+    lon = lat = None
+    try:
+        g = json.loads(geometry) if isinstance(geometry, str) else geometry
+        c = (g or {}).get('coordinates')
+        if c and len(c) >= 2:
+            lon, lat = float(c[0]), float(c[1])
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return {'creator': str(creator), 'ts': ts, 'lon': lon, 'lat': lat}
+
+
+def resolve_capture(image_ids, repo, python_bin):
+    """{image_id: {creator, ts, lon, lat}} from the ground_animals parquets.
+
+    Beside resolve_sequences, not inside it: a dozen tools (and their tests)
+    hold resolve_sequences to {image_id: sequence}. An id the catalog does not
+    hold, or holds with no creator, is simply absent; one with a creator and
+    no captured_at carries ts None. Neither joins a twin (capture_known), and
+    the callers count both.
+    """
+    if not image_ids:
+        return {}
+    prog = r'''
+import duckdb, json, sys
+spec = json.load(open(sys.argv[1]))
+con = duckdb.connect(spec["db"], read_only=True)
+con.execute("SET memory_limit='6GB'")
+paths = [r[0] for r in con.execute(
+    "SELECT path FROM files WHERE path LIKE '%ground_animals%'").fetchall()]
+con.execute("CREATE TEMP TABLE want(image_id VARCHAR)")
+con.executemany("INSERT INTO want VALUES (?)", [(i,) for i in spec["ids"]])
+src = "read_parquet([" + ",".join(
+    "'" + p.replace("'", "''") + "'" for p in paths) + "], union_by_name=true)"
+# min() per field over an id's duplicate rows (3.4% of the corpus), NULLs
+# ignored -- the same reason resolve_sequences takes min().
+rows = con.execute(
+    "SELECT CAST(p.image_id AS VARCHAR) i, min(CAST(p.captured_at AS VARCHAR)),"
+    " min(CAST(p.computed_geometry AS VARCHAR)),"
+    " min(json_extract_string(CAST(p.creator AS VARCHAR), '$.id')) "
+    "FROM " + src + " p JOIN want w ON CAST(p.image_id AS VARCHAR)=w.image_id "
+    "GROUP BY 1").fetchall()
+json.dump([list(r) for r in rows], open(spec["out"], "w"))
+'''
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        spec_p = os.path.join(tmp, 'spec.json')
+        out_p = os.path.join(tmp, 'cap.json')
+        with open(spec_p, 'w') as f:
+            json.dump({'db': os.path.join(repo, 'data', 'catalog.duckdb'),
+                       'ids': sorted(str(i) for i in image_ids),
+                       'out': out_p}, f)
+        p = subprocess.run([python_bin, '-c', prog, spec_p],
+                           capture_output=True, text=True)
+        if p.returncode != 0 or not os.path.exists(out_p):
+            raise SystemExit('capture lookup failed:\n'
+                             + (p.stderr or p.stdout or '')[-800:])
+        with open(out_p) as f:
+            raw = json.load(f)
+    out = {}
+    for iid, ts, geo, creator in raw:
+        cap = _capture_of(ts, geo, creator)
+        if cap:
+            out[str(iid)] = cap
+    return out
+
+
+def capture_known(cap):
+    """True when a capture can take part in the twin rule: creator AND time."""
+    return bool(cap and cap.get('creator') and cap.get('ts') is not None)
+
+
+def _metres(a, b):
+    import math
+    la1, la2 = math.radians(a['lat']), math.radians(b['lat'])
+    dla = la2 - la1
+    dlo = math.radians(b['lon'] - a['lon'])
+    h = (math.sin(dla / 2) ** 2
+         + math.cos(la1) * math.cos(la2) * math.sin(dlo / 2) ** 2)
+    return 2 * 6371000.0 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def is_capture_twin(a, b, seconds=TWIN_SECONDS, metres=TWIN_METRES,
+                    nogeo_seconds=TWIN_SECONDS_NOGEO):
+    """The twin rule on two captures ({creator, ts, lon, lat} or None)."""
+    if not a or not b or a.get('creator') != b.get('creator') \
+            or a.get('ts') is None or b.get('ts') is None:
+        return False
+    dt = abs(float(a['ts']) - float(b['ts']))
+    if None in (a.get('lon'), a.get('lat'), b.get('lon'), b.get('lat')):
+        return dt <= nogeo_seconds
+    return dt <= seconds and _metres(a, b) <= metres
+
+
+def capture_twins(items, seconds=TWIN_SECONDS, metres=TWIN_METRES,
+                  nogeo_seconds=TWIN_SECONDS_NOGEO):
+    """[(node a, node b)], a < b: every pair of nodes holding twin captures.
+
+    `items` is [(node, capture or None)]; a node may appear more than once
+    (one per crop) and is never paired with itself. THE ONE TWIN RULE: the
+    split (split_groups), the reserves (reserve_twin_ids, check_rows) and the
+    test-set draw (reserve_test_set.twin_units) all call this.
+
+    Bucketed by (creator, ts // seconds) and compared only within a bucket
+    and with the next one, so it is linear in the images, not all-pairs --
+    every pair within `seconds` (and so within nogeo_seconds) shares a bucket
+    or sits in adjacent ones.
+    """
+    nogeo_seconds = min(nogeo_seconds, seconds)
+    buckets = collections.defaultdict(list)
+    for node, cap in items:
+        if not cap or not cap.get('creator') or cap.get('ts') is None:
+            continue
+        buckets[(cap['creator'], int(float(cap['ts']) // seconds))].append(
+            (node, cap))
+    out = set()
+    for (cr, b), lst in buckets.items():
+        cand = lst + buckets.get((cr, b + 1), [])
+        for i in range(len(lst)):
+            ni, ci = lst[i]
+            for nj, cj in cand[i + 1:]:
+                if ni != nj and is_capture_twin(ci, cj, seconds, metres,
+                                                nogeo_seconds):
+                    out.add((ni, nj) if ni < nj else (nj, ni))
+    return sorted(out)
+
+
+def capture_twin_unions(rows):
+    """([(sequence a, sequence b)], image pairs): the sequence unions the
+    twin rule asks of these rows, one per twin pair in two sequences."""
+    by_img = {}
+    for r in sorted(rows, key=lambda r: r['uid']):
+        by_img.setdefault(str(r['image_id']), r)
+    pairs = capture_twins([(i, r.get('capture'))
+                           for i, r in sorted(by_img.items())])
+    unions, cross = set(), []
+    for a, b in pairs:
+        sa, sb = by_img[a]['sequence'], by_img[b]['sequence']
+        if sa != sb:
+            unions.add((sa, sb) if sa < sb else (sb, sa))
+            cross.append((a, b))
+    return sorted(unions), cross
+
+
+def reserve_captures(reserves):
+    """{image_id: capture} of every reserved image whose capture is known."""
+    out = {}
+    for r in reserves or ():
+        for iid, cap in sorted((r.get('captures') or {}).items()):
+            out.setdefault(str(iid), cap)
+    return out
+
+
+def reserve_twin_ids(rows, reserves):
+    """{row image_id: reserved image_id} for rows that are capture twins of a
+    reserved image (and are not that image -- assertion 2's business)."""
+    res = reserve_captures(reserves)
+    if not res:
+        return {}
+    items = [('x:' + i, c) for i, c in sorted(res.items())]
+    seen = set()
+    for r in rows:
+        iid = str(r['image_id'])
+        if iid not in seen and iid not in res:
+            seen.add(iid)
+            items.append(('r:' + iid, r.get('capture')))
+    out = {}
+    for a, b in capture_twins(items):
+        if a[0] != b[0]:
+            ri, xi = (a, b) if a.startswith('r:') else (b, a)
+            out.setdefault(ri[2:], xi[2:])
+    return out
+
+
 def dhash(path, size=8):
     """64-bit difference hash. Robust to the small shifts between frames."""
     from PIL import Image
@@ -317,6 +593,13 @@ def load_reserves(paths, repo=REPO, python_bin=None):
     acceptance set. A file that lists its sequences is taken at its word;
     one that does not (the acceptance sets predate the field) has them
     resolved now.
+
+    AND BY MOMENT: each reserve carries `captures`, {image_id: {creator, ts,
+    lon, lat}} for its images, resolved now, so the build can drop a capture
+    twin of a reserved image (capture_twins) -- the same dog filed under
+    another sequence. 10 of the 312 leash acceptance images had one in
+    leash_20261115_18b269's train. Written to reserves.json with the rest, so
+    the on-disk check repeats it. The frozen files themselves are untouched.
     """
     out = []
     for p in paths or ():
@@ -350,6 +633,15 @@ def load_reserves(paths, repo=REPO, python_bin=None):
                                            if i.get('sha256')}),
                     'crop_dhash': sorted({int(i['dhash']) for i in items
                                           if i.get('dhash') is not None})})
+    # one catalog pass for every reserve file's images, not one per file
+    every = sorted({i for r in out for i in r['image_ids']})
+    caps = resolve_capture(every, repo, python_bin or sys.executable) \
+        if every else {}
+    for r in out:
+        r['captures'] = {i: caps[i] for i in r['image_ids'] if i in caps}
+        r['captures_missing'] = sum(1 for c in r['captures'].values()
+                                    if not capture_known(c)) + (
+            len(r['image_ids']) - len(r['captures']))
     return out
 
 
@@ -383,13 +675,36 @@ def near_hashes(rows, ref, dist):
 def _rank(row):
     """Which of several agreeing rows for ONE box survives.
 
-    A redrawn box first (a person framed it), then a drawn box, then the
-    detector's box as an audit reviewer saw it, then the review queue's, then
-    a leash call from the review page.
+    DOG-BIN: a redrawn box first (a person framed it), then a drawn box, then
+    the detector's box as an audit reviewer saw it, then the review queue's,
+    then a leash call from the review page.
+
+    LEASH: every DETECTOR-box crop first -- the audit's full/ crop, then the
+    review queue's, then a leash call -- then a drawn box, and a redraw
+    (audit_edited) last. The leash model trains on the crop production cuts,
+    the detector's box (user decision 2026-11-15); a leash redraw or a Label
+    Studio box is the leash-inclusive box, so when either agrees with a
+    detector crop of the same box, the detector crop is the one kept (the
+    label is the same -- only agreeing rows collapse). Before this, a Label
+    Studio crop outranked audit_full here as on the dog-bin: on the phase-2
+    stage 9 leash_audit / leash_call rows were dropped in favour of an
+    ls_box crop of their box. crop_sources no longer emits audit_edited
+    leash rows at all; rank 5 keeps an older manifest from bringing one back
+    through the dedup.
     """
+    s = row.get('source')
+    if family_of(row) == 'leash':
+        if row.get('framing') == 'audit_edited':
+            return 5
+        if s in DRAWN_SOURCES:
+            return 4
+        if row.get('framing') == 'audit_full':
+            return 1
+        if s in ('hard_negative', 'hard_positive'):
+            return 2
+        return 3
     if row.get('framing') == 'audit_edited':
         return 0
-    s = row.get('source')
     if s in DRAWN_SOURCES:
         return 1
     if row.get('framing') == 'audit_full':
@@ -397,6 +712,19 @@ def _rank(row):
     if s in ('hard_negative', 'hard_positive'):
         return 3
     return 4
+
+
+def _collapse_best(members):
+    """The one row a near-duplicate collapse (dHash, embedding) keeps of
+    same-class members: the largest file -- except on LEASH, where a
+    detector-box crop beats a drawn or redrawn one first (_rank), so an
+    enlarged leash-inclusive crop cannot win on size alone."""
+    if members and family_of(members[0]) == 'leash':
+        # min() keeps the first of equals: walked in descending uid, a tie
+        # breaks on the uid the dog-bin's max() would keep
+        return min(sorted(members, key=lambda r: r['uid'], reverse=True),
+                   key=lambda r: (_rank(r), -_size_of(r)))
+    return max(members, key=lambda r: (_size_of(r), r['uid']))
 
 
 def _iou(a, b):
@@ -412,7 +740,7 @@ def _member(r):
             'image_id': r['image_id'], 'det_key': r.get('det_key')}
 
 
-def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=0.5):
+def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=LS_IOU):
     """(kept rows, sequence unions, conflicts, reported, counts).
 
     Before the split and ACROSS SOURCES -- the old pass collapsed duplicates
@@ -420,8 +748,16 @@ def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=0.5):
     audit and from the review queue was two examples, and a box arriving
     under both labels taught both. In order:
 
-    1. THE SAME BOX. Detector boxes are keyed (image_id, det_key). A drawn box
-       (Label Studio, annotate page) joins the detector box on its frame it
+    1. THE SAME BOX. Detector boxes are keyed (image_id, det_key), and two
+       DIFFERENT det keys on one image are one box too when their pool_box
+       (the detector's box, never a redraw) overlaps at IoU >= `iou_thr` --
+       crop_sources.apply_box_vetoes' rule, here for the rows themselves.
+       The gen-1 store double-boxes: on 2020931115336701 a leash audit d1
+       ('unleashed') and a gate d0 sat at IoU 0.889, and on 934932528930690
+       six near-identical dets did; keyed alone, two labels of one box both
+       trained, and two agreeing ones trained twice. A row with no pool_box
+       joins by key only. A drawn box (Label Studio, annotate page) joins the
+       detector box on its frame it
        overlaps at IoU >= 0.5 -- the detector's own box (pool_box), not a
        redraw of it; failing that, another drawn box it overlaps as much. If
        two or more qualify, nobody can say which box it was and the whole
@@ -457,8 +793,10 @@ def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=0.5):
     # box d0 sits at 0.41 with its redraw -- the join missed it, and both
     # rows trained (and would have, under two labels).
     det_boxes = collections.defaultdict(list)      # image -> [(key, box)]
-    for (iid, dk), lst in det.items():
-        box = next((x['pool_box'] for x in lst if x.get('pool_box')), None)
+    pool_boxes = collections.defaultdict(list)     # image -> [(key, pool)]
+    for (iid, dk), lst in sorted(det.items()):
+        pool = next((x['pool_box'] for x in lst if x.get('pool_box')), None)
+        box = pool
         if box is None:
             box = next((x['box'] for x in lst if x.get('box')
                         and x.get('framing') != 'audit_edited'), None)
@@ -466,14 +804,31 @@ def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=0.5):
             det_boxes[iid].append(((iid, dk), box))
         else:
             counts['detector_box_unknown'] += 1
-    groups = {k: list(v) for k, v in det.items()}
+        if pool:
+            pool_boxes[iid].append(((iid, dk), pool))
+    # differing det keys, one box: joined on the POOL box only
+    det_uf = UnionFind()
+    for iid in sorted(pool_boxes):
+        lst = pool_boxes[iid]
+        for i in range(len(lst)):
+            for j in range(i + 1, len(lst)):
+                if _iou(lst[i][1], lst[j][1]) >= iou_thr and \
+                        det_uf.find(lst[i][0]) != det_uf.find(lst[j][0]):
+                    det_uf.union(lst[i][0], lst[j][0])
+                    counts['detector_keys_joined_by_overlap'] += 1
+    groups = collections.defaultdict(list)
+    for k in sorted(det):
+        groups[det_uf.find(k)] += det[k]
+    groups = dict(groups)
     ambiguous_images = set()
     drawn_boxes = collections.defaultdict(list)    # image -> [(key, box)]
     drawn = sorted((r for r in rows if r.get('source') in DRAWN_SOURCES),
                    key=lambda r: (_rank(r), r['uid']))
     for r in drawn:
-        hits = [k for k, b in det_boxes.get(r['image_id'], ())
-                if r.get('box') and _iou(r['box'], b) >= iou_thr]
+        # one hit per BOX: two det keys joined above are one box
+        hits = sorted({det_uf.find(k) for k, b in det_boxes.get(
+            r['image_id'], ()) if r.get('box') and _iou(r['box'], b)
+            >= iou_thr})
         if len(hits) >= 2:
             ambiguous_images.add(r['image_id'])
         elif hits:
@@ -512,8 +867,12 @@ def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=0.5):
             continue
         labels = {r['label'] for r in lst}
         if len(labels) > 1:
-            conflicts.append({'kind': 'same_box_two_labels',
-                              'key': list(key),
+            dks = sorted({str(r.get('det_key')) for r in lst
+                          if str(r.get('det_key') or '').startswith('d')})
+            conflicts.append({'kind': 'same_box_two_labels'
+                              if len(dks) <= 1
+                              else 'same_box_two_labels_overlap',
+                              'key': list(key), 'det_keys': dks,
                               'members': [_member(m) for m in lst]})
             counts['dropped_same_box_conflict'] += len(lst)
             continue
@@ -605,7 +964,7 @@ def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=0.5):
                     nxt.append(by_uid[g[0]])
                     continue
                 members = [by_uid[u] for u in g]
-                best = max(members, key=lambda r: (_size_of(r), r['uid']))
+                best = _collapse_best(members)
                 nxt.append(best)
                 counts['collapsed_dhash'] += len(members) - 1
                 for other in members:
@@ -636,7 +995,7 @@ def dedup_rows(rows, hamming=6, emb_groups=None, iou_thr=0.5):
             for r in lst:
                 per[r['label']].append(r)
             for cls in sorted(per):
-                best = max(per[cls], key=lambda r: (_size_of(r), r['uid']))
+                best = _collapse_best(per[cls])
                 nxt.append(best)
                 counts['collapsed_embedding'] += len(per[cls]) - 1
         kept = nxt
@@ -665,15 +1024,48 @@ def _size_of(r):
         return 0
 
 
-def cap_rows(rows, cap, rng):
-    """At most `cap` rows per (sequence, class); deterministic for a seed."""
+def _seed_of(seed):
+    """An int seed. A random.Random (the old signature) is reduced to one, so
+    a caller that still passes an rng gets a fixed order, not an error."""
+    if hasattr(seed, 'getrandbits'):
+        return seed.getrandbits(32)
+    return int(seed)
+
+
+def _hash_key(seed, name):
+    """The draw order of one item: sha256 of '<seed>:<name>'.
+
+    PER ITEM, not one shared shuffle. cap_rows and assign_splits used to draw
+    from one random.Random: every (sequence, class) bucket's shuffle used up
+    randomness in proportion to its size, and the split shuffled the whole
+    group list at once, so one row more or less re-dealt everything after it.
+    Removing one leash audit row from leash_20261115_18b269 moved 626-700 of
+    the other 3,743 rows across train/val; 20 random single-row removals moved
+    up to 705. Two separate rngs do not fix it (still up to ~900: the group
+    list's shuffle depends on how many groups there are). Ordered by hash
+    (with the capture-twin unions), 20 random single-row removals from the
+    3,735 crops of the audit's reproduced leash stage (cap 5, seed 0) moved
+    [0 x7, 1 x13] rows -- never more than one.
+    """
+    return hashlib.sha256(('%s:%s' % (seed, name)).encode()).hexdigest()
+
+
+def cap_rows(rows, cap, seed):
+    """At most `cap` rows per (sequence, class): the first `cap` of each by
+    _hash_key(seed, uid), so a row's survival depends on its own bucket only.
+
+    The order changed on 2026-11-15 from a shared rng shuffle: a build after
+    that date keeps a different (equally random) set over the cap, and splits
+    differently, than an earlier build with the same seed.
+    """
+    seed = _seed_of(seed)
     per = collections.defaultdict(list)
     for r in rows:
         per[(r['sequence'], r['label'])].append(r)
     kept, dropped = [], collections.Counter()
     for k in sorted(per):
-        lst = sorted(per[k], key=lambda r: r['uid'])
-        rng.shuffle(lst)
+        lst = sorted(per[k], key=lambda r: (_hash_key(seed, r['uid']),
+                                            r['uid']))
         if len(lst) > cap:
             dropped[k[1]] += len(lst) - cap
             lst = lst[:cap]
@@ -682,13 +1074,21 @@ def cap_rows(rows, cap, rng):
     return kept, dropped
 
 
-def split_groups(rows, unions):
+def split_groups(rows, unions, twin_unions=None):
     """{row uid: group id}. A group is every sequence joined by a shared image,
-    a duplicate or a near-duplicate; its id is its smallest sequence key."""
+    a duplicate, a near-duplicate or a CAPTURE TWIN (capture_twins: the same
+    creator within TWIN_SECONDS and TWIN_METRES, in another sequence); its id
+    is its smallest sequence key.
+
+    `twin_unions` is capture_twin_unions(rows)[0], computed here when not
+    given; rows with no `capture` join no twin.
+    """
+    if twin_unions is None:
+        twin_unions = capture_twin_unions(rows)[0]
     uf = UnionFind()
     for r in rows:
         uf.union('s:' + r['sequence'], 'i:' + r['image_id'])
-    for a, b in unions:
+    for a, b in list(unions) + list(twin_unions):
         if a and b:
             uf.union('s:' + a, 's:' + b)
     canon = {}
@@ -700,21 +1100,38 @@ def split_groups(rows, unions):
     return {r['uid']: canon[uf.find('s:' + r['sequence'])][2:] for r in rows}
 
 
-def assign_splits(rows, group_of, val_frac, rng):
+def group_sizes(rows, group_of):
+    """(largest group's rows, largest group's sequences): the single-link
+    chaining guard -- a twin window that is too wide shows up here first."""
+    n = collections.Counter(group_of[r['uid']] for r in rows)
+    s = collections.defaultdict(set)
+    for r in rows:
+        s[group_of[r['uid']]].add(r['sequence'])
+    return (max(n.values()) if n else 0,
+            max((len(v) for v in s.values()), default=0))
+
+
+def assign_splits(rows, group_of, val_frac, seed):
     """{group id: 'train'|'val'}, whole groups, stratified per class.
+
+    Groups are filled into val greedily in _hash_key(seed, group id) order --
+    not a shuffle of the whole list, so one row more or less moves at most a
+    group or so (see _hash_key). This reshuffled every split once, on
+    2026-11-15, against builds made before it with the same seed.
 
     A group holding any sequence-less row is pinned to train: its real
     sequence-mates may be sitting in train under a resolved sequence, and in
     val it would leak exactly what this tool exists to prevent.
     """
+    seed = _seed_of(seed)
     items = collections.defaultdict(list)
     for r in rows:
         items[group_of[r['uid']]].append(r)
     pinned = {g for g, lst in items.items()
               if any(r.get('seq_status') == 'noseq'
                      or str(r['sequence']).startswith('noseq:') for r in lst)}
-    order = sorted(g for g in items if g not in pinned)
-    rng.shuffle(order)
+    order = sorted((g for g in items if g not in pinned),
+                   key=lambda g: (_hash_key(seed, g), g))
     want = collections.Counter()
     for r in rows:
         want[r['label']] += val_frac
@@ -730,11 +1147,251 @@ def assign_splits(rows, group_of, val_frac, rng):
     return split, pinned
 
 
+# ── the opt-in rebalance: per creator, per size band ────────────────────────
+#
+# Two shortcuts the leash audit measured in leash_20261115_18b269, neither a
+# leak and neither caught by the split:
+#
+#   CREATOR BLOCKS. Single photographers hold blocks of one class: one
+#   creator has 162 crops (160 unleashed, 51 sequences, three days in one
+#   city), another 80 (all leashed), and the 33 creators with 10 or more
+#   crops that are at least 90% one class hold 990 of 3,744 rows. They are
+#   different dogs (montages), so the per-sequence cap does not touch them;
+#   the model learns the scene and the region. 86% of val rows come from a
+#   creator also in train (76% of the test set's), so val rewards it more.
+#   --max-per-creator N keeps at most N rows per (creator, class).
+#
+#   SIZE. The leashed rate ran from 0.17 at <=64 px short side (n=242) to
+#   about 0.60 above 192 px, and crop area alone ranked leashed above
+#   unleashed at AUC 0.60 train / 0.65 val, against 0.51 on leash_test_v1
+#   (production framing). --balance-size-bands downsamples, within each
+#   split and each SIZE_BANDS band, whichever class is over the split's own
+#   positive rate, until P(positive | band) is that rate -- so the band a
+#   crop falls in says nothing about its label.
+#
+# Both OFF by default: the plain build is the plain build. They run AFTER the
+# split (groups are assigned first and only ever lose rows, so nothing can
+# straddle), creator cap first, and in sha256(seed:uid) order with distinct
+# sequences, then distinct images, kept first (_spread_order) -- one row more
+# or less moves only its own bucket.
+
+MAX_PER_CREATOR_SUGGESTED = 40
+
+
+def creator_of(row):
+    """The Mapillary creator id of a row's image (resolve_capture), or None.
+    A row with none is never creator-capped: there is no block to cap."""
+    cap = row.get('capture') or {}
+    return str(cap['creator']) if cap.get('creator') else None
+
+
+def _spread_order(rows, seed):
+    """`rows` in keep-first order: the k-th row of each sequence before the
+    (k+1)-th of any, and within a sequence one row per image before a second
+    of any -- each tier in _hash_key(seed, uid) order."""
+    by_seq = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in rows:
+        by_seq[str(r['sequence'])][str(r['image_id'])].append(r)
+    keyed = []
+    for seq in by_seq:
+        imgs = {i: sorted(lst, key=lambda r: (_hash_key(seed, r['uid']),
+                                              r['uid']))
+                for i, lst in by_seq[seq].items()}
+        order = sorted(imgs, key=lambda i: (_hash_key(seed, 'img:' + i), i))
+        seq_rows = []
+        depth = 0
+        while len(seq_rows) < sum(len(v) for v in imgs.values()):
+            for i in order:
+                if depth < len(imgs[i]):
+                    seq_rows.append(imgs[i][depth])
+            depth += 1
+        for k, r in enumerate(seq_rows):
+            keyed.append(((k, _hash_key(seed, r['uid']), r['uid']), r))
+    keyed.sort(key=lambda t: t[0])
+    return [r for _, r in keyed]
+
+
+def cap_creators(rows, cap, seed):
+    """(kept, dropped {class: n}, dropped {creator: n}): at most `cap` rows
+    per (creator, class), the first `cap` of each by _spread_order."""
+    seed = _seed_of(seed)
+    per = collections.defaultdict(list)
+    kept = []
+    for r in rows:
+        cr = creator_of(r)
+        if cr is None:
+            kept.append(r)
+        else:
+            per[(cr, r['label'])].append(r)
+    dropped, by_creator = collections.Counter(), collections.Counter()
+    for k in sorted(per):
+        lst = _spread_order(per[k], seed)
+        if len(lst) > cap:
+            dropped[k[1]] += len(lst) - cap
+            by_creator[k[0]] += len(lst) - cap
+            lst = lst[:cap]
+        kept += lst
+    kept.sort(key=lambda r: r['uid'])
+    return kept, dropped, by_creator
+
+
+def _band_of(row):
+    wh = row.get('crop_wh')
+    if not wh or len(wh) != 2 or not min(wh):
+        return None
+    return size_band(min(float(wh[0]), float(wh[1])))
+
+
+def _band_keep(n_pos, n_neg, rate):
+    """(positives kept, negatives kept) for one band at target `rate`: the
+    over-represented class is cut to round(rate/(1-rate) * other), so
+    |n_pos - rate * n| <= 0.5 afterwards."""
+    if n_pos * (1 - rate) > rate * n_neg:
+        return min(n_pos, int(rate / (1 - rate) * n_neg + 0.5)), n_neg
+    return n_pos, min(n_neg, int((1 - rate) / rate * n_pos + 0.5))
+
+
+def balance_bands(rows, pos, seed):
+    """(kept, report): per split, per SIZE_BANDS band, the majority class
+    downsampled so the band's positive rate is the split's.
+
+    The target is the split's positive rate BEFORE the balance (after the
+    creator cap); every band is brought to it, so the split's own rate stays
+    there within rounding. A band holding one class only loses all of it --
+    a band that is all one label is the purest shortcut there is. Rows with
+    no crop_wh are kept as they are and counted. A split that is all one
+    class is left alone (there is no rate to balance to).
+    """
+    seed = _seed_of(seed)
+    by_split = collections.defaultdict(list)
+    for r in rows:
+        by_split[r['split']].append(r)
+    kept, rep = [], {'positive': pos,
+                     'bands_px': [b[2] for b in SIZE_BANDS], 'splits': {}}
+    for sp in sorted(by_split):
+        lst = by_split[sp]
+        banded = [r for r in lst if _band_of(r)]
+        kept += [r for r in lst if not _band_of(r)]
+        n_pos = sum(1 for r in banded if r['label'] == pos)
+        doc = {'rows_before': len(lst), 'no_crop_wh': len(lst) - len(banded),
+               'target_pos_rate': (n_pos / len(banded)) if banded else None,
+               'bands': {}, 'dropped': {}}
+        rep['splits'][sp] = doc
+        rate = doc['target_pos_rate']
+        if not banded or rate in (0.0, 1.0):
+            kept += banded
+            doc['skipped'] = 'one class only' if banded else 'no rows'
+            continue
+        per = collections.defaultdict(lambda: ([], []))
+        for r in banded:
+            per[_band_of(r)][0 if r['label'] == pos else 1].append(r)
+        for _lo, _hi, b in SIZE_BANDS:
+            P, N = per[b]
+            kp, kn = _band_keep(len(P), len(N), rate)
+            keep_p, keep_n = (_spread_order(P, seed)[:kp],
+                              _spread_order(N, seed)[:kn])
+            kept += keep_p + keep_n
+            neg = {r['label'] for r in N}
+            doc['bands'][b] = {
+                'before': {pos: len(P), 'other': len(N)},
+                'kept': {pos: kp, 'other': kn},
+                'pos_rate_before': round(len(P) / (len(P) + len(N)), 4)
+                if P or N else None,
+                'pos_rate_after': round(kp / (kp + kn), 4)
+                if kp + kn else None}
+            for lab, n in ((pos, len(P) - kp),) + tuple(
+                    (lab, sum(1 for r in N if r['label'] == lab)
+                     - sum(1 for r in keep_n if r['label'] == lab))
+                    for lab in sorted(neg)):
+                if n:
+                    doc['dropped'].setdefault(b, {})[lab] = n
+        n_after = sum(1 for r in kept if r['split'] == sp)
+        doc['rows_after'] = n_after
+    kept.sort(key=lambda r: r['uid'])
+    return kept, rep
+
+
+def rebalance_plan(plan, max_per_creator, balance_size_bands, pos, seed):
+    """(plan, record): the opt-in rebalance on a split plan, and what it did.
+
+    `record` goes into rebuild_manifest.json as 'rebalance' (and its
+    'variant' beside it): the settings, the rows dropped per class and per
+    creator, and per (split, band, class). verify_dataset re-asserts both
+    from it on disk (rebalance_checks).
+    """
+    rec = {'variant': 'plain', 'max_per_creator': max_per_creator or None,
+           'balance_size_bands': bool(balance_size_bands),
+           'rows_before': len(plan)}
+    if max_per_creator:
+        n0 = len(plan)
+        plan, dropped, by_creator = cap_creators(plan, max_per_creator, seed)
+        rec['creator_cap'] = {
+            'cap': max_per_creator, 'dropped': dict(dropped),
+            'dropped_total': n0 - len(plan),
+            'creators_capped': len(by_creator),
+            'dropped_by_creator': dict(sorted(by_creator.items())),
+            'rows_without_creator': sum(1 for r in plan
+                                        if not creator_of(r)),
+            'order': 'per (creator, class): distinct sequences, then '
+                     'distinct images, first; sha256(seed:uid) within'}
+        print('creator cap (%d per creator and class): %d row(s) dropped %s '
+              'from %d creator(s); %d row(s) have no creator (not capped)'
+              % (max_per_creator, n0 - len(plan), dict(dropped),
+                 len(by_creator), rec['creator_cap']['rows_without_creator']))
+    if balance_size_bands:
+        n0 = len(plan)
+        plan, rep = balance_bands(plan, pos, seed)
+        rep['dropped_total'] = n0 - len(plan)
+        rec['band_balance'] = rep
+        print('size-band balance (%s rate per short-side band = the split\'s'
+              '): %d row(s) dropped' % (pos, n0 - len(plan)))
+        for sp, doc in sorted(rep['splits'].items()):
+            if doc.get('skipped'):
+                print('  %-5s skipped (%s)' % (sp, doc['skipped']))
+                continue
+            print('  %-5s target %.3f  ' % (sp, doc['target_pos_rate'])
+                  + '  '.join('%s %s->%s' % (
+                      b, d['pos_rate_before'], d['pos_rate_after'])
+                      for b, d in doc['bands'].items()))
+            for b, d in doc['dropped'].items():
+                print('        dropped in %-8s %s' % (b, d))
+    if max_per_creator or balance_size_bands:
+        rec['variant'] = 'rebalanced'
+    rec['rows_after'] = len(plan)
+    return plan, rec
+
+
+def rebalance_checks(rec):
+    """check_rows' keyword arguments for the rebalance `rec` recorded."""
+    rec = rec or {}
+    out = {'max_per_creator': rec.get('max_per_creator') or None,
+           'band_balance': None}
+    bb = rec.get('band_balance')
+    if rec.get('balance_size_bands') and bb:
+        out['band_balance'] = {
+            'positive': bb.get('positive'),
+            'targets': {sp: d['target_pos_rate']
+                        for sp, d in (bb.get('splits') or {}).items()
+                        if not d.get('skipped')
+                        and d.get('target_pos_rate') is not None}}
+    return out
+
+
+def largest_creator_share(rows):
+    """(creator, rows, share of all rows) for the creator holding the most
+    rows, or (None, 0, 0.0)."""
+    n = collections.Counter(creator_of(r) for r in rows if creator_of(r))
+    if not n or not rows:
+        return None, 0, 0.0
+    cr, k = max(n.items(), key=lambda kv: (kv[1], kv[0]))
+    return cr, k, k / len(rows)
+
+
 # ── the assertions ──────────────────────────────────────────────────────────
 
 def check_rows(rows, reserves=(), cap=None, max_noseq_frac=None,
                conflict_uids=(), framings=None, reserved_crops=None,
-               allow_noseq=False):
+               allow_noseq=False, max_per_creator=None, band_balance=None):
     """Every property the dataset promises, as a list of failures.
 
     Run on the PLAN before anything is written and again by verify_dataset on
@@ -742,7 +1399,10 @@ def check_rows(rows, reserves=(), cap=None, max_noseq_frac=None,
     is a property nobody measured (see straddling_sequences).
 
     rows: dicts with uid, split, label, image_id, det_key, sequence,
-    seq_status, source, provenance, framing, sha256 and (optionally) group.
+    seq_status, source, provenance, framing, sha256 and (optionally) group,
+    capture and crop_wh. `max_per_creator` and `band_balance` ({'positive':
+    class, 'targets': {split: rate}}) are the rebalance a build asked for
+    (assertions 12 and 13); None checks neither.
     """
     bad = []
     framings = framings or FRAMINGS
@@ -835,6 +1495,23 @@ def check_rows(rows, reserves=(), cap=None, max_noseq_frac=None,
     if dup:
         fail('%d (image_id, det_key) pair(s) appear more than once'
              % (len(dup),), dup)
+    # ...nor under two det keys: one detector box double-boxed by the store
+    # (pool_box IoU >= LS_IOU on one image, dedup_rows step 1)
+    pools = collections.defaultdict(list)
+    for r in rows:
+        if r.get('pool_box') and str(r.get('det_key') or '').startswith('d'):
+            pools[str(r['image_id'])].append(r)
+    twice = []
+    for iid in sorted(pools):
+        lst = sorted(pools[iid], key=lambda r: r['uid'])
+        for i in range(len(lst)):
+            for j in range(i + 1, len(lst)):
+                if lst[i].get('det_key') != lst[j].get('det_key') and \
+                        _iou(lst[i]['pool_box'], lst[j]['pool_box']) >= LS_IOU:
+                    twice.append((lst[i]['uid'], lst[j]['uid']))
+    if twice:
+        fail('%d pair(s) of detector rows on one image are one box (pool_box '
+             'IoU >= %.2f) under two det keys' % (len(twice), LS_IOU), twice)
     # 7. a conflict's members are gone
     cu = set(conflict_uids or ())
     survived = sorted(r['uid'] for r in rows if r['uid'] in cu)
@@ -846,21 +1523,145 @@ def check_rows(rows, reserves=(), cap=None, max_noseq_frac=None,
     if wrong:
         fail('%d crop(s) framed some other way than production'
              % (len(wrong),), wrong)
+    # 10. no capture twin across a boundary: not train against val, not a
+    # row against a reserved image. Rows without a `capture` (a build before
+    # 2026-11-15) and reserves without `captures` take no part.
+    split_of = {}
+    for r in rows:
+        split_of.setdefault(str(r['image_id']), r['split'])
+    by_img = {}
+    for r in rows:
+        by_img.setdefault(str(r['image_id']), r.get('capture'))
+    cross = sorted((a, b) for a, b in capture_twins(sorted(by_img.items()))
+                   if split_of[a] != split_of[b])
+    if cross:
+        fail('%d capture-twin pair(s) (same creator, <= %ds, <= %gm) sit in '
+             'two splits' % (len(cross), TWIN_SECONDS, TWIN_METRES), cross)
+    rt = reserve_twin_ids(rows, reserves)
+    if rt:
+        fail('%d image(s) are capture twins of a reserved image'
+             % (len(rt),), sorted(rt.items()))
+    # 11. the leash family trains on the crop production cuts: the detector's
+    # box. No redraw (audit_edited), and no detector row -- a leash call, a
+    # leash audit verdict -- cut from a box that is not its pool_box. The
+    # Label Studio rows are drawn boxes and take no part.
+    lf = [r for r in rows if family_of(r) == 'leash']
+    ed = sorted(r['uid'] for r in lf if r.get('framing') == 'audit_edited')
+    if ed:
+        fail('%d leash crop(s) are cut from a redraw (audit_edited), not the '
+             'detector box production cuts' % (len(ed),), ed)
+    off = sorted(r['uid'] for r in lf
+                 if r.get('source') in ('leash_call', 'leash_audit')
+                 and (r.get('box') or r.get('source') == 'leash_call')
+                 and not _same_box(r.get('box'), r.get('pool_box')))
+    if off:
+        fail('%d leash detector row(s) are cut from a box other than their '
+             'pool_box (a review-page or audit redraw)' % (len(off),), off)
+    # 12. the creator cap, when the build asked for one
+    if max_per_creator:
+        per = collections.Counter((creator_of(r), r['label']) for r in rows
+                                  if creator_of(r))
+        over = sorted(k for k, n in per.items() if n > max_per_creator)
+        if over:
+            fail('%d (creator, class) group(s) hold more than %d crops'
+                 % (len(over), max_per_creator), over)
+    # 13. the size-band balance, when the build asked for one: in every band
+    # of every split, |positives - rate * n| <= 1 (the cut rounds to 0.5)
+    if band_balance:
+        pos = band_balance.get('positive')
+        targets = band_balance.get('targets') or {}
+        cnt = collections.defaultdict(lambda: [0, 0])
+        for r in rows:
+            b = _band_of(r)
+            if b and targets.get(r['split']) is not None:
+                cnt[(r['split'], b)][0 if r['label'] == pos else 1] += 1
+        off = sorted('%s %s: %d/%d %s, want %.3f' % (
+            sp, b, p_, p_ + n_, pos, targets[sp])
+            for (sp, b), (p_, n_) in cnt.items()
+            if abs(p_ - targets[sp] * (p_ + n_)) > 1.0)
+        if off:
+            fail('%d (split, size band) cell(s) are off the split\'s '
+                 'positive rate' % (len(off),), off)
     return bad
+
+
+def _same_box(a, b, tol=1e-6):
+    if not a or not b or len(a) != 4 or len(b) != 4:
+        return False
+    return all(abs(float(x) - float(y)) <= tol for x, y in zip(a, b))
+
+
+def twin_check_skipped(rows, reserves=()):
+    """Why assertion 10 could NOT be checked on these rows: [] when it was.
+
+    check_rows passes assertion 10 vacuously on rows with no `capture` field
+    (every build before 2026-11-15) and on reserves with no `captures`. That
+    is not the same as holding: --verify-only on leash_20261115_18b269 said
+    "all 11 hold" while 4 twin pairs sat across train/val and 10 train images
+    were twins of reserved ones. So the callers report it as skipped and
+    count it out of the "all N hold" line.
+    """
+    if rows and not any('capture' in r for r in rows):
+        # both halves: a reserve twin is found from the ROW's capture too
+        return ['assertion 10 (capture twins across splits and of reserved '
+                'images) skipped: the rows carry no capture data -- the '
+                'build predates it; rebuild to check']
+    if reserves and not any('captures' in (r or {}) for r in reserves):
+        return ['assertion 10 (capture twins of reserved images) skipped: '
+                'the reserves carry no captures -- pass --reserve to look '
+                'them up']
+    return []
+
+
+def rebalance_not_requested(rec):
+    """Why assertions 12 / 13 were NOT checked: [] on a build that asked for
+    both. They pass vacuously when the build did not ask (max_per_creator /
+    band_balance None, rebalance_checks) -- on a plain build, and on a
+    manifest that lost its 'rebalance' record -- and a vacuous pass is not a
+    hold (twin_check_skipped's rule): phase 2's plain build printed "all 14
+    assertions hold" with 12 and 13 never looked at."""
+    chk = rebalance_checks(rec)
+    what = ('a %s build' % (rec['variant'],) if (rec or {}).get('variant')
+            else 'no rebalance record in the manifest')
+    out = []
+    if chk['max_per_creator'] is None:
+        out.append('assertion 12 (rows per creator and class <= the cap) '
+                   'not requested: %s' % (what,))
+    if chk['band_balance'] is None:
+        out.append('assertion 13 (positive rate per size band = the '
+                   'split\'s) not requested: %s' % (what,))
+    return out
+
+
+def _held(skipped, not_requested=()):
+    """'all N hold' -- N counts assertion 10 out when any half of it was
+    skipped, and 12 / 13 out when the build did not ask for them
+    (rebalance_not_requested); the SKIP lines follow."""
+    n = ASSERTIONS - (1 if skipped else 0) - len(not_requested)
+    parts = []
+    if skipped:
+        parts.append('1 not checkable')
+    if not_requested:
+        parts.append('%d not requested' % (len(not_requested),))
+    return 'all %d assertions hold%s' % (
+        n, ' (%s)' % (', '.join(parts),) if parts else '')
 
 
 def conflict_member_uids(conflicts):
     return {m['uid'] for c in conflicts or () for m in c.get('members', ())}
 
 
-def verify_dataset(out, reserves=None, cap=None, max_noseq_frac=None):
+def verify_dataset(out, reserves=None, cap=None, max_noseq_frac=None,
+                   skipped=None, not_requested=None):
     """Re-read a written dataset and assert check_rows on what is ON DISK.
 
     The plan can be right and the copy wrong -- a file written twice, a row
     with no file, a class directory edited by hand afterwards. So this reads
     the directory tree, recomputes every digest, and checks it against
     crops.jsonl both ways (assertion 8) before running every other check on
-    the rows the files say exist. Returns a list of failures.
+    the rows the files say exist. Returns a list of failures; a list passed
+    as `skipped` gets twin_check_skipped's lines, and one passed as
+    `not_requested` gets rebalance_not_requested's.
     """
     bad = []
     man = {}
@@ -944,7 +1745,12 @@ def verify_dataset(out, reserves=None, cap=None, max_noseq_frac=None):
     bad += check_rows(checked, reserves, cap, max_noseq_frac,
                       conflict_member_uids(conflicts),
                       reserved_crops=reserved_crops,
-                      allow_noseq=bool(man.get('keep_noseq')))
+                      allow_noseq=bool(man.get('keep_noseq')),
+                      **rebalance_checks(man.get('rebalance')))
+    if skipped is not None:
+        skipped.extend(twin_check_skipped(checked, reserves))
+    if not_requested is not None:
+        not_requested.extend(rebalance_not_requested(man.get('rebalance')))
     return bad
 
 
@@ -1027,8 +1833,6 @@ def read_manifest(path):
 
 
 def manifest_main(args, reserves):
-    import random
-    rng = random.Random(args.seed)
     rows = read_manifest(args.manifest)
     if not rows:
         raise SystemExit('%s holds no rows' % (args.manifest,))
@@ -1054,6 +1858,31 @@ def manifest_main(args, reserves):
            and 'no sequence' not in b]
     if pre:
         raise SystemExit('the manifest itself fails: ' + '; '.join(pre))
+
+    # ---- when, where and by whom each image was taken ------------------------
+    # For the capture-twin rule (capture_twins). A row that already carries
+    # `capture` is taken at its word; the rest are looked up in one pass.
+    need = sorted({str(r['image_id']) for r in rows if 'capture' not in r})
+    caps = resolve_capture(need, args.repo, args.duckdb_python) \
+        if need else {}
+    for r in rows:
+        if 'capture' not in r:
+            r['capture'] = caps.get(str(r['image_id']))
+    imgs = {str(r['image_id']): r.get('capture') for r in rows}
+    cap_stats = {
+        'rule': {'seconds': TWIN_SECONDS, 'metres': TWIN_METRES,
+                 'seconds_without_geometry': TWIN_SECONDS_NOGEO,
+                 'same_creator': True},
+        'images': len(imgs),
+        'images_without_capture': sum(1 for c in imgs.values()
+                                      if not capture_known(c)),
+        'images_without_geometry': sum(1 for c in imgs.values()
+                                       if capture_known(c)
+                                       and c.get('lon') is None)}
+    print('captures: %d images, %d with no creator/time (join no twin), %d '
+          'with no geometry (twins on time alone, <= %ds)'
+          % (cap_stats['images'], cap_stats['images_without_capture'],
+             cap_stats['images_without_geometry'], TWIN_SECONDS_NOGEO))
 
     # ---- reserves --------------------------------------------------------
     # A reserved crop is held out by image_id and sequence, and its PIXELS
@@ -1081,11 +1910,22 @@ def manifest_main(args, reserves):
     rows = [r for r in rows if r.get('sha256') not in held_sha]
     near = near_hashes(rows, held_dh, rh)
     rows = [r for r in rows if r['uid'] not in near]
+    # ...and the same MOMENT under another sequence: a capture twin of a
+    # reserved image is dropped with every row of its image, whatever its
+    # label. Its sequence-mates stay unless they are twins too: the leak
+    # measured was image to image (10 acceptance images, each at 0-30 m and
+    # under a minute), and any frame of that sequence close enough in time
+    # and place is a twin in its own right and goes the same way.
+    rtwin = reserve_twin_ids(rows, reserves)
+    twin_dropped = sorted(r['uid'] for r in rows
+                          if str(r['image_id']) in rtwin)
+    rows = [r for r in rows if str(r['image_id']) not in rtwin]
     print('reserved: %d image_ids / %d sequences in %d file(s): %d rows '
           'removed, %d more sharing a reserved crop\'s bytes, %d more '
-          'within dHash %d of one'
+          'within dHash %d of one, %d more (%d images) capture twins of a '
+          'reserved image'
           % (len(ids), len(seqs), len(reserves), n_held, len(mates),
-             len(near), rh))
+             len(near), rh, len(twin_dropped), len(rtwin)))
 
     # ---- sequence-less rows ------------------------------------------------
     # A row whose sequence no manifest knows cannot be held disjoint from a
@@ -1117,17 +1957,54 @@ def manifest_main(args, reserves):
                                                       emb)
     for k, v in sorted(dc.items()):
         print('  %-32s %d' % (k, v))
-    kept, capped = cap_rows(kept, args.max_per_sequence, rng)
+    kept, capped = cap_rows(kept, args.max_per_sequence, args.seed)
     print('  over per-sequence cap (%d)      %d %s'
           % (args.max_per_sequence, sum(capped.values()), dict(capped)))
 
     # ---- split -------------------------------------------------------------
-    group_of = split_groups(kept, unions)
-    split_of, pinned = assign_splits(kept, group_of, args.val_frac, rng)
+    twin_unions, twin_pairs = capture_twin_unions(kept)
+    group_of = split_groups(kept, unions, twin_unions)
+    n_groups_untwinned = len(set(split_groups(kept, unions, ()).values()))
+    big_rows, big_seqs = group_sizes(kept, group_of)
+    cap_stats.update({
+        'twin_pairs_in_dataset': len(twin_pairs),
+        'twin_sequence_unions': len(twin_unions),
+        'groups_merged_by_twins': n_groups_untwinned - len(set(
+            group_of.values())),
+        'reserve_twin_images': len(rtwin),
+        'reserve_twin_rows_dropped': len(twin_dropped),
+        # which ones, so a dropped twin can be looked at
+        'reserve_twins': sorted(rtwin.items()),
+        'reserve_twin_uids': twin_dropped,
+        'largest_group_rows': big_rows,
+        'largest_group_sequences': big_seqs})
+    print('capture twins: %d pair(s) in two sequences -> %d sequence '
+          'union(s), %d group(s) merged; largest group %d crops / %d '
+          'sequences' % (len(twin_pairs), len(twin_unions),
+                         cap_stats['groups_merged_by_twins'], big_rows,
+                         big_seqs))
+    if kept and big_rows > 0.02 * len(kept):
+        print('  WARNING the largest split group holds %.1f%% of the crops '
+              '-- single-link chaining? (twins, embedding clusters and '
+              'dHash all join groups)' % (100.0 * big_rows / len(kept),))
+    split_of, pinned = assign_splits(kept, group_of, args.val_frac,
+                                     args.seed)
     plan = []
     for r in kept:
         g = group_of[r['uid']]
         plan.append(dict(r, split=split_of[g], group=g))
+
+    # ---- the opt-in rebalance, AFTER the split -----------------------------
+    # Whole groups are assigned already and only lose rows here, so nothing
+    # can come to straddle. Creator cap first, then the size bands.
+    plan, rebalance = rebalance_plan(plan, args.max_per_creator,
+                                     args.balance_size_bands, args.pos_class,
+                                     args.seed)
+    cr, k, share = largest_creator_share(plan)
+    rebalance['largest_creator'] = {'creator': cr, 'rows': k,
+                                    'share': round(share, 4)}
+    print('largest single creator: %d of %d rows (%.1f%%)'
+          % (k, len(plan), 100.0 * share))
     counts = collections.Counter('%s/%s' % (r['split'], r['label'])
                                  for r in plan)
     print('\nresulting split (whole groups, never straddling):')
@@ -1140,7 +2017,8 @@ def manifest_main(args, reserves):
     cu = conflict_member_uids(conflicts)
     fails = check_rows(plan, reserves, args.max_per_sequence,
                        args.max_noseq_frac, cu, reserved_crops=reserved_crops,
-                       allow_noseq=args.keep_noseq)
+                       allow_noseq=args.keep_noseq,
+                       **rebalance_checks(rebalance))
     ref = None
     if args.size_ref:
         with open(args.size_ref) as fh:
@@ -1152,7 +2030,11 @@ def manifest_main(args, reserves):
             print('FAIL ' + f)
         raise SystemExit('%d assertion(s) failed on the plan -- nothing '
                          'written' % (len(fails),))
-    print('\nassertions on the plan: all %d hold' % (ASSERTIONS,))
+    skipped = twin_check_skipped(plan, reserves)
+    not_req = rebalance_not_requested(rebalance)
+    for f in skipped + not_req:
+        print('SKIP ' + f)
+    print('\nassertions on the plan: ' + _held(skipped, not_req))
     if not args.execute:
         print('\nnothing written. re-run with --execute')
         return 0
@@ -1184,8 +2066,18 @@ def manifest_main(args, reserves):
             'reserves': [{k: r[k] for k in ('path', 'sha256',
                                              'sequences_resolved_at_build')}
                          | {'image_ids': len(r['image_ids']),
-                            'sequences': len(r['sequences'])}
+                            'sequences': len(r['sequences']),
+                            'captures': len(r.get('captures') or ()),
+                            'captures_missing': r.get('captures_missing')}
                          for r in reserves],
+            'capture_twins': cap_stats,
+            # which build this is: 'plain', or 'rebalanced' with the
+            # settings and every row the rebalance dropped, by why
+            'variant': rebalance['variant'],
+            'rebalance': rebalance,
+            'split_order': 'sha256(seed:uid) cap, sha256(seed:group) val '
+                           'fill (since 2026-11-15; earlier builds used one '
+                           'shared rng, so their splits differ)',
             'source_rows': n0, 'reserved_rows_removed': n_held,
             'reserved_bytes_mates_removed': len(mates),
             'reserved_dhash_mates_removed': len(near),
@@ -1213,7 +2105,9 @@ def manifest_main(args, reserves):
         }
         with open(os.path.join(args.out, 'rebuild_manifest.json'), 'w') as f:
             json.dump(man, f, indent=2, sort_keys=True)
-        fails = verify_dataset(args.out)
+        skipped, not_req = [], []
+        fails = verify_dataset(args.out, skipped=skipped,
+                               not_requested=not_req)
     except BaseException:
         shutil.rmtree(args.out, ignore_errors=True)
         raise
@@ -1223,12 +2117,14 @@ def manifest_main(args, reserves):
         shutil.rmtree(args.out, ignore_errors=True)
         raise SystemExit('%d assertion(s) failed on the written dataset -- '
                          'removed' % (len(fails),))
-    print('assertions on disk: all %d hold' % (ASSERTIONS,))
+    for f in skipped + not_req:
+        print('SKIP ' + f)
+    print('assertions on disk: ' + _held(skipped, not_req))
     print('\nwrote %d crops -> %s' % (len(plan), args.out))
     return 0
 
 
-ASSERTIONS = 10
+ASSERTIONS = 14
 
 
 # ── legacy mode: an existing dataset, by filename ────────────────────────────
@@ -1541,6 +2437,18 @@ def main(argv=None):
     ap.add_argument('--size-ref',
                     help='production short-side reference '
                          '(crop_sources.py size-ref)')
+    ap.add_argument('--max-per-creator', type=int, default=0, metavar='N',
+                    help='manifest mode, OPT-IN: after the split, keep at '
+                         'most N crops per (Mapillary creator, class); rows '
+                         'with no creator are not capped. %d is the value '
+                         'the leash audit suggested. Recorded; 0 (default) '
+                         'is off' % (MAX_PER_CREATOR_SUGGESTED,))
+    ap.add_argument('--balance-size-bands', action='store_true',
+                    help='manifest mode, OPT-IN: after the split (and the '
+                         'creator cap), downsample within each split and '
+                         'each short-side band (%s) so the positive rate per '
+                         'band is the split\'s own. Recorded'
+                         % (', '.join(b[2] for b in SIZE_BANDS),))
     ap.add_argument('--val-frac', type=float, default=0.2)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--execute', action='store_true')
@@ -1550,19 +2458,27 @@ def main(argv=None):
         reserves = (load_reserves(args.reserve + args.exclude_ids, args.repo,
                                   args.duckdb_python)
                     if (args.reserve or args.exclude_ids) else None)
-        fails = verify_dataset(args.verify_only, reserves)
+        skipped, not_req = [], []
+        fails = verify_dataset(args.verify_only, reserves, skipped=skipped,
+                               not_requested=not_req)
         for f in fails:
             print('FAIL ' + f)
+        for f in skipped + not_req:
+            print('SKIP ' + f)
         if fails:
             raise SystemExit('%d assertion(s) failed on %s'
                              % (len(fails), args.verify_only))
-        print('verify: all %d assertions hold on %s'
-              % (ASSERTIONS, args.verify_only))
+        print('verify: %s on %s' % (_held(skipped, not_req),
+                                    args.verify_only))
         return 0
     if not (args.manifest or args.src):
         ap.error('one of --manifest, --src or --verify-only is required')
     if not args.out:
         ap.error('--out is required')
+    if args.max_per_creator < 0:
+        ap.error('--max-per-creator must be 0 (off) or more')
+    if args.src and (args.max_per_creator or args.balance_size_bands):
+        ap.error('--max-per-creator and --balance-size-bands need --manifest')
     paths = [p for p in args.reserve + args.exclude_ids if p]
     if args.exclude_ids:
         print('note: --exclude-ids is deprecated; read as --reserve')

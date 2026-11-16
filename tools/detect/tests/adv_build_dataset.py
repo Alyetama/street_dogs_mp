@@ -957,8 +957,38 @@ def composition_checks(bad, bd):
                 bad.append('the crop bundle has no %s' % (name,))
         calls[:] = []
         man = bd.build('leash', detect_root=os.path.join(tmp, 'gen1'))
-        bd.D = real_d
         argv = argv_named('rebuild_crop_dataset')
+        # THE OPT-IN REBALANCE (per creator, per size band): off unless
+        # asked, passed through when asked, and on the record either way
+        if '--max-per-creator' in argv or '--balance-size-bands' in argv:
+            bad.append('a plain leash build asked for a rebalance: %r'
+                       % (argv,))
+        if (man.get('rebalance') or {}).get('variant') != 'plain':
+            bad.append('a plain leash build does not record its variant: %r'
+                       % (man.get('rebalance'),))
+        calls[:] = []
+        man_rb = bd.build('leash', detect_root=os.path.join(tmp, 'gen1'),
+                          max_per_creator=40, balance_size_bands=True)
+        rb = argv_named('rebuild_crop_dataset')
+        if '--max-per-creator' not in rb or \
+                rb[rb.index('--max-per-creator') + 1] != '40' or \
+                '--balance-size-bands' not in rb:
+            bad.append('--max-per-creator 40 --balance-size-bands is not '
+                       'handed to the rebuilder: %r' % (rb,))
+        if (man_rb.get('rebalance') or {}) != {
+                'variant': 'rebalanced', 'max_per_creator': 40,
+                'balance_size_bands': True}:
+            bad.append('a rebalanced build does not record what it asked '
+                       'for: %r' % (man_rb.get('rebalance'),))
+        if man_rb.get('id') == man.get('id'):
+            bad.append('a plain and a rebalanced build share a name')
+        try:
+            bd.build('dogdet', max_per_creator=40)
+            bad.append('a detector build accepted --max-per-creator')
+        except SystemExit as e:
+            if 'crop models' not in str(e):
+                bad.append('the detector refusal says: %s' % (e,))
+        bd.D = real_d
         if not argv:
             bad.append('the leash build never ran the crop builder')
             argv = ['--pos-class', '?', '--neg-class', '?',
@@ -1207,6 +1237,18 @@ def cli_checks(bad):
         elif not got.stdout.strip():
             bad.append('build_dataset.py %s printed nothing'
                        % (' '.join(args),))
+    # the dry-run says which variant it would build, and with what
+    for extra, want in (([], 'rebalance: plain'),
+                        (['--max-per-creator', '40', '--balance-size-bands'],
+                         'rebalance: rebalanced (--max-per-creator 40 '
+                         '--balance-size-bands)')):
+        got = subprocess.run([sys.executable,
+                              os.path.join(DETECT, 'build_dataset.py'),
+                              '--family', 'leash', '--dry-run'] + extra,
+                             capture_output=True, text=True, timeout=120)
+        if want not in (got.stdout or ''):
+            bad.append('--dry-run %s does not print %r: %r'
+                       % (' '.join(extra), want, (got.stdout or '')[:300]))
     # --dry-run must not create anything
     got = subprocess.run([sys.executable,
                           os.path.join(DETECT, 'build_dataset.py'),

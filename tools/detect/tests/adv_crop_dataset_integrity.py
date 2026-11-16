@@ -33,10 +33,23 @@ and, from the review of the first fix, the holes it left:
     they now each have a stubbed collect() case (frames wider than 1280 px,
     so a thumbnail cannot pass for the original) and a MUTANT.
 
+and, from the leash audit of leash_20261115_18b269 (2026-11-15):
+
+  * the leash family trained on reviewers' leash-inclusive redraws (270
+    audit_edited rows, 12 corrected leash calls) where production cuts the
+    detector box -- the leash rows are cut from the detector box now, the
+    redraw kept as metadata, while the gate keeps redraw-wins;
+  * one detector box double-boxed by the store under two det keys trained
+    twice, or under two labels -- joined on pool_box IoU now;
+  * creator blocks and a size-predicts-the-label skew -- the opt-in
+    --max-per-creator and --balance-size-bands, asserted on plan and disk.
+
 Synthetic frames in a temp directory; the stores, the catalog and the drives
-are stood in for. Each check is a function returning a list of failures, and
-the MUTANTS section re-runs a check with the OLD behaviour patched back in
-and requires it to FAIL -- a check that passes either way proves nothing.
+are stood in for -- the catalog lookups too (resolve_sequences and
+resolve_capture), so the suite reads nothing under data/ and runs in a
+checkout without one. Each check is a function returning a list of
+failures, and the MUTANTS section re-runs a check with the OLD behaviour
+patched back in and requires it to FAIL -- a check that passes either way proves nothing.
 
 The optional real-data smoke (skipped loudly when the data is not there)
 runs reserve_test_set --dry-run against the live ledgers.
@@ -126,15 +139,41 @@ def write_manifest(rows, name):
     return p
 
 
+# What the stand-in catalog knows of each image's capture ({image_id:
+# {creator, ts, lon, lat}}); a check sets the ones it needs. Everything else
+# has no capture, which joins no twin -- the real catalog is never opened.
+CAPTURES = {}
+_REAL_CAPTURE = rcd.resolve_capture
+
+
+def _stub_capture(ids, repo, py):
+    return {str(i): dict(CAPTURES[str(i)]) for i in ids
+            if str(i) in CAPTURES}
+
+
 def run_rebuild(argv):
-    """(exit text or None, stdout). SystemExit is caught and returned."""
+    """(exit text or None, stdout). SystemExit is caught and returned.
+
+    HERMETIC: manifest mode looks every image's capture up in
+    <repo>/data/catalog.duckdb (resolve_capture, for the twin rule), and so
+    does load_reserves. Unstubbed, D1/D2/D7/D8's builds read the 33,170
+    live ground_animals parquets (~6.5 s a lookup) and fail outright in a
+    checkout with no catalog -- so the lookup is stood in for here, the way
+    resolve_sequences is, unless a check put its own stub in place.
+    """
     buf = io.StringIO()
+    stub = rcd.resolve_capture is _REAL_CAPTURE
+    if stub:
+        rcd.resolve_capture = _stub_capture
     try:
         with contextlib.redirect_stdout(buf):
             rcd.main(argv)
         return None, buf.getvalue()
     except SystemExit as e:
         return str(e), buf.getvalue()
+    finally:
+        if stub:
+            rcd.resolve_capture = _REAL_CAPTURE
 
 
 # ── D1 parsing ──────────────────────────────────────────────────────────────
@@ -334,17 +373,19 @@ def check_leash_argv_reserves(families=None):
 
 # ── D3 coverage ─────────────────────────────────────────────────────────────
 
-def check_audit_coverage():
-    import fn_audit as fa
-    base = os.path.join(TMP, 'audit_fixture')
+def _audit_fixture(stage, answers):
+    """An audit directory for `stage`: verdicts, full/ crops, one edited/
+    crop (key ...2#0, redrawn to (2, 3, 20, 30)) and a pool parquet."""
+    base = os.path.join(TMP, 'audit_fixture_' + stage)
     paths = {'out': base, 'pool': os.path.join(base, 'pool.parquet'),
              'verdicts': os.path.join(base, 'verdicts.jsonl'),
              'full': os.path.join(base, 'full'),
              'pages': os.path.join(base, 'pages')}
     os.makedirs(paths['pages'], exist_ok=True)
-    vs = [('500000000001#0', 'leashed'), ('500000000002#0', 'unleashed'),
-          ('500000000003#0', 'unsure'), ('500000000004#1', 'leashed'),
-          ('500000000005#0', 'leashed'), ('500000000005#0', None)]
+    yes, no = answers
+    vs = [('500000000001#0', yes), ('500000000002#0', no),
+          ('500000000003#0', 'unsure'), ('500000000004#1', yes),
+          ('500000000005#0', yes), ('500000000005#0', None)]
     with open(paths['verdicts'], 'w') as fh:
         for k, v in vs:
             fh.write(json.dumps({'key': k, 'verdict': v, 'band': 3,
@@ -359,33 +400,67 @@ def check_audit_coverage():
         " 'c', 'd'), ('500000000002', 0, 1.0, 2.0, 30.0, 40.0, 'c', 'd')) "
         "t(image_id, det_idx, x1, y1, x2, y2, cell, drive)) TO '%s' "
         "(FORMAT PARQUET)" % paths['pool'])
+    return paths
+
+
+def check_audit_coverage():
+    """Every labelled verdict becomes a row, and WHICH crop of a redrawn box
+    trains is the family's rule: the gate trains on the redraw (edited/),
+    the leash model on the detector box production cuts (full/), keeping
+    the redraw as provenance.redraw_box (user decision 2026-11-15)."""
+    import fn_audit as fa
+    fx = {'leash': _audit_fixture('leash', ('leashed', 'unleashed')),
+          'gate': _audit_fixture('gate', ('dog', 'not_dog'))}
     real_paths, real_corr = fa.paths, cs.read_audit_corrections
-    fa.paths = lambda stage='gate': dict(paths)
+    fa.paths = lambda stage='gate': dict(fx[stage])
     cs.read_audit_corrections = lambda stage, path=None: {
         ('500000000002', 0): (2.0, 3.0, 20.0, 30.0)}
     try:
-        rows, counts = cs.audit_candidates('leash')
+        got = {st: cs.audit_candidates(st) for st in fx}
     finally:
         fa.paths, cs.read_audit_corrections = real_paths, real_corr
     bad = []
-    keys = {r['provenance']['key_or_task_id']: r for r in rows}
-    labelled = {'500000000001#0', '500000000002#0', '500000000004#1'}
-    accounted = len(keys) + counts.get('audit_missing_crop', 0)
-    if accounted != len(labelled):
-        bad.append('D3 %d labelled verdicts became %d rows + %d counted '
-                   'drops' % (len(labelled), len(keys),
-                              counts.get('audit_missing_crop', 0)))
-    if '500000000003#0' in keys:
-        bad.append('D3 an "unsure" answer became a training row')
-    if '500000000005#0' in keys:
-        bad.append('D3 a withdrawn verdict (null) became a training row')
-    r2 = keys.get('500000000002#0')
-    if not r2 or r2['framing'] != 'audit_edited' or 'edited' not in \
-            r2.get('src_path', ''):
-        bad.append('D3 a redrawn box did not win over the detector\'s full/ '
-                   'crop: %r' % ((r2 or {}).get('src_path'),))
-    elif r2['box'] != [2.0, 3.0, 20.0, 30.0]:
-        bad.append('D3 an edited crop does not carry its redrawn box')
+    for st, (rows, counts) in sorted(got.items()):
+        keys = {r['provenance']['key_or_task_id']: r for r in rows}
+        labelled = {'500000000001#0', '500000000002#0', '500000000004#1'}
+        accounted = len(keys) + counts.get('audit_missing_crop', 0)
+        if accounted != len(labelled):
+            bad.append('D3 %s: %d labelled verdicts became %d rows + %d '
+                       'counted drops' % (st, len(labelled), len(keys),
+                                          counts.get('audit_missing_crop', 0)))
+        if '500000000003#0' in keys:
+            bad.append('D3 %s: an "unsure" answer became a training row'
+                       % (st,))
+        if '500000000005#0' in keys:
+            bad.append('D3 %s: a withdrawn verdict (null) became a training '
+                       'row' % (st,))
+        r2 = keys.get('500000000002#0') or {}
+        if st == 'gate':
+            if r2.get('framing') != 'audit_edited' or 'edited' not in \
+                    r2.get('src_path', ''):
+                bad.append('D3 gate: a redrawn box did not win over the '
+                           'detector\'s full/ crop: %r'
+                           % (r2.get('src_path'),))
+            elif r2['box'] != [2.0, 3.0, 20.0, 30.0]:
+                bad.append('D3 gate: an edited crop does not carry its '
+                           'redrawn box')
+        else:
+            if r2.get('framing') != 'audit_full' or 'full' not in \
+                    r2.get('src_path', ''):
+                bad.append('D3 leash: a redraw (edited/) trains instead of '
+                           'the detector box production cuts: %r'
+                           % (r2.get('src_path'),))
+            elif r2['box'] != [1.0, 2.0, 30.0, 40.0] or \
+                    r2['box'] != r2.get('pool_box'):
+                bad.append('D3 leash: the crop\'s box is not its pool_box '
+                           '(%r vs %r)' % (r2['box'], r2.get('pool_box')))
+            elif r2['provenance'].get('redraw_box') != [2.0, 3.0, 20.0, 30.0]:
+                bad.append('D3 leash: the redraw is not kept as metadata '
+                           '(provenance.redraw_box %r)'
+                           % (r2['provenance'].get('redraw_box'),))
+            if counts.get('edited_not_used_detector_box_wins') != 1:
+                bad.append('D3 leash: the redraw not trained on is not '
+                           'counted: %r' % (dict(counts),))
     return bad
 
 
@@ -1174,7 +1249,18 @@ def check_collect_exclusions_and_vetoes():
 
 
 def check_exclusion_records():
-    """exclusions() itself reads label_flags and the leash conflict list."""
+    """exclusions() itself reads label_flags; the leash conflict list is
+    RETIRED -- consulted and digested, never applied.
+
+    data/leash_label_conflicts.json named 19 crops on 10 images that
+    "disagreed" between two Label Studio lineages; its own commit (de27f267)
+    called that a detection-index misalignment, and side by side every dog
+    in all 10 images carries the same label in both. Applied, it dropped 34
+    good ls_box rows -- 10 of the only 13 Label Studio scenes with a leashed
+    and an unleashed dog together. So the image it names must NOT be
+    excluded, its sha256 must still be recorded (a reader of the bundle can
+    see the file was there), and a status line must say it was retired.
+    """
     import types
     fake = types.ModuleType('label_flags')
     fake.DB_PATH = os.path.join(TMP, 'lf.db')
@@ -1187,7 +1273,7 @@ def check_exclusion_records():
     sys.modules['label_flags'] = fake
     cs.D = lambda *p: os.path.join(TMP, 'excl_data', *p)
     try:
-        got, _ = cs.exclusions('leash', os.path.join(TMP, 'no_root'))
+        got, digests = cs.exclusions('leash', os.path.join(TMP, 'no_root'))
     finally:
         cs.D = saved_d
         if saved_mod is None:
@@ -1197,13 +1283,24 @@ def check_exclusion_records():
     bad = []
     if got.get('971000000001') != 'label_flags':
         bad.append('D6 exclusions() ignores a label-flagged image')
-    if got.get('971000000002') != 'leash_label_conflicts':
-        bad.append('D6 exclusions() ignores the leash label conflicts')
+    if '971000000002' in got:
+        bad.append('D6 exclusions() still applies the retired leash label '
+                   'conflicts (%r)' % (got.get('971000000002'),))
+    if digests.get('leash_label_conflicts') != cs.sha256_file(conflicts):
+        bad.append('D6 the retired conflicts file is not digested: %r'
+                   % (digests.get('leash_label_conflicts'),))
+    if 'retired' not in str(digests.get('leash_label_conflicts:status')):
+        bad.append('D6 no status line says the conflicts file was retired: '
+                   '%r' % (digests.get('leash_label_conflicts:status'),))
     return bad
 
 
 def check_leash_calls():
-    """Redraws apply, repeat calls collapse, disagreeing calls drop."""
+    """The DETECTOR's box is cut and the review page's redraw kept as
+    provenance.redraw_box (the leash rule, user decision 2026-11-15: 12 of
+    the 13 leash calls collected that day had a redraw, and production cuts
+    the detector box); an audit:leash record is never read as one; repeat
+    calls collapse, disagreeing calls drop."""
     import types
     import harvest_flagged as hf
     db = os.path.join(TMP, 'leash.db')
@@ -1256,12 +1353,17 @@ def check_leash_calls():
     if len(one) != 1:
         bad.append('D6 two agreeing calls on one box became %d rows'
                    % (len(one),))
-    elif one[0]['box'] != [1.0, 2.0, 300.0, 400.0]:
-        bad.append('D3 a leash call is not cut from the reviewer\'s redraw '
-                   '(box %r; an audit:leash record must not win either)'
-                   % (one[0]['box'],))
     elif one[0]['pool_box'] != [10.0, 20.0, 110.0, 220.0]:
         bad.append('D6 a leash call does not carry its detector box')
+    elif one[0]['box'] != one[0]['pool_box']:
+        bad.append('D3 a leash call is cut from box %r, not its detector box '
+                   '%r (production cuts the detector box)'
+                   % (one[0]['box'], one[0]['pool_box']))
+    elif one[0]['provenance'].get('redraw_box') != [1.0, 2.0, 300.0, 400.0]:
+        bad.append('D3 a leash call\'s review-page redraw is not kept as '
+                   'provenance.redraw_box (%r; an audit:leash record must '
+                   'not stand in for it either)'
+                   % (one[0]['provenance'].get('redraw_box'),))
     if any(r['image_id'] == '972000000002' for r in rows) or not conf:
         bad.append('D6 a box called both leashed and unleashed was kept')
     return bad
@@ -1354,6 +1456,653 @@ def check_dedup_joins_detector_box(strip_pool=False):
         bad.append('D6 a Label Studio box and an annotate-page box of one dog '
                    'stayed two rows')
     return bad
+
+
+def _leash(r):
+    r['family'] = 'leash'
+    return r
+
+
+def check_dedup_rank_by_family(rank=None):
+    """One box, two agreeing rows: the dog-bin keeps the redraw, the leash
+    model the detector box's crop (audit_full)."""
+    saved = rcd._rank
+    if rank:
+        rcd._rank = rank
+    try:
+        bad = []
+        for fam, a, b, want in (
+                ('dogbin', 'dog', 'dog', 'audit_edited'),
+                ('leash', 'leashed', 'leashed', 'audit_full')):
+            iid = '975100000001' if fam == 'dogbin' else '975100000002'
+            full = row('gate_audit' if fam == 'dogbin' else 'leash_audit', a,
+                       iid, 'd0', 'RK', box=(100, 100, 200, 200),
+                       framing='audit_full')
+            ed = row('gate_audit' if fam == 'dogbin' else 'leash_audit', b,
+                     iid, 'd0', 'RK', box=(60, 60, 260, 260),
+                     framing='audit_edited')
+            ed['uid'] = ed['uid'].replace('.jpg', '_e.jpg')
+            for r in (full, ed):
+                r['pool_box'] = [100, 100, 200, 200]
+                r['family'] = fam
+            kept, _, _, _, _ = rcd.dedup_rows([ed, full], 0)
+            if len(kept) != 1 or kept[0]['framing'] != want:
+                bad.append('D6 %s: of a redraw and the detector box\'s crop '
+                           'of one box, %r survived, want %s'
+                           % (fam, [r['framing'] for r in kept], want))
+        # a Label Studio box of the same dog (IoU 0.575 with the detector
+        # box, leash-inclusive): the dog-bin keeps the drawn crop, the leash
+        # model the detector's -- audit_full over ls_box AND over a leash
+        # call of the same box
+        for fam, src, lab, want in (
+                ('dogbin', 'gate_audit', 'dog', 'ls_box'),
+                ('leash', 'leash_audit', 'leashed', 'leash_audit')):
+            iid = '975100000003' if fam == 'dogbin' else '975100000004'
+            full = row(src, lab, iid, 'd0', 'RL', box=(100, 100, 200, 200),
+                       framing='audit_full')
+            full['pool_box'] = [100, 100, 200, 200]
+            ls = row('ls_box', lab, iid, 'b0', 'RL', box=(95, 95, 215, 240))
+            ls['pool_box'] = None
+            group = [ls, full]
+            if fam == 'leash':
+                call = row('leash_call', lab, iid, 'd0', 'RL',
+                           box=(100, 100, 200, 200))
+                call['pool_box'] = [100, 100, 200, 200]
+                group.append(call)
+            for r in group:
+                r['family'] = fam
+            kept, _, _, _, cnt = rcd.dedup_rows(group, 0)
+            if len(kept) != 1 or kept[0]['source'] != want:
+                bad.append('D6 %s: of a Label Studio crop and the detector '
+                           'box\'s crop of one box, %r survived, want %s'
+                           % (fam, [r['source'] for r in kept], want))
+        bad += _check_collapse_by_family()
+        return bad
+    finally:
+        rcd._rank = saved
+
+
+def _check_collapse_by_family():
+    """dHash (step 3) and embedding (step 4) collapses of same-class crops:
+    the dog-bin keeps the largest file; leash keeps the detector-box crop
+    even when a drawn crop of the dog is the larger file (a leash-inclusive
+    box usually is)."""
+    bad = []
+    for step in ('dhash', 'embedding'):
+        for fam, src, lab, want in (
+                ('dogbin', 'gate_audit', 'dog', 'ls_box'),
+                ('leash', 'leash_audit', 'leashed', 'leash_audit')):
+            tag = '%d%d' % (step == 'dhash', fam == 'leash')
+            small = row(src, lab, '97510001%s01' % tag, 'd0', 'CS' + tag,
+                        framing='audit_full')
+            small['pool_box'] = list(small['box'])
+            big_path = _img(os.path.join(TMP, 'crops_big', tag + '.jpg'),
+                            w=160, h=140, seed=_SEED[0] + 7)
+            big = row('ls_box', lab, '97510001%s02' % tag, 'b0', 'CT' + tag,
+                      path=big_path)
+            big['pool_box'] = None
+            assert os.path.getsize(big['path']) > \
+                os.path.getsize(small['path'])
+            for r in (small, big):
+                r['family'] = fam
+            if step == 'dhash':
+                big['dhash'] = small['dhash']
+                kept, _, _, _, _ = rcd.dedup_rows([small, big], 6)
+            else:
+                kept, _, _, _, _ = rcd.dedup_rows(
+                    [small, big], 0, emb_groups=[[small['path'],
+                                                  big['path']]])
+            if len(kept) != 1 or kept[0]['source'] != want:
+                bad.append('D6 %s: the %s collapse of a detector crop and a '
+                           'larger drawn crop kept %r, want %s'
+                           % (fam, step, [r['source'] for r in kept], want))
+    return bad
+
+
+def _phase2_rank(row):
+    # leash: only the redraw ranks last; a Label Studio box still outranks
+    # the detector's crop (the rank before the 2026-11-15 review)
+    if row.get('framing') == 'audit_edited':
+        return 5 if rcd.family_of(row) == 'leash' else 0
+    if row.get('source') in cs.DRAWN_SOURCES:
+        return 1
+    if row.get('framing') == 'audit_full':
+        return 2
+    if row.get('source') in ('hard_negative', 'hard_positive'):
+        return 3
+    return 4
+
+
+def _size_only_collapse(members):
+    return max(members, key=lambda r: (rcd._size_of(r), r['uid']))
+
+
+def _old_rank(row):
+    # redraw-wins for every family -- the rule before 2026-11-15
+    if row.get('framing') == 'audit_edited':
+        return 0
+    if row.get('source') in cs.DRAWN_SOURCES:
+        return 1
+    if row.get('framing') == 'audit_full':
+        return 2
+    return 3
+
+
+def check_dedup_overlapping_det_keys(dedup=None):
+    """Two det keys on one image whose POOL boxes overlap at IoU >= LS_IOU
+    are one box (the gen-1 store double-boxes): two labels drop both, one
+    label keeps one, a drawn box over the pair joins it; a redraw or a
+    distant box does not join, and check_rows refuses the pair."""
+    dedup = dedup or rcd.dedup_rows
+    bad = []
+    a_box, b_box = [100.0, 100.0, 200.0, 200.0], [103.0, 102.0, 204.0, 201.0]
+    assert cs.iou(a_box, b_box) >= cs.LS_IOU
+
+    def det(source, label, iid, dk, pool, box=None, framing=None):
+        r = _leash(row(source, label, iid, dk, 'OV' + iid[-2:],
+                       box=box or pool, framing=framing))
+        r['pool_box'] = list(pool) if pool else None
+        return r
+    # 1. two labels, two keys, one box -> both dropped, as a conflict
+    x = det('leash_audit', 'unleashed', '975200000001', 'd1', a_box)
+    y = det('leash_call', 'leashed', '975200000001', 'd0', b_box)
+    kept, _, conf, _, cnt = dedup([x, y], 0)
+    if kept or not any(c['kind'] == 'same_box_two_labels_overlap'
+                       for c in conf):
+        bad.append('D6 one detector box under two det keys and two labels '
+                   'trained (kept %r)' % ([r['uid'] for r in kept],))
+    # 2. one label -> one row
+    x = det('leash_audit', 'leashed', '975200000002', 'd1', a_box)
+    y = det('leash_call', 'leashed', '975200000002', 'd0', b_box)
+    kept, _, _, _, cnt = dedup([x, y], 0)
+    if len(kept) != 1 or not cnt.get('detector_keys_joined_by_overlap'):
+        bad.append('D6 one detector box under two det keys stayed %d rows'
+                   % (len(kept),))
+    # 3. a drawn box over the double-boxed pair joins it -- not "ambiguous"
+    x = det('leash_audit', 'leashed', '975200000003', 'd1', a_box)
+    y = det('leash_call', 'leashed', '975200000003', 'd0', b_box)
+    z = _leash(row('ls_box', 'leashed', '975200000003', 'b0', 'OV03',
+                   box=(101, 101, 202, 202)))
+    kept, _, conf, _, _ = dedup([x, y, z], 0)
+    if len(kept) != 1:
+        bad.append('D6 a drawn box over one double-boxed detector box did not '
+                   'join it (kept %d, conflicts %r)'
+                   % (len(kept), [c['kind'] for c in conf]))
+    # 4. two dogs side by side (IoU < LS_IOU) stay two
+    x = det('leash_audit', 'leashed', '975200000004', 'd0', a_box)
+    y = det('leash_audit', 'unleashed', '975200000004', 'd1',
+            [180.0, 100.0, 280.0, 200.0])
+    kept, _, conf, _, _ = dedup([x, y], 0)
+    if len(kept) != 2:
+        bad.append('D6 two detector boxes at IoU %.2f were joined as one'
+                   % cs.iou(a_box, [180.0, 100.0, 280.0, 200.0]))
+    # 5. the join is on the POOL box only: a row with no pool_box whose
+    # (redrawn) box overlaps is matched by key alone
+    x = det('leash_audit', 'leashed', '975200000005', 'd0', a_box)
+    y = det('gate_audit', 'unleashed', '975200000005', 'd1', None,
+            box=b_box, framing='audit_full')
+    kept, _, _, _, _ = dedup([x, y], 0)
+    if len(kept) != 2:
+        bad.append('D6 a row with no pool_box was joined on its own box')
+    # 6. the assertion: such a pair on a plan fails check_rows
+    x = det('leash_audit', 'leashed', '975200000006', 'd1', a_box)
+    y = det('leash_call', 'leashed', '975200000006', 'd0', b_box)
+    for r in (x, y):
+        r['split'], r['group'] = 'train', r['sequence']
+    if not any('one box' in f for f in rcd.check_rows([x, y])):
+        bad.append('D8 check_rows passed one detector box under two det keys')
+    return bad
+
+
+def _keyonly_dedup(rows, hamming=6, emb_groups=None, iou_thr=0.5):
+    """dedup_rows with the det-key join by key only (before 2026-11-15)."""
+    f = _mutated(rcd.dedup_rows,
+                 'if _iou(lst[i][1], lst[j][1]) >= iou_thr and',
+                 'if False and')
+    return f(rows, hamming, emb_groups, iou_thr)
+
+
+def _mutated(fn, old, new):
+    """fn re-compiled from its own source with `old` -> `new`, in a copy of
+    its module's namespace (the real function is left alone)."""
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(fn))
+    if src.count(old) != 1:
+        raise AssertionError('mutant anchor %r not found once in %s'
+                             % (old, fn.__name__))
+    ns = dict(fn.__globals__)
+    exec(compile(src.replace(old, new), fn.__code__.co_filename, 'exec'), ns)
+    return ns[fn.__name__]
+
+
+def check_leash_framing_assertion(check=None):
+    """Assertion 11 on a plan: no leash redraw, no leash detector row cut
+    from a box other than its pool_box -- and the gate's redraws pass."""
+    check = check or rcd.check_rows
+    bad = []
+
+    def plan():
+        out = []
+        for k, (src, lab, sp) in enumerate((
+                ('leash_audit', 'leashed', 'train'),
+                ('leash_call', 'unleashed', 'train'),
+                ('leash_audit', 'unleashed', 'val'),
+                ('ls_box', 'leashed', 'val'))):
+            r = _leash(row(src, lab, '97530000000%d' % k,
+                           'b0' if src == 'ls_box' else 'd0', 'LF%d' % k,
+                           box=(10, 10, 50, 50)))
+            r['pool_box'] = None if src == 'ls_box' else [10, 10, 50, 50]
+            r['split'], r['group'] = sp, r['sequence']
+            out.append(r)
+        return out
+    if check(plan()):
+        bad.append('D8 a clean leash plan fails: %s' % (check(plan()),))
+    p = plan()
+    p[0]['framing'] = 'audit_edited'
+    if not check(p):
+        bad.append('D8 check_rows passed a leash row framed audit_edited')
+    p = plan()
+    p[1]['box'] = [5, 5, 80, 90]
+    if not check(p):
+        bad.append('D8 check_rows passed a leash call cut from a redraw, not '
+                   'its pool_box')
+    p = plan()
+    p[2]['box'] = [5, 5, 80, 90]
+    if not check(p):
+        bad.append('D8 check_rows passed a leash audit row cut from a box '
+                   'other than its pool_box')
+    g = row('gate_audit', 'dog', '975300000009', 'd0', 'LF9',
+            box=(5, 5, 80, 90), framing='audit_edited')
+    g['pool_box'] = [10, 10, 50, 50]
+    g['split'], g['group'] = 'train', 'LF9'
+    if check(plan() + [g]):
+        bad.append('D8 the leash framing rule fails a dog-bin redraw, which '
+                   'is the gate\'s rule: %s' % (check(plan() + [g]),))
+    return bad
+
+
+def _creator_rows():
+    """Creator cA: 8 dog crops in sequence S1 (4 images x 2) and one each in
+    S2-S4, 2 not_dog; creator cB: 3 dog; 7 rows with no creator (1 dog, 6
+    not_dog -- more of one class than the cap, so treating "no creator" as
+    one creator would cut them)."""
+    rows = []
+    k = [0]
+
+    def mk(label, seq, creator, iid=None):
+        k[0] += 1
+        iid = iid or '9754000%05d' % k[0]
+        r = row('gate_audit', label, iid, 'd%d' % k[0], seq)
+        r['capture'] = ({'creator': creator, 'ts': 1e6 * k[0], 'lon': 0.0,
+                         'lat': 0.0} if creator else None)
+        r['split'], r['group'] = 'train', seq
+        rows.append(r)
+    for i in range(4):
+        iid = '97540009%04d' % i
+        mk('dog', 'S1', 'cA', iid)
+        mk('dog', 'S1', 'cA', iid)
+    for seq in ('S2', 'S3', 'S4'):
+        mk('dog', seq, 'cA')
+    mk('not_dog', 'S5', 'cA')
+    mk('not_dog', 'S6', 'cA')
+    for _ in range(3):
+        mk('dog', 'S7', 'cB')
+    mk('dog', 'S8', None)
+    for i in range(6):
+        mk('not_dog', 'S9%d' % i, None)
+    return rows
+
+
+def _image_tier_rows():
+    """Creator cC, one sequence, two images with two dog crops each -- the
+    det keys chosen so that in plain sha256(0:uid) order BOTH of image A's
+    crops come first. A cap of 2 keeps one of each image only if the image
+    tier of _spread_order runs."""
+    def key(iid, d):
+        return rcd._hash_key(0, cs.uid_for('gate_audit', iid, d))
+    ia, ib = '975410000001', '975410000002'
+    da = sorted(('d%d' % i for i in range(40)), key=lambda d: key(ia, d))[:2]
+    top = max(key(ia, d) for d in da)
+    db = [d for d in ('d%d' % i for i in range(400)) if key(ib, d) > top][:2]
+    out = []
+    for iid, dets in ((ia, da), (ib, db)):
+        for d in dets:
+            r = row('gate_audit', 'dog', iid, d, 'S10')
+            r['capture'] = {'creator': 'cC', 'ts': 5e6, 'lon': 0.0,
+                            'lat': 0.0}
+            r['split'], r['group'] = 'train', 'S10'
+            out.append(r)
+    return out
+
+
+def check_creator_cap(cap_fn=None):
+    """At most N per (creator, class), distinct sequences first, rows with no
+    creator untouched, the same answer twice -- and check_rows holds it."""
+    cap_fn = cap_fn or rcd.cap_creators
+    rows = _creator_rows()
+    bad = []
+    kept, dropped, by_creator = cap_fn(rows, 4, 0)
+    per = collections.Counter((rcd.creator_of(r), r['label']) for r in kept)
+    if per.get(('cA', 'dog')) != 4:
+        bad.append('D9 creator cA kept %r dog crops under a cap of 4'
+                   % (per.get(('cA', 'dog')),))
+    if per.get(('cA', 'not_dog')) != 2 or per.get(('cB', 'dog')) != 3:
+        bad.append('D9 the creator cap took rows from a (creator, class) '
+                   'under it: %r' % (dict(per),))
+    seqs = sorted(r['sequence'] for r in kept
+                  if rcd.creator_of(r) == 'cA' and r['label'] == 'dog')
+    if seqs != ['S1', 'S2', 'S3', 'S4']:
+        bad.append('D9 the creator cap kept %r -- not one crop of each of '
+                   'its four sequences first' % (seqs,))
+    if sum(1 for r in kept if not rcd.creator_of(r)) != 7:
+        bad.append('D9 a row with no creator was capped (%d of 7 kept)'
+                   % (sum(1 for r in kept if not rcd.creator_of(r)),))
+    if dict(dropped) != {'dog': 7} or dict(by_creator) != {'cA': 7}:
+        bad.append('D9 the creator cap reports %r / %r, want 7 cA dog rows'
+                   % (dict(dropped), dict(by_creator)))
+    again, _, _ = cap_fn(_creator_rows_like(rows), 4, 0)
+    if sorted(r['uid'] for r in again) != sorted(r['uid'] for r in kept):
+        bad.append('D9 the creator cap is not deterministic for a seed')
+    if rcd.check_rows(kept, max_per_creator=4):
+        bad.append('D8 check_rows fails a creator-capped plan: %s'
+                   % (rcd.check_rows(kept, max_per_creator=4),))
+    if not rcd.check_rows(rows, max_per_creator=4):
+        bad.append('D8 check_rows passed 11 crops of one (creator, class) '
+                   'under a cap of 4')
+    # within a sequence, one crop per image before a second of any
+    tier = _image_tier_rows()
+    kept, _, _ = cap_fn(tier, 2, 0)
+    if sorted({r['image_id'] for r in kept}) != \
+            sorted({r['image_id'] for r in tier}):
+        bad.append('D9 a cap of 2 on two images of one sequence kept %r -- '
+                   'not one crop of each image first'
+                   % (sorted(r['uid'] for r in kept),))
+    # a creator with no capture TIME is still a creator: a NULL captured_at
+    # must not exempt an image from the cap (it joins no twin, though)
+    cap = rcd._capture_of(None, None, 'C1')
+    if (cap or {}).get('creator') != 'C1' or rcd.capture_known(cap):
+        bad.append('D9 a creator with no captured_at reads as %r' % (cap,))
+    else:
+        nots = []
+        for i in range(6):
+            r = row('gate_audit', 'dog', '9754200000%02d' % i, 'd0',
+                    'NT%d' % i)
+            r['capture'] = dict(cap)
+            r['split'], r['group'] = 'train', r['sequence']
+            nots.append(r)
+        kept, _, _ = cap_fn(nots, 4, 0)
+        if len(kept) != 4:
+            bad.append('D9 6 crops of creator C1 with no captured_at kept %d '
+                       'under a cap of 4' % (len(kept),))
+        if rcd.capture_twins([(r['image_id'], r['capture']) for r in nots]):
+            bad.append('D9 captures with no time were paired as twins')
+    return bad
+
+
+def _creator_rows_like(rows):
+    return [dict(r) for r in reversed(rows)]
+
+
+def _hash_only_spread(rows, seed):
+    return sorted(rows, key=lambda r: (rcd._hash_key(seed, r['uid']),
+                                       r['uid']))
+
+
+def _sequence_only_spread(rows, seed):
+    """_spread_order without its image tier: the k-th row of each sequence
+    first, but in plain hash order within a sequence."""
+    by_seq = collections.defaultdict(list)
+    for r in rows:
+        by_seq[str(r['sequence'])].append(r)
+    keyed = []
+    for lst in by_seq.values():
+        lst = _hash_only_spread(lst, seed)
+        for k, r in enumerate(lst):
+            keyed.append(((k, rcd._hash_key(seed, r['uid']), r['uid']), r))
+    keyed.sort(key=lambda t: t[0])
+    return [r for _, r in keyed]
+
+
+def _band_rows(split='train', tag='0', mix=((2, 8), (6, 4))):
+    """(rows, pos rate): by default <=64 px 2 dog / 8 not_dog, >192 px 6 dog
+    / 4 not_dog, so the split's dog rate is 0.4 and size predicts the label;
+    `mix` sets the (dog, not_dog) counts of the two bands. Crops are
+    NON-square: their long side sits in another band. One more row has no
+    crop_wh: it is kept and counted, never banded."""
+    rows = []
+    k = [0]
+
+    def mk(label, wh):
+        k[0] += 1
+        r = row('gate_audit', label, '9755%s%07d' % (tag, k[0]), 'd0',
+                'B%s%03d' % (tag, k[0]))
+        r['crop_wh'] = list(wh)
+        r['split'], r['group'] = split, r['sequence']
+        rows.append(r)
+    (sp, sn), (bp, bn) = mix
+    for _ in range(sp):
+        mk('dog', (50, 230))
+    for _ in range(sn):
+        mk('not_dog', (50, 230))
+    for _ in range(bp):
+        mk('dog', (230, 200))
+    for _ in range(bn):
+        mk('not_dog', (230, 200))
+    mk('not_dog', (60, 60))
+    rows[-1]['crop_wh'] = None
+    return rows, (sp + bp) / float(sp + sn + bp + bn)
+
+
+def check_band_balance(balance=None):
+    """Within each split and each short-side band the dog rate becomes THAT
+    split's own rate -- 0.4 in train, 0.5 in val (not 0.5 everywhere, not
+    the 0.45 of both together) -- whole splits only, rows with no crop_wh
+    kept and counted, the drops reported per (split, band, class), and
+    check_rows holds it."""
+    balance = balance or rcd.balance_bands
+    tr, rate_tr = _band_rows('train', '0')
+    va, rate_va = _band_rows('val', '1', mix=((3, 7), (7, 3)))
+    rates = {'train': rate_tr, 'val': rate_va}
+    bad = []
+    kept, rep = balance(tr + va, 'dog', 0)
+    for sp in ('train', 'val'):
+        rate = rates[sp]
+        got = ((rep.get('splits') or {}).get(sp) or {})
+        if got.get('target_pos_rate') is None or \
+                abs(got['target_pos_rate'] - rate) > 1e-9:
+            bad.append('D9 %s balanced to %r, want its own rate %.2f'
+                       % (sp, got.get('target_pos_rate'), rate))
+        if got.get('no_crop_wh') != 1:
+            bad.append('D9 %s reports %r row(s) with no crop_wh, want 1'
+                       % (sp, got.get('no_crop_wh')))
+        nowh = [r for r in kept if r['split'] == sp and not r.get('crop_wh')]
+        if len(nowh) != 1:
+            bad.append('D9 %s kept %d row(s) with no crop_wh, want 1'
+                       % (sp, len(nowh)))
+        cnt = collections.defaultdict(collections.Counter)
+        for r in kept:
+            if r['split'] == sp and r.get('crop_wh'):
+                cnt[rcd.size_band(min(r['crop_wh']))][r['label']] += 1
+        for b, c in sorted(cnt.items()):
+            n = c['dog'] + c['not_dog']
+            if abs(c['dog'] - rate * n) > 1.0:
+                bad.append('D9 %s band %s keeps %d dog of %d, want a dog rate '
+                           'of %.1f (the split\'s own)' % (sp, b, c['dog'], n,
+                                                             rate))
+        if set(cnt) != {'<=64', '>192'}:
+            bad.append('D9 %s: bands %r -- the band is not taken on the SHORT '
+                       'side' % (sp, sorted(cnt)))
+    moved = {r['uid'] for r in kept} - {r['uid'] for r in tr + va}
+    if moved or any(r['split'] != ('train' if r['uid'] in {x['uid'] for x in
+                                                           tr} else 'val')
+                    for r in kept):
+        bad.append('D9 the band balance moved rows between splits')
+    wants = {'train': {'<=64': {'not_dog': 5}, '>192': {'dog': 3}},
+             'val': {'<=64': {'not_dog': 4}, '>192': {'dog': 4}}}
+    for sp, want in wants.items():
+        got = ((rep.get('splits') or {}).get(sp) or {}).get('dropped')
+        if got != want:
+            bad.append('D9 %s drops reported as %r, want %r' % (sp, got, want))
+    targets = {'positive': 'dog', 'targets': rates}
+    if rcd.check_rows(kept, band_balance=targets):
+        bad.append('D8 check_rows fails a band-balanced plan: %s'
+                   % (rcd.check_rows(kept, band_balance=targets),))
+    if not rcd.check_rows(tr + va, band_balance=targets):
+        bad.append('D8 check_rows passed bands at dog rate 0.2 / 0.6 and '
+                   '0.3 / 0.7 against targets of 0.4 / 0.5')
+    return bad
+
+
+def _rebalance_manifest():
+    """30 dog-bin crops, one sequence each: creator cA holds 10 dogs, small
+    crops are mostly not_dog and big ones mostly dog."""
+    rows = []
+    CAPTURES.clear()
+    for k in range(30):
+        label = 'dog' if k % 3 else 'not_dog'
+        iid = '97560000%04d' % k
+        r = row('gate_audit', label, iid, 'd0', 'RB%02d' % k)
+        big = (label == 'dog') != (k % 7 == 0)
+        r['crop_wh'] = [210, 220] if big else [50, 60]
+        creator = 'cA' if label == 'dog' and k < 16 else 'c%d' % k
+        CAPTURES[iid] = {'creator': creator, 'ts': 1e6 * k, 'lon': 0.0,
+                         'lat': 0.0}
+        rows.append(r)
+    return write_manifest(rows, 'm_rebalance.jsonl')
+
+
+def check_rebalanced_build(plan_fn=None):
+    """--max-per-creator and --balance-size-bands through a whole manifest
+    build: recorded as the 'rebalanced' variant, every drop counted,
+    re-asserted on disk -- and the plain build of the same manifest is
+    'plain' and drops nothing for them. Either flag ALONE is a 'rebalanced'
+    build too, recording only its own setting; and a build that did not ask
+    for 12 / 13 says so ("not requested") instead of "all 14 hold"."""
+    saved = rcd.rebalance_plan
+    if plan_fn:
+        rcd.rebalance_plan = plan_fn
+    try:
+        m = _rebalance_manifest()
+        tag = random.randrange(1 << 30)
+        outs, texts = {}, {}
+        for name, extra in (('plain', []),
+                            ('reb', ['--max-per-creator', '3',
+                                     '--balance-size-bands']),
+                            ('reb2', ['--max-per-creator', '3',
+                                      '--balance-size-bands']),
+                            ('cap', ['--max-per-creator', '3']),
+                            ('band', ['--balance-size-bands'])):
+            out = os.path.join(TMP, 'out_rb_%s_%d' % (name, tag))
+            err, text = run_rebuild(['--manifest', m, '--out', out,
+                                     '--no-reserve', '--hamming', '0',
+                                     '--val-frac', '0.3', '--execute']
+                                    + extra)
+            if err:
+                return ['D9 the %s build failed: %s' % (name, err)]
+            outs[name], texts[name] = out, text
+    finally:
+        rcd.rebalance_plan = saved
+    bad = []
+    n = rcd.ASSERTIONS
+    for name, want, n_req in (('plain', 'all %d assertions hold (2 not '
+                               'requested)' % (n - 2,), 2),
+                              ('cap', 'all %d assertions hold (1 not '
+                               'requested)' % (n - 1,), 1),
+                              ('band', 'all %d assertions hold (1 not '
+                               'requested)' % (n - 1,), 1),
+                              ('reb', 'all %d assertions hold\n' % (n,), 0)):
+        t = texts[name]
+        if t.count('assertions on the plan: ' + want) != 1 or \
+                t.count('assertions on disk: ' + want) != 1 or \
+                t.count('not requested: a ') != 2 * n_req:
+            bad.append('D9 the %s build does not report %r on the plan and '
+                       'on disk: %r' % (name, want, [
+                           x for x in t.splitlines()
+                           if 'assertions' in x or 'not requested' in x]))
+    for name, cap_want, bands_want in (('cap', 3, False),
+                                       ('band', None, True)):
+        mm = _read_json(os.path.join(outs[name], 'rebuild_manifest.json'))
+        rb = mm.get('rebalance') or {}
+        if mm.get('variant') != 'rebalanced' or \
+                rb.get('variant') != 'rebalanced' or \
+                rb.get('max_per_creator') != cap_want or \
+                rb.get('balance_size_bands') is not bands_want or \
+                ('creator_cap' in rb) != bool(cap_want) or \
+                ('band_balance' in rb) != bands_want:
+            bad.append('D9 the %s-only build is recorded as %r with %r'
+                       % (name, mm.get('variant'),
+                          {k: rb.get(k) for k in (
+                              'variant', 'max_per_creator',
+                              'balance_size_bands')}))
+
+    def man(o):
+        with open(os.path.join(o, 'rebuild_manifest.json')) as fh:
+            return json.load(fh)
+
+    def uids(o):
+        with open(os.path.join(o, 'crops.jsonl')) as fh:
+            return sorted(json.loads(line)['uid'] for line in fh)
+    pm, rm = man(outs['plain']), man(outs['reb'])
+    if pm.get('variant') != 'plain' or rm.get('variant') != 'rebalanced':
+        bad.append('D9 the manifests say %r / %r, not plain / rebalanced'
+                   % (pm.get('variant'), rm.get('variant')))
+    reb = rm.get('rebalance') or {}
+    if reb.get('max_per_creator') != 3 or not reb.get('balance_size_bands'):
+        bad.append('D9 the rebalance settings are not recorded: %r'
+                   % ({k: reb.get(k) for k in ('max_per_creator',
+                                               'balance_size_bands')},))
+    if not (reb.get('creator_cap') or {}).get('dropped_total') or \
+            not (reb.get('band_balance') or {}).get('dropped_total'):
+        bad.append('D9 the rebalanced build dropped nothing (creator %r, '
+                   'bands %r)' % ((reb.get('creator_cap') or {})
+                                  .get('dropped_total'),
+                                  (reb.get('band_balance') or {})
+                                  .get('dropped_total')))
+    if len(uids(outs['reb'])) + reb.get('creator_cap', {}).get(
+            'dropped_total', 0) + reb.get('band_balance', {}).get(
+            'dropped_total', 0) != len(uids(outs['plain'])):
+        bad.append('D9 the rebalanced build is not the plain one minus what '
+                   'its record says it dropped')
+    if (pm.get('rebalance') or {}).get('rows_before') != \
+            (pm.get('rebalance') or {}).get('rows_after'):
+        bad.append('D9 the plain build dropped rows for a rebalance')
+    if uids(outs['reb']) != uids(outs['reb2']):
+        bad.append('D9 two rebalanced builds of one manifest and seed differ')
+    err, _ = run_rebuild(['--verify-only', outs['reb']])
+    if err:
+        bad.append('D9 --verify-only fails a rebalanced build: %s' % (err,))
+    # on disk: the record asks for a cap the files break
+    p = os.path.join(outs['reb'], 'rebuild_manifest.json')
+    doc = man(outs['reb'])
+    doc['rebalance']['max_per_creator'] = 1
+    with open(p, 'w') as fh:
+        json.dump(doc, fh)
+    if not rcd.verify_dataset(outs['reb']):
+        bad.append('D9 verify passed a dataset over the creator cap its '
+                   'record asks for')
+    doc['rebalance']['max_per_creator'] = 3
+    for d in doc['rebalance']['band_balance']['splits'].values():
+        if d.get('target_pos_rate') is not None:
+            d['target_pos_rate'] = 0.05
+    with open(p, 'w') as fh:
+        json.dump(doc, fh)
+    if not rcd.verify_dataset(outs['reb']):
+        bad.append('D9 verify passed size bands off the rate its record '
+                   'asks for')
+    return bad
+
+
+def _read_json(p):
+    with open(p) as fh:
+        return json.load(fh)
+
+
+def _no_rebalance(plan, *a, **k):
+    rec = {'variant': 'rebalanced', 'max_per_creator': a[0] or None,
+           'balance_size_bands': bool(a[1]), 'rows_before': len(plan),
+           'rows_after': len(plan)}
+    return plan, rec
 
 
 def check_reserved_near_copies(near=None):
@@ -1674,10 +2423,94 @@ MUTANTS = [
      lambda: _patched(__import__('harvest_flagged'), 'read_corrections',
                       _old_read_corrections,
                       check_review_corrections_skip_audit)),
-    ('D3 leash calls cut from the raw detector box',
+    ('D3 a leash call\'s redraw not kept as metadata',
      lambda: _patched(__import__('harvest_flagged'), 'read_corrections',
                       lambda path: {}, check_leash_calls)),
+    ('D3 leash calls cut from the review-page redraw (the old rule)',
+     lambda: _patched(cs, 'leash_call_candidates', _mutated(
+         cs.leash_call_candidates, 'box = list(det_box)',
+         'box = [float(v) for v in fixed] if fixed else list(det_box)'),
+         check_leash_calls)),
+    ('D3 leash audit: the redraw wins (the old rule)',
+     lambda: _patched(cs, 'EDITED_WINS', {'gate': True, 'leash': True},
+                      check_audit_coverage)),
+    ('D3 gate audit: the detector box wins',
+     lambda: _patched(cs, 'EDITED_WINS', {'gate': False, 'leash': False},
+                      check_audit_coverage)),
+    ('D6 the leash dedup keeps the redraw (redraw-wins for every family)',
+     lambda: check_dedup_rank_by_family(_old_rank)),
+    ('D6 differing det keys joined by key only',
+     lambda: check_dedup_overlapping_det_keys(_keyonly_dedup)),
+    ('D8 the leash framing assertion off',
+     lambda: check_leash_framing_assertion(_mutated(
+         rcd.check_rows, "lf = [r for r in rows if family_of(r) == 'leash']",
+         'lf = []'))),
+    ('D9 no creator cap',
+     lambda: check_creator_cap(lambda rows, cap, seed: (
+         list(rows), collections.Counter(), collections.Counter()))),
+    ('D9 creator cap in plain hash order (not sequences first)',
+     lambda: _patched(rcd, '_spread_order', _hash_only_spread,
+                      check_creator_cap)),
+    ('D9 no band balance',
+     lambda: check_band_balance(lambda rows, pos, seed: (list(rows), {}))),
+    ('D9 bands taken on the long side',
+     lambda: check_band_balance(_long_side_balance)),
+    ('D9 bands balanced to 0.5, not the split\'s rate',
+     lambda: check_band_balance(_mutated(
+         rcd.balance_bands,
+         "'target_pos_rate': (n_pos / len(banded)) if banded else None",
+         "'target_pos_rate': 0.5 if banded else None"))),
+    ('D9 the rebalance not run by the build',
+     lambda: check_rebalanced_build(_no_rebalance)),
+    ('D6 leash: a Label Studio crop outranks the detector box (phase-2 rank)',
+     lambda: check_dedup_rank_by_family(_phase2_rank)),
+    ('D6 leash: the dHash / embedding collapse keeps the largest file',
+     lambda: _patched(rcd, '_collapse_best', _size_only_collapse,
+                      check_dedup_rank_by_family)),
+    ('D9 a creator with no captured_at reads as no creator',
+     lambda: _patched(rcd, '_capture_of', _mutated(
+         rcd._capture_of, 'if not creator:',
+         'if not creator or ts is None:'), check_creator_cap)),
+    ('D9 rows with no creator capped as one creator',
+     lambda: check_creator_cap(_mutated(
+         rcd.cap_creators, 'cr = creator_of(r)',
+         "cr = creator_of(r) or 'NONE'"))),
+    ('D9 the creator cap without the image tier',
+     lambda: _patched(rcd, '_spread_order', _sequence_only_spread,
+                      check_creator_cap)),
+    ('D9 bands balanced to the rate of all splits together',
+     lambda: check_band_balance(_mutated(
+         rcd.balance_bands,
+         "'target_pos_rate': (n_pos / len(banded)) if banded else None",
+         "'target_pos_rate': (sum(1 for x in rows if _band_of(x) and "
+         "x['label'] == pos) / float(sum(1 for x in rows if _band_of(x)))) "
+         "if banded else None"))),
+    ('D9 rows with no crop_wh dropped by the band balance',
+     lambda: check_band_balance(_mutated(
+         rcd.balance_bands,
+         'kept += [r for r in lst if not _band_of(r)]', 'pass'))),
+    ('D9 a creator-cap-only build recorded as plain',
+     lambda: check_rebalanced_build(_mutated(
+         rcd.rebalance_plan, 'if max_per_creator or balance_size_bands:',
+         'if balance_size_bands:'))),
+    ('D9 a plain build claims assertions 12 and 13 held',
+     lambda: _patched(rcd, 'rebalance_not_requested', lambda rec: [],
+                      check_rebalanced_build)),
 ]
+
+
+def _long_side_balance(rows, pos, seed):
+    """balance_bands with each crop banded by its LONG side."""
+    real = rcd._band_of
+
+    def long_band(r):
+        wh = r.get('crop_wh')
+        return rcd.size_band(max(wh)) if wh else None
+    rcd._band_of = long_band
+    try:
+        return rcd.balance_bands(rows, pos, seed)
+    finally:
+        rcd._band_of = real
 
 
 def main():
@@ -1697,6 +2530,9 @@ def main():
               check_collect_exclusions_and_vetoes, check_exclusion_records,
               check_leash_calls, check_review_corrections_skip_audit,
               check_frame_labels, check_dedup_joins_detector_box,
+              check_dedup_rank_by_family, check_dedup_overlapping_det_keys,
+              check_leash_framing_assertion, check_creator_cap,
+              check_band_balance, check_rebalanced_build,
               check_reserved_near_copies, check_noseq_dropped,
               check_reserve_twins, check_family_reserves_add,
               check_no_ls_refused, smoke_reserve_counts]

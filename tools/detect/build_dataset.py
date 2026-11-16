@@ -58,6 +58,12 @@ EVERY BUILD CARRIES A BUNDLE, in <dataset>/bundle/:
                     annotation store, its digest, and the name of every crop
     build_log.txt   everything the builders printed, in order
 
+and a crop build adds crops.jsonl (the kept rows), collect_manifest.jsonl
+(every row collected, before the split dropped any) and clusters.json (the
+embedding near-duplicates) -- the stage is deleted, and without those two
+nobody can say which rows a build dropped -- plus size_report.json, which
+says how well crop size alone predicts the label.
+
 THE LIST IS THE POINT, not the counts. A count says a dataset had 3,247
 images; a list says WHICH 3,247, in which split, under which class, with a
 digest for each. Two builds are the same dataset when their file lists match,
@@ -600,10 +606,34 @@ def _dying_cleans_up(is_main=None):
             pass
 
 
-def new_name(family, now=None):
-    """`<family>_<day>_<six hex>` -- sortable, readable, and never reused."""
+def new_name(family, now=None, variant=None):
+    """`<family>_<day>_<six hex>` -- sortable, readable, and never reused.
+
+    The six hex are random, so two builds -- a plain one and a rebalanced
+    one of the same day, say -- never share a name. `variant` (the
+    rebalance settings) is hashed in with the randomness so the id is
+    derived from what was asked for as well; it cannot be read back off the
+    name (BUILT_RE and train_model hold the name to three parts), which is
+    why the rebuild manifest and the bundle say which variant it is.
+    """
     day = time.strftime('%Y%m%d', time.localtime(now or time.time()))
-    return '%s_%s_%s' % (family, day, os.urandom(3).hex())
+    salt = json.dumps(variant, sort_keys=True).encode()
+    return '%s_%s_%s' % (family, day, hashlib.sha256(
+        os.urandom(16) + salt).hexdigest()[:6])
+
+
+def rebalance_variant(max_per_creator=0, balance_size_bands=False):
+    """{'variant': 'plain'|'rebalanced', ...settings} for a crop build, and
+    the rebuild_crop_dataset flags that ask for it (the opt-in rebalance:
+    rebuild_crop_dataset.rebalance_plan)."""
+    flags = []
+    if max_per_creator:
+        flags += ['--max-per-creator', str(int(max_per_creator))]
+    if balance_size_bands:
+        flags += ['--balance-size-bands']
+    return ({'variant': 'rebalanced' if flags else 'plain',
+             'max_per_creator': int(max_per_creator) or None,
+             'balance_size_bands': bool(balance_size_bands)}, flags)
 
 
 # ── running the builders ────────────────────────────────────────────────────
@@ -954,13 +984,285 @@ def _read_json(path):
         return {}
 
 
-def _bundle_crop_record(out, stage, bundle, base, reserve_paths):
+# ── the size shortcut ───────────────────────────────────────────────────────
+
+# Short-side bands, (lo, hi] in px, the ones the leash audit measured in:
+# rebuild_crop_dataset.SIZE_BANDS, the ONE definition, which
+# --balance-size-bands balances in -- a diagnostic that cut the axis
+# differently would not be measuring what the balance changed.
+sys.path.insert(0, DETECT)
+import rebuild_crop_dataset as _rcd               # noqa: E402
+SIZE_BANDS = _rcd.SIZE_BANDS
+# Size-only AUC past which a split is WARNED. leash_test_v1 (production
+# framing, 628 crops) has size-only AUC 0.51 (0.53 with every geometry
+# feature); leash_20261115_18b269 had 0.60 train / 0.65 val. 0.58 is clear
+# of the test set's noise and well under what the build actually had.
+SIZE_AUC_WARN = 0.58
+# What each family's frozen production-framed test set itself carries,
+# measured on its crops (pixel sizes of data/<audit>/full/<key>.jpg, the
+# crops it is scored on). The gate's is NOT flat: dogbin_test_v1's dog rate
+# runs 0.31 at <=64 px to 0.75 above 192 px, AUC 0.63 -- above
+# dogbin_20261114_06c6b6's own 0.60 train / 0.60 val -- so for the gate a
+# size-predicts-the-label build is what production looks like, and "the
+# test set does not have it" would be false. A build against any other
+# test set (--test-set) gets no baseline and a neutral message.
+TEST_SIZE_AUC = {
+    'leash': {'test_set': 'leash_test_v1.json', 'n': 628,
+              'size_auc': 0.513, 'short_side_auc': 0.508},
+    'dogbin': {'test_set': 'dogbin_test_v1.json', 'n': 1839,
+               'size_auc': 0.629, 'short_side_auc': 0.678},
+}
+
+
+def rank_auc(scores, labels):
+    """Mann-Whitney AUC of `scores` for labels==1, midranks for ties.
+
+    None when either class is missing -- an AUC over one class is not 0.5,
+    it is undefined, and a 0.5 would read as "no shortcut".
+    """
+    pairs = sorted(zip(scores, labels), key=lambda p: p[0])
+    n_pos = sum(1 for _s, y in pairs if y)
+    n_neg = len(pairs) - n_pos
+    if not n_pos or not n_neg:
+        return None
+    rank_sum = 0.0
+    i = 0
+    while i < len(pairs):
+        j = i
+        while j + 1 < len(pairs) and pairs[j + 1][0] == pairs[i][0]:
+            j += 1
+        mid = (i + j) / 2.0 + 1.0          # 1-based midrank of the tie block
+        rank_sum += mid * sum(1 for k in range(i, j + 1) if pairs[k][1])
+        i = j + 1
+    return (rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def _size_band(short):
+    # this module's SIZE_BANDS, so a test can patch the bands here alone
+    return _rcd.size_band(short, SIZE_BANDS)
+
+
+def _size_slice(rows, pos):
+    """One slice's band table and size-only AUCs, from (w, h, label) rows."""
+    doc = {'n': len(rows), 'positives': sum(1 for r in rows if r[2] == pos),
+           'bands': {}}
+    doc['pos_rate'] = (round(doc['positives'] / doc['n'], 4)
+                       if doc['n'] else None)
+    for _lo, _hi, name in SIZE_BANDS:
+        doc['bands'][name] = {'n': 0, 'classes': {}, 'pos_rate': None}
+    for w, h, label in rows:
+        b = doc['bands'][_size_band(min(w, h))]
+        b['n'] += 1
+        b['classes'][label] = b['classes'].get(label, 0) + 1
+    for b in doc['bands'].values():
+        if b['n']:
+            b['pos_rate'] = round(b['classes'].get(pos, 0) / b['n'], 4)
+    ys = [1 if r[2] == pos else 0 for r in rows]
+    area = rank_auc([r[0] * r[1] for r in rows], ys)
+    short = rank_auc([min(r[0], r[1]) for r in rows], ys)
+    doc['size_auc'] = None if area is None else round(area, 4)
+    doc['short_side_auc'] = None if short is None else round(short, 4)
+    return doc
+
+
+def size_shortcut(rows, pos, warn_at=SIZE_AUC_WARN, baseline=None):
+    """How well crop size ALONE predicts the label, per split and source.
+
+    leash_20261115_18b269 let it: leashed rate by short side ran from 0.17
+    at <=64 px (n=242) to about 0.60 above 192 px, and crop area alone
+    ranked leashed above unleashed at AUC 0.60 train / 0.65 val. In
+    leash_test_v1, cut the way production cuts, every band sits at
+    0.50-0.61 and the same AUC is 0.51 -- so a model that learned "small
+    means unleashed" scores well on val and pushes production's small dogs
+    (28% of boxes are under 64 px) toward unleashed, and val cannot show it.
+    The causes are framing (Label Studio leashed boxes take in the leash)
+    and the aimed audit draws (27% leashed overall, and 8% leashed among
+    those under 64 px), so it is a diagnostic here, not a rebalance.
+
+    `rows` are crops.jsonl rows (crop_wh, split, label, source); `pos` is
+    the family's positive class; `baseline` is the family's TEST_SIZE_AUC
+    entry, or None when the test set's own AUC is not known. A split past
+    `warn_at` -- either way round: 0.40 is as much a shortcut as 0.60 -- is
+    WARNED, and the message says what the test set does. When the test set
+    is itself past the line (the gate, 0.63), size predicting the label is
+    what production looks like: only a split further than the same margin
+    (warn_at - 0.5) from the test set's AUC is WARNED, and one within it is
+    a NOTE that says to score per size band. Sources are reported, not
+    warned: a source is not what the model is scored on.
+    """
+    by_split, by_source = {}, {}
+    for r in rows:
+        wh = r.get('crop_wh')
+        if not wh or len(wh) != 2 or not min(wh):
+            continue
+        one = (float(wh[0]), float(wh[1]), r.get('label'))
+        by_split.setdefault(str(r.get('split')), []).append(one)
+        by_source.setdefault(str(r.get('source')), []).append(one)
+    rep = {'positive': pos, 'measure': 'rank AUC of crop area (w*h) for '
+           'the positive class; short_side_auc is the same on min(w, h)',
+           'bands_px': [name for _lo, _hi, name in SIZE_BANDS],
+           'warn_at': warn_at,
+           'splits': {k: _size_slice(v, pos)
+                      for k, v in sorted(by_split.items())},
+           'sources': {k: _size_slice(v, pos)
+                       for k, v in sorted(by_source.items())},
+           'baseline': baseline, 'warnings': [], 'notes': []}
+    margin = warn_at - 0.5
+    ref = (baseline or {}).get('size_auc')
+    test = (os.path.splitext(baseline['test_set'])[0] if baseline
+            else 'the test set')
+    for split, doc in rep['splits'].items():
+        auc = doc['size_auc']
+        if auc is None or abs(auc - 0.5) <= margin:
+            continue
+        head = ('%s size-only AUC %.3f (crop area alone ranks %s %s the '
+                'other class): crop size predicts the label in this set'
+                % (split, auc, pos, 'above' if auc > 0.5 else 'below'))
+        if ref is None:
+            rep['warnings'].append(
+                'WARNING: %s. Whether the production-framed test set shares '
+                'it is not measured for this family: measure it, and score '
+                'the model per size band on the test set before trusting '
+                'val.' % head)
+        elif abs(ref - 0.5) <= margin:
+            rep['warnings'].append(
+                'WARNING: %s -- a shortcut the production-framed test set '
+                'does not have (%s: %.3f). Score the model per size band on '
+                'the test set before trusting val.' % (head, test, ref))
+        elif abs(auc - ref) > margin:
+            rep['warnings'].append(
+                'WARNING: %s, and %s does too (%.3f), but this set is %.3f '
+                'away from it: the build\'s size mix is not production\'s. '
+                'Score the model per size band on the test set.'
+                % (head, test, ref, abs(auc - ref)))
+        else:
+            rep['notes'].append(
+                'NOTE: %s, as the production-framed test set does (%s: '
+                '%.3f), so it is not a build-versus-test mismatch. Score '
+                'the model per size band on the test set.'
+                % (head, test, ref))
+    return rep
+
+
+def print_size_shortcut(rep, say=print):
+    cols = rep['bands_px']
+    say('\nsize shortcut: %s rate per short-side band, and size-only AUC'
+        % (rep['positive'],))
+    say('  %-22s %5s  %s  %6s %6s'
+        % ('', 'n', '  '.join('%9s' % c for c in cols), 'auc', 'short'))
+    for kind in ('splits', 'sources'):
+        for k, doc in rep[kind].items():
+            cells = []
+            for c in cols:
+                b = doc['bands'][c]
+                cells.append('%9s' % ('-' if b['pos_rate'] is None else
+                                      '%.2f/%d' % (b['pos_rate'], b['n'])))
+            say('  %-22s %5d  %s  %6s %6s'
+                % ('%s %s' % (kind[:-1], k), doc['n'], '  '.join(cells),
+                   '-' if doc['size_auc'] is None else '%.3f'
+                   % doc['size_auc'],
+                   '-' if doc['short_side_auc'] is None else '%.3f'
+                   % doc['short_side_auc']))
+    for w in rep['warnings'] + rep.get('notes', []):
+        say(w)
+
+
+def _read_jsonl(path):
+    rows = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.strip():
+                    rows.append(json.loads(line))
+    except (OSError, ValueError):
+        pass
+    return rows
+
+
+def _bundle_stage_records(stage, bundle, rm):
+    """Keep what the stage alone holds: the pre-split manifest and clusters.
+
+    leash_20261115_18b269 collected 5,410 rows and kept 3,744. The other
+    1,666 (1,005 reserved, 508 over the sequence cap, 31 with no sequence,
+    122 de-duplicated) were listed only in the stage's crops.jsonl and the
+    embedding clusters only in its clusters.json -- and the stage is deleted
+    when the build ends, so the bundle held counts, a manifest_sha256 of a
+    file that no longer existed, and nothing that said WHICH rows went.
+    Reconciling them took a two-minute re-collect and a twenty-minute
+    re-embed, and against ledgers that have moved on it cannot be done at
+    all. Copied byte for byte, so the recorded sha256 still checks: about
+    5.8 MB for leash (5,410 rows), and about 49 MB for the gate --
+    dogbin_20261114_06c6b6 collected 45,371 rows at ~1,070 bytes each,
+    which takes its 54 MB bundle to ~103 MB, +7% on its 690 MB dataset.
+    Left uncompressed so it opens and hashes like the file the rebuilder
+    read. The collector's conflicts are already inlined in conflicts.json.
+
+    Returns {name: {path (bundle-relative to the dataset), built_as (the
+    stage path the build recorded), sha256, ...}} for what was copied.
+    """
+    got = {}
+    for name, dest, recorded in (
+            ('crops.jsonl', 'collect_manifest.jsonl', 'manifest'),
+            ('clusters.json', 'clusters.json', 'dup_clusters_file')):
+        src = os.path.join(stage, name)
+        if not os.path.isfile(src):
+            continue
+        to = os.path.join(bundle, dest)
+        shutil.copy2(src, to)
+        doc = {'path': os.path.join(os.path.basename(bundle), dest),
+               'built_as': rm.get(recorded) or src,
+               'sha256': sha256(to), 'bytes': os.path.getsize(to)}
+        if dest == 'collect_manifest.jsonl':
+            with open(to) as fh:
+                doc['rows'] = sum(1 for line in fh if line.strip())
+            if rm.get('manifest_sha256'):
+                doc['matches_rebuild_manifest'] = (
+                    doc['sha256'] == rm['manifest_sha256'])
+        got[dest.split('.')[0]] = doc
+    return got
+
+
+# Where a path inside a crop record resolves once the stage is gone. Every
+# crop path written during the build points into <dataset>.stage/crops/,
+# which the build deletes; the rows are copied as they were (the sha256s
+# must still check), and this is how to read them.
+STAGE_PATH_RULES = {
+    'kept_crop': 'crops.jsonl rows: the crop is <dataset>/<split>/<label>/'
+                 '<uid>; "path" is where it was cut, in the deleted stage',
+    'dropped_crop': 'collect_manifest.jsonl rows not in crops.jsonl were '
+                    'dropped (reserved, capped, no sequence, de-duplicated): '
+                    'their crop is not kept -- re-cut it from frame.path and '
+                    'box with gate_store.cut_crops',
+    'clusters': 'clusters.json groups name stage crop paths; match them by '
+                'basename, which is the uid',
+}
+
+
+def _point_at_bundle(rebuild_manifest, records):
+    """Add the bundle copies beside the stage paths a rebuild manifest names.
+
+    Both are kept: the stage path is what the build actually read, and the
+    bundle path is the one that still opens.
+    """
+    if not isinstance(rebuild_manifest, dict):
+        return rebuild_manifest
+    for key, name in (('manifest', 'collect_manifest'),
+                      ('dup_clusters_file', 'clusters')):
+        if name in (records or {}):
+            rebuild_manifest[key + '_in_bundle'] = records[name]['path']
+    return rebuild_manifest
+
+
+def _bundle_crop_record(out, stage, bundle, base, reserve_paths,
+                        classes=None, say=print, family=None):
     """Copy a crop build's own records into the bundle; return their summary.
 
     crops.jsonl (one row per crop: what it is, where it came from), the
-    conflicts (both the collector's and the splitter's), the size report,
-    the reserves with their digests, and how much of the old base the
-    ledgers reproduce -- informational, the base is no longer a source.
+    pre-split manifest and the embedding clusters from the stage, the
+    conflicts (both the collector's and the splitter's), the size report
+    with its size-shortcut diagnostic, the reserves with their digests, and
+    how much of the old base the ledgers reproduce -- informational, the
+    base is no longer a source.
     """
     for name in ('crops.jsonl', 'reserves.json', 'reserved_crops.json'):
         src = os.path.join(out, name)
@@ -970,6 +1272,15 @@ def _bundle_crop_record(out, stage, bundle, base, reserve_paths):
         src = os.path.join(stage, name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(bundle, name))
+    rm = _read_json(os.path.join(out, 'rebuild_manifest.json'))
+    records = _bundle_stage_records(stage, bundle, rm)
+    kept = _read_jsonl(os.path.join(out, 'crops.jsonl'))
+    resolved = sum(1 for r in kept if os.path.isfile(os.path.join(
+        out, str(r.get('split')), str(r.get('label')), str(r.get('uid')))))
+    records['crops'] = {'path': os.path.join(os.path.basename(bundle),
+                                             'crops.jsonl'),
+                        'rows': len(kept), 'rows_resolved': resolved}
+    records['rules'] = STAGE_PATH_RULES
     split_conf = _read_json(os.path.join(out, 'conflicts.json'))
     conflicts = {'collect': _read_json(os.path.join(
                      stage, 'collect_conflicts.json')) or [],
@@ -977,7 +1288,6 @@ def _bundle_crop_record(out, stage, bundle, base, reserve_paths):
                  'reported_not_dropped': split_conf.get('reported') or []}
     with open(os.path.join(bundle, 'conflicts.json'), 'w') as fh:
         json.dump(conflicts, fh, indent=1, sort_keys=True)
-    rm = _read_json(os.path.join(out, 'rebuild_manifest.json'))
     sizes = rm.get('sizes') or {}
     sizes['note'] = (
         'No gen-2-only box carries a human label, so the box distribution is '
@@ -985,6 +1295,22 @@ def _bundle_crop_record(out, stage, bundle, base, reserve_paths):
         '"other animal" boxes are much smaller than its dog boxes: a "small '
         'means not a dog" shortcut is available to the gate and should be '
         'checked per size band at evaluation.')
+    pos = (classes or [None])[0]
+    family = family or (kept[0].get('family') if kept else None)
+    if pos is None:
+        pos = ((FAMILIES.get(family) or {}).get('classes') or (None,))[0]
+    # the test set's own size AUC applies only when that test set is the
+    # one this build held out
+    baseline = TEST_SIZE_AUC.get(family)
+    if baseline and baseline['test_set'] not in {
+            os.path.basename(p) for p in reserve_paths or ()}:
+        baseline = None
+    if pos and kept:
+        shortcut = size_shortcut(kept, pos, baseline=baseline)
+        sizes['shortcut'] = shortcut
+        sizes['warnings'] = list(sizes.get('warnings') or []) + \
+            shortcut['warnings']
+        print_size_shortcut(shortcut, say=say)
     with open(os.path.join(bundle, 'size_report.json'), 'w') as fh:
         json.dump(sizes, fh, indent=1, sort_keys=True)
     # how much of the old base the ledgers re-derive, by image_id
@@ -1030,6 +1356,13 @@ def _bundle_crop_record(out, stage, bundle, base, reserve_paths):
         'reserves': [{'path': p, 'sha256': sha256(p)} for p in reserve_paths],
         'conflicts': {k: len(v) for k, v in conflicts.items()},
         'size_warnings': sizes.get('warnings'),
+        'size_notes': (sizes.get('shortcut') or {}).get('notes'),
+        'size_auc': {k: v['size_auc'] for k, v in
+                     ((sizes.get('shortcut') or {}).get('splits') or
+                      {}).items()},
+        # the stage's records, now in the bundle, and how to resolve every
+        # path that still names the stage
+        'records': records,
         'base_reproduction': repro,
         'rebuild': {k: rm.get(k) for k in ('dedup', 'over_sequence_cap',
                                            'kept', 'counts', 'groups',
@@ -1041,7 +1374,8 @@ def _bundle_crop_record(out, stage, bundle, base, reserve_paths):
                                            'reserved_rows_removed',
                                            'reserved_bytes_mates_removed',
                                            'reserved_dhash_mates_removed',
-                                           'reserve_hamming')},
+                                           'reserve_hamming', 'variant',
+                                           'rebalance')},
     }
 
 
@@ -1083,13 +1417,19 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
           ls_export_path=None, detect_root=None, s3_python=None, workers=4,
           allow_missing_frames=0, no_reserve=False, max_noseq_frac=0.02,
           reserves=None, size_ref_root=None, dedup_device='auto',
-          test_set=None, allow_no_ls=False, keep_noseq=False):
+          test_set=None, allow_no_ls=False, keep_noseq=False,
+          max_per_creator=0, balance_size_bands=False):
     """Build one dataset. Returns the manifest it wrote."""
     if family not in FAMILIES:
         raise SystemExit('no such model: %s (try %s)'
                          % (family, ', '.join(sorted(FAMILIES))))
     root = training_root()
     spec = FAMILIES[family]
+    variant, rebalance_flags = rebalance_variant(max_per_creator,
+                                                 balance_size_bands)
+    if rebalance_flags and spec['kind'] != 'classify':
+        raise SystemExit('--max-per-creator / --balance-size-bands are for '
+                         'the crop models, not %s' % (family,))
     base = os.path.join(root, spec['base'])
     # The detector still derives from its base. A crop model does not -- it is
     # re-cut from the ledgers -- so its base is only read, if it is there, for
@@ -1098,7 +1438,7 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         raise SystemExit('the base dataset is missing: %s\n'
                          '  every build starts from it, so there is nothing '
                          'to derive from' % (base,))
-    name = os.path.basename(out) if out else new_name(family, now)
+    name = os.path.basename(out) if out else new_name(family, now, variant)
     out = out or os.path.join(root, name)
     if os.path.exists(out):
         raise SystemExit('%s already exists — a dataset is the evidence for '
@@ -1301,6 +1641,9 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                     '--size-ref', size_ref]
             if keep_noseq:
                 argv += ['--keep-noseq']
+            # the opt-in rebalance (off unless asked): recorded by the
+            # rebuilder as 'variant' / 'rebalance' in its manifest
+            argv += rebalance_flags
             for rp in reserve_paths:
                 argv += ['--reserve', rp]
             if no_reserve:
@@ -1356,7 +1699,9 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
         crop_record = {}
         if spec['kind'] == 'classify':
             crop_record = _bundle_crop_record(out, stage, bundle, base,
-                                              reserve_paths)
+                                              reserve_paths,
+                                              classes=spec['classes'],
+                                              say=run.say, family=family)
         inputs_path = os.path.join(bundle, 'inputs.json')
         with open(inputs_path, 'w') as fh:
             json.dump({'id': name, 'built_at': started, 'stores': inputs},
@@ -1399,6 +1744,8 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
             else None,
             'keep_noseq': bool(keep_noseq) if spec['kind'] == 'classify'
             else None,
+            # plain, or rebalanced per creator / size band -- and with what
+            'rebalance': variant if spec['kind'] == 'classify' else None,
             'test_set': test_set,
             'label_studio': (None if not ls_path else {
                 'file': 'bundle/label_studio_export.json',
@@ -1435,6 +1782,10 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                         manifest['builder_manifests'][who] = json.load(fh)
                 except (OSError, ValueError):
                     pass
+        # Its 'manifest' and 'dup_clusters_file' name the stage, which is
+        # deleted below; the bundle copies are recorded beside them.
+        _point_at_bundle(manifest['builder_manifests'].get(
+            'rebuild_manifest.json'), (crop_record or {}).get('records'))
         with open(os.path.join(bundle, 'manifest.json'), 'w') as fh:
             json.dump(manifest, fh, indent=1, sort_keys=True)
         run.close()
@@ -1534,6 +1885,15 @@ def main(argv=None):
                          'has no sequence in any manifest')
     ap.add_argument('--dedup-device', default='auto',
                     help='crop models: device for the embedding dedup')
+    ap.add_argument('--max-per-creator', type=int, default=0, metavar='N',
+                    help='crop models, OPT-IN: keep at most N crops per '
+                         '(Mapillary creator, class), after the split (%d '
+                         'suggested). Off by default; recorded'
+                         % (_rcd.MAX_PER_CREATOR_SUGGESTED,))
+    ap.add_argument('--balance-size-bands', action='store_true',
+                    help='crop models, OPT-IN: after the split and the '
+                         'creator cap, balance each split\'s positive rate '
+                         'per crop short-side band. Off by default; recorded')
     ap.add_argument('--list', action='store_true',
                     help='what can be built, and what it would read')
     ap.add_argument('--dry-run', action='store_true',
@@ -1561,8 +1921,21 @@ def main(argv=None):
                             if isinstance(st['files'], dict)
                             else len(st['files'] or []))))
         return 0
+    if a.max_per_creator < 0:
+        ap.error('--max-per-creator must be 0 (off) or more')
+    variant, flags = rebalance_variant(a.max_per_creator,
+                                       a.balance_size_bands)
+    if flags and FAMILIES[a.family]['kind'] != 'classify':
+        ap.error('--max-per-creator / --balance-size-bands are for the crop '
+                 'models')
     if a.dry_run:
-        print('would build %s in %s' % (new_name(a.family), training_root()))
+        print('would build %s in %s' % (new_name(a.family, variant=variant),
+                                        training_root()))
+        if FAMILIES[a.family]['kind'] == 'classify':
+            print('  rebalance: %s%s' % (variant['variant'],
+                                         (' (' + ' '.join(flags) + ')')
+                                         if flags else ' (no per-creator '
+                                         'cap, no size-band balance)'))
         for k, v in sorted(STORES.items()):
             if a.family in v['for']:
                 st = store_state(k)
@@ -1578,7 +1951,9 @@ def main(argv=None):
           no_reserve=a.no_reserve, max_noseq_frac=a.max_noseq_frac,
           reserves=a.reserve or None, size_ref_root=a.size_ref_root,
           dedup_device=a.dedup_device, test_set=a.test_set,
-          allow_no_ls=a.allow_no_ls, keep_noseq=a.keep_noseq)
+          allow_no_ls=a.allow_no_ls, keep_noseq=a.keep_noseq,
+          max_per_creator=a.max_per_creator,
+          balance_size_bands=a.balance_size_bands)
     return 0
 
 

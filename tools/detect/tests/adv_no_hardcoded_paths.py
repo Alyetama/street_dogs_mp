@@ -56,6 +56,11 @@ EXTRA = (
     'tools/detect/crop_sources.py',
     'tools/detect/reserve_test_set.py',
     'tools/detect/tests/adv_crop_dataset_integrity.py',
+    # The leash-build audit's checks (2026-11-15). New, so `git add -f`.
+    'tools/detect/tests/adv_leash_sources.py',
+    'tools/detect/tests/adv_split_twins.py',
+    'tools/detect/tests/adv_bundle_record.py',
+    'tools/detect/tests/adv_eval_leash_testset.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
