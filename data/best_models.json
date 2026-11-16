@@ -210,7 +210,7 @@
       "stage": 2,
       "short": "Dog gate",
       "emits": "crops confirmed to be dogs",
-      "key_metric": "acceptance_rejected_at_full_dog_recall"
+      "key_metric": "test_v1_balanced_accuracy_t0.5"
     },
     "leash-models": {
       "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
