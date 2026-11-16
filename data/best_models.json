@@ -13,7 +13,7 @@
     "A model's 'deployed' flag means the sweep actually runs it right now, which is not the same as being promoted. Only stage 1 is deployed today; the gate and leash classifier are accepted but not yet wired into sweep.py."
   ],
   "workspace": "alyetama",
-  "updated_at": "2026-11-14",
+  "updated_at": "2026-11-15",
   "projects": {
     "dogdetection": {
       "role": "detector - finds dogs in street imagery, one class (the sweep runs this). The HARVEST collects ground animals; this model is trained single_cls on a set whose only class is \"target\" = dog, so a non-dog animal in its output is a false positive, which is what the dog-bin gate downstream exists to catch.",
@@ -60,23 +60,49 @@
     "dog-bin": {
       "role": "binary gate - dog vs not_dog, runs before the leash classifier",
       "best": {
-        "run": "dogbin_20261012_2b86d1_20261012-170519",
+        "run": "dogbin_20261114_06c6b6_20261114-1130",
         "key": null,
-        "date": "2026-10-12",
-        "dataset": "dogbin_20261012_2b86d1",
-        "weights": "runs/classify/dog-bin/dogbin_20261012_2b86d1_20261012-170519/weights/best.pt",
+        "date": "2026-11-15",
+        "dataset": "dogbin_20261114_06c6b6",
+        "weights": "runs/classify/dog-bin/dogbin_20261114_06c6b6_20261114-1130/weights/best.pt",
         "imgsz": 640,
         "metrics": {
-          "fn_audit_clean_weighted_dog_recall_t0.5": 0.9564,
-          "fn_audit_clean_weighted_notdog_reject_t0.5": 0.859,
-          "fn_audit_clean_weighted_roc_auc": 0.9774,
-          "acceptance_rejected_at_t0.5": 0.9159,
-          "acceptance_rejected_at_t0.9": 0.9626,
-          "acceptance_rejected_at_t0.5_sequence_clean": 0.9155
+          "test_v1_balanced_accuracy_t0.5": 0.9244,
+          "test_v1_dog_recall_t0.5": 0.9851,
+          "test_v1_notdog_reject_t0.5": 0.8637,
+          "test_v1_roc_auc": 0.9842,
+          "acceptance_rejected_at_t0.5": 0.9019,
+          "acceptance_rejected_at_t0.9": 0.9486,
+          "acceptance_roc_auc": 0.9902,
+          "val_accuracy_top1": 0.9365
         },
-        "why": "Promoted 2026-11-14 over dogbin_008 on production-protocol scoring (full-resolution crop cut as gate_store.cut_crops, imgsz 640 = its train size). On the 9,368 spread-drawn fn_audit human verdicts clean of every compared model's train/val images and sequences, band-weighted to the gen-1 pool: dog recall@0.5 0.956 [0.944,0.966] vs dogbin_008 0.807 [0.785,0.828]; not-dog rejection 0.859 [0.836,0.880] vs 0.763; AUC 0.977 vs 0.869; ahead in every p band. On the 214 reserved acceptance negatives: rejects 0.916 at t=0.5 and 0.963 at t=0.9 vs 0.893 / 0.944 (1 crop shares a sequence with its train/val; sequence-clean 0.9155 / 0.9624). Caveats: its own val is 6.8% sequence-leaked through ls_ crops pinned to train (sequence-clean val top-1 0.925, AUC 0.977); no gen-2-only boxes were scored; audit crops were answered at 42-62% per sheet, so absolute rates likely flatter all models equally. Numbers: independently re-derived by a second pass (max score diff 5e-7)."
+        "why": "Promoted 2026-11-15 over dogbin_20261012_2b86d1 on the frozen data/dogbin_test_v1.json (1,839 fn_audit human verdicts: 1,142 dog / 697 not_dog, sequence-disjoint, held out of both models' training; full/ production crops, sha256-verified, imgsz 640, unweighted, t=0.5): balanced accuracy 0.924 vs 0.911, paired bootstrap 95% CI of the difference [+0.001, +0.026], McNemar exact p=0.031 (54 items only this model gets right vs 33). Dog recall 0.985 vs 0.980, not-dog rejection 0.864 vs 0.842, AUC 0.984 vs 0.983. The gain is concentrated on small crops (short side <=64 px: BA 0.930 vs 0.898; 64-96: 0.941 vs 0.920); it is weaker at 128-192 px (not-dog rejection 0.745 vs 0.793). On the 214 reserved acceptance negatives it rejects 0.902 at t=0.5 / 0.949 at t=0.9 vs 0.916 / 0.963 (3 crops, inside the CIs). Trained on dogbin_20261114_06c6b6 (39,424 human-labelled crops re-cut at production framing, sequence-split, leak-checked) with dogbin_20261012's recipe; stopped by hand at epoch 357 of 500 while still improving (best = last, val top-1 0.9365, patience 100 never reached). Not yet scored on gen-2-only boxes."
       },
       "candidates": [
+        {
+          "run": "dogbin_20261012_2b86d1_20261012-170519",
+          "key": null,
+          "date": "2026-10-12",
+          "dataset": "dogbin_20261012_2b86d1",
+          "weights": "runs/classify/dog-bin/dogbin_20261012_2b86d1_20261012-170519/weights/best.pt",
+          "imgsz": 640,
+          "metrics": {
+            "fn_audit_clean_weighted_dog_recall_t0.5": 0.9564,
+            "fn_audit_clean_weighted_notdog_reject_t0.5": 0.859,
+            "fn_audit_clean_weighted_roc_auc": 0.9774,
+            "acceptance_rejected_at_t0.5": 0.9159,
+            "acceptance_rejected_at_t0.9": 0.9626,
+            "acceptance_rejected_at_t0.5_sequence_clean": 0.9155
+          },
+          "why": "[superseded 2026-11-15 by dogbin_20261114_06c6b6] Promoted 2026-11-14 over dogbin_008 on production-protocol scoring (full-resolution crop cut as gate_store.cut_crops, imgsz 640 = its train size). On the 9,368 spread-drawn fn_audit human verdicts clean of every compared model's train/val images and sequences, band-weighted to the gen-1 pool: dog recall@0.5 0.956 [0.944,0.966] vs dogbin_008 0.807 [0.785,0.828]; not-dog rejection 0.859 [0.836,0.880] vs 0.763; AUC 0.977 vs 0.869; ahead in every p band. On the 214 reserved acceptance negatives: rejects 0.916 at t=0.5 and 0.963 at t=0.9 vs 0.893 / 0.944 (1 crop shares a sequence with its train/val; sequence-clean 0.9155 / 0.9624). Caveats: its own val is 6.8% sequence-leaked through ls_ crops pinned to train (sequence-clean val top-1 0.925, AUC 0.977); no gen-2-only boxes were scored; audit crops were answered at 42-62% per sheet, so absolute rates likely flatter all models equally. Numbers: independently re-derived by a second pass (max score diff 5e-7).",
+          "test_v1_2026_11_15": {
+            "balanced_accuracy": 0.911,
+            "dog_recall@0.5": 0.9799,
+            "notdog_reject@0.5": 0.8422,
+            "roc_auc": 0.983,
+            "n": 1839
+          }
+        },
         {
           "run": "dogbin_008",
           "key": "6ebc449070cc450283fc2253319556b4",
