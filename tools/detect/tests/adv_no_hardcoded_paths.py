@@ -71,6 +71,19 @@ EXTRA = (
     # The gate panel's controls for a ViT-pinned leash stage (2026-11-17).
     # New, so `git add -f`.
     'tools/detect/tests/adv_gate_vit_controls.py',
+    # An audit pool and the frame picker never mix detector generations
+    # (2026-11-17). New, so `git add -f`.
+    'tools/detect/tests/adv_audit_generation.py',
+    # gate_store plan / sweep.py run take the store's own gen (2026-11-17).
+    # New, so `git add -f`.
+    'tools/detect/tests/adv_store_gen.py',
+    # The review page's boxes come from the pinned ledger store, and the
+    # dashboard spawns planners and sweeps on the store's gen (2026-11-17).
+    # New, so `git add -f`.
+    'tools/detect/tests/adv_ledger_box_pin.py',
+    # The detector builders read the pinned ledger store (2026-11-17).
+    # New, so `git add -f`.
+    'tools/detect/tests/adv_builders_ledger_root.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked

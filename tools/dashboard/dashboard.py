@@ -3363,10 +3363,22 @@ function openLb(i){
         return;
       }
       /* pick the detection this crop came from: the filename carries its
-         confidence, which is what harvest_flagged matches on too */
-      var want=+c.conf||0,pick=j.boxes[0];
+         confidence, which is what harvest_flagged matches on too. Exactly
+         one match or nothing: box 0, or one of two boxes sharing the
+         confidence, would be redrawn and saved under another box's det_idx */
+      var want=+c.conf||0,hits=[];
       for(var k=0;k<j.boxes.length;k++)
-        if(Math.abs(j.boxes[k].conf-want)<=0.006){pick=j.boxes[k];break}
+        if(Math.abs(j.boxes[k].conf-want)<=0.006)hits.push(j.boxes[k]);
+      if(hits.length!==1){
+        /* the original already loading above resolved fine; swap it only
+           for the burned-in frame, which shows WHICH box this crop is --
+           a harvested crop has none, and /recent_crops/full would 404 */
+        if(c.has_full)
+          $('lbi').src='/recent_crops/full/'+encodeURIComponent(c.name);
+        $('lbxy').textContent='box not editable';
+        return;
+      }
+      var pick=hits[0];
       boxMeta={name:c.name,det_idx:pick.det_idx,w:j.w,h:j.h};
       origBox=[pick.x1,pick.y1,pick.x2,pick.y2];
       var sv=j.saved;
@@ -7741,11 +7753,44 @@ def _grid_roots():
     return out
 
 
+LEDGER_ROOT_FILE = os.path.join('data', 'ledger_detect_root.txt')
+
+
+def _ledger_detect_root():
+    """The store the review queue and its ledgers were recorded against.
+
+    Named by the gitignored data/ledger_detect_root.txt -- NOT detect_root.txt,
+    which names the LIVE store and is repointed when a new detector goes live.
+    A crop names its detection by (image_id, conf) only, and a redraw is saved
+    under that store's det_idx: read through the live store after a switch,
+    a gen-1 crop opens on another detector's box and its redraw is filed under
+    a det_idx from the wrong generation. No fallback to detect_root.txt: a
+    missing pin raises, and every caller turns that into "box not editable",
+    the preview, or no size floor.
+    """
+    p = os.path.join(REPO, LEDGER_ROOT_FILE)
+    try:
+        with open(p) as fh:
+            root = fh.read().strip()
+    except OSError:
+        root = ''
+    if not root:
+        raise RuntimeError('%s is missing or empty -- it names the store the '
+                           'review crops were cut from' % LEDGER_ROOT_FILE)
+    if not os.path.isabs(root):
+        root = os.path.join(REPO, root)
+    if not os.path.isdir(os.path.join(root, 'shards')):
+        raise RuntimeError('%s names %s, which holds no shards'
+                           % (LEDGER_ROOT_FILE, root))
+    return root.rstrip('/')
+
+
 def _detect_sql():
-    """(img_src, det_src) duckdb sources for the predictions store."""
+    """(img_src, det_src) duckdb sources for the store the review crops came
+    from: the pinned ledger store, never the live one (_ledger_detect_root)."""
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import store as _store
-    root = _store.get_detect_root()
+    root = _ledger_detect_root()
     return (_store._sql_src(_store._store_globs(root, 'img')),
             _store._sql_src(_store._store_globs(root, 'det')))
 
@@ -7769,8 +7814,11 @@ def box_for(name):
         meta = con.execute(
             f"SELECT orig_w, orig_h, cell, drive FROM {img} "
             f"WHERE CAST(image_id AS VARCHAR)=? LIMIT 1", [iid]).fetchall()
+        # DISTINCT: a cell twin (one image stored under two cells) repeats
+        # every detection row, and the conf match below must count boxes,
+        # not rows -- 329 queue crops read as "two boxes match" otherwise
         rows = con.execute(
-            f"SELECT det_idx, x1, y1, x2, y2, conf FROM {det} "
+            f"SELECT DISTINCT det_idx, x1, y1, x2, y2, conf FROM {det} "
             f"WHERE CAST(image_id AS VARCHAR)=? ORDER BY det_idx",
             [iid]).fetchall()
         con.close()
@@ -7817,6 +7865,18 @@ def _orig_path(name):
 HQ_DIR = os.path.join(OUT, 'hq_crops')
 HQ_MAX = 512          # long side; boxes are rarely larger, so no upscaling
 HQ_PAD = 0.12         # same context padding the preview writer uses
+# (pinned root, name) of crops hq_crop found zero or several boxes for. They
+# are never cut, so without this every /hq request and warm pass re-ran
+# box_for's two store scans (~1 s) for each of them. Keyed by the pin, so
+# repointing data/ledger_detect_root.txt forgets them.
+_hq_ambig = set()
+
+
+def _hq_pin():
+    try:
+        return _ledger_detect_root()
+    except RuntimeError:
+        return None
 
 
 def hq_crop(name):
@@ -7838,16 +7898,22 @@ def hq_crop(name):
     out = os.path.join(HQ_DIR, name)
     if os.path.exists(out):
         return out
+    pin = _hq_pin()
+    if pin is None or (pin, name) in _hq_ambig:
+        return None
     info = box_for(name)
     if not info.get('ok') or not info.get('boxes') or not info.get('path'):
         return None
-    # the crop's own confidence picks its detection, as everywhere else
+    # the crop's own confidence picks its detection, as everywhere else -- and
+    # only a single match does. Another box (or one of two that share the
+    # confidence) cut here would be cached under this crop's name for good;
+    # None falls back to the preview, which is at least this crop's pixels.
     want = round(int(m.group(3)) / 100.0, 2)
-    box = info['boxes'][0]
-    for b in info['boxes']:
-        if abs(b['conf'] - want) <= 0.006:
-            box = b
-            break
+    hits = [b for b in info['boxes'] if abs(b['conf'] - want) <= 0.006]
+    if len(hits) != 1:
+        _hq_ambig.add((pin, name))
+        return None
+    box = hits[0]
     # one temp name per writer: the browser prefetches four at a time over the
     # same names warm_hq is cutting, and on a shared '<name>.part' the second
     # os.replace hit a file the first had already moved -- hq_crop returned
@@ -7918,8 +7984,10 @@ def warm_hq(names):
     with _hq_lock:
         if _hq_busy:
             return
+        pin = _hq_pin()
         todo = [n for n in names
-                if not os.path.exists(os.path.join(HQ_DIR, n))][:120]
+                if not os.path.exists(os.path.join(HQ_DIR, n))
+                and (pin, n) not in _hq_ambig][:120]
         if not todo:
             return
         _hq_busy = True
@@ -10106,12 +10174,23 @@ def _gate_plan(stage, sp):
         return {'ok': False, 'running': False,
                 'msg': f'no plan yet, and this interpreter has no duckdb to '
                        f'build one — run `gate_store.py plan --stage {stage}`'}
+    # the store's own generation, never the planner's default of 1: against
+    # the gen-2 store that default planned 0 boxes and "finished" at once
+    try:
+        gen = _store_gen()
+    except Exception as e:
+        return {'ok': False, 'running': False, 'msg': str(e)}
+    if gen is None:
+        return {'ok': False, 'running': False,
+                'msg': 'the live store names no generation (no gen in its '
+                       'status.json, no worklist/gen=*) — nothing to plan'}
     try:
         log = open(os.path.join(REPO, 'data', f'{sp["dir"]}_run.log'), 'a')
         env = dict(os.environ)
         env['TRAINING_ROOT'] = training_root()
         proc = subprocess.Popen(
-            [sys.executable, script, 'plan', '--stage', stage],
+            [sys.executable, script, 'plan', '--stage', stage,
+             '--gen', str(gen)],
             cwd=REPO, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
             start_new_session=True, env=env)
         _SPAWNED.append(proc)
@@ -10632,6 +10711,39 @@ def _detect_root():
     return store.get_detect_root(REPO)
 
 
+def _store_gen(root=None):
+    """The generation the live store (or `root`) holds, as an int, or None.
+
+    Never a constant: the gen-1 and gen-2 stores share one layout, and a
+    planner or sweep told `1` against the gen-2 store plans 0 boxes or goes
+    looking for a worklist that is not there. status.store_gen when the
+    detect tooling has it, else the same reading here: the store's
+    status.json, else its newest worklist/gen=* -- which a re-run's
+    archive_store keeps when it moves status.json aside."""
+    root = root or _detect_root()
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        from status import store_gen
+    except ImportError:
+        store_gen = None
+    if store_gen is not None:
+        return store_gen(root)
+    try:
+        with open(os.path.join(root, 'status.json')) as fh:
+            g = json.load(fh).get('gen')
+        if isinstance(g, int) and not isinstance(g, bool) and g >= 0:
+            return g
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        names = os.listdir(os.path.join(root, 'worklist'))
+    except OSError:
+        names = []
+    gens = [int(n[4:]) for n in names
+            if n.startswith('gen=') and n[4:].isascii() and n[4:].isdigit()]
+    return max(gens) if gens else None
+
+
 def detector_best():
     """The detector promoted in data/best_models.json: its run name, its
     TensorRT engine (absolute) and the engine's digest, or None."""
@@ -10704,11 +10816,20 @@ def promoted_side_store(best=None):
     return None
 
 
-def _sweep_spawn(engine=None):
+def _sweep_spawn(engine=None, gen=None):
+    # the store's own generation: a hardcoded '1' against the gen-2 store
+    # opened runs/gen=0001 in it and then died on a worklist it does not have.
+    # A re-run passes the gen it checked BEFORE archive_store moved
+    # status.json aside; re-reading it here would fall back to the newest
+    # worklist/gen=*, which need not be the gen whose _dirs.json was checked
+    gen = gen if gen is not None else _store_gen()
+    if gen is None:
+        raise RuntimeError('the live store names no generation (no gen in '
+                           'its status.json, no worklist/gen=*)')
     py = os.environ.get('SWEEP_PYTHON', SWEEP_PYTHON)
     log = open(os.path.join(REPO, 'data', 'sweep_resume.log'), 'a')
     argv = [py, os.path.join(REPO, 'tools', 'detect', 'sweep.py'),
-            'run', '--gen', '1']
+            'run', '--gen', str(gen)]
     if engine:
         argv += ['--engine', engine]
     _SPAWNED.append(subprocess.Popen(
@@ -10779,8 +10900,24 @@ def sweep_control(action):
                            f'Switch over instead: run the gate and leash on '
                            f'that store, then point data/detect_root.txt '
                            f'at it.'}
+        # the sweep that follows needs the store's worklist for its
+        # generation; without it the store would be set aside and the sweep
+        # would die on a missing _dirs.json, leaving no live shards at all
         try:
             root = _detect_root()
+            gen = _store_gen(root)
+        except Exception as e:
+            return {'ok': False, 'running': False,
+                    'msg': f'could not read the live store: {e}'}
+        dirs = (os.path.join(root, 'worklist', 'gen=%04d' % gen, '_dirs.json')
+                if gen is not None else None)
+        if not dirs or not os.path.exists(dirs):
+            return {'ok': False, 'running': False,
+                    'msg': f'the live store has no work list for its '
+                           f'generation ({dirs or "no gen in its status"}) '
+                           f'\u2014 nothing set aside, the sweep would have '
+                           f'nothing to run'}
+        try:
             note = _sweep_archive().archive_store(
                 root, {st['store_model'] or 'unknown': 'all'}, best['run'],
                 reason='re-run from the dashboard with the promoted detector')
@@ -10788,7 +10925,7 @@ def sweep_control(action):
             return {'ok': False, 'running': False,
                     'msg': f'could not set the sweep aside: {e}'}
         try:
-            _sweep_spawn(best['engine'])
+            _sweep_spawn(best['engine'], gen)
         except Exception as e:
             return {'ok': False, 'running': False,
                     'msg': f'set aside, but the sweep did not start: {e}'}
@@ -16423,12 +16560,18 @@ if(cmdGen){cmdGen.addEventListener('click',genCommands);cmdRegion.addEventListen
     var MODEL={gate:{file:'map_layer_dogs.json',doc:null,state:'none'},
                leash:{file:'map_layer_leash.json',doc:null,state:'none'}};
     /* Whether a layer's counts had the duplicate boxes taken out (NMS at
-       IoU 0.7, tools/detect/box_nms.py). A layer built without the sidecar
-       still holds them, and says so rather than passing for deduplicated. */
+       IoU 0.7, tools/detect/box_nms.py) and the detector's count-time conf
+       floor applied (count_conf_min in best_models.json; the same sidecar
+       carries both). A layer built without the sidecar has neither, and
+       says so rather than passing for deduplicated -- on gen 2 most of
+       what the sidecar removes is under the floor, not duplicates. */
     function dedupNote(d){
       var x=d&&d.dedup;
-      return x?'duplicate boxes removed (IoU '+x.iou+')'
-              :'duplicate boxes NOT removed';
+      if(!x)return 'duplicate boxes NOT removed, no conf floor applied';
+      var f=x.count_conf_min||{},v=[];
+      Object.keys(f).forEach(function(k){if(v.indexOf(f[k])<0)v.push(f[k])});
+      return 'duplicate boxes removed (IoU '+x.iou+')'+
+        (v.length?' · boxes at conf <= '+v.sort().join('/')+' left out':'');
     }
     function cellKey(p){return p[0]+'|'+p[1]}
     function clean(){return !cleanTog||cleanTog.checked}

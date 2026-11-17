@@ -64,6 +64,9 @@ def setup(dash, tmp, models, best_engine):
     other = os.path.join(tmp, 'detect_other')
     for d in (live, side, other):
         os.makedirs(d, exist_ok=True)
+    # a re-run refuses a live store with no work list for its gen
+    os.makedirs(os.path.join(live, 'worklist', 'gen=0001'), exist_ok=True)
+    open(os.path.join(live, 'worklist', 'gen=0001', '_dirs.json'), 'w').close()
     arch = FakeArchive(models)
     dash._sweep_archive = lambda: arch
     dash._detect_root = lambda: live
@@ -75,7 +78,7 @@ def setup(dash, tmp, models, best_engine):
     dash.gate_pids = lambda *a, **k: []
     dash.gate_planning = lambda: False
     spawned = []
-    dash._sweep_spawn = lambda engine=None: spawned.append(engine)
+    dash._sweep_spawn = lambda engine=None, gen=None: spawned.append(engine)
     return arch, spawned
 
 

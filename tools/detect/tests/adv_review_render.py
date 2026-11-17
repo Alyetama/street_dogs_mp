@@ -1562,9 +1562,11 @@ async function t16() {
 // ── 17. box editing keeps ORIGINAL pixels, whatever the render scale ─────
 async function t17() {
   let posted = null;
+  // the box's conf is crop0's (0.95): the editor takes only the box whose
+  // conf matches the crop's name, never boxes[0]
   const BOX = { ok: true, image_id: 'img1', w: 4000, h: 3000, has_file: true,
                 boxes: [{det_idx: 0, x1: 1000, y1: 800, x2: 1400, y2: 1200,
-                         conf: 0.5}], saved: null };
+                         conf: 0.95}], saved: null };
   RESP = { '/api/review/box': (u, o) => { if (o) { posted = JSON.parse(o.body);
                                                    return { ok: true }; }
                                           return BOX; },
@@ -1629,7 +1631,7 @@ async function t17() {
   // a SMALL object must open zoomed in, not fitted to the whole frame --
   // a 30px box on a 4000px image is 6 screen px at fit, which is the
   // complaint this whole zoom model exists to answer
-  BOX.boxes = [{det_idx: 0, x1: 2000, y1: 1500, x2: 2030, y2: 1530, conf: 0.5}];
+  BOX.boxes = [{det_idx: 0, x1: 2000, y1: 1500, x2: 2030, y2: 1530, conf: 0.95}];
   await open0();
   API.fitBox();
   const zBox = API.imgScale(), zFit = 0.2;
@@ -1656,8 +1658,11 @@ function crop0(){ return CROPS.normal[0]; }
 async function t18() {
   const order = [];
   const BOX = { ok: true, image_id: 'img1', w: 4000, h: 3000, has_file: true,
-                boxes: [{det_idx: 0, x1: 100, y1: 100, x2: 500, y2: 500,
-                         conf: 0.5}], saved: null };
+                // one box per crop on the page, each at that crop's conf:
+                // the editor opens only the box the crop's name matches
+                boxes: [0.95, 0.90, 0.85].map((c, k) => ({
+                  det_idx: k, x1: 100, y1: 100, x2: 500, y2: 500, conf: c})),
+                saved: null };
   RESP = { '/api/review/box': (u, o) => { if (o) { order.push('box');
                                                    return { ok: true }; }
                                           return BOX; },

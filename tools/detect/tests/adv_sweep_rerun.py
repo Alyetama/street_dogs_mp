@@ -480,7 +480,9 @@ try:
                               }).encode()), ('', 'status.json', b'{}'),
                              ('', 'sweep.duckdb',
                               b'db'), ('worklist/gen=0001', 'ids.npy',
-                                       b'ids'), ('_bootstrap/gen=_bootstrap',
+                                       b'ids'), ('worklist/gen=0001',
+                                                 '_dirs.json', b'[]'),
+                             ('_bootstrap/gen=_bootstrap',
                                                  'img.parquet', b'boot')):
             os.makedirs(os.path.join(r, sub), exist_ok=True)
             with open(os.path.join(r, sub, f), 'wb') as fh:
@@ -587,7 +589,7 @@ try:
     d.REPO = drepo
     d._detect_root = lambda: droot
     spawned = []
-    d._sweep_spawn = lambda engine=None: spawned.append(engine)
+    d._sweep_spawn = lambda engine=None, gen=None: spawned.append(engine)
     d.gate_pids = lambda stage='gate': []
     d.gate_planning = lambda: False
     dbest = {
