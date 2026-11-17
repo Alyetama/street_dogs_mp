@@ -42,6 +42,10 @@ What has to hold:
   v12 run(): --vit-model refused on the gate stage before anything is read;
       --max-unreadable defaults to MAX_UNREADABLE; the guards sit before the
       pool / the shard write
+  v17 a record pinned to the ViT model: a run without --vit-model is
+      refused before the work list loads; another ViT model is refused
+      (model is in a ViT run's protocol); the pinned model resumes; a YOLO
+      record still compares crop and imgsz only
 
 Every guard is then broken on purpose in a copy of its source (a mutant) and
 the check that holds it must fail.
@@ -716,6 +720,79 @@ def c_mount_hint():
     return bad
 
 
+def c_vit_pin():
+    """A stage pinned to the ViT model: run() without --vit-model is refused
+    before the work list loads, naming the flag and the directory; a ViT run
+    with another model of the same framing is refused (the model is part of
+    a ViT record's protocol); the pinned model itself gets past the check;
+    a YOLO record still compares crop and imgsz only."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    bad = []
+    base = tempfile.mkdtemp(dir=TMP)
+    old = os.environ.get('GATE_ROOT')
+    os.environ['GATE_ROOT'] = base                        # never data/
+
+    def model_dir(name):
+        d = os.path.join(tempfile.mkdtemp(dir=TMP), name)
+        os.makedirs(d)
+        json.dump({'model_id': LV.MODEL_ID, 'framing': 'pad050', 'res': 448,
+                   'args': {'batch': 16}},
+                  open(os.path.join(d, 'config.json'), 'w'))
+        json.dump({}, open(os.path.join(d, 'parity.json'), 'w'))
+        return d
+
+    def refusal(argv):
+        import contextlib
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                GS.main(argv)
+            return 'run() went ahead'
+        except SystemExit as e:
+            return str(e.code)
+
+    dir_a, dir_b = model_dir('leash_A'), model_dir('leash_B')
+    try:
+        GS.use('leash')
+        out = GS.OUT_DIR
+        os.makedirs(out, exist_ok=True)
+        GS.pin_protocol({'crop': 'pad050', 'imgsz': 448, 'model': 'leash_A',
+                         'kind': GS.VIT_KIND, 'model_dir': dir_a}, out)
+        pq.write_table(pa.table({'image_id': ['i0']}),
+                       os.path.join(out, GS.shard_name(0)))
+        # not a parquet: a refusal that comes after the load never arrives
+        open(os.path.join(out, 'work.parquet'), 'w').write('not a parquet')
+        try:
+            got = refusal(['run', '--stage', 'leash'])
+        except Exception as e:   # noqa: BLE001
+            got = f'threw {type(e).__name__} (the work list was read)'
+        if ('pinned to the ViT model leash_A' not in got
+                or f'--vit-model {dir_a}' not in got):
+            bad.append(f'YOLO run on a ViT record: {got[:200]!r}')
+        pq.write_table(pa.table({
+            'image_id': ['i0'], 'cell': ['c'], 'drive': ['d'], 'det_idx': [0],
+            'x1': [1.0], 'y1': [1.0], 'x2': [40.0], 'y2': [40.0]}),
+            os.path.join(out, 'work.parquet'))
+        got = refusal(['run', '--stage', 'leash', '--vit-model', dir_b])
+        if 'model=leash_A' not in got or 'model=leash_B' not in got:
+            bad.append(f'another ViT model appended: {got[:200]!r}')
+        got = refusal(['run', '--stage', 'leash', '--vit-model', dir_a])
+        if 'shards in' in got or 'drive roots' not in got:
+            bad.append(f'the pinned model itself: {got[:200]!r}')
+        yolo = {'crop': 'full', 'imgsz': 640}
+        d = tempfile.mkdtemp(dir=TMP)
+        GS.pin_protocol(dict(yolo, model='yolo_old'), d)
+        if GS.check_protocol(yolo, d, shards={0}):
+            bad.append('a YOLO resume refused over the model name')
+    finally:
+        if old is None:
+            os.environ.pop('GATE_ROOT', None)
+        else:
+            os.environ['GATE_ROOT'] = old
+        GS.use('gate')
+    return bad
+
+
 CHECKS = [('v1 rect_pad == the framings script\'s rect', c_rect),
           ('v2 config / spec / eval batch', c_config),
           ('v3 cut_vit judges exactly cut_crops\' boxes', c_same_boxes),
@@ -731,7 +808,9 @@ CHECKS = [('v1 rect_pad == the framings script\'s rect', c_rect),
           ('v13 cut_vit skips a box under 1 px', c_tiny_box),
           ('v14 parity frames: a dead drive is a drive', c_parity_frames),
           ('v15 short finished shards are found', c_short_shards),
-          ('v16 the remount hint names a mount point', c_mount_hint)]
+          ('v16 the remount hint names a mount point', c_mount_hint),
+          ('v17 a ViT-pinned record: YOLO refused early, model compared',
+           c_vit_pin)]
 
 
 # ── mutants: each guard broken in a copy of its source ─────────────────────
@@ -868,6 +947,20 @@ MUTANTS = [
     ('a short finished shard let through',
      mutant('gate_store', '        if have < len(shards[si]) - limit:',
             '        if have < 0:', c_short_shards)),
+    ('a YOLO run let into a ViT-pinned record',
+     mutant('gate_store',
+            "    if not vit_dir and pinned.get('kind') == VIT_KIND:",
+            '    if False:', c_vit_pin)),
+    ('the ViT model left out of the protocol comparison',
+     mutant('gate_store', "                'model': run_name}\n"
+            "        _no = check_protocol(want)",
+            "                }\n        _no = check_protocol(want)",
+            c_vit_pin)),
+    ('the model compared for a YOLO record too',
+     mutant('gate_store', "    if {k: pinned.get(k) for k in want} == want:",
+            "    if {k: pinned.get(k) for k in want} == want and "
+            "pinned.get('model') in (None, want.get('model')):",
+            c_vit_pin)),
     ('the write-time drive re-probe removed',
      mutant('gate_store', '            if not _no and bad_drives.get(si):',
             '            if False:', c_run)),

@@ -8791,6 +8791,11 @@ RFDETR_MODEL = cfg('rfdetr_model', 'rfdetr', env='RFDETR_MODEL')
 # data/best_models.json, and a second place to write it down is a second place
 # for it to go stale.
 DOGBIN_PYTHON = cfg('dogbin_python', '', env='DOGBIN_PYTHON')
+# The fine-tuned DINOv3 leash model (tools/detect/leash_vit.py) runs under
+# torch + transformers, which the ultralytics environment does not have. Used
+# only for a leash stage pinned to that model, or for a fresh leash run while
+# data/best_models.json promotes one ("vit_model").
+VIT_PYTHON = cfg('vit_python', '', env='VIT_PYTHON')
 # Share of the 120 crops in data/hard_positives -- ones the DETECTOR was
 # unsure about and a human then confirmed are dogs -- that each guesser files
 # under 'dog'. Both measured the same way on the same set, which is the only
@@ -10267,14 +10272,149 @@ def gate_control(action, stage='gate'):
         return _gate_act(action, stage, sp, gate_pids(stage))
 
 
-def stage_best(stage):
-    """The run promoted for a stage's project in data/best_models.json, or
-    None. The runner loads exactly this (gate_store.gate_weights), so it is
-    the model a re-run will judge with."""
+def _stage_best_entry(stage):
     proj = (best_models().get('projects') or {}).get(
         GATE_STAGES[stage]['project']) or {}
-    best = proj.get('best') or {}
+    return proj.get('best') or {}
+
+
+def stage_best_vit(stage):
+    """The directory of the ViT leash model promoted for this stage -- the
+    optional "vit_model" of its project's best entry in data/best_models.json,
+    absolute or relative to training_root() -- or None when the promoted model
+    is a YOLO run. Only the leash stage has one: gate_store refuses
+    --vit-model anywhere else."""
+    if stage != 'leash':
+        return None
+    rel = str(_stage_best_entry(stage).get('vit_model') or '')
+    if not rel:
+        return None
+    if os.path.isabs(rel):
+        return os.path.normpath(rel)
+    root = training_root()
+    # unresolvable without a root: left relative, and the launch refuses it
+    return os.path.normpath(os.path.join(root, rel)) if root else rel
+
+
+def stage_best(stage):
+    """The run promoted for a stage's project in data/best_models.json, or
+    None. The runner loads exactly this (gate_store.gate_weights, or the
+    promoted "vit_model" directory, whose name is the run), so it is the
+    model a re-run will judge with."""
+    vit = stage_best_vit(stage)
+    if vit:
+        return os.path.basename(os.path.normpath(vit))
+    best = _stage_best_entry(stage)
     return best.get('run') if best.get('weights') else None
+
+
+# leash_vit.KIND, repeated: the panel reads the pin, it never imports torch
+VIT_KIND = 'dinov3-leash'
+
+
+def stage_vit(stage, root=None):
+    """The ViT model a stage's record is pinned to, or None.
+
+    A `gate_store.py run --vit-model DIR` pins protocol.json as
+    {kind: dinov3-leash, model, model_dir, ...}; such a stage can only be
+    resumed with that model (gate_store refuses a YOLO run on it). Returns
+    {'model', 'model_dir', 'error'}: `error` says why it cannot be resumed
+    (the directory is gone) -- still a ViT stage, never None for that.
+    """
+    try:
+        with open(os.path.join(gate_dir(stage, root), 'protocol.json')) as fh:
+            pin = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(pin, dict) or pin.get('kind') != VIT_KIND:
+        return None
+    d = str(pin.get('model_dir') or '')
+    name = str(pin.get('model') or os.path.basename(os.path.normpath(d))
+               or 'unknown')
+    title = GATE_STAGES[stage]['title']
+    err = None
+    if not d:
+        err = (f'the {title} is pinned to the ViT model {name}, but its '
+               f'protocol.json names no model_dir')
+    elif not os.path.isdir(d):
+        err = (f'the {title} is pinned to the ViT model {name}, and its '
+               f'directory is not on disk: {d}')
+    return {'model': name, 'model_dir': d, 'error': err}
+
+
+def _gate_has_verdicts(stage, root=None):
+    """Any verdict shard on disk -- gate_store.done_shards' test."""
+    pre = GATE_STAGES[stage]['dir'] + '-'
+    try:
+        return any(f.startswith(pre) and f.endswith('.parquet')
+                   for f in os.listdir(gate_dir(stage, root)))
+    except OSError:
+        return False
+
+
+def _gate_launch(stage, fresh=False):
+    """How a start of this stage runs: {'py', 'vit_dir', 'model', 'key',
+    'error'}.
+
+    A stage pinned to a ViT model resumes with exactly that model; a stage
+    with no verdicts yet starts with the promoted ViT model when there is
+    one; everything else is today's YOLO run (the promoted weights, under
+    dogbin_python). `fresh` is the state a re-run leaves -- the record set
+    aside -- so only the promoted model counts.
+    """
+    sp = GATE_STAGES[stage]
+    pin = None if fresh else stage_vit(stage)
+    vit = model = None
+    if pin:
+        if pin['error']:
+            return {'error': pin['error'], 'vit_dir': pin['model_dir'],
+                    'model': pin['model'], 'key': 'vit_python', 'py': None}
+        vit, model = pin['model_dir'], pin['model']
+    else:
+        best_vit = stage_best_vit(stage)
+        if best_vit and (fresh or not _gate_has_verdicts(stage)):
+            vit = best_vit
+            model = os.path.basename(os.path.normpath(vit))
+            if not (os.path.isabs(vit) and os.path.isdir(vit)):
+                return {'error': (f'the promoted {sp["project"]} ViT model '
+                                  f'is not on disk: {vit} (a relative '
+                                  f'"vit_model" resolves against '
+                                  f'training_root)'),
+                        'vit_dir': vit, 'model': model, 'key': 'vit_python',
+                        'py': None}
+    if vit:
+        if not VIT_PYTHON:
+            return {'error': (f'no interpreter for the ViT {sp["title"]} '
+                              f'{model} (set vit_python in the dashboard '
+                              f'config: torch + transformers + pyarrow)'),
+                    'vit_dir': vit, 'model': model, 'key': 'vit_python',
+                    'py': None}
+        return {'error': None, 'vit_dir': vit, 'model': model,
+                'key': 'vit_python', 'py': VIT_PYTHON}
+    if not DOGBIN_PYTHON:
+        return {'error': (f'no interpreter for the {sp["title"]} (set '
+                          f'dogbin_python in the dashboard config)'),
+                'vit_dir': None, 'model': None, 'key': 'dogbin_python',
+                'py': None}
+    return {'error': None, 'vit_dir': None, 'model': None,
+            'key': 'dogbin_python', 'py': DOGBIN_PYTHON}
+
+
+def gate_rerun_blocked(stage, root=None):
+    """Why a re-run must not replace this stage's record, or None.
+
+    A re-run judges with the promoted model. A record by the ViT leash model
+    while the promoted model is the YOLO run would be archived and judged
+    again by the weaker model -- refused until the ViT one is promoted."""
+    pin = stage_vit(stage, root)
+    if not pin or stage_best_vit(stage):
+        return None
+    best = stage_best(stage)
+    return (f'this stage holds verdicts by the ViT model {pin["model"]}, '
+            f'while the promoted {GATE_STAGES[stage]["title"]} is the YOLO '
+            f'run {best or "(none promoted)"}: re-running would replace '
+            f'better verdicts with worse ones. To re-run with the ViT model, '
+            f'promote it ("vit_model" in data/best_models.json).')
 
 
 def _gate_stale_plan(stage):
@@ -10343,11 +10483,22 @@ def _gate_set_aside(stage, sp):
         return {'ok': False, 'running': False,
                 'msg': f'the {up["title"]} has not finished \u2014 the '
                        f'{sp["title"]} judges its verdicts'}
+    # ViT verdicts while the promoted model is YOLO: a re-run would archive
+    # the better record and judge everything again with the worse model
+    blocked = gate_rerun_blocked(stage)
+    if blocked:
+        return {'ok': False, 'running': False, 'msg': blocked}
     best = stage_best(stage)
     if not best:
         return {'ok': False, 'running': False,
                 'msg': f'no {sp["project"]} model is promoted in '
                        f'data/best_models.json'}
+    # A re-run with the promoted ViT model needs its interpreter and its
+    # directory: say so BEFORE the record moves, not after, when nothing
+    # would be running and the verdicts would sit in an archive.
+    launch = _gate_launch(stage, fresh=True)
+    if launch['vit_dir'] and launch['error']:
+        return {'ok': False, 'running': False, 'msg': launch['error']}
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import gate_store
     shards = _gate_shards(stage) or {}
@@ -10387,12 +10538,14 @@ def _gate_act(action, stage, sp, pids):
         return {'ok': False, 'msg': 'unknown action'}
     if pids:
         return {'ok': True, 'running': True, 'msg': 'already running'}
-    py = DOGBIN_PYTHON
+    # which model and interpreter: a stage pinned to the ViT leash model
+    # resumes with it, a fresh one starts with a promoted ViT model, and
+    # anything else is the promoted YOLO run under dogbin_python
+    launch = _gate_launch(stage)
+    py = launch['py']
     script = os.path.join(REPO, 'tools', 'detect', 'gate_store.py')
     if not py:
-        return {'ok': False, 'running': False,
-                'msg': f'no interpreter for the {sp["title"]} (set '
-                       f'dogbin_python in the dashboard config)'}
+        return {'ok': False, 'running': False, 'msg': launch['error']}
     if not os.path.exists(script):
         return {'ok': False, 'running': False,
                 'msg': 'tools/detect/gate_store.py is missing'}
@@ -10419,8 +10572,17 @@ def _gate_act(action, stage, sp, pids):
         env = dict(os.environ)
         # the runner resolves the promoted weights against this
         env['TRAINING_ROOT'] = training_root()
+        argv = [py, script, 'run', '--stage', stage]
+        if launch['vit_dir']:
+            argv += ['--vit-model', launch['vit_dir']]
+            # The shell this server was started from may export an
+            # LD_LIBRARY_PATH into another environment's cuDNN; torch in the
+            # ViT environment then loads that cuDNN against its own and dies
+            # with CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED. Its own wheels
+            # find their libraries without it.
+            env.pop('LD_LIBRARY_PATH', None)
         proc = subprocess.Popen(
-            [py, script, 'run', '--stage', stage],
+            argv,
             cwd=REPO, stdout=log, stderr=log,
             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
         _SPAWNED.append(proc)
@@ -10452,7 +10614,10 @@ def _gate_act(action, stage, sp, pids):
                        f'(code {code}). ' + tail[:160]}
     except subprocess.TimeoutExpired:
         pass
-    return {'ok': True, 'running': True, 'msg': f'{sp["title"]} started'}
+    return {'ok': True, 'running': True,
+            'msg': f'{sp["title"]} started' + (
+                f' with the ViT model {launch["model"]}'
+                if launch['vit_dir'] else '')}
 
 
 def _sweep_archive():
@@ -11873,9 +12038,32 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     'last')
                 doc['side_store'] = bool(side)
                 doc['store'] = os.path.basename(side) if side else None
-                doc['can_run'] = (not side) and bool(DOGBIN_PYTHON) and (
-                    not doc.get('upstream')
-                    or doc['upstream']['ready'])
+                # the interpreter a start would use: vit_python for a stage
+                # pinned to the ViT leash model (or a fresh one while a ViT
+                # model is promoted), dogbin_python otherwise
+                launch = _gate_launch(stage)
+                ready = (not doc.get('upstream')
+                         or doc['upstream']['ready'])
+                # The same button is Stop while a run is live, and stopping
+                # only signals pids: it needs no interpreter, no model dir
+                # and no finished upstream. Gating it on the start config
+                # would grey out Stop on a ViT run started from a terminal
+                # with no vit_python here, or with the model drive gone.
+                live = bool(doc['running'])
+                doc['can_run'] = (not side) and (
+                    live or (not launch['error'] and ready))
+                doc['run_error'] = (None if side or live
+                                    else launch['error'])
+                doc['run_model'] = launch['model']
+                # a re-run judges with the PROMOTED model, which can need the
+                # other interpreter; and a ViT record is never re-judged by a
+                # promoted YOLO run (the reason, for the panel to show)
+                again = _gate_launch(stage, fresh=True)
+                doc['can_rerun'] = (not side) and not again['error'] and ready
+                doc['rerun_error'] = None if side else again['error']
+                doc['rerun_blocked'] = gate_rerun_blocked(stage, side)
+                pin = stage_vit(stage, side)
+                doc['vit_model'] = pin and pin['model']
                 self._json(doc)
             except Exception as e:
                 self._json({'ever': False, 'error': str(e)})
@@ -17333,7 +17521,9 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         : j.planning
           ? 'building the work list \u2014 a few minutes over the whole store'
           : needsPlan
-            ? 'build the work list for this stage, then run it'
+            /* a greyed-out Plan says why (no interpreter, model dir gone) */
+            ? (!j.can_run&&j.run_error?j.run_error
+                :'build the work list for this stage, then run it')
             : over
               ? 'every planned shard is written \u2014 this stage has judged '+
                 'all of it, and there is nothing left to resume'
@@ -17342,7 +17532,7 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
                             :(what==='leash'
                               ?'judge every box the gate called a dog; resumes where it left off'
                               :'judge every detection the sweep committed; resumes where it left off'))
-                : 'no interpreter configured for the '+what;
+                : (j.run_error||'no interpreter configured for the '+what);
     }
     /* Re-run with the promoted model: offered wherever there is a record to
        replace and nothing in flight. The runner skips every shard on disk,
@@ -17351,8 +17541,12 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
     if(rr&&rr.dataset.busy!=='1'){
       var best=j.best_model||'',had=Object.keys(j.models||{});
       var same=had.length===1&&had[0]===best;
-      rr.hidden=!best||!j.rows||!!j.running||!!j.planning||!!waiting;
-      rr.disabled=!j.can_run;
+      /* a ViT record while the promoted model is YOLO: no re-run at all --
+         it would archive the better verdicts and judge with the worse model.
+         The reason is on the model line below instead. */
+      rr.hidden=!best||!j.rows||!!j.running||!!j.planning||!!waiting||
+        !!j.rerun_blocked;
+      rr.disabled=!j.can_rerun;
       rr.textContent=same?'Re-run':'Re-run with '+best;
       rr.dataset.best=best;
       rr.dataset.had=had.join(', ')||'an unknown model';
@@ -17361,7 +17555,8 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
                      '; this judges every box again with it'
                     :'judged so far by '+rr.dataset.had+
                      '; this judges every box again with '+best)+
-               ' — the old verdicts are moved to an archive, not deleted';
+               ' — the old verdicts are moved to an archive, not deleted'+
+               (j.rerun_error?'. Unavailable: '+j.rerun_error:'');
     }
     var gm=document.getElementById('gModel');
     if(gm){
@@ -17371,7 +17566,11 @@ window.addEventListener('resize',function(){var c=echarts.getInstanceByDom(bEl);
         names.length?names.join(' + '):'',
         (names.length>1?names.map(function(n){return n+' '+fmt(by[n])}).join(', ')+' \u00b7 ':'')+
         (j.last_shard_at?'last shard '+new Date(j.last_shard_at*1000).toLocaleString():''),
-        j.best_model);
+        j.rerun_blocked?'':j.best_model)+
+        (j.rerun_blocked?' \u00b7 <span class="diff">'+
+          String(j.rerun_blocked).replace(/[&<>"]/g,function(c){
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})+
+          '</span>':'');
     }
     var ga=document.getElementById('gArch'),la=j.last_archive;
     if(ga){

@@ -1023,15 +1023,28 @@ def check_protocol(want, out_dir=None, shards=None):
         return ''
     if {k: pinned.get(k) for k in want} == want:
         return ''
+    by = 'model' in want
     return (f'{len(have_shards)} shards in {os.path.relpath(d, REPO)}/ were '
             f'written with crop={pinned.get("crop")} imgsz={pinned.get("imgsz")}'
+            + (f' model={pinned.get("model")}' if by else '') +
             f'{" (the legacy runner)" if pinned.get("legacy") else ""}; this run '
             f'would add crop={want["crop"]} '
-            f'imgsz={want["imgsz"] or "<as trained>"} to the same '
+            f'imgsz={want["imgsz"] or "<as trained>"}'
+            + (f' model={want["model"]}' if by else '') + ' to the same '
             f'record. Set the old verdicts aside first: '
             + (f'`gate_store.py archive --stage {STAGE} --replan`, then '
                f'`plan` again.' if STAGES[STAGE]['feeds_on'] else
                f'`gate_store.py archive --stage {STAGE}`.'))
+
+
+def read_protocol(out_dir=None):
+    """The stage's pinned protocol.json as a dict, {} when there is none."""
+    try:
+        with open(os.path.join(out_dir or OUT_DIR, PROTOCOL_FILE)) as fh:
+            got = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return got if isinstance(got, dict) else {}
 
 
 def pin_protocol(want, out_dir=None):
@@ -1232,6 +1245,16 @@ def run(args):
         raise SystemExit('--vit-model is a leash model: --stage leash')
     if not os.path.exists(os.path.join(OUT_DIR, 'work.parquet')):
         raise SystemExit('no plan yet -- run `gate_store.py plan` first')
+    # A record pinned to the ViT leash model resumes with that model only. A
+    # run without --vit-model (the YOLO one) would be refused by the protocol
+    # check anyway, but only after the work list loads (past the dashboard's
+    # 2.5 s window, below) -- and it should say which flag it is missing,
+    # not which crop it disagrees with.
+    pinned = read_protocol(OUT_DIR)
+    if not vit_dir and pinned.get('kind') == VIT_KIND:
+        raise SystemExit(f'{STAGE} is pinned to the ViT model '
+                         f'{pinned.get("model")}: pass --vit-model '
+                         f'{pinned.get("model_dir")}')
     # Both refusals come BEFORE the model and the 4.7M-row work list load: the
     # dashboard waits ~2.5 s after spawning a run to see whether it died, and
     # a refusal that lands after that is reported as a run that started.
@@ -1272,7 +1295,11 @@ def run(args):
             print(f'--batch {args.batch} ignored: {run_name} always scores '
                   f'in batches of {eb}, the shape it was validated at')
         args.batch = eb
-        want = {'crop': vspec['framing'], 'imgsz': int(imgsz)}
+        # the model too: two ViT models with the same framing are still two
+        # opinions, and must not be appended to one record (a YOLO record
+        # compares crop and imgsz only, as it always has)
+        want = {'crop': vspec['framing'], 'imgsz': int(imgsz),
+                'model': run_name}
         _no = check_protocol(want)
         if _no:
             raise SystemExit(_no)

@@ -68,6 +68,9 @@ EXTRA = (
     # (2026-11-17). New, so `git add -f`.
     'tools/detect/leash_vit.py',
     'tools/detect/tests/adv_leash_vit.py',
+    # The gate panel's controls for a ViT-pinned leash stage (2026-11-17).
+    # New, so `git add -f`.
+    'tools/detect/tests/adv_gate_vit_controls.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked
