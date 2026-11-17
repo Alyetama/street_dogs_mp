@@ -152,6 +152,11 @@ G1_FRAMES = {'1001': [(0, 0.42)], '1002': [(0, 0.30), (1, 0.70)],
 G2_FRAMES = {'1001': [(0, 0.42), (1, 0.61)], '1005': [(0, 0.55)]}
 FLAGS = {'1001': 0.42, '1002': 0.30, '1003': 0.42, '1004': None,
          '1005': 0.55}
+# The flag on 1005 was made on the gen-2 detector's box, and says so: a
+# reader keeps only the rows of the generation of the store it joins
+# (untagged = gen 1), so --any-generation lets the gen-2 store be named and
+# the row's own tag decides which flags it is joined with.
+FLAG_GEN = {'1005': 2}
 
 
 class World:
@@ -177,6 +182,8 @@ class World:
                 row = {'image_id': iid, 'label': 'false_positive'}
                 if conf is not None:
                     row['conf'] = conf
+                if iid in FLAG_GEN:
+                    row['gen'] = FLAG_GEN[iid]
                 fh.write(json.dumps(row) + '\n')
         self.batches = os.path.join(tmp, 'no_batches')
         os.makedirs(self.batches, exist_ok=True)

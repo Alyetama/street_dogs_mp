@@ -1419,7 +1419,8 @@ import fn_audit as _fn_audit  # noqa: E402
 
 sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
 import work_strip  # noqa: E402
-from fn_audit import AUTHOR_FIELD, LEGACY_AUTHOR, author_of  # noqa: E402,F401
+from fn_audit import (AUTHOR_FIELD, GEN_FIELD,  # noqa: E402,F401
+                      LEGACY_AUTHOR, LEGACY_GEN, author_of, gen_of)
 
 # An annotation nobody can be named for. _gate() answers every request before
 # a route is matched, so a POST that reaches a write path here is signed in by
@@ -1579,6 +1580,11 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None, by=None):
     and undoing something never flagged is a no-op success. Only a malformed
     name, an unknown label or a nameless annotator is a 4xx; every filesystem
     failure comes back 200 with ``ok:false`` so a cosmetic button never 500s.
+
+    A new row carries ``gen``, the detector generation of the store the crop
+    is resolved against (_review_gen): its conf names a box only there. A
+    flag whose generation cannot be named comes back 200 ``ok:false``
+    (NO_GEN) and nothing moves.
     """
     name = name or ''
     m = _CROP_RE.match(name)
@@ -1591,6 +1597,11 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None, by=None):
     # a caller that cannot say who is doing that is the same bug either way.
     if not by:
         return {'ok': False, 'error': NO_AUTHOR}, 400
+    # which detector the crop's conf names a box of -- before anything below
+    # moves a verdict out of the other ledger
+    gen = None if undo else _review_gen(name)
+    if not undo and gen is None:
+        return {'ok': False, 'error': NO_GEN}, 200
     st = _store_for(label)
     try:
         with _flag_lock:
@@ -1667,7 +1678,7 @@ def flag_crop(name, label=FLAG_LABEL, undo=False, now=None, by=None):
                    'ts': int(m.group(1)), 'crop': name, 'label': label,
                    'copied': bool(got_crop or got_full),
                    'flagged_at': int(time.time() if now is None else now),
-                   AUTHOR_FIELD: str(by)}
+                   AUTHOR_FIELD: str(by), GEN_FIELD: gen}
             os.makedirs(st['dir'], exist_ok=True)
             with open(st['labels'], 'a') as w:
                 w.write(json.dumps(rec) + '\n')
@@ -7785,6 +7796,62 @@ def _ledger_detect_root():
     return root.rstrip('/')
 
 
+# A verdict, redraw or "kept" whose detector generation cannot be named is
+# refused, not written: its conf and det_idx mean a box only in the store the
+# crop was resolved against, and a row with no `gen` reads as gen 1.
+NO_GEN = ('no detector generation — %s or its store names none, or this '
+          'crop\'s review set was cut from another generation, so which '
+          'detector\'s box this crop is cannot be recorded; nothing was '
+          'written' % LEDGER_ROOT_FILE)
+
+
+def _review_gen(name=None):
+    """The detector generation the review crops' det_idx and conf belong to.
+
+    The generation of the store they are resolved against -- the pinned
+    ledger store (_ledger_detect_root), never the live one and never a
+    constant -- read with crop_sources.store_gen_of, the same function every
+    reader joins with. Every row the review page writes (flags, redraws,
+    reviewed-and-kept, leash calls) carries it as `gen`, so a reader joining
+    another generation's store skips it instead of landing it on a box
+    nobody judged. None when the pin or its generation cannot be read: the
+    writers refuse then (NO_GEN).
+
+    With a crop `name`: a crop served from the harvested set
+    (review_extra_dir) was cut from the generation its review_set.json
+    names (none recorded: gen 1). One cut from another generation than the
+    pinned store's -- a `build_review_set.py --gen 2` set -- is None too: its
+    conf is another detector's, and tagging it with the pin's gen would hide
+    exactly that. (recent_crops has no manifest; sweep.py writes no preview
+    crops from a store of another generation than the pin's.)
+    """
+    try:
+        root = _ledger_detect_root()
+    except RuntimeError:
+        return None
+    try:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        from crop_sources import store_gen_of
+    except ImportError:
+        return None
+    gen = store_gen_of(root)
+    if gen is None or name is None:
+        return gen
+    extra = review_extra_dir()
+    if extra and os.path.realpath(crop_dir(name)) == os.path.realpath(extra):
+        try:
+            with open(os.path.join(extra, 'review_set.json')) as fh:
+                doc = json.load(fh)
+            made = gen_of(doc.get('gen')) if isinstance(doc, dict) else None
+        except FileNotFoundError:
+            made = LEGACY_GEN
+        except (OSError, ValueError):
+            made = None
+        if made != gen:
+            return None
+    return gen
+
+
 def _detect_sql():
     """(img_src, det_src) duckdb sources for the store the review crops came
     from: the pinned ledger store, never the live one (_ledger_detect_root)."""
@@ -8067,6 +8134,8 @@ def save_box(name, det_idx, box, now=None, by=None):
 
     ``by`` is the signed-in username and is required: hand-drawn geometry is
     an annotation like a verdict, and the same rule covers it (NO_AUTHOR).
+    ``det_idx`` is the pinned ledger store's (box_for), so the row records
+    that store's generation as ``gen`` -- and is refused without one (NO_GEN).
     """
     m = _CROP_RE.match(name or '')
     if not m:
@@ -8083,12 +8152,16 @@ def save_box(name, det_idx, box, now=None, by=None):
     y1, y2 = sorted((y1, y2))
     if x2 - x1 < 2 or y2 - y1 < 2:
         return {'ok': False, 'error': 'box is degenerate'}
+    # det_idx is the pinned store's (box_for), so the row names its gen
+    gen = _review_gen(name)
+    if gen is None:
+        return {'ok': False, 'error': NO_GEN}
     rec = {'crop': name, 'image_id': m.group(2),
            'det_idx': int(det_idx or 0),
            'x1': round(x1, 2), 'y1': round(y1, 2),
            'x2': round(x2, 2), 'y2': round(y2, 2),
            'saved_at': int(time.time() if now is None else now),
-           AUTHOR_FIELD: str(by)}
+           AUTHOR_FIELD: str(by), GEN_FIELD: gen}
     try:
         with _box_lock:
             os.makedirs(BOX_DIR, exist_ok=True)
@@ -8179,10 +8252,18 @@ def mark_seen(names, now=None, by=None):
     ledgers as one exclusion set, and it is the largest of the three. A page
     whose negative verdicts name a person and whose positive ones name nobody
     records half of what the reviewer did.
+
+    Each row carries ``gen`` like a flag does (_review_gen; NO_GEN without).
     """
     now = int(time.time() if now is None else now)
     if not by:
         return {'ok': False, 'error': NO_AUTHOR, 'added': 0}
+    # every crop's own generation, and one for the batch: a page is kept
+    # whole or not at all
+    gens = {_review_gen(str(nm)) for nm in (names or [])}
+    gen = gens.pop() if len(gens) == 1 else None
+    if names and gen is None:
+        return {'ok': False, 'error': NO_GEN, 'added': 0}
     added = 0
     with _seen_lock:
         cur = _seen_ids()
@@ -8196,7 +8277,7 @@ def mark_seen(names, now=None, by=None):
                 continue
             cur.add(iid)
             new.append({'image_id': iid, 'crop': str(nm), 'seen_at': now,
-                        AUTHOR_FIELD: str(by)})
+                        AUTHOR_FIELD: str(by), GEN_FIELD: gen})
         if new:
             try:
                 os.makedirs(HN_DIR, exist_ok=True)
@@ -12791,11 +12872,18 @@ class BoardHandler(SimpleHTTPRequestHandler):
                     # the store's "a label whose image has aged out is not
                     # trainable" copy found nothing every single time
                     src = crop_dir(name)
-                    body, code = mod.record(
-                        name, str(data.get('label') or ''),
-                        copy_from={'crop': src,
-                                   'full': os.path.join(src, 'full')},
-                        by=self._annotator())
+                    # which detector the crop's conf is a box of: refused
+                    # here when it cannot be named (NO_GEN), never left to
+                    # the store to guess
+                    gen = _review_gen(name)
+                    if gen is None:
+                        body, code = {'ok': False, 'error': NO_GEN}, 400
+                    else:
+                        body, code = mod.record(
+                            name, str(data.get('label') or ''),
+                            copy_from={'crop': src,
+                                       'full': os.path.join(src, 'full')},
+                            by=self._annotator(), gen=gen)
                 self._json(body, code)
             except Exception as e:
                 self._json({'ok': False, 'error': str(e)})

@@ -367,7 +367,7 @@ def new_record_checks(bad):
 
             # 5. the leash database
             db = os.path.join(tmp, 'leash.db')
-            body, code = ls.record(CROP, 'leashed', path=db, by=WHO)
+            body, code = ls.record(CROP, 'leashed', path=db, gen=1, by=WHO)
             if code != 200 or not body.get('ok'):
                 bad.append(f'recording a leash verdict with an annotator '
                            f'failed: {body}')
@@ -379,7 +379,7 @@ def new_record_checks(bad):
                     bad.append(f'the leash row does not name its annotator: '
                                f'{dict(row) if row else None}')
                 # re-deciding is one row, and the person whose call it now is
-                ls.record(CROP, 'unleashed', path=db, by=WHO + '2')
+                ls.record(CROP, 'unleashed', path=db, gen=1, by=WHO + '2')
                 row = con.execute('SELECT * FROM leash WHERE crop = ?',
                                   (CROP,)).fetchone()
                 if row[ls.AUTHOR_FIELD] != WHO + '2' or \
@@ -491,15 +491,17 @@ def legacy_read_checks(bad):
                            f'{byline} — a dataset row with no judge is the '
                            f'reason this field exists')
 
-            # the box corrections, both readers
-            for path in (audit.BOX_FILE, dash.BOX_LABELS):
+            # the box corrections, both readers -- each its own page's row:
+            # the audit reads only 'audit:<stage>' rows of its pool's gen
+            for path, crop in ((audit.BOX_FILE, 'audit:gate'),
+                               (dash.BOX_LABELS, OLD_CROP)):
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, 'w') as fh:
                     fh.write(json.dumps({
-                        'crop': OLD_CROP, 'image_id': '1606751523958969',
+                        'crop': crop, 'image_id': '1606751523958969',
                         'det_idx': 0, 'x1': 1, 'y1': 2, 'x2': 3, 'y2': 4,
                         'saved_at': 1_700_000_000}) + '\n')
-            fixed = audit.corrections().get(('1606751523958969', 0))
+            fixed = audit.corrections('gate').get(('1606751523958969', 0))
             if not fixed or fixed[5] != fa.LEGACY_AUTHOR:
                 bad.append(f'a box drawn before accounts reads as {fixed}; '
                            f'the audit page has to be able to say who drew it')
@@ -544,7 +546,7 @@ def legacy_read_checks(bad):
                          1785663300001, 1_700_000_000, 'review_page'))
             con.commit()
             con.close()
-            ls.record(CROP, 'unleashed', path=db, by=WHO)
+            ls.record(CROP, 'unleashed', path=db, gen=1, by=WHO)
             con = ls.connect(db)
             try:
                 seen = {r['crop']: ls.row_dict(r)[A]
@@ -806,7 +808,7 @@ def refusal_checks(bad):
                                                    [1, 2, 31, 41], by=nobody),
                      audit.BOX_FILE),
                     ('leash_store.record',
-                     lambda: ls.record(CROP, 'leashed', path=db,
+                     lambda: ls.record(CROP, 'leashed', path=db, gen=1,
                                        by=nobody)[0],
                      db),
                     ('label_flags.add',
@@ -1257,8 +1259,8 @@ def redecision_checks(bad):
 
             # one row per crop: the annotator moves with the verdict
             db = os.path.join(tmp, 'leash.db')
-            ls.record(CROP, 'leashed', path=db, by=alice)
-            ls.record(CROP, 'unleashed', path=db, by=bob)
+            ls.record(CROP, 'leashed', path=db, gen=1, by=alice)
+            ls.record(CROP, 'unleashed', path=db, gen=1, by=bob)
             con = ls.connect(db)
             try:
                 got = [(r['label'], ls.row_dict(r)[A])

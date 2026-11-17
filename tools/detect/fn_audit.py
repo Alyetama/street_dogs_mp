@@ -579,6 +579,64 @@ def author_of(who):
     return str(who) if who else LEGACY_AUTHOR
 
 
+# WHICH DETECTOR a human ledger row's det_idx, conf and crop belong to. The
+# second word every ledger shares, owned here for the same reason as `by`:
+# the flag ledgers, the box corrections, the reviewed-and-kept ledger and the
+# leash database's column of the same name. A det_idx (and a conf to two
+# decimals) names a box only within one detector generation -- gen 2 numbers
+# the same frame's boxes differently -- so a gen-1 row joined to a gen-2 store
+# lands on a box nobody judged. Every new row records it; every reader keeps
+# only rows whose generation is the one of the store it joins against.
+#
+# The two audit ledgers (verdicts.jsonl, drawn.jsonl) carry no per-row tag:
+# each sits in one audit dir beside the pool its keys were cut from, the
+# pool's pool.json records that pool's gen, and fn_audit build refuses to
+# re-cut a pool across generations. Box corrections are different: one file
+# for the review page and both audits, so the tag goes on the row.
+GEN_FIELD = 'gen'
+LEGACY_GEN = 1
+"""The generation a ledger row with no `gen` on it was recorded against.
+
+Every row written before the tag existed was made on the gen-1 detector's
+boxes -- the only one there was -- so an absent tag reads as 1, on the way
+out, exactly as an absent `by` reads as LEGACY_AUTHOR. Never written: a new
+row takes its generation from the store (or pool) it was judged on.
+"""
+
+
+def gen_of(tag):
+    """The detector generation one stored `gen` value names, as an int.
+
+    Takes the value as it came off disk (``rec.get('gen')``, a NULL column):
+    absent or None is LEGACY_GEN. A value that is not a non-negative int --
+    a string, a float, a bool -- names no generation and comes back None,
+    which matches no store, so a reader skips that row rather than guess.
+    """
+    if tag is None:
+        return LEGACY_GEN
+    if isinstance(tag, bool) or not isinstance(tag, int) or tag < 0:
+        return None
+    return tag
+
+
+def pool_gen(stage=DEFAULT_STAGE):
+    """The detector generation this stage's audit pool was cut from (its
+    pool.json `gen`; a pool.json without one, or none at all, is gen 1).
+
+    None when pool.json is there but says nothing usable -- unreadable, not
+    JSON, not an object, or a `gen` gen_of names no generation by: a damaged
+    gen-2 pool read as gen 1 would put gen-1 redraws on its det_idx. Writers
+    refuse then and readers keep nothing."""
+    try:
+        with open(os.path.join(paths(stage)['out'], 'pool.json')) as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return LEGACY_GEN
+    except (OSError, ValueError):
+        return None
+    return gen_of(doc.get('gen')) if isinstance(doc, dict) else None
+
+
 def read_verdicts(path=None, stage=DEFAULT_STAGE):
     """[{key, verdict, band, p_dog, ts, by}] -- append-only, last write wins.
 

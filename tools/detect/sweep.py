@@ -56,6 +56,33 @@ READERS = {'lynx': 1, 'capybara': 1, 'jackal': 1, 'bobcat': 8}
 DECODERS = 4  # cv2 decode threads (GIL released inside imdecode)
 
 
+def preview_refusal(gen, repo=REPO):
+    """Why this sweep must not drop preview crops into recent_crops, or None.
+
+    recent_crops is the review page's queue, and the page resolves every
+    crop in it against the store data/ledger_detect_root.txt pins and tags
+    each verdict with that store's generation. A crop from a sweep of
+    another generation would be judged as the pinned detector's box and
+    filed under its generation. The pin and its generation are read the way
+    the dashboard and every ledger reader read them (crop_sources)."""
+    pin = os.path.join(repo, 'data', 'ledger_detect_root.txt')
+    try:
+        with open(pin) as fh:
+            root = fh.read().strip()
+    except OSError as e:
+        return f'{pin} cannot be read ({e.strerror or e})'
+    if not root:
+        return f'{pin} is empty'
+    if not os.path.isabs(root):
+        root = os.path.join(repo, root)
+    import crop_sources
+    pinned = crop_sources.store_gen_of(root)
+    if pinned != gen:
+        return (f'the review page resolves recent_crops against {root} '
+                f'(gen {pinned}); this sweep is gen {gen}')
+    return None
+
+
 def parse_drive_map(pairs, cast, flag):
     """['jackal=8', 'bobcat=16'] -> {'jackal': 8, 'bobcat': 16}.
 
@@ -863,7 +890,13 @@ def cmd_run(args):
         ]
         coll.add(m['key'], m['pos'], img, dets)
 
-    preview = None if args.no_preview else PreviewWriter()
+    preview = None
+    if not args.no_preview:
+        why = preview_refusal(args.gen)
+        if why:
+            print(f'no preview crops: {why}', flush=True)
+        else:
+            preview = PreviewWriter()
     # Several consumers, each with its own execution context and buffers,
     # take batches from the one ring: while one is in NMS and the sink (CPU
     # work, GPU idle) another's batch is on the GPU. Output is per image and

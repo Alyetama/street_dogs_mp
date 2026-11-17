@@ -234,39 +234,82 @@ def leashed_ids(ids, con):
         WHERE l.det_idx = 0 AND l.label = 'leashed'""").fetchall()}
 
 
+def ledger_gen():
+    """The detector generation of detect_root() -- the only one whose human
+    ledger rows this build reads (crop_sources.join_gen). A row's `gen`
+    (absent: gen 1) names the detector its det_idx and conf belong to, and
+    the det-0 label box and n_det are read off detect_root()."""
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import crop_sources
+    return crop_sources.join_gen(detect_root())
+
+
 def confirmed_positive_ids():
-    """Frames a HUMAN said contain a real dog, from both ledgers."""
+    """Frames a HUMAN said contain a real dog, from both ledgers -- of
+    detect_root()'s detector generation only (ledger_gen).
+
+    A hard positive tagged with another generation was confirmed on another
+    detector's box, and the gate audit's verdicts are its pool's generation
+    (fn_audit.pool_gen): either is skipped, and said so.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import fn_audit as fa
+    gen = ledger_gen()
     out = set()
+    other = 0
     try:
         for line in open(HARD_POS):
             if line.strip():
                 d = json.loads(line)
                 if d.get('label') == 'true_positive':
+                    if fa.gen_of(d.get(fa.GEN_FIELD)) != gen:
+                        other += 1
+                        continue
                     out.add(str(d['image_id']))
     except OSError:
         pass
+    if other:
+        print(f'{other} hard positive(s) of another detector generation '
+              f'skipped (the store is gen {gen})', flush=True)
     try:
-        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
-        import fn_audit as fa
-        for v in fa.read_verdicts(stage='gate'):
-            if fa.verdict_of(v.get('verdict'), 'gate') == 'dog':
-                out.add(str(v['key']).split('#')[0])
+        pool = fa.pool_gen('gate')
+        if pool != gen:
+            print(f'the gate audit pool is gen {pool}, the store gen {gen}: '
+                  f'its verdicts are skipped', flush=True)
+        else:
+            for v in fa.read_verdicts(stage='gate'):
+                if fa.verdict_of(v.get('verdict'), 'gate') == 'dog':
+                    out.add(str(v['key']).split('#')[0])
     except Exception:
         pass
     return out
 
 
 def corrections():
+    """{(image_id, det_idx): box} from the box-corrections ledger, last write
+    wins -- the records of detect_root()'s generation only (ledger_gen): a
+    redraw keyed by another detector's det_idx would move a box nobody
+    redrew."""
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import fn_audit as fa
+    gen = ledger_gen()
     out = {}
+    other = 0
     try:
         for line in open(CORRECTIONS):
             if line.strip():
                 d = json.loads(line)
+                if fa.gen_of(d.get(fa.GEN_FIELD)) != gen:
+                    other += 1
+                    continue
                 out[(str(d['image_id']), int(d.get('det_idx') or 0))] = (
                     float(d['x1']), float(d['y1']),
                     float(d['x2']), float(d['y2']))
     except OSError:
         pass
+    if other:
+        print(f'{other} box correction(s) of another detector generation '
+              f'skipped (the store is gen {gen})', flush=True)
     return out
 
 
@@ -330,7 +373,9 @@ def main(argv=None):
                     help='accept a --detect-root that holds another detector '
                          'generation. Only for confirmations and corrections '
                          'recorded against THAT store: every existing one '
-                         'carries gen-1 det_idx.')
+                         'carries gen-1 det_idx. Either way only rows tagged '
+                         'with the store\'s own generation (`gen`; untagged '
+                         '= 1) are read.')
     a = ap.parse_args(argv)
     global DETECT_ROOT
     DETECT_ROOT = None

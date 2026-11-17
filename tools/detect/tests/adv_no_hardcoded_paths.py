@@ -84,6 +84,9 @@ EXTRA = (
     # The detector builders read the pinned ledger store (2026-11-17).
     # New, so `git add -f`.
     'tools/detect/tests/adv_builders_ledger_root.py',
+    # Every new human-ledger row names its detector generation, and every
+    # reader keeps only the store's own (2026-11-17). New, so `git add -f`.
+    'tools/detect/tests/adv_ledger_gen.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked

@@ -392,8 +392,16 @@ VIEW_PAD = 2.2
 VIEW_MAX = 1100
 
 
-def corrections():
+def corrections(stage):
     """{(image_id, det_idx): (x1, y1, x2, y2, saved_at, by)} -- last wins.
+
+    THIS stage's redraws of THIS pool only: rows whose crop is
+    'audit:<stage>' (as crop_sources.read_audit_corrections reads them) and
+    whose `gen` is the pool's (fa.pool_gen; an untagged row is gen 1). The
+    file is shared with the review page and the other audit, under the same
+    (image_id, det_idx) key: read whole, a review-page redraw or the leash
+    audit's leash-inclusive box showed on a gate tile as this audit's
+    correction, and a gen-1 redraw would sit on a gen-2 pool's det_idx.
 
     The timestamp is carried because the tile has to be able to ASK for the
     redrawn crop. Crops are served with a day of browser cache, so without a
@@ -403,7 +411,11 @@ def corrections():
     The author is carried through fa.author_of, so a box drawn before there
     were accounts reads as the admin here rather than as None.
     """
+    want, gen = f"audit:{stage}", fa.pool_gen(stage)
     out = {}
+    if gen is None:
+        # a pool.json that names no generation: no redraw is this pool's
+        return out
     try:
         with open(BOX_FILE) as fh:
             for line in fh:
@@ -412,6 +424,9 @@ def corrections():
                 except ValueError:
                     continue
                 if not isinstance(d, dict) or d.get('image_id') is None:
+                    continue
+                if d.get('crop') != want or \
+                        fa.gen_of(d.get(fa.GEN_FIELD)) != gen:
                     continue
                 try:
                     out[(str(d['image_id']), int(d.get('det_idx') or 0))] = (
@@ -458,15 +473,24 @@ def save_correction(key, box, stage=DEFAULT_STAGE, by=None):
     same = all(round(v, 2) == round(float(cand[k]), 2)
                for v, k in zip((x1, y1, x2, y2), ('x1', 'y1', 'x2', 'y2')))
     if same and (str(cand['image_id']),
-                 int(cand['det_idx'])) not in corrections():
+                 int(cand['det_idx'])) not in corrections(stage):
         return {'ok': False,
                 'msg': "that is the model's own box, unchanged -- nothing "
                        "to save"}
+    # the pool's generation: cand's det_idx is that pool's, and the file is
+    # shared with every other page and generation. A pool.json that names
+    # none (damaged) is refused, not guessed to be gen 1.
+    gen = fa.pool_gen(stage)
+    if gen is None:
+        return {'ok': False,
+                'msg': 'this pool names no detector generation (pool.json '
+                       'unreadable or its gen malformed) -- nothing saved'}
     rec = {'crop': f"audit:{stage}", 'image_id': str(cand['image_id']),
            'det_idx': int(cand['det_idx']),
            'x1': round(x1, 2), 'y1': round(y1, 2),
            'x2': round(x2, 2), 'y2': round(y2, 2),
-           'saved_at': int(time.time()), AUTHOR_FIELD: str(by)}
+           'saved_at': int(time.time()), AUTHOR_FIELD: str(by),
+           fa.GEN_FIELD: gen}
     with _BOX_LOCK:
         os.makedirs(os.path.dirname(BOX_FILE), exist_ok=True)
         with open(BOX_FILE, 'a') as fh:
@@ -502,7 +526,8 @@ def frame_view(key, stage=DEFAULT_STAGE):
         return None, None
     src = os.path.join(root, cand['cell'], 'ground_animal_images',
                        f"{cand['image_id']}.jpg")
-    cur = corrections().get((str(cand['image_id']), int(cand['det_idx'])))
+    cur = corrections(stage).get((str(cand['image_id']),
+                                  int(cand['det_idx'])))
     x1, y1, x2, y2 = (cur[:4] if cur else (cand['x1'], cand['y1'],
                                            cand['x2'], cand['y2']))
     try:
@@ -2509,7 +2534,7 @@ def with_verdicts(doc, stage=DEFAULT_STAGE):
     # a shared queue "already judged" is half the fact
     seen = {v['key']: (v.get('verdict'), v.get(AUTHOR_FIELD))
             for v in fa.read_verdicts(stage=stage)}
-    fixed = corrections()
+    fixed = corrections(stage)
     for it in doc['items']:
         # through verdict_of, because the page paints from this stage's own
         # two words and the gate's ledger still holds forty rows written in
@@ -2759,7 +2784,7 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
     total = len(rows)
     pages = max(1, -(-total // max(1, n)))
     page = max(0, min(pages - 1, int(page)))
-    fixed = corrections()
+    fixed = corrections(stage)
     out = []
     for v in rows[page * n:(page + 1) * n]:
         iid, _, di = str(v['key']).partition('#')

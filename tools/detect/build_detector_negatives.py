@@ -88,8 +88,22 @@ def ids_in(d):
     return out
 
 
-def flagged_ids(ledger):
+def flagged_ids(ledger, gen=None):
+    """{image_id: flag row} for the false positives of detector generation
+    `gen` -- default: detect_root()'s (crop_sources.join_gen).
+
+    A flag is an image_id and a conf, and the conf names a box only within
+    the generation it was flagged on (absent `gen`: gen 1). Asked of another
+    generation's store, "every detection on this frame was flagged" would be
+    a statement about boxes nobody looked at, so those rows are skipped, and
+    said so.
+    """
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import fn_audit as fa
+    if gen is None:
+        gen = _crop_sources().join_gen(detect_root())
     out = {}
+    other = 0
     try:
         with open(ledger) as fh:
             for ln in fh:
@@ -100,10 +114,18 @@ def flagged_ids(ledger):
                     r = json.loads(ln)
                 except ValueError:
                     continue
+                if not isinstance(r, dict):
+                    continue
                 if r.get('image_id') and r.get('label') == 'false_positive':
+                    if fa.gen_of(r.get(fa.GEN_FIELD)) != gen:
+                        other += 1
+                        continue
                     out[str(r['image_id'])] = r
     except OSError:
         pass
+    if other:
+        print(f'{other} flag(s) of another detector generation skipped '
+              f'(the store is gen {gen})', flush=True)
     return out
 
 
@@ -224,7 +246,9 @@ def main(argv=None):
     ap.add_argument('--any-generation', action='store_true',
                     help='accept a --detect-root that holds another detector '
                          'generation. Only for flags recorded against THAT '
-                         'store: every existing flag carries a gen-1 conf.')
+                         'store: every existing flag carries a gen-1 conf. '
+                         'Either way only flags tagged with the store\'s own '
+                         'generation (`gen`; untagged = 1) are read.')
     ap.add_argument('--execute', action='store_true')
     args = ap.parse_args(argv)
     global DETECT_ROOT

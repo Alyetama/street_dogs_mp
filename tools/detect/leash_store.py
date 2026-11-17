@@ -45,7 +45,15 @@ import time
 # audit ledgers -- fn_audit owns it, this store imports it. Same directory, no
 # third-party imports, and the alternative is a second copy of the word
 # `admin` that drifts the first time one of the two changes.
-from fn_audit import AUTHOR_FIELD, author_of
+import fn_audit  # noqa: E402
+if not hasattr(fn_audit, 'GEN_FIELD'):
+    # A long-running process (the dashboard) that imported fn_audit before it
+    # named the detector generation, and this module lazily after: load the
+    # file as it is now. Failing the import instead is remembered by the
+    # dashboard as "no leash store" for the rest of its life.
+    import importlib
+    importlib.reload(fn_audit)
+from fn_audit import AUTHOR_FIELD, GEN_FIELD, author_of, gen_of  # noqa: E402
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -75,7 +83,14 @@ CREATE TABLE IF NOT EXISTS leash (
     -- before this column existed keep reading as the admin's without one of
     -- them being rewritten. Quoted because BY is a keyword to sqlite's
     -- parser; every statement below quotes it for the same reason.
-    "by"        TEXT
+    "by"        TEXT,
+    -- WHICH DETECTOR the crop, its conf and so its box belong to: the
+    -- generation of the store the review page resolved the crop against
+    -- (fn_audit.GEN_FIELD). NULL means gen 1 -- every row written before
+    -- the column existed was judged on the gen-1 detector's boxes -- and is
+    -- never written now: record() tags every row (pinned_gen when the
+    -- caller names none) or refuses it.
+    gen         INTEGER
 );
 CREATE INDEX IF NOT EXISTS leash_label ON leash(label);
 CREATE INDEX IF NOT EXISTS leash_when  ON leash(labelled_at);
@@ -90,6 +105,41 @@ CREATE INDEX IF NOT EXISTS leash_when  ON leash(labelled_at);
 # (A leash row CAN be taken back, unlike a jsonl line -- the refusal is not
 # about recoverability, it is about not writing something untrue.)
 NO_AUTHOR = 'no annotator — this write was not made by a signed-in account'
+# A verdict whose detector generation the caller could not name: the crop's
+# conf matches a box only in the store it was cut from, so a row without one
+# is refused rather than left to read as gen 1.
+NO_GEN = ('no detector generation — which store this crop was cut from is '
+          'unknown, so nothing was recorded')
+LEDGER_ROOT_FILE = os.path.join('data', 'ledger_detect_root.txt')
+_PINNED = object()
+
+
+def pinned_gen():
+    """The generation of the store the review page resolves its crops
+    against (data/ledger_detect_root.txt, as the dashboard reads it), by
+    crop_sources.store_gen_of -- the function every reader joins with. None
+    when the pin or its generation cannot be read.
+
+    What record() tags a call with that names no generation: a dashboard
+    started before the review page passed one resolves every crop against
+    this same pinned store."""
+    try:
+        with open(os.path.join(REPO, LEDGER_ROOT_FILE)) as fh:
+            root = fh.read().strip()
+    except OSError:
+        return None
+    if not root:
+        return None
+    if not os.path.isabs(root):
+        root = os.path.join(REPO, root)
+    if not os.path.isdir(os.path.join(root, 'shards')):
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from crop_sources import store_gen_of
+        return store_gen_of(root)
+    except (Exception, SystemExit):         # noqa: BLE001 - no gen, refused
+        return None
 
 
 def connect(path=None):
@@ -137,16 +187,51 @@ def _migrate(con):
     again. Anything else (a locked database, most likely) still raises: that
     one leaves the store WITHOUT the column, and a silent pass would turn it
     into "no such column" on the next insert.
+
+    The same for `gen` (the detector generation, added after `by`): its
+    NULLs read as gen 1, which every row recorded before it was.
     """
-    have = {r['name'] for r in con.execute('PRAGMA table_info(leash)')}
-    if AUTHOR_FIELD not in have:
+    for col, decl in ((AUTHOR_FIELD, '"by" TEXT'),
+                      (GEN_FIELD, 'gen INTEGER')):
+        have = {r['name'] for r in con.execute('PRAGMA table_info(leash)')}
+        if col in have:
+            continue
         try:
             with con:
-                con.execute('ALTER TABLE leash ADD COLUMN "by" TEXT')
+                con.execute('ALTER TABLE leash ADD COLUMN ' + decl)
         except sqlite3.OperationalError:
             have = {r['name'] for r in con.execute('PRAGMA table_info(leash)')}
-            if AUTHOR_FIELD not in have:
+            if col not in have:
                 raise
+
+
+def read_calls(path=None):
+    """Every stored verdict as a dict of its raw columns. SELECTs only.
+
+    For readers that are not this store's writer -- a dataset build -- so
+    reading never migrates: connect() would ALTER an older database on the
+    way in, and a build must not change the store it reads. A database from
+    before the `gen` column existed reads as gen None on every row (NULL:
+    gen 1, see SCHEMA); `by` comes back as stored (row_dict resolves it).
+
+    Opened mode=rw, not mode=ro: rw never creates a missing file, and only a
+    writable handle removes the -wal/-shm files on close -- a mode=ro open of
+    this WAL database leaves both behind beside it.
+    """
+    import urllib.parse
+    p = os.path.abspath(path or DB_PATH)
+    con = sqlite3.connect('file:%s?mode=rw' % urllib.parse.quote(p),
+                          uri=True, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        have = {r['name'] for r in con.execute('PRAGMA table_info(leash)')}
+        cols = ['crop', 'image_id', 'label', 'conf', 'ts', 'labelled_at',
+                '"by"' if AUTHOR_FIELD in have else 'NULL AS "by"',
+                'gen' if GEN_FIELD in have else 'NULL AS gen']
+        return [dict(r) for r in con.execute(
+            'SELECT %s FROM leash' % ', '.join(cols))]
+    finally:
+        con.close()
 
 
 def parse_crop(name):
@@ -158,7 +243,7 @@ def parse_crop(name):
 
 
 def record(name, label, copy_from=None, source='review_page', note=None,
-           now=None, path=None, by=None):
+           now=None, path=None, by=None, gen=_PINNED):
     """Record one verdict, and who made it. Idempotent; re-deciding replaces.
 
     Returns (dict, http status) so the dashboard can hand it straight back.
@@ -172,6 +257,15 @@ def record(name, label, copy_from=None, source='review_page', note=None,
     append-only file rather than a row that gets replaced -- see flag_crop's
     duplicate branch. Neither is the general rule; each follows the shape of
     the store it is written into.
+
+    ``gen`` is the detector generation of the store the crop was resolved
+    against (the review page's pinned ledger store): the crop's conf names a
+    box only within that generation. Left out, it is that pinned store's
+    (pinned_gen) -- what a caller that predates the argument resolved the
+    crop against. None, a malformed value, or a pin naming none is refused
+    (NO_GEN): never a row left to read as gen 1 whatever it was judged on.
+    A re-decision takes the new call's generation with it, like its
+    annotator.
     """
     got = parse_crop(name)
     if not got:
@@ -180,6 +274,10 @@ def record(name, label, copy_from=None, source='review_page', note=None,
         return {'ok': False, 'error': 'unknown label %r' % (label,)}, 400
     if not by:
         return {'ok': False, 'error': NO_AUTHOR}, 400
+    if gen is _PINNED:
+        gen = pinned_gen()
+    if gen is None or gen_of(gen) is None:
+        return {'ok': False, 'error': NO_GEN}, 400
     image_id, ts, conf = got
     copied = False
     if copy_from:
@@ -189,15 +287,15 @@ def record(name, label, copy_from=None, source='review_page', note=None,
         with con:
             con.execute(
                 'INSERT INTO leash (crop, image_id, label, conf, ts, '
-                '                   labelled_at, source, note, "by") '
-                'VALUES (?,?,?,?,?,?,?,?,?) '
+                '                   labelled_at, source, note, "by", gen) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(crop) DO UPDATE SET '
                 '  label=excluded.label, labelled_at=excluded.labelled_at, '
                 '  source=excluded.source, note=excluded.note, '
-                '  "by"=excluded."by"',
+                '  "by"=excluded."by", gen=excluded.gen',
                 (name, image_id, label, conf, ts,
                  int(time.time() if now is None else now), source, note,
-                 str(by)))
+                 str(by), int(gen)))
         return dict(_counts(con), ok=True, crop=name, label=label,
                     copied=copied), 200
     finally:
@@ -239,10 +337,13 @@ def row_dict(row):
     Every path OUT of this store goes through here, so nothing downstream --
     a dataset build reading the export, a person reading --list -- ever sees
     a verdict whose author is null. A row recorded before the column existed
-    reads as fn_audit.LEGACY_AUTHOR, which is what it has always meant.
+    reads as fn_audit.LEGACY_AUTHOR, which is what it has always meant, and
+    a NULL `gen` as fn_audit.LEGACY_GEN.
     """
     out = dict(row)
     out[AUTHOR_FIELD] = author_of(out.get(AUTHOR_FIELD))
+    if GEN_FIELD in out:
+        out[GEN_FIELD] = gen_of(out[GEN_FIELD])
     return out
 
 

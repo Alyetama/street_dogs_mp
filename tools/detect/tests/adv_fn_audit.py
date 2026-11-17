@@ -775,7 +775,10 @@ def correction_checks(bad):
         audit.BOX_FILE = os.path.join(tmp, 'boxes.jsonl')
         try:
             with open(audit.BOX_FILE, 'w') as fh:
-                fh.write(json.dumps({'image_id': '9', 'det_idx': 0,
+                # an audit page's row, as save_correction writes it: the
+                # page reads only 'audit:<stage>' rows of its pool's gen
+                fh.write(json.dumps({'crop': 'audit:gate', 'image_id': '9',
+                                     'det_idx': 0,
                                      'x1': 1, 'y1': 1, 'x2': 9, 'y2': 9,
                                      'saved_at': 1234}) + '\n')
             doc = audit.with_verdicts(

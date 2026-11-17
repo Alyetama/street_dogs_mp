@@ -305,6 +305,45 @@ def default_detect_root():
     return root
 
 
+def store_gen_of(root):
+    """The detector generation `root`'s det_idx and confidences are, or None.
+
+    status.store_gen -- the store's status.json, else its newest
+    worklist/gen=* -- and, when that names none, the store's only
+    shards/gen=NNNN. A store holding several shard generations and no status
+    names none.
+    """
+    from status import store_gen
+    gen = store_gen(root)
+    if gen is not None:
+        return gen
+    try:
+        names = os.listdir(os.path.join(root, 'shards'))
+    except OSError:
+        return None
+    gens = {int(n[4:]) for n in names
+            if n.startswith('gen=') and n[4:].isascii() and n[4:].isdigit()}
+    return gens.pop() if len(gens) == 1 else None
+
+
+def join_gen(root):
+    """The generation a human ledger row must be tagged with to be joined
+    against `root` (see store_gen_of); refused when the store names none.
+
+    A row's `gen` (fn_audit.gen_of: untagged is gen 1) says which detector's
+    det_idx and conf it carries. Joined against a store of another generation
+    it lands on a box nobody judged, so readers keep only rows of this one --
+    and a store that cannot say which it is has nothing they can be kept for.
+    """
+    gen = store_gen_of(root)
+    if gen is None:
+        raise SystemExit(
+            '%s names no detector generation (no status.json gen, no '
+            'worklist/gen=*, not exactly one shards/gen=*): which human '
+            'ledger rows belong to its boxes cannot be told' % (root,))
+    return gen
+
+
 def drive_roots():
     """{drive label: grid_runs root}: gate_store's own lookup, or the plan's.
 
@@ -375,15 +414,28 @@ def frame_path(roots, cell, drive, image_id):
 
 # ── the ledgers ─────────────────────────────────────────────────────────────
 
-def read_audit_corrections(stage, path=None):
+def read_audit_corrections(stage, path=None, gen=None, counts=None):
     """{(image_id, det_idx): (x1, y1, x2, y2)} -- the audit page's redraws.
 
     Only `crop == "audit:<stage>"` records, last write wins: that is the box
     the page cut its edited/ crop from, which is what the framing check below
     re-cuts to prove the file on disk is what it claims to be.
+
+    And only records of `gen` -- default: the generation of the stage's audit
+    pool (fn_audit.pool_gen), whose det_idx the keys are. A redraw of another
+    generation's pool (untagged reads as gen 1) is skipped and counted in
+    `counts['other_gen']`.
     """
+    import fn_audit as fa
     want = 'audit:%s' % stage
+    gen = fa.pool_gen(stage) if gen is None else gen
     out = {}
+    if gen is None:
+        # a pool.json that names no generation: no redraw can be told to be
+        # its own (and an unreadable row tag, gen_of None, must not match)
+        if counts is not None:
+            counts['pool_gen_unknown'] += 1
+        return out
     try:
         with open(path or D('box_corrections', 'boxes.jsonl')) as fh:
             for line in fh:
@@ -392,6 +444,10 @@ def read_audit_corrections(stage, path=None):
                 except ValueError:
                     continue
                 if not isinstance(r, dict) or r.get('crop') != want:
+                    continue
+                if fa.gen_of(r.get(fa.GEN_FIELD)) != gen:
+                    if counts is not None:
+                        counts['other_gen'] += 1
                     continue
                 try:
                     out[(str(r['image_id']), int(r.get('det_idx') or 0))] = (
@@ -588,24 +644,35 @@ def _pct(b):
             float(b['height']))
 
 
-def flag_candidates(label, detect_root, ledger=None, corrections=None):
+def flag_candidates(label, detect_root, ledger=None, corrections=None,
+                    gen=None):
     """(rows, counts) for one review-page ledger: hard negatives or positives.
 
     The matching is harvest_flagged's, imported: a flag records an image_id
     and the confidence of the box the reviewer judged, and is resolved to the
     one gen-1 detection within CONF_TOL of it. None or several -- skipped and
     counted, because a wrong guess is a dog filed under not-a-dog.
+
+    Only flags (and review-page redraws) of `gen` -- default: the store's own
+    generation, join_gen(detect_root) -- are read; the rest are counted as
+    `other_gen` and never matched.
     """
     import harvest_flagged as hf
     source = 'hard_negative' if label == 'false_positive' else 'hard_positive'
     cls = 'not_dog' if label == 'false_positive' else 'dog'
     ledger = ledger or hf.LEDGERS[label]
-    flags = hf.read_flags(ledger, label)
+    # only the flags made on THIS store's detector generation: a flag's conf
+    # matched against another generation's boxes is a guess (join_gen)
+    gen = join_gen(detect_root) if gen is None else gen
+    skipped = collections.Counter()
+    flags = hf.read_flags(ledger, label, gen=gen, counts=skipped)
     c = collections.Counter({'offered': len(flags)})
+    if skipped['other_gen']:
+        c['other_gen'] = skipped['other_gen']
     if not flags:
         return [], c
     boxes = hf.boxes_for(sorted(flags), detect_root)
-    corr = hf.read_corrections(corrections or hf.CORRECTIONS)
+    corr = hf.read_corrections(corrections or hf.CORRECTIONS, gen=gen)
     rows = []
     for iid in sorted(flags):
         rec = flags[iid]
@@ -675,8 +742,12 @@ def audit_candidates(stage, con=None):
     labels = sp['answers'][:2]
     aimed = fa.targeted(stage)
     edited_dir = os.path.join(P['out'], 'edited')
-    corr = read_audit_corrections(stage)
     c = collections.Counter()
+    # the pool's generation: verdicts and pool share one audit dir (and so one
+    # gen); the corrections file is shared by every page and generation
+    corr = read_audit_corrections(stage, gen=fa.pool_gen(stage), counts=c)
+    if c['other_gen']:
+        c['corrections_other_gen'] = c.pop('other_gen')
     picked = []
     for v in fa.read_verdicts(stage=stage):
         c['verdicts'] += 1
@@ -735,7 +806,7 @@ def audit_candidates(stage, con=None):
     return rows, c
 
 
-def leash_call_candidates(detect_root, corrections=None):
+def leash_call_candidates(detect_root, corrections=None, gen=None):
     """(rows, counts, conflicts) for the review page's leash calls (leash.db).
 
     The image_id comes from the database COLUMN, never the crop's filename --
@@ -759,7 +830,13 @@ def leash_call_candidates(detect_root, corrections=None):
     be queued and called twice. Agreeing calls collapse to the latest;
     disagreeing ones are all dropped and returned as a conflict -- two people
     (or one, twice) said both, and neither answer is the label.
+
+    ONE GENERATION. Only calls whose `gen` column is `gen` (default: the
+    store's, join_gen(detect_root); NULL reads as gen 1) are matched; the
+    rest are counted as `other_gen`. Read through leash_store.read_calls,
+    read-only: a build never migrates the database it reads.
     """
+    import fn_audit as fa
     import harvest_flagged as hf
     import leash_store
     c = collections.Counter()
@@ -767,21 +844,23 @@ def leash_call_candidates(detect_root, corrections=None):
         c['offered'] = 0
         c['ledger_missing'] = 1
         return [], c, []
+    gen = join_gen(detect_root) if gen is None else gen
     try:
-        con = leash_store.connect()
-        try:
-            got = con.execute('SELECT crop, image_id, label, conf, ts, '
-                              'labelled_at, "by" FROM leash').fetchall()
-        finally:
-            con.close()
+        calls = leash_store.read_calls()
     except Exception as e:                # noqa: BLE001 - a store, say so
         raise SystemExit('leash.db unreadable (%s: %s)'
                          % (type(e).__name__, e))
+    got = [r for r in calls if fa.gen_of(r.get(fa.GEN_FIELD)) == gen]
     c['offered'] = len(got)
-    boxes = hf.boxes_for(sorted({str(r[1]) for r in got}), detect_root)
-    corr = hf.read_corrections(corrections or hf.CORRECTIONS)
+    if len(got) != len(calls):
+        c['other_gen'] = len(calls) - len(got)
+    boxes = hf.boxes_for(sorted({str(r['image_id']) for r in got}),
+                         detect_root)
+    corr = hf.read_corrections(corrections or hf.CORRECTIONS, gen=gen)
     per_box = collections.defaultdict(list)
-    for crop, iid, label, conf, _ts, at, by in got:
+    for r in got:
+        crop, iid, label = r['crop'], r['image_id'], r['label']
+        conf, at, by = r['conf'], r['labelled_at'], r[fa.AUTHOR_FIELD]
         iid = str(iid)
         dets = boxes.get(iid) or []
         hit = [d for d in dets if conf is not None
@@ -1790,7 +1869,9 @@ def main(argv=None):
                    help='accept a --detect-root that holds another detector '
                         'generation. Only for ledgers recorded against THAT '
                         'store: every existing ledger carries gen-1 det_idx '
-                        'and confidences.')
+                        'and confidences. Either way only rows tagged with '
+                        'the store\'s own generation (`gen`; untagged = 1) '
+                        'are read.')
     c.add_argument('--workers', type=int, default=4)
     c.add_argument('--s3-python',
                    help='interpreter with boto3 for the few Label Studio '

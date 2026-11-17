@@ -59,6 +59,13 @@ def load_dashboard():
     spec = importlib.util.spec_from_file_location('dash_under_test', DASH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # The payloads below look leash labels up through leash_store, whose
+    # connect() opens -- and migrates, whenever its schema has moved on --
+    # the database it is pointed at. Never the real one: an empty temp path.
+    ls = mod.leash_store()
+    if ls is not None:
+        ls.DB_PATH = os.path.join(tempfile.mkdtemp(prefix='review-leash-'),
+                                  'leash.db')
     return mod
 
 

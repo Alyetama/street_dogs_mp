@@ -50,6 +50,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import store  # noqa: E402
+from fn_audit import GEN_FIELD, gen_of  # noqa: E402
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,10 +67,16 @@ FLAGS = LEDGERS['false_positive']
 CORRECTIONS = os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl')
 
 
-def read_corrections(path):
+def read_corrections(path, *, gen, counts=None):
     """{(image_id, det_idx): (x1, y1, x2, y2)} -- the REVIEW page's redraws.
 
-    Last write wins. Records whose `crop` starts with 'audit:' are skipped:
+    Only redraws made on detector generation `gen` -- the generation of the
+    store the caller joins them against (crop_sources.join_gen). A record's
+    `gen` (absent: gen 1, fn_audit.gen_of) says whose det_idx it carries; one
+    of another generation would move a box nobody redrew, so it is skipped
+    and counted in `counts['other_gen']`. Last write wins, within `gen`.
+
+    Records whose `crop` starts with 'audit:' are skipped:
     the audit pages write their redraws into the same file under the same
     (image_id, det_idx) key, and they mean something else. A leash-audit
     redraw takes in the leash and often the person holding it (92% of them
@@ -93,6 +100,10 @@ def read_corrections(path):
                     continue
                 if str(r.get('crop') or '').startswith('audit:'):
                     continue
+                if gen_of(r.get(GEN_FIELD)) != gen:
+                    if counts is not None:
+                        counts['other_gen'] += 1
+                    continue
                 try:
                     out[(str(r['image_id']), int(r.get('det_idx') or 0))] = (
                         float(r['x1']), float(r['y1']),
@@ -104,8 +115,14 @@ def read_corrections(path):
     return out
 
 
-def read_flags(path, want='false_positive'):
-    """{image_id: record} for one label, last write wins."""
+def read_flags(path, want='false_positive', *, gen, counts=None):
+    """{image_id: record} for one label, last write wins -- among the flags
+    made on detector generation `gen` only.
+
+    A flag names its box by (image_id, conf), and a conf means a box only
+    within one generation: a flag of another (absent `gen`: gen 1,
+    fn_audit.gen_of) is skipped and counted in `counts['other_gen']`.
+    """
     out = {}
     try:
         with open(path) as f:
@@ -117,7 +134,13 @@ def read_flags(path, want='false_positive'):
                     r = json.loads(ln)
                 except ValueError:
                     continue
+                if not isinstance(r, dict):
+                    continue
                 if r.get('label') == want and r.get('image_id'):
+                    if gen_of(r.get(GEN_FIELD)) != gen:
+                        if counts is not None:
+                            counts['other_gen'] += 1
+                        continue
                     out[str(r['image_id'])] = r
     except OSError:
         pass
@@ -252,7 +275,9 @@ def main():
                    'generation. Only for a ledger recorded against THAT '
                    'store: every existing ledger carries gen-1 det_idx and '
                    'confidences, which match nothing (or the wrong box) in '
-                   'another generation.')
+                   'another generation. Either way only rows tagged with '
+                   'the store\'s own generation (`gen`; untagged = 1) are '
+                   'read.')
     p.add_argument('--max-conf',
                    type=float,
                    help='only harvest flags below this detector confidence')
@@ -291,12 +316,18 @@ def main():
                              'recorded against this store.' % why)
     else:
         detect_root = crop_sources.default_detect_root()
+    # the flags and redraws made on this store's detector generation, only
+    gen = crop_sources.join_gen(detect_root)
 
     ledger = args.flags or LEDGERS[args.label]
     cls_dir = 'dog' if args.label == 'true_positive' else 'not_dog'
-    flags = read_flags(ledger, args.label)
+    skipped = {'other_gen': 0}
+    flags = read_flags(ledger, args.label, gen=gen, counts=skipped)
+    if skipped['other_gen']:
+        print(f'  {skipped["other_gen"]:,} {args.label} flag(s) of another '
+              f'detector generation skipped (this store is gen {gen})')
     if not flags:
-        print(f'no {args.label} flags in {ledger}')
+        print(f'no gen-{gen} {args.label} flags in {ledger}')
         return 0
     if args.max_conf is not None:
         flags = {
@@ -359,7 +390,8 @@ def main():
     # Hand-corrected geometry wins over the detector's. Without this the
     # review page's box editor would be decorative: the user drags the box,
     # and the crop is still cut where the model guessed.
-    corr = read_corrections(args.corrections) if args.corrections else {}
+    corr = (read_corrections(args.corrections, gen=gen)
+            if args.corrections else {})
     n_corr = 0
     if corr:
         for iid, dets in boxes.items():

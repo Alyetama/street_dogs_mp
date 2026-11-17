@@ -413,7 +413,7 @@ def check_audit_coverage():
           'gate': _audit_fixture('gate', ('dog', 'not_dog'))}
     real_paths, real_corr = fa.paths, cs.read_audit_corrections
     fa.paths = lambda stage='gate': dict(fx[stage])
-    cs.read_audit_corrections = lambda stage, path=None: {
+    cs.read_audit_corrections = lambda stage, path=None, **_: {
         ('500000000002', 0): (2.0, 3.0, 20.0, 30.0)}
     try:
         got = {st: cs.audit_candidates(st) for st in fx}
@@ -1326,6 +1326,10 @@ def check_leash_calls():
     fake = types.ModuleType('leash_store')
     fake.DB_PATH = db
     fake.connect = lambda: _Q()
+    # what crop_sources reads through: read-only, one dict per row
+    fake.read_calls = lambda path=None: [
+        dict(zip(('crop', 'image_id', 'label', 'conf', 'ts', 'labelled_at',
+                  'by'), r), gen=None) for r in got]
     corr = os.path.join(TMP, 'corr.jsonl')
     with open(corr, 'w') as fh:
         fh.write(json.dumps({'image_id': '972000000001', 'det_idx': 0,
@@ -1341,7 +1345,8 @@ def check_leash_calls():
         i: [(0, 10.0, 20.0, 110.0, 220.0, 0.9 if i.endswith('1') else 0.8)]
         for i in ids}
     try:
-        rows, c, conf = cs.leash_call_candidates('x', corrections=corr)
+        rows, c, conf = cs.leash_call_candidates('x', corrections=corr,
+                                                 gen=1)
     finally:
         hf.boxes_for = saved[1]
         if saved[0] is None:
@@ -1382,7 +1387,7 @@ def check_review_corrections_skip_audit():
         fh.write(json.dumps({'image_id': '973000000002', 'det_idx': 1,
                              'x1': 0, 'y1': 0, 'x2': 99, 'y2': 99,
                              'crop': 'audit:gate'}) + '\n')
-    got = hf.read_corrections(p)
+    got = hf.read_corrections(p, gen=1)
     if got != {('973000000001', 0): (1.0, 1.0, 5.0, 5.0)}:
         return ['D3 the review page\'s corrections reader takes the audit '
                 'pages\' redraws too: %r' % (got,)]
@@ -2371,7 +2376,7 @@ def _patched(obj, name, value, fn):
         setattr(obj, name, real)
 
 
-def _old_read_corrections(path):
+def _old_read_corrections(path, **_):
     # the reader before it skipped the audit pages' records
     out = {}
     for ln in open(path):
@@ -2425,7 +2430,7 @@ MUTANTS = [
                       check_review_corrections_skip_audit)),
     ('D3 a leash call\'s redraw not kept as metadata',
      lambda: _patched(__import__('harvest_flagged'), 'read_corrections',
-                      lambda path: {}, check_leash_calls)),
+                      lambda path, **_: {}, check_leash_calls)),
     ('D3 leash calls cut from the review-page redraw (the old rule)',
      lambda: _patched(cs, 'leash_call_candidates', _mutated(
          cs.leash_call_candidates, 'box = list(det_box)',
