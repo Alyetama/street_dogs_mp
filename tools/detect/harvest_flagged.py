@@ -242,8 +242,17 @@ def main():
                    'of the gen-2 boxes are under 48 px)')
     p.add_argument('--detect-root',
                    help='the store whose det_idx and confidences the ledger '
-                   'was recorded against (default data/detect_root.txt; a '
-                   'disagreeing $DETECT_ROOT is refused)')
+                   'was recorded against (default: the gen-1 store '
+                   'data/ledger_detect_root.txt pins; a disagreeing '
+                   '$DETECT_ROOT is refused). A store whose shards are not '
+                   'only gen=0001 is refused unless --any-generation')
+    p.add_argument('--any-generation',
+                   action='store_true',
+                   help='accept a --detect-root that holds another detector '
+                   'generation. Only for a ledger recorded against THAT '
+                   'store: every existing ledger carries gen-1 det_idx and '
+                   'confidences, which match nothing (or the wrong box) in '
+                   'another generation.')
     p.add_argument('--max-conf',
                    type=float,
                    help='only harvest flags below this detector confidence')
@@ -273,7 +282,15 @@ def main():
     import gate_store
     import crop_sources
     from PIL import Image
-    detect_root = args.detect_root or crop_sources.default_detect_root()
+    if args.detect_root:
+        detect_root = args.detect_root
+        why = crop_sources.ledger_store_refusal(detect_root)
+        if why and not args.any_generation:
+            raise SystemExit('--detect-root refused: %s. Pass '
+                             '--any-generation only if the ledger was '
+                             'recorded against this store.' % why)
+    else:
+        detect_root = crop_sources.default_detect_root()
 
     ledger = args.flags or LEDGERS[args.label]
     cls_dir = 'dog' if args.label == 'true_positive' else 'not_dog'

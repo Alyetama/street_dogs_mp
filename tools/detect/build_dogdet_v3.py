@@ -79,6 +79,28 @@ V2 = os.path.join(TRAINING_ROOT, 'dogdet_v2')
 HARD_POS = os.path.join(REPO, 'data', 'hard_positives', 'labels.jsonl')
 AUDIT_VERDICTS = os.path.join(REPO, 'data', 'fn_audit', 'verdicts.jsonl')
 CORRECTIONS = os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl')
+# The store n_det and the det-0 boxes are read from. main() sets it from
+# --detect-root; unset, detect_root() resolves the pinned ledger root.
+DETECT_ROOT = None
+
+
+def detect_root():
+    """The store the confirmations were made on: --detect-root, else the
+    pinned ledger root (crop_sources.default_detect_root), NEVER the live one.
+
+    A confirmed positive is an image_id a person called a dog on a gen-1
+    crop, and its label box is that store's det 0 (or a correction recorded
+    at gen-1 det 0). Read off the live store after the switch, a frame the
+    gen-1 detector saw several boxes in can turn up single in gen 2, and an
+    unreviewed gen-2 det 0 becomes the dog label with silence everywhere
+    else; a gen-1 correction lands on whatever gen 2 numbered 0.
+    """
+    global DETECT_ROOT
+    if not DETECT_ROOT:
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        import crop_sources
+        DETECT_ROOT = crop_sources.default_detect_root()
+    return DETECT_ROOT
 
 
 def _grid_roots():
@@ -113,7 +135,7 @@ def frame_meta(ids, con):
     """{image_id: (n_det, orig_w, orig_h, cell, drive)} from the sweep store."""
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import store
-    root = store.get_detect_root()
+    root = detect_root()
     img = store._sql_src(store._store_globs(root, 'img'))
     det = store._sql_src(store._store_globs(root, 'det'))
     con.execute("CREATE TEMP TABLE want(image_id VARCHAR)")
@@ -139,18 +161,68 @@ def frame_meta(ids, con):
     return meta, boxes
 
 
+def _store_gens(root):
+    """{gen} of the shards a detector store holds (shards/gen=NNNN)."""
+    try:
+        names = os.listdir(os.path.join(root, 'shards'))
+    except OSError:
+        return set()
+    return {int(n[4:]) for n in names
+            if n.startswith('gen=') and n[4:].isdigit()}
+
+
+def leash_dirs(root):
+    """The leash stage dirs whose verdicts were made on `root`'s boxes.
+
+    data/leash, and any gen-1 record renamed out of its way at the switch
+    (data/leash_gen1_<when>). A dir counts when its plan.json names this
+    store, or -- a plan without detect_root, or no plan at all, being a gen-1
+    record -- when its generation is the store's only one. So a gen-1 build
+    never reads gen-2 calls against gen-1 det 0, nor the other way round.
+    """
+    want = os.path.realpath(root)
+    gens = _store_gens(root)
+    out = []
+    for d in ([os.path.join(REPO, 'data', 'leash')]
+              + sorted(glob.glob(os.path.join(REPO, 'data', 'leash_gen*')))):
+        if not os.path.isdir(d):
+            continue
+        try:
+            with open(os.path.join(d, 'plan.json')) as fh:
+                plan = json.load(fh)
+        except FileNotFoundError:
+            plan = {}
+        except (OSError, ValueError) as e:
+            raise SystemExit('%s/plan.json cannot be read (%s): which store '
+                             'its leash calls were made on is unknown'
+                             % (d, e))
+        if plan.get('detect_root'):
+            ok = os.path.realpath(plan['detect_root']) == want
+        else:
+            ok = gens == {int(plan.get('gen') or 1)}
+        if ok:
+            out.append(d)
+    return out
+
+
 def leashed_ids(ids, con):
-    """The ids the leash stage calls leashed, off its shards in data/leash.
+    """The ids the leash stage calls leashed, off the shards of the leash
+    dirs that judged this build's store (leash_dirs).
 
     Model output, used only to leave frames OUT: an addition carries the
     sweep's dog-only box, and a leashed dog is boxed with its leash
     everywhere a person drew one. Detection 0 only, because an addition is a
-    single-detection frame.
+    single-detection frame -- of the store frame_meta read, which is why the
+    calls must be that store's too: gen-2 det 0 is not gen-1 det 0.
     """
     # the stage's shards only: work.parquet sits beside them, and an archive
     # of a re-run sits below them
-    shards = sorted(glob.glob(os.path.join(REPO, 'data', 'leash',
-                                           'leash-*.parquet')))
+    dirs = leash_dirs(detect_root())
+    shards = sorted(p for d in dirs
+                    for p in glob.glob(os.path.join(d, 'leash-*.parquet')))
+    print(f'leash calls for {detect_root()}: {len(shards)} shard(s) in '
+          f'{[os.path.relpath(d, REPO) for d in dirs] or "no leash dir"}',
+          flush=True)
     if not shards or not ids:
         return set()
     con.execute("CREATE OR REPLACE TEMP TABLE lwant(image_id VARCHAR)")
@@ -246,7 +318,34 @@ def main(argv=None):
                          'drawn round the dog only, where a leashed dog in '
                          'Label Studio is boxed with its leash -- the mixed '
                          'convention that teaches the model both boxes')
+    ap.add_argument('--detect-root', default=None,
+                    help='the store n_det and the det-0 label boxes are read '
+                         'from (default: the pinned ledger root, '
+                         'data/ledger_detect_root.txt). The confirmations and '
+                         'box corrections are gen-1, so another store reads '
+                         'them against boxes nobody confirmed, and one whose '
+                         'shards are not only gen=0001 is refused unless '
+                         '--any-generation')
+    ap.add_argument('--any-generation', action='store_true',
+                    help='accept a --detect-root that holds another detector '
+                         'generation. Only for confirmations and corrections '
+                         'recorded against THAT store: every existing one '
+                         'carries gen-1 det_idx.')
     a = ap.parse_args(argv)
+    global DETECT_ROOT
+    DETECT_ROOT = None
+    if a.detect_root:
+        if not os.path.isdir(os.path.join(a.detect_root, 'shards')):
+            raise SystemExit('%s has no shards/ -- it is not a detector '
+                             'store' % (a.detect_root,))
+        sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+        import crop_sources
+        why = crop_sources.ledger_store_refusal(a.detect_root)
+        if why and not a.any_generation:
+            raise SystemExit('--detect-root refused: %s. Pass '
+                             '--any-generation only if the confirmations '
+                             'were recorded against this store.' % why)
+        DETECT_ROOT = os.path.abspath(a.detect_root)
     if a.src:
         # Module-level because the reading and writing below reach for it by
         # name in half a dozen places; rebinding it here is what makes one
@@ -457,6 +556,8 @@ def main(argv=None):
     n_bg['train'] += sum(1 for *_, t in framed_added if not t)
     manifest = {
         'src': V2, 'seed': a.seed,
+        # the store n_det and the det-0 boxes came from
+        'detect_root': DETECT_ROOT,
         'train': n_train, 'val': len(new_val),
         'backgrounds_train': n_bg['train'], 'backgrounds_val': n_bg['val'],
         'holdout': sorted(holdout),

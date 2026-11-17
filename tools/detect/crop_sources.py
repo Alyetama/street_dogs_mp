@@ -233,25 +233,75 @@ def low_priority():
                        capture_output=True)
 
 
+LEDGER_ROOT_FILE = 'ledger_detect_root.txt'
+LEDGER_SHARDS = ['gen=0001']
+
+
+def ledger_store_refusal(root):
+    """Why the human ledgers cannot be joined against `root`, or None.
+
+    They are joined by det_idx and confidence, and those belong to the gen-1
+    detector: a gen-2 store numbers its boxes differently, so a reviewer's
+    "0.82, not a dog" would match nothing (2,844 hard negatives became 11) or
+    a different box. So the store must hold gen=0001 shards and nothing else.
+    """
+    shards = os.path.join(root, 'shards')
+    try:
+        gens = sorted(os.listdir(shards))
+    except OSError as e:
+        return '%s cannot be listed (%s)' % (shards, e.strerror or e)
+    if gens != LEDGER_SHARDS:
+        return ('%s holds %s, not only %s: the human ledgers carry gen-1 '
+                'det_idx and confidences, and another generation numbers '
+                'its boxes differently'
+                % (shards, ', '.join(gens) or 'nothing', LEDGER_SHARDS[0]))
+    return None
+
+
 def default_detect_root():
-    """The gen-1 store, from data/detect_root.txt -- NOT $DETECT_ROOT.
+    """The gen-1 store, from data/ledger_detect_root.txt -- NOT
+    data/detect_root.txt, NOT $DETECT_ROOT.
 
     Every det_idx and confidence a human ledger holds was recorded against
-    the gen-1 detector. $DETECT_ROOT exists so a candidate detector can sweep
-    into a side store; a build that followed it would match a reviewer's
-    "0.82, not a dog" against another detector's boxes. So the file decides,
-    and a disagreeing environment is refused unless --detect-root says which
-    one is meant.
+    the gen-1 detector. data/detect_root.txt names the LIVE store, which
+    moves to gen 2 at the switch-over; $DETECT_ROOT exists so a candidate
+    detector can sweep into a side store. A build that followed either would
+    match a reviewer's "0.82, not a dog" against another detector's boxes.
+    So the pinned file (gitignored, the absolute path of the gen-1 store)
+    decides. A missing pin is refused -- never a fallback to the live
+    pointer -- and so is a pinned store whose shards are not only gen=0001,
+    and a $DETECT_ROOT that disagrees with the pin. An explicit --detect-root
+    skips the pin, but the CLIs put it through ledger_store_refusal too.
     """
-    with open(D('detect_root.txt')) as fh:
-        root = fh.read().strip()
+    pin = D(LEDGER_ROOT_FILE)
+    try:
+        with open(pin) as fh:
+            root = fh.read().strip()
+    except OSError as e:
+        raise SystemExit(
+            '%s cannot be read (%s). It names the gen-1 store the human '
+            'ledgers\' det_idx and confidences were recorded against; '
+            'data/detect_root.txt is not consulted, because it names the '
+            'live store, whichever generation that is. Write the absolute '
+            'path of the gen-1 store into it, or pass --detect-root.'
+            % (pin, e.strerror or e))
+    if not os.path.isabs(root):
+        raise SystemExit('%s must hold one absolute path (the gen-1 store), '
+                         'not %r' % (pin, root))
+    root = os.path.normpath(root)
     env = os.environ.get('DETECT_ROOT', '').strip().rstrip('/')
     if env and os.path.realpath(env) != os.path.realpath(root):
         raise SystemExit(
-            '$DETECT_ROOT (%s) is not the store data/detect_root.txt names '
-            '(%s). The human ledgers carry gen-1 det_idx and confidences; '
-            'pass --detect-root explicitly if you really mean another store.'
-            % (env, root))
+            '$DETECT_ROOT (%s) is not the store data/%s pins (%s). The '
+            'human ledgers carry gen-1 det_idx and confidences, which match '
+            'nothing (or the wrong box) in another generation; unset it. '
+            'An explicit --detect-root is itself refused unless it holds '
+            'only gen=0001 shards.'
+            % (env, LEDGER_ROOT_FILE, root))
+    why = ledger_store_refusal(root)
+    if why:
+        raise SystemExit('the store data/%s pins is not the gen-1 store: %s'
+                         % (LEDGER_ROOT_FILE, why))
     return root
 
 
@@ -1732,8 +1782,15 @@ def main(argv=None):
     c.add_argument('--ls-export', help='Label Studio JSON_MIN export')
     c.add_argument('--detect-root',
                    help='the store whose det_idx the ledgers carry (default: '
-                        'data/detect_root.txt; a disagreeing $DETECT_ROOT is '
-                        'refused unless this is given)')
+                        'the gen-1 store data/ledger_detect_root.txt pins; a '
+                        'disagreeing $DETECT_ROOT is refused unless this is '
+                        'given). A store whose shards are not only gen=0001 '
+                        'is refused unless --any-generation')
+    c.add_argument('--any-generation', action='store_true',
+                   help='accept a --detect-root that holds another detector '
+                        'generation. Only for ledgers recorded against THAT '
+                        'store: every existing ledger carries gen-1 det_idx '
+                        'and confidences.')
     c.add_argument('--workers', type=int, default=4)
     c.add_argument('--s3-python',
                    help='interpreter with boto3 for the few Label Studio '
@@ -1762,7 +1819,15 @@ def main(argv=None):
     if a.ls_export:
         with open(a.ls_export) as fh:
             tasks = json.load(fh)
-    root = a.detect_root or default_detect_root()
+    if a.detect_root:
+        root = a.detect_root
+        why = ledger_store_refusal(root)
+        if why and not a.any_generation:
+            raise SystemExit('--detect-root refused: %s. Pass '
+                             '--any-generation only if the ledgers were '
+                             'recorded against this store.' % why)
+    else:
+        root = default_detect_root()
     collect(a.family, a.stage, tasks, a.ls_export, detect_root=root,
             workers=a.workers, s3_python=a.s3_python,
             frames_dir=a.frames_dir,

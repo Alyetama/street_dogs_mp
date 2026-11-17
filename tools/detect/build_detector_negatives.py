@@ -48,6 +48,31 @@ import sys
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ID_RE = re.compile(r'\d{6,}')
+# The store the flags are matched against. main() sets it from --detect-root;
+# unset, detect_root() resolves the pinned ledger root.
+DETECT_ROOT = None
+
+
+def _crop_sources():
+    sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+    import crop_sources
+    return crop_sources
+
+
+def detect_root():
+    """The store the flags were made on: --detect-root, else the pinned
+    ledger root (crop_sources.default_detect_root), NEVER the live one.
+
+    A flag is an image_id and a gen-1 conf. "Every detection on this frame
+    was flagged" is a statement about the gen-1 boxes; asked of the live
+    store after the switch, 1,725 single-detection frames have no gen-2
+    detection at all and drop out, and frames newly single in gen 2 go in
+    as "no dog here" on a box nobody looked at.
+    """
+    global DETECT_ROOT
+    if not DETECT_ROOT:
+        DETECT_ROOT = _crop_sources().default_detect_root()
+    return DETECT_ROOT
 
 
 def ids_in(d):
@@ -83,7 +108,13 @@ def flagged_ids(ledger):
 
 
 def detections_per_image(ids, repo):
-    """{image_id: n detections} from the predictions store.
+    """{image_id: n detections} from the predictions store (detect_root()).
+
+    Given a mapping {image_id: flag row} rather than bare ids, a frame with
+    ONE detection whose conf is not within CONF_TOL (0.006) of the flag's --
+    or whose flag carries no conf -- comes back as None, not 1: its lone box
+    is not the one the person flagged, so nobody vouched for it and an empty
+    label would call it "no dog here" on nobody's word.
 
     count(DISTINCT det_idx), not count(*). The store keys on
     (image_id, det_idx, cell, drive) and a frame the harvest wrote into two
@@ -100,19 +131,29 @@ def detections_per_image(ids, repo):
     sys.path.insert(0, os.path.join(repo, 'tools', 'detect'))
     import duckdb
     import store as _store
-    root = _store.get_detect_root()
+    root = detect_root()
     src = _store._sql_src(_store._store_globs(root, 'det'))
     con = duckdb.connect()
     try:
         lst = "','".join(sorted(ids))
         rows = con.execute(
-            f"SELECT CAST(image_id AS VARCHAR), count(DISTINCT det_idx) "
+            f"SELECT CAST(image_id AS VARCHAR), count(DISTINCT det_idx), "
+            f"min(conf), max(conf) "
             f"FROM {src} WHERE CAST(image_id AS VARCHAR) IN ('{lst}') "
             f"GROUP BY 1"
         ).fetchall()
     finally:
         con.close()
-    return {i: n for i, n in rows}
+    out = {i: n for i, n, _, _ in rows}
+    if isinstance(ids, dict):
+        tol = _crop_sources().CONF_TOL
+        for i, n, lo, hi in rows:
+            want = (ids.get(i) or {}).get('conf')
+            if n == 1 and (want is None or lo is None
+                           or abs(float(lo) - float(want)) > tol
+                           or abs(float(hi) - float(want)) > tol):
+                out[i] = None
+    return out
 
 
 def resolve_originals(ids, roots_file, repo):
@@ -123,14 +164,13 @@ def resolve_originals(ids, roots_file, repo):
     over 32.5M files.
     """
     sys.path.insert(0, os.path.join(repo, 'tools', 'detect'))
-    import store as _store
     from harvest_flagged import cells_for, roots_by_drive
     try:
         roots = [ln.strip() for ln in open(roots_file)
                  if ln.strip() and not ln.startswith('#')]
     except OSError:
         raise SystemExit(f'no roots file at {roots_file}')
-    placed = cells_for(list(ids), _store.get_detect_root())
+    placed = cells_for(list(ids), detect_root())
     by_drive = roots_by_drive(roots)
     out = {}
     for iid, (cell, drive) in placed.items():
@@ -174,8 +214,31 @@ def main(argv=None):
                          'a dog in it')
     ap.add_argument('--no-hidden-dogs', action='store_true',
                     help='ignore the hidden-dog store')
+    ap.add_argument('--detect-root', default=None,
+                    help='the store the flags are matched against (default: '
+                         'the pinned ledger root, data/ledger_detect_root.txt'
+                         '). The flags carry gen-1 confs; another store '
+                         'matches them against boxes nobody flagged, so one '
+                         'whose shards are not only gen=0001 is refused '
+                         'unless --any-generation')
+    ap.add_argument('--any-generation', action='store_true',
+                    help='accept a --detect-root that holds another detector '
+                         'generation. Only for flags recorded against THAT '
+                         'store: every existing flag carries a gen-1 conf.')
     ap.add_argument('--execute', action='store_true')
     args = ap.parse_args(argv)
+    global DETECT_ROOT
+    DETECT_ROOT = None
+    if args.detect_root:
+        if not os.path.isdir(os.path.join(args.detect_root, 'shards')):
+            raise SystemExit(f'{args.detect_root} has no shards/ -- it is '
+                             f'not a detector store')
+        why = _crop_sources().ledger_store_refusal(args.detect_root)
+        if why and not args.any_generation:
+            raise SystemExit(f'--detect-root refused: {why}. Pass '
+                             f'--any-generation only if the flags were '
+                             f'recorded against this store.')
+        DETECT_ROOT = os.path.abspath(args.detect_root)
 
     rng = random.Random(args.seed)
     tr_img = os.path.join(args.src, 'images', 'train')
@@ -198,11 +261,15 @@ def main(argv=None):
     print(f'  {len(flags) - len(cand)} already in the detector set '
           f'-> {len(cand)} candidates')
 
-    # 2. only frames whose every detection was flagged
-    per = detections_per_image(cand, REPO)
+    # 2. only frames whose every detection was flagged: ONE detection, and
+    #    that one the flagged box (its conf within 0.006 of the flag's)
+    per = detections_per_image({i: flags[i] for i in cand}, REPO)
     safe = {i for i in cand if per.get(i) == 1}
-    print(f'  {len(cand) - len(safe)} carry 2+ detections with the others '
-          f'unverified -> {len(safe)} safe')
+    not_flagged = sorted(i for i in cand if i in per and per[i] is None)
+    print(f'  {len(not_flagged)} carry one detection that is not the flagged '
+          f'box (conf off by more than 0.006, or none on the flag)')
+    print(f'  {len(cand) - len(safe) - len(not_flagged)} carry 2+ detections '
+          f'with the others unverified, or none -> {len(safe)} safe')
 
     # 3. the ORIGINAL jpg, resolved through the store's (cell, drive)
     #
@@ -320,7 +387,10 @@ def main(argv=None):
         'src': args.src,
         'flagged_in_ledger': len(flags),
         'already_in_src': len(flags) - len(cand),
-        'multi_detection_skipped': len(cand) - len(safe),
+        'multi_detection_skipped': len(cand) - len(safe) - len(not_flagged),
+        'lone_detection_not_flagged': len(not_flagged),
+        # the store the flags were matched against
+        'detect_root': DETECT_ROOT,
         'unresolved_to_original': (len(safe) - len(have) - len(leaked) -
                                    len(in_test)),
         'val_sequence_skipped': len(leaked),

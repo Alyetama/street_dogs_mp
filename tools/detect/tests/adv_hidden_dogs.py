@@ -396,7 +396,7 @@ try:
             return {'raised': repr(e)}, []
 
     try:
-        neg.flagged_ids = lambda ledger: set(cands)
+        neg.flagged_ids = lambda ledger: {i: {} for i in cands}
         neg.detections_per_image = lambda ids, repo: {i: 1 for i in ids}
         neg.resolve_originals = lambda ids, rf, repo: {
             i: origs[i]

@@ -1455,10 +1455,14 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
                 'build without them, on the record')
         if ls_export_path and not os.path.isfile(ls_export_path):
             raise SystemExit('no such export: %s' % (ls_export_path,))
-        if detect_root is None:
-            sys.path.insert(0, DETECT)
-            import crop_sources
-            detect_root = crop_sources.default_detect_root()
+    # EVERY family joins the human ledgers to a store -- the crop models by
+    # conf, the detector by n_det and det 0 -- and those were recorded against
+    # the gen-1 store. So both default to the pinned ledger root, never the
+    # live one, and the manifest says which store it was.
+    if detect_root is None:
+        sys.path.insert(0, DETECT)
+        import crop_sources
+        detect_root = crop_sources.default_detect_root()
     duckdb_python = duckdb_python or sys.executable
     # The crops are cut with cv2, which lives in the training environment;
     # duckdb lives in the dashboard's. Neither has both, which is why the
@@ -1566,12 +1570,14 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
             run.run('build_dogdet_v3',
                     [sys.executable, os.path.join(DETECT,
                                                   'build_dogdet_v3.py'),
-                     '--src', src, '--out', mid])
+                     '--src', src, '--out', mid,
+                     '--detect-root', detect_root])
             run.progress(2, 'backgrounds from the false positives')
             run.run('build_detector_negatives',
                     [sys.executable,
                      os.path.join(DETECT, 'build_detector_negatives.py'),
                      '--src', mid, '--out', out,
+                     '--detect-root', detect_root,
                      '--duckdb-python', duckdb_python, '--execute'])
             # The first step writes its record into the STAGE directory,
             # which is about to be deleted -- and that record holds the
@@ -1846,9 +1852,11 @@ def main(argv=None):
                          'bundle\'s label_studio_export.json) instead of '
                          'fetching a fresh one')
     ap.add_argument('--detect-root',
-                    help='crop models: the store the ledgers\' det_idx and '
-                         'confidences belong to (default data/detect_root.txt'
-                         '; a disagreeing $DETECT_ROOT is refused)')
+                    help='the store the ledgers\' det_idx and confidences '
+                         'belong to, for every family (default: the pinned '
+                         'ledger root, data/ledger_detect_root.txt; a '
+                         'disagreeing $DETECT_ROOT is refused, and so is a '
+                         'store whose shards are not only gen=0001)')
     ap.add_argument('--size-ref-root',
                     help='crop models: the store production judges, for the '
                          'size report (default: the size_ref_root config key, '

@@ -157,14 +157,12 @@ def p1_p2(tmp):
           f'{len(hit)} boxes matched the flagged confidence -- the harvest '
           f'calls that ambiguous and drops the human verdict')
 
-    import store
     import build_detector_negatives as bdn
-    real_root = store.get_detect_root
-    store.get_detect_root = lambda *a, **k: root
+    bdn.DETECT_ROOT = root
     try:
         per = bdn.detections_per_image({'111', '222'}, REPO)
     finally:
-        store.get_detect_root = real_root
+        bdn.DETECT_ROOT = None
     check('p2 detections_per_image counts detections, not store rows',
           per.get('111') == 1 and per.get('222') == 2,
           f'a one-detection frame in two cells read as {per.get("111")} '
