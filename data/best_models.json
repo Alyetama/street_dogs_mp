@@ -13,7 +13,7 @@
     "A model's 'deployed' flag means the sweep actually runs it right now, which is not the same as being promoted. Only stage 1 is deployed today; the gate and leash classifier are accepted but not yet wired into sweep.py."
   ],
   "workspace": "alyetama",
-  "updated_at": "2026-11-16",
+  "updated_at": "2026-11-17",
   "projects": {
     "dogdetection": {
       "role": "detector - finds dogs in street imagery, one class (the sweep runs this). The HARVEST collects ground animals; this model is trained single_cls on a set whose only class is \"target\" = dog, so a non-dog animal in its output is a false positive, which is what the dog-bin gate downstream exists to catch.",
@@ -31,8 +31,8 @@
         "engine": "data/engines/yolo26x_dogdet_20261104.engine",
         "sha256_engine": "047b6268df683427eb2a648d2e7b916468c59910df3cffb372ae0d02e3993343",
         "count_conf_min": 0.25,
-        "why": "Promoted 2026-11-15. Fine-tune of the 0923 model on the Nov 2026 labels (last.pt, epoch 25; metrics are on its own val set, not comparable to train-30's). Exported end to end with ultralytics 8.4.115. On 100k random frames, with its dogs counted only at detector conf > 0.25, it counts about +330 more real dogs than train-30 at about the same number of false ones (blinded review, 2026-11-09). Being re-swept as gen 2 into a separate store; it becomes 'best' and deployed once that store goes live. NOT wired in yet: the live store (data/detect_root.txt) and every count on the page are still train-30's. dogdet_20261104 has swept all 32.5M images into its own store (data/detect_dogdet20261104); it goes live at switch-over, once the gen-2 gate and leash runs over that store are done.",
-        "deployed": false
+        "why": "Promoted 2026-11-15. Fine-tune of the 0923 model on the Nov 2026 labels (last.pt, epoch 25; metrics are on its own val set, not comparable to train-30's). Exported end to end with ultralytics 8.4.115. On 100k random frames, with its dogs counted only at detector conf > 0.25, it counts about +330 more real dogs than train-30 at about the same number of false ones (blinded review, 2026-11-09). Live since 2026-11-17: its gen-2 store (data/detect_dogdet20261104) replaced train-30's as data/detect_root.txt, with the gen-2 gate (dog-bin) and leash (DINOv3) passes over that store. Human ledgers stay on the gen-1 store via data/ledger_detect_root.txt.",
+        "deployed": true
       },
       "stage": 1,
       "short": "Detector",
@@ -53,7 +53,7 @@
           "engine": "data/engines/yolo26x_train30.engine",
           "sha256_engine": "ac98daeecefa24406f2f776348f0eb7101f94b7fc1267ef6d7fbde19950f0803",
           "why": "[still in production until the gen-2 switch-over; superseded as the promoted detector 2026-11-15 by dogdet_20261104] In production: this is the engine sweeping all 32.5M images. Best mAP50-95 (0.4973) and best recall (0.8764) in the project. train-28 edges it on mAP50 by 0.0008 but loses 3.4 points of recall, and recall is what matters when a missed dog is unrecoverable and a false positive is one click in the review page.",
-          "deployed": true
+          "deployed": false
         }
       ]
     },
@@ -215,25 +215,40 @@
     "leash-models": {
       "role": "leash classifier - leashed vs unleashed, on crops the gate passes",
       "best": {
-        "run": "leash_20261115_bbf19d_20261115-1958",
+        "run": "leash_dinov3_pad050_20261117",
         "key": null,
-        "date": "2026-11-16",
-        "dataset": "leash_20261115_bbf19d",
-        "weights": "runs/classify/leash-models/leash_20261115_bbf19d_20261115-1958/weights/best.pt",
-        "imgsz": 640,
+        "date": "2026-11-17",
+        "vit_model": "leash-models/leash_dinov3_pad050_20261117",
+        "imgsz": 448,
         "metrics": {
-          "test_v1_balanced_accuracy_t0.5": 0.8102,
-          "test_v1_leashed_recall_t0.5": 0.8483,
-          "test_v1_unleashed_recall_t0.5": 0.7721,
-          "test_v1_roc_auc": 0.8755,
-          "balanced_accuracy_acceptance": 0.869,
-          "roc_auc_acceptance": 0.9451,
-          "balanced_accuracy_val": 0.8622
+          "test_v1_balanced_accuracy_t0.5": 0.9163,
+          "test_v1_leashed_recall_t0.5": 0.8989,
+          "test_v1_unleashed_recall_t0.5": 0.9338,
+          "test_v1_roc_auc": 0.9673
         },
-        "why": "Promoted 2026-11-16 over leash_v2_001 on the frozen data/leash_test_v1.json (628 leash-audit human verdicts: 356 leashed / 272 unleashed, withheld by key, image_id and sequence before any current split; full/ production detector-box crops, sha256-verified, imgsz 640, unweighted, t=0.5): balanced accuracy 0.810 vs 0.681, paired bootstrap 95% CI of the difference [+0.087, +0.169], McNemar exact p<1e-6 (134 items only this model gets right vs 50). Also ahead of leash_v2_003 (0.705; CI [+0.065, +0.144]). Leashed recall 0.848 vs 0.688, unleashed 0.772 vs 0.673, AUC 0.876 vs 0.743; ahead in every size band, largest on small crops (<=64 px: leashed recall 0.68 vs 0.23). Chosen over its rebalanced sibling leash_20261115_2965b7 (same recipe, creator cap 65 + size-band balance, 2,827 crops): 0.810 vs 0.800, CI [-0.022, +0.042], p=0.69 -- a tie, settled by the key metric and the larger training set; the sibling is better on the 71 audit-redrawn items (0.672 vs 0.505) and AUC (0.883 vs 0.876). Trained on leash_20261115_bbf19d (3,744 human-labelled crops re-cut at production framing = the detector box, sequence-split with capture twins joined, per-sequence cap 5, test and acceptance sets reserved); early-stopped at epoch 180, best epoch 80, patience 100.",
-        "caveat": "On the older acceptance set (data/leash_acceptance_set.json, scored on harvest/leash_src crops -- the leash_v2-era framing, partly leash-inclusive redraws) it scores 0.869 balanced / 0.945 AUC against leash_v2_001's recorded 0.895 / 0.959. That set is framed the way leash_v2 was trained, not the way production cuts crops, which is why the frozen test set (production framing) decides. Known weak slices: audit items whose redraw left the leash outside the detector box (32 items, BA 0.27 -- every model fails these), East Asia (11 items) and Southeast Asia (69 items, BA 0.68). Not yet scored on gen-2-only boxes."
+        "why": "Promoted 2026-11-17 over leash_20261115_bbf19d on the frozen data/leash_test_v1.json (628 items, scored once): balanced accuracy 0.916 [0.894, 0.937] vs 0.810, paired difference +0.106 [+0.071, +0.141], McNemar 92 vs 30. DINOv3 ViT-L/16 (facebook/dinov3-vitl16-pretrain-lvd1689m), last 4 blocks + head fine-tuned on human-labelled crops, pad050 framing (detector box grown by half its long side), 448 letterbox. Won 5-fold CV first (0.908 vs frozen probe 0.888). Runs through gate_store --vit-model (tools/detect/leash_vit.py), batch 32 bf16, bit-exact to training via parity.json. The test set is now spent for leash comparisons.",
+        "caveat": "Still fails where the leash lies outside the detector box (audit redraw IoU < 0.5, 32 items: BA 0.23). Small crops (<=64 px short side, 41 items) BA 0.83. Not scored on gen-2-only boxes."
       },
       "candidates": [
+        {
+          "run": "leash_20261115_bbf19d_20261115-1958",
+          "key": null,
+          "date": "2026-11-16",
+          "dataset": "leash_20261115_bbf19d",
+          "weights": "runs/classify/leash-models/leash_20261115_bbf19d_20261115-1958/weights/best.pt",
+          "imgsz": 640,
+          "metrics": {
+            "test_v1_balanced_accuracy_t0.5": 0.8102,
+            "test_v1_leashed_recall_t0.5": 0.8483,
+            "test_v1_unleashed_recall_t0.5": 0.7721,
+            "test_v1_roc_auc": 0.8755,
+            "balanced_accuracy_acceptance": 0.869,
+            "roc_auc_acceptance": 0.9451,
+            "balanced_accuracy_val": 0.8622
+          },
+          "why": "Promoted 2026-11-16 over leash_v2_001 on the frozen data/leash_test_v1.json (628 leash-audit human verdicts: 356 leashed / 272 unleashed, withheld by key, image_id and sequence before any current split; full/ production detector-box crops, sha256-verified, imgsz 640, unweighted, t=0.5): balanced accuracy 0.810 vs 0.681, paired bootstrap 95% CI of the difference [+0.087, +0.169], McNemar exact p<1e-6 (134 items only this model gets right vs 50). Also ahead of leash_v2_003 (0.705; CI [+0.065, +0.144]). Leashed recall 0.848 vs 0.688, unleashed 0.772 vs 0.673, AUC 0.876 vs 0.743; ahead in every size band, largest on small crops (<=64 px: leashed recall 0.68 vs 0.23). Chosen over its rebalanced sibling leash_20261115_2965b7 (same recipe, creator cap 65 + size-band balance, 2,827 crops): 0.810 vs 0.800, CI [-0.022, +0.042], p=0.69 -- a tie, settled by the key metric and the larger training set; the sibling is better on the 71 audit-redrawn items (0.672 vs 0.505) and AUC (0.883 vs 0.876). Trained on leash_20261115_bbf19d (3,744 human-labelled crops re-cut at production framing = the detector box, sequence-split with capture twins joined, per-sequence cap 5, test and acceptance sets reserved); early-stopped at epoch 180, best epoch 80, patience 100.",
+          "caveat": "On the older acceptance set (data/leash_acceptance_set.json, scored on harvest/leash_src crops -- the leash_v2-era framing, partly leash-inclusive redraws) it scores 0.869 balanced / 0.945 AUC against leash_v2_001's recorded 0.895 / 0.959. That set is framed the way leash_v2 was trained, not the way production cuts crops, which is why the frozen test set (production framing) decides. Known weak slices: audit items whose redraw left the leash outside the detector box (32 items, BA 0.27 -- every model fails these), East Asia (11 items) and Southeast Asia (69 items, BA 0.68). Not yet scored on gen-2-only boxes."
+        },
         {
           "run": "leash_20261115_2965b7_20261116-0000",
           "key": null,
