@@ -31,7 +31,23 @@ dog together, a bin) remove a box the gate called a dog: 32,108 gate-kept
 dogs, and 20,799 frames that hold a dog would have read as dog-free. Within
 the gate's call, a dog is only ever removed by another dog box covering it,
 which is the duplicate the count wants gone -- and no frame loses its last
-dog, because the frame's surest dog box always survives.
+dog to NMS, because the frame's surest dog box always survives (the conf
+floor below can still empty a frame whose every dog is under it).
+
+THE COUNT-TIME CONF CUTOFF. A detector can be promoted on the strength of
+a count taken above a confidence floor (data/best_models.json,
+count_conf_min: the blinded review that promoted dogdet_20261104 counted at
+conf > 0.25), while its sweep stored boxes down to the sweep's own floor.
+Every box at conf <= that floor is suppressed in BOTH sets, beside the
+duplicates, so every count the dashboard takes through the sidecar is taken
+above it. The floor is per engine: keyed on the store's model_sha8 column
+(sha256 of the engine, first 8 hex), looked up in best_models.json's
+detector project (best and candidates). A box with no model_sha8 (gen-1
+shards predate the column) or an engine with no count_conf_min is counted
+at every conf, exactly as before. Applying it after NMS is exact, not an
+approximation: det_idx is conf-descending, so a box under the floor only
+ever suppresses boxes under it too. Such a row has sup_box/sup_gate true and
+by_box/by_gate NULL unless NMS dropped it as well; the meta reports how many.
 
 Greedy order is det_idx (the store writes them surest first; ties are already
 broken). A box is suppressed when its IoU with a KEPT box of its group is
@@ -46,9 +62,9 @@ Outputs (both written atomically): data/dashboard/box_nms.parquet -- one row
 per suppressed box: image_id UBIGINT, det_idx UTINYINT, sup_box, sup_gate,
 by_box, by_gate (the det_idx that suppressed it, NULL where not) -- and
 data/dashboard/box_nms.json, the meta: the signature of the det shards and
-gate shards it was computed from, the rule, and the counts. A consumer that
-finds the meta stale (current()) must count raw and say so; it must never
-apply a suppression set computed from another store.
+gate shards it was computed from, the rule, the conf floors, and the
+counts. A consumer that finds the meta stale (current()) must count raw and
+say so; it must never apply a suppression set computed from another store.
 """
 
 import argparse
@@ -63,6 +79,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 OUT_DIR = os.path.join(REPO, 'data', 'dashboard')
 GATE_DIR = os.path.join(REPO, 'data', 'gate')
+BEST_MODELS = os.path.join(REPO, 'data', 'best_models.json')
+DET_PROJECT = 'dogdetection'     # the detector's entry in best_models.json
 PARQUET = 'box_nms.parquet'
 META = 'box_nms.json'
 
@@ -118,13 +136,50 @@ def _stat_sig(paths):
     return hashlib.sha256(json.dumps(ent).encode()).hexdigest()
 
 
-def signatures(det_root, gate_dir):
-    """(det_sig, gate_sig, sig). sig also covers the rule and threshold, so a
-    change of either rebuilds instead of reading as current."""
+def conf_cutoffs(path=None):
+    """{model_sha8: count_conf_min} for the detector's engines, from
+    best_models.json (best and candidates). No file -> {} (a checkout without
+    data/). An entry that names a cutoff but cannot be keyed by its engine,
+    or two that disagree on one engine, is refused: a cutoff dropped here
+    would publish counts without it and nothing would say so."""
+    path = path or BEST_MODELS
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    proj = ((doc.get('projects') or {}).get(DET_PROJECT) or {}
+            if isinstance(doc, dict) else {})
+    out = {}
+    for e in [proj.get('best')] + list(proj.get('candidates') or []):
+        if not isinstance(e, dict) or e.get('count_conf_min') is None:
+            continue
+        sha = e.get('sha256_engine')
+        c = e.get('count_conf_min')
+        if not isinstance(sha, str) or len(sha) < 8:
+            raise ValueError(f"{DET_PROJECT} entry {e.get('run')!r} has "
+                             'count_conf_min but no sha256_engine to key it')
+        if (isinstance(c, bool) or not isinstance(c, (int, float))
+                or not 0 <= c < 1):
+            raise ValueError(f"{DET_PROJECT} entry {e.get('run')!r}: "
+                             f'count_conf_min {c!r} is not in [0, 1)')
+        k = sha[:8].lower()
+        if k in out and out[k] != float(c):
+            raise ValueError(f'two count_conf_min for engine {k}')
+        out[k] = float(c)
+    return out
+
+
+def signatures(det_root, gate_dir, cut=None):
+    """(det_sig, gate_sig, sig). sig also covers the rule, the threshold and
+    the conf cutoffs, so a change of any rebuilds instead of reading as
+    current. With no cutoff configured the sig is the one it always was."""
     d = _stat_sig(det_files(det_root))
     g = _stat_sig(gate_files(gate_dir))
-    s = hashlib.sha256(json.dumps([SCHEMA, IOU, P_DOG_MIN, RULE, d, g])
-                       .encode()).hexdigest()
+    parts = [SCHEMA, IOU, P_DOG_MIN, RULE, d, g]
+    if cut:
+        parts.append(['count_conf_min', sorted(cut.items())])
+    s = hashlib.sha256(json.dumps(parts).encode()).hexdigest()
     return d, g, s
 
 
@@ -160,9 +215,11 @@ def current(out_dir=None, det_root=None, gate_dir=None):
         return None
     try:
         det_root = det_root or det_root_default()
+        # unreadable cutoffs: not current, so the page counts raw and says so
+        cut = conf_cutoffs()
     except Exception:
         return None
-    _, _, sig = signatures(det_root, gate_dir or GATE_DIR)
+    _, _, sig = signatures(det_root, gate_dir or GATE_DIR, cut)
     if meta.get('sig') != sig:
         return None
     meta = dict(meta)
@@ -187,8 +244,10 @@ def dedup_note(meta):
     """What a payload records about the suppression it applied (or None)."""
     if not meta:
         return None
+    # count_conf_min: {model_sha8: floor} actually applied ({} = none)
     return {'iou': meta['iou'], 'rule': meta['rule'], 'sig': meta['sig'],
-            'built_at': meta.get('built_at')}
+            'built_at': meta.get('built_at'),
+            'count_conf_min': meta.get('count_conf_min') or {}}
 
 
 def greedy(img, i, j, n_levels):
@@ -244,7 +303,8 @@ def build(det_root=None, gate_dir=None, out_dir=None, force=False,
         return (old and old.get('sig') == sig
                 and _parquet_ok(os.path.join(out_dir, PARQUET), old))
 
-    dsig, gsig, sig = signatures(det_root, gate_dir)
+    cut = conf_cutoffs()
+    dsig, gsig, sig = signatures(det_root, gate_dir, cut)
     if not force and fresh(sig):
         return {'built': False, 'reason': 'signature match', 'sig': sig,
                 'secs': time.time() - t0}
@@ -255,18 +315,19 @@ def build(det_root=None, gate_dir=None, out_dir=None, force=False,
     lock = open(os.path.join(out_dir, PARQUET + '.lock'), 'a')
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        dsig, gsig, sig = signatures(det_root, gate_dir)
+        cut = conf_cutoffs()
+        dsig, gsig, sig = signatures(det_root, gate_dir, cut)
         if not force and fresh(sig):
             return {'built': False, 'reason': 'signature match', 'sig': sig,
                     'secs': time.time() - t0}
         return _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig,
-                             memory, threads, t0)
+                             memory, threads, t0, cut)
     finally:
         lock.close()
 
 
 def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
-                  threads, t0):
+                  threads, t0, cut=None):
     import duckdb
     import numpy as np
     import pyarrow as pa
@@ -283,13 +344,33 @@ def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
         # ONE ROW PER BOX. Cell twins and re-commits repeat (image_id,
         # det_idx) with identical geometry; collapsed here, the surest copy's
         # geometry is taken whole (never min/max per coordinate, which would
-        # build a box that no row holds).
+        # build a box that no row holds). The engine that drew it likewise:
+        # model_sha8 is absent from every gen-1 shard, and union_by_name
+        # cannot conjure a column no file has, so ask rather than assume.
+        cols = {r[0] for r in con.execute(f'DESCRIBE SELECT * FROM {det}')
+                .fetchall()}
+        sha8 = ('arg_max(model_sha8, conf)' if 'model_sha8' in cols
+                else 'CAST(NULL AS VARCHAR)')
         con.execute(f"""
             CREATE TEMP TABLE b AS
             SELECT image_id, det_idx, max(conf) conf,
-                   arg_max([x1, y1, x2, y2], conf) xy
+                   arg_max([x1, y1, x2, y2], conf) xy, {sha8} sha8
             FROM {det} GROUP BY 1, 2""")
         n_boxes, = con.execute('SELECT count(*) FROM b').fetchone()
+        # under the count-time conf floor of the engine that drew it. The
+        # floor is compared at the store's own precision (FLOAT): a conf
+        # stored as float32(0.3) IS 0.3 to the detector, and read as a
+        # double it would sit just above a 0.3 floor and be counted.
+        con.execute('CREATE TEMP TABLE cut(sha8 VARCHAR, cmin FLOAT)')
+        if cut:
+            con.executemany('INSERT INTO cut VALUES (?, ?)',
+                            sorted(cut.items()))
+        lowc = con.execute("""
+            SELECT b.image_id, b.det_idx FROM b JOIN cut USING (sha8)
+            WHERE b.conf <= cut.cmin""").fetchnumpy()
+        applied = {k: cut[k] for k, in con.execute(
+            'SELECT DISTINCT sha8 FROM b WHERE sha8 IN '
+            '(SELECT sha8 FROM cut)').fetchall()}
         if gfiles:
             con.execute("""
                 CREATE TEMP TABLE lab AS
@@ -332,9 +413,13 @@ def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
                            np.asarray(pr['same'], dtype=bool))
         kb, sb, bb = greedy(img, i, j, levels)
         kg, sg, bg = greedy(img[same], i[same], j[same], levels)
-        keys = np.union1d(kb[sb], kg[sg])
+        kc = (np.asarray(lowc['image_id'], dtype=np.uint64)
+              * np.uint64(_IDX_MUL)
+              + np.asarray(lowc['det_idx'], dtype=np.uint64))
+        keys = np.union1d(np.union1d(kb[sb], kg[sg]), kc)
         in_b = np.isin(keys, kb[sb])
         in_g = np.isin(keys, kg[sg])
+        in_c = np.isin(keys, kc)
         by_b = np.full(len(keys), -1, dtype=np.int64)
         by_g = np.full(len(keys), -1, dtype=np.int64)
         if len(keys):
@@ -347,8 +432,8 @@ def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
                                  type=pa.uint64()),
             'det_idx': pa.array((keys % np.uint64(_IDX_MUL))
                                 .astype(np.uint8), type=pa.uint8()),
-            'sup_box': pa.array(in_b),
-            'sup_gate': pa.array(in_g),
+            'sup_box': pa.array(in_b | in_c),
+            'sup_gate': pa.array(in_g | in_c),
             'by_box': pa.array(np.where(in_b, by_b, 0).astype(np.uint8),
                                mask=~in_b, type=pa.uint8()),
             'by_gate': pa.array(np.where(in_g, by_g, 0).astype(np.uint8),
@@ -362,13 +447,17 @@ def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
             if os.path.exists(tmp):
                 os.remove(tmp)
             raise
-        con.register('s', tbl)
+        # sup_conf rides along for the counts below only; the parquet keeps
+        # its columns (a gen-1 build writes the very bytes it always did)
+        con.register('s', tbl.append_column('sup_conf', pa.array(in_c)))
         # the counts the meta reports, each taken off the same tables the
         # consumers will join, so a number here is a number on the page
-        dogs, dogs_sup, frames_dog = con.execute(f"""
+        dogs, dogs_sup, frames_dog, dogs_low = con.execute(f"""
             SELECT count(*) FILTER (WHERE l.p >= {P_DOG_MIN}),
                    count(*) FILTER (WHERE l.p >= {P_DOG_MIN} AND s.sup_gate),
-                   count(DISTINCT l.image_id) FILTER (WHERE l.p >= {P_DOG_MIN})
+                   count(DISTINCT l.image_id)
+                       FILTER (WHERE l.p >= {P_DOG_MIN}),
+                   count(*) FILTER (WHERE l.p >= {P_DOG_MIN} AND s.sup_conf)
             FROM lab l LEFT JOIN s USING (image_id, det_idx)""").fetchone()
         frames_dog_after, = con.execute(f"""
             SELECT count(DISTINCT l.image_id) FROM lab l
@@ -382,6 +471,10 @@ def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
         'sig': sig, 'det_sig': dsig, 'gate_sig': gsig,
         'det_files': len(det_files(det_root)), 'gate_files': len(gfiles),
         'rows': int(len(keys)),
+        # the conf floors configured (best_models.json) and the ones that
+        # met a box of this store: {model_sha8: count_conf_min}
+        'count_conf_min_config': dict(sorted((cut or {}).items())),
+        'count_conf_min': dict(sorted(applied.items())),
         'built_at': time.strftime('%Y-%m-%d %H:%M'),
         'seconds': round(time.time() - t0, 1),
         # model output throughout: the detector's boxes, the gate's calls
@@ -389,16 +482,19 @@ def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
         'counts': {
             'boxes': int(n_boxes),
             # through the gate set: the box count every page shows
-            'boxes_kept_gate': int(n_boxes - int(in_g.sum())),
+            'boxes_kept_gate': int(n_boxes - int((in_g | in_c).sum())),
             # class-agnostic: what a sweep at 0.7 would have stored; no page
             # shows it
-            'boxes_kept': int(n_boxes - int(in_b.sum())),
+            'boxes_kept': int(n_boxes - int((in_b | in_c).sum())),
             'gate_dogs': int(dogs or 0),
             'gate_dogs_kept': int((dogs or 0) - (dogs_sup or 0)),
             'frames_with_dog': int(frames_dog or 0),
             'frames_with_dog_kept': int(frames_dog_after or 0),
-            'suppressed_box': int(in_b.sum()),
-            'suppressed_gate': int(in_g.sum()),
+            'suppressed_box': int((in_b | in_c).sum()),
+            'suppressed_gate': int((in_g | in_c).sum()),
+            # under the conf floor, duplicate or not (in both sets above)
+            'suppressed_conf': int(in_c.sum()),
+            'gate_dogs_below_conf': int(dogs_low or 0),
         },
     }
     os.replace(tmp, ppath)
@@ -408,7 +504,8 @@ def _build_locked(det_root, gate_dir, out_dir, dsig, gsig, sig, memory,
         json.dump(meta, fh, indent=1)
     os.replace(mtmp, mpath)
     return {'built': True, 'reason': 'rebuilt', 'sig': sig,
-            'secs': time.time() - t0, 'counts': meta['counts']}
+            'secs': time.time() - t0, 'counts': meta['counts'],
+            'count_conf_min': meta['count_conf_min']}
 
 
 def main(argv=None):
@@ -435,7 +532,10 @@ def main(argv=None):
           f"{c['boxes_kept_gate']:,} (class-agnostic {c['boxes_kept']:,}); "
           f"gate dogs {c['gate_dogs']:,} -> "
           f"{c['gate_dogs_kept']:,}; frames with a dog "
-          f"{c['frames_with_dog']:,} -> {c['frames_with_dog_kept']:,}")
+          f"{c['frames_with_dog']:,} -> {c['frames_with_dog_kept']:,}; "
+          f"conf floor {info.get('count_conf_min') or 'none'} "
+          f"({c['suppressed_conf']:,} boxes, "
+          f"{c['gate_dogs_below_conf']:,} gate dogs under it)")
     return 0
 
 

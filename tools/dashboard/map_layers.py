@@ -435,6 +435,7 @@ def refresh(force=False, gate_dir=None, leash_dir=None, snapshot=None,
     _atomic_write(leash_path, leash_doc)
     return {'built': True, 'reason': 'rebuilt', 'sig': sig,
             'secs': time.time() - t0, 'dedup': bool(nms),
+            'count_conf_min': (nms or {}).get('count_conf_min') or {},
             'manifests_named': len(named), 'manifests_found': len(found),
             'dogs': {'total': dogs_doc['total'],
                      'images': dogs_doc['images'],
@@ -466,8 +467,11 @@ def main():
               f"in {info['secs']:.3f}s")
         return
     d, l = info['dogs'], info['leash']
-    how = ('duplicate boxes removed' if info['dedup']
-           else 'RAW: no current duplicate-box sidecar')
+    floor = sorted(set(info.get('count_conf_min', {}).values()))
+    how = (('duplicate boxes removed'
+            + (f", conf <= {'/'.join(map(str, floor))} left out"
+               if floor else '')) if info['dedup']
+           else 'RAW: no current duplicate-box sidecar, no conf floor')
     print(f"map_layers: built in {info['secs']:.1f}s ({how}) "
           f"from {info['manifests_found']:,} of the "
           f"{info['manifests_named']:,} manifests the catalog names")

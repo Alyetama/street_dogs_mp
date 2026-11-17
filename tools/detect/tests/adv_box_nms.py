@@ -21,6 +21,14 @@ wrong is checked against a store small enough to work out by hand:
     when there is no current sidecar, and rebuilds (not skips) when one
     appears. The dashboard runs the sidecar before the layers and its map
     captions say which kind of count they show.
+  * the conf floor (count_conf_min in best_models.json, keyed on the
+    store's model_sha8): a box at or under its engine's floor is out of
+    both sets, the boundary included; candidates count, other projects do
+    not; a box with no model_sha8 or an engine with no floor is untouched;
+    the floor is in the signature, the meta and the payloads' dedup note;
+    a store with no model_sha8 column (gen 1) writes the very parquet bytes
+    it wrote before, under the very signature when no floor is configured.
+    Each guard is put back wrong by a mutant that must be caught.
 
 Standalone: python tools/detect/tests/adv_box_nms.py
 """
@@ -42,6 +50,11 @@ import duckdb  # noqa: E402
 
 import box_nms  # noqa: E402
 import map_layers as ml  # noqa: E402
+
+# DASH_PY=<copy> checks an edited copy of the watched dashboard.py instead
+# of the live file (saving the live one restarts the dashboard)
+DASH_PY = os.environ.get('DASH_PY') or os.path.join(
+    REPO, 'tools', 'dashboard', 'dashboard.py')
 
 fails = []
 
@@ -572,6 +585,620 @@ def wiring_checks():
                          src)) == 2)
 
 
+def _js_fn(src, name, end):
+    """The source of JS function `name` out of a page template."""
+    i = src.find(f'function {name}(')
+    j = src.find(end, i)
+    return src[i:j + len(end)] if i >= 0 and j > i else None
+
+
+def _node(js):
+    import subprocess
+    r = subprocess.run(['node', '-e', js], capture_output=True, text=True,
+                       timeout=30)
+    return json.loads(r.stdout) if r.returncode == 0 else {'err': r.stderr}
+
+
+FLOOR_CASES = [{'dedup': {'iou': 0.7, 'count_conf_min': {'047b6268': 0.25}}},
+               {'dedup': {'iou': 0.7, 'count_conf_min': {'a': 0.25,
+                                                         'b': 0.5,
+                                                         'c': 0.25}}},
+               {'dedup': {'iou': 0.7, 'count_conf_min': {}}},
+               {'dedup': {'iou': 0.7}},       # a payload from before the floor
+               {'dedup': None}, None]
+
+
+def caption_checks(dash_src, page_src, mlm, tag=''):
+    """Every caption that reports the sidecar's counts says the conf floor
+    when one was applied, and says there is none on a raw fallback -- on
+    gen 2 most of what the sidecar removes is under the floor, and a page
+    that called all of it 'duplicates' (or a raw page that blamed a 28%
+    jump on duplicates alone) would misstate both. Returns True if all
+    passed."""
+    import contextlib
+    import io
+    n0 = len(fails)
+    fn = _js_fn(dash_src, 'dedupNote', '\n    }\n')
+    got = (_node(fn + 'console.log(JSON.stringify(' + json.dumps(FLOOR_CASES)
+                 + '.map(dedupNote)))') if fn else {'err': 'no dedupNote'})
+    ok = isinstance(got, list) and len(got) == 6
+    check(f'{tag}w3 map captions: the floor applied is named (once per '
+          'value), none is claimed where none was applied, and a raw layer '
+          'says it has no floor either',
+          ok and 'IoU 0.7' in got[0] and 'conf <= 0.25 ' in got[0]
+          and 'conf <= 0.25/0.5 ' in got[1]
+          and 'conf' not in got[2] and 'conf' not in got[3]
+          and all('NOT removed' in x and 'no conf floor' in x
+                  for x in got[4:]), got)
+    fn = _js_fn(page_src, 'floorNote', '\n}\n')
+    fn = fn and (_js_fn(page_src, 'esc', '[c]})}\n') or '') + fn
+    got = (_node(fn + 'console.log(JSON.stringify([floorNote({a:0.25}),'
+                 'floorNote({}),floorNote(undefined),floorNote({a:0.25,'
+                 'b:0.25})]))') if fn else {'err': 'no floorNote'})
+    check(f'{tag}w4 explore footer: the floor is named after the duplicates '
+          'and the raw footer says no floor was applied',
+          isinstance(got, list) and '&le; 0.25 ' in got[0]
+          and got[1] == '' and got[2] == '' and got[3] == got[0]
+          and 'floorNote(j.dedup.count_conf_min)' in page_src
+          and 'no conf floor was applied' in page_src, got)
+    outs = []
+    for info in ({'dedup': True, 'count_conf_min': {'a': 0.25}},
+                 {'dedup': True, 'count_conf_min': {}},
+                 {'dedup': False, 'count_conf_min': {}}):
+        info = dict(info, built=True, secs=1.0, manifests_found=1,
+                    manifests_named=1,
+                    dogs={'total': 1, 'images': 1, 'unlocated': 0,
+                          'cells': 1},
+                    leash={'leashed': 1, 'loose': 0, 'unlocated': 0,
+                           'cells': 1})
+        saved = (mlm.refresh, sys.argv)
+        buf = io.StringIO()
+        try:
+            mlm.refresh = lambda *a, _i=info, **k: _i
+            sys.argv = ['map_layers.py']
+            with contextlib.redirect_stdout(buf):
+                mlm.main()
+        except Exception as e:
+            buf.write(repr(e))
+        finally:
+            mlm.refresh, sys.argv = saved
+        outs.append(buf.getvalue().splitlines()[0] if buf.getvalue() else '')
+    check(f'{tag}w5 the map_layers CLI line names the floor, and a raw '
+          'build says it has none',
+          'conf <= 0.25 left out' in outs[0] and 'conf' not in outs[1]
+          and 'RAW' in outs[2] and 'no conf floor' in outs[2], outs)
+    return len(fails) == n0
+
+
+def caption_mutants(dash_src, page_src):
+    """Each caption put back wrong must fail caption_checks."""
+    import contextlib
+    import importlib.util
+    import io
+    ml_src = open(ml.__file__).read()
+    mutants = [
+        ('d', 'the map caption drops the floor',
+         "(v.length?' · boxes at conf <= '+v.sort().join('/')+' left out':'')",
+         "''"),
+        ('d', 'the raw map caption claims nothing about the floor',
+         "'duplicate boxes NOT removed, no conf floor applied'",
+         "'duplicate boxes NOT removed'"),
+        ('d', 'one floor per engine, repeated',
+         "if(v.indexOf(f[k])<0)v.push(f[k])", "v.push(f[k])"),
+        ('p', 'the explore footer drops the floor',
+         "return v.length?', and boxes at conf &le; '", "return 0?'"),
+        ('p', 'the explore footer never asks for the floor',
+         "floorNote(j.dedup.count_conf_min)+'.'", "'.'"),
+        ('m', 'the CLI line drops the floor',
+         "               if floor else '')", "               if 0 else '')"),
+    ]
+    for k, (which, name, old, new) in enumerate(mutants):
+        src = {'d': dash_src, 'p': page_src, 'm': ml_src}[which]
+        if src.count(old) != 1:
+            check(f'wm mutant "{name}" applies', False,
+                  f'target text found {src.count(old)} times')
+            continue
+        d, p, m = dash_src, page_src, ml
+        if which == 'd':
+            d = src.replace(old, new)
+        elif which == 'p':
+            p = src.replace(old, new)
+        else:
+            path = os.path.join(tempfile.mkdtemp(prefix='adv_box_nms_wm_'),
+                                'ml_mut.py')
+            with open(path, 'w') as fh:
+                fh.write(src.replace(old, new))
+            spec = importlib.util.spec_from_file_location('ml_mut', path)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+        saved = list(fails)
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                ok = caption_checks(d, p, m, 'mut: ')
+            except Exception:
+                ok = False
+        fails[:] = saved
+        check(f'wm mutant "{name}" is caught', not ok)
+
+
+# ---- the count-time conf floor ---------------------------------------
+ENG = {k: k * 8 + '0' * 56 for k in 'abcde'}   # sha256_engine per engine
+# (image_id, det_idx, conf, x1, y1, x2, y2, engine); det_idx is conf order
+CBOXES = [
+    # 201: 0 sure; 1 just over a's floor (0.26 > 0.25) kept; 2 exactly AT
+    # the floor -> out (the review counted conf > 0.25)
+    (201, 0, 0.9, 0, 0, 10, 10, 'a'), (201, 1, 0.26, 20, 0, 30, 10, 'a'),
+    (201, 2, 0.25, 50, 0, 60, 10, 'a'),
+    # 202: every dog under the floor, 1 also an NMS duplicate of 0 -> the
+    # frame loses its dog (NMS alone never does that)
+    (202, 0, 0.2, 0, 0, 10, 10, 'a'), (202, 1, 0.1, 0, 0, 10, 9, 'a'),
+    # 203: engine b has no floor -> counted at any conf
+    (203, 0, 0.1, 0, 0, 10, 10, 'b'),
+    # 205: engine c is a CANDIDATE with floor 0.5 -> 1 (0.4) is out
+    (205, 0, 0.9, 0, 0, 10, 10, 'c'), (205, 1, 0.4, 50, 0, 60, 10, 'c'),
+    # 206: engine a, over its floor, stored under two cells (a twin)
+    (206, 0, 0.3, 0, 0, 10, 10, 'a'),
+    # 207: engine e's floor belongs to ANOTHER project -> not applied
+    (207, 0, 0.5, 0, 0, 10, 10, 'e'),
+]
+# 204 sits in a shard written before model_sha8 existed: NULL -> untouched
+CBOX_OLD = (204, 0, 0.1, 0, 0, 10, 10)
+CTWIN = (206, 0, 0.3, 0, 0, 10, 10, 'a')
+EXPECT_CONF = {(201, 2), (202, 0), (202, 1), (205, 1)}
+EXPECT_CONF_NMS = {(202, 1): 0}          # dropped by NMS as well, by box 0
+CUT = {ENG['a'][:8]: 0.25, ENG['c'][:8]: 0.5, ENG['d'][:8]: 0.3}
+
+
+def write_best(path, **over):
+    """A best_models.json: a is the detector's best, b/c/d candidates (b
+    without a floor, d an engine the store never ran), e in another
+    project with a floor that must not leak into the detector's counts."""
+    det = {'best': {'run': 'A', 'sha256_engine': ENG['a'],
+                    'count_conf_min': 0.25},
+           'candidates': [{'run': 'B', 'sha256_engine': ENG['b']},
+                          {'run': 'C', 'sha256_engine': ENG['c'],
+                           'count_conf_min': 0.5},
+                          {'run': 'D', 'sha256_engine': ENG['d'],
+                           'count_conf_min': 0.3}]}
+    det.update(over)
+    with open(path, 'w') as fh:
+        json.dump({'projects': {
+            'dogdetection': det,
+            'dog-bin': {'best': {'run': 'E', 'sha256_engine': ENG['e'],
+                                 'count_conf_min': 0.9}}}}, fh)
+    return path
+
+
+def build_conf_store(tmp):
+    det = os.path.join(tmp, 'detect')
+    con = duckdb.connect()
+
+    def write(path, sch, rows, n):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        con.execute(f'CREATE OR REPLACE TEMP TABLE t({sch})')
+        if rows:
+            con.executemany(f'INSERT INTO t VALUES ({", ".join("?" * n)})',
+                            rows)
+        con.execute(f"COPY t TO '{path}' (FORMAT PARQUET)")
+
+    sch = ('image_id UBIGINT, det_idx UTINYINT, conf FLOAT, x1 FLOAT, '
+           'y1 FLOAT, x2 FLOAT, y2 FLOAT')
+    isch = 'image_id UBIGINT, n_det USMALLINT, max_conf FLOAT'
+    boot = os.path.join(det, '_bootstrap', 'gen=_bootstrap',
+                        'region=_bootstrap', 'cell=_bootstrap',
+                        'drive=_bootstrap', 'det.parquet')
+    write(boot, sch, [], 7)
+    write(boot.replace('det.parquet', 'img.parquet'), isch, [], 3)
+    sh = os.path.join(det, 'shards', 'gen=0002', 'region=R')
+
+    def rows(bs):
+        return [b[:7] + (ENG[b[7]][:8],) for b in bs]
+
+    def img_rows(bs):
+        by = {}
+        for b in bs:
+            n, c = by.get(b[0], (0, 0.0))
+            by[b[0]] = (n + 1, max(c, b[2]))
+        return [(i, n, c) for i, (n, c) in sorted(by.items())]
+
+    for cell, bs, with_sha in (('C1', CBOXES, True), ('C2', [CTWIN], True),
+                               ('C3', [CBOX_OLD], False)):
+        d = os.path.join(sh, f'cell={cell}', 'drive=d1')
+        if with_sha:
+            write(os.path.join(d, 's00000.p0_9.det.parquet'),
+                  sch + ', model_sha8 VARCHAR', rows(bs), 8)
+        else:
+            write(os.path.join(d, 's00000.p0_9.det.parquet'), sch, bs, 7)
+        write(os.path.join(d, 's00000.p0_9.img.parquet'), isch,
+              img_rows(bs), 3)
+    allb = [b[:7] for b in CBOXES] + [CBOX_OLD]
+    gate = os.path.join(tmp, 'gate')
+    leash = os.path.join(tmp, 'leash')
+    os.makedirs(gate)
+    os.makedirs(leash)
+    write(os.path.join(gate, 'gate-00000.parquet'),
+          'image_id VARCHAR, det_idx INTEGER, label VARCHAR, p_dog FLOAT, '
+          'model VARCHAR',
+          [(str(b[0]), b[1], 'dog', 0.9, 'dogbin_test') for b in allb], 5)
+    write(os.path.join(leash, 'leash-00000.parquet'),
+          'image_id VARCHAR, det_idx INTEGER, p_leashed FLOAT, model VARCHAR',
+          [(str(b[0]), b[1], 0.9 if b[1] % 2 == 0 else 0.1, 'leash_test')
+           for b in allb], 4)
+    man = os.path.join(tmp, 'grid_runs', 'm1.parquet')
+    write(man, 'image_id BIGINT, computed_geometry VARCHAR',
+          [(i, json.dumps({'type': 'Point', 'coordinates': [0.1, 0.1]}))
+           for i in sorted({b[0] for b in allb})], 2)
+    st = os.stat(man)
+    snap = os.path.join(tmp, 'catalog.parquet')
+    write(snap, 'path VARCHAR, region VARCHAR, kind VARCHAR, mtime DOUBLE, '
+          'size_bytes BIGINT',
+          [(man, 'Testland', 'ground_animals', float(st.st_mtime),
+            int(st.st_size))], 5)
+    con.close()
+    return dict(det_root=det, gate_dir=gate, leash_dir=leash, snapshot=snap,
+                nms_dir=os.path.join(tmp, 'nms'), best=os.path.join(
+                    tmp, 'best_models.json'), allb=allb)
+
+
+def conf_checks(bn, fx, legacy, tmp, tag='', mlm=None):
+    """Every conf-floor check against module `bn` (the real one or a
+    mutant), and map_layers module `mlm` (default the real one). Returns
+    True when all of them passed."""
+    n0 = len(fails)
+    mlm = mlm or ml
+    bn.BEST_MODELS = write_best(fx['best'])
+    try:
+        info = bn.build(fx['det_root'], fx['gate_dir'], fx['nms_dir'],
+                        force=True)
+    except Exception as e:
+        info = {'built': False, 'error': repr(e)}
+    check(f'{tag}c0 the fixture with a model_sha8 column builds',
+          info.get('built'), info)
+    if not info.get('built'):
+        return False
+    rows = read_sup(fx['nms_dir'])
+    gate = {(int(r[0]), int(r[1])): r[5] for r in rows if r[3]}
+    box = {(int(r[0]), int(r[1])): r[4] for r in rows if r[2]}
+    check(f'{tag}c1 a box at or under its engine\'s floor is out of the gate '
+          'set -- the boundary included, a candidate\'s floor included; a '
+          'box with no model_sha8, an engine with no floor, or a floor from '
+          'another project, is not',
+          set(gate) == EXPECT_CONF, f'got {sorted(gate)} '
+          f'want {sorted(EXPECT_CONF)}')
+    check(f'{tag}c2 ... and out of the class-agnostic set too',
+          set(box) == EXPECT_CONF, sorted(box))
+    check(f'{tag}c3 by_* names an NMS suppressor only: NULL for a box the '
+          'floor alone took out',
+          all(gate.get(k) == EXPECT_CONF_NMS.get(k) for k in EXPECT_CONF)
+          and all(box.get(k) == EXPECT_CONF_NMS.get(k) for k in EXPECT_CONF),
+          (gate, box))
+    meta = bn.read_meta(fx['nms_dir']) or {}
+    c = meta.get('counts', {})
+    n = len(fx['allb'])
+    frames = len({b[0] for b in fx['allb']})
+    lost = {k[0] for k in EXPECT_CONF} - {
+        b[0] for b in fx['allb'] if (b[0], b[1]) not in EXPECT_CONF}
+    check(f'{tag}c4 the meta counts are the counts through the floor',
+          c.get('boxes') == n
+          and c.get('boxes_kept_gate') == n - len(EXPECT_CONF)
+          and c.get('boxes_kept') == n - len(EXPECT_CONF)
+          and c.get('gate_dogs_kept') == n - len(EXPECT_CONF)
+          and c.get('suppressed_conf') == len(EXPECT_CONF)
+          and c.get('gate_dogs_below_conf') == len(EXPECT_CONF)
+          and c.get('frames_with_dog_kept') == frames - len(lost), c)
+    applied = {ENG['a'][:8]: 0.25, ENG['c'][:8]: 0.5}
+    note = bn.dedup_note(bn.current(fx['nms_dir'], fx['det_root'],
+                                    fx['gate_dir']))
+    check(f'{tag}c5 the meta and the payloads\' dedup note name the floors '
+          'applied (and the meta the ones configured)',
+          meta.get('count_conf_min') == applied
+          and meta.get('count_conf_min_config') == CUT
+          and (note or {}).get('count_conf_min') == applied,
+          (meta.get('count_conf_min'), meta.get('count_conf_min_config'),
+           note))
+    # another floor is another sidecar
+    write_best(fx['best'], best={'run': 'A', 'sha256_engine': ENG['a'],
+                                 'count_conf_min': 0.3})
+    stale = bn.current(fx['nms_dir'], fx['det_root'], fx['gate_dir'])
+    reb = bn.build(fx['det_root'], fx['gate_dir'], fx['nms_dir'])
+    rows = read_sup(fx['nms_dir'])
+    check(f'{tag}c6 a changed floor makes the sidecar NOT current, and the '
+          'next build rebuilds it with the new floor -- compared at the '
+          'store\'s float32 precision, so a conf stored as 0.3 is AT a 0.3 '
+          'floor, not over it',
+          stale is None and reb.get('built')
+          and (206, 0) in {(int(r[0]), int(r[1])) for r in rows if r[3]},
+          (stale is None, reb.get('built')))
+    # an unreadable best_models.json: not current (raw, said so), no build
+    with open(fx['best'], 'w') as fh:
+        fh.write('{not json')
+    try:
+        bn.build(fx['det_root'], fx['gate_dir'], fx['nms_dir'], force=True)
+        refused = False
+    except ValueError:
+        refused = True
+    check(f'{tag}c7 an unreadable best_models.json: the sidecar is not '
+          'current and a build refuses rather than dropping the floor',
+          refused and bn.current(fx['nms_dir'], fx['det_root'],
+                                 fx['gate_dir']) is None)
+    bad = []
+    for name, over in (
+            ('a floor with no engine to key it',
+             {'best': {'run': 'A', 'count_conf_min': 0.25}}),
+            ('a floor outside [0, 1)',
+             {'best': {'run': 'A', 'sha256_engine': ENG['a'],
+                       'count_conf_min': 1.5}}),
+            ('two floors for one engine',
+             {'candidates': [{'run': 'A2', 'sha256_engine': ENG['a'],
+                              'count_conf_min': 0.4}]})):
+        try:
+            bn.conf_cutoffs(write_best(fx['best'], **over))
+            bad.append(name)
+        except ValueError:
+            pass
+    check(f'{tag}c8 a floor that cannot be applied as written is refused',
+          not bad, bad)
+    absent = os.path.join(tmp, 'no_such_best_models.json')
+    check(f'{tag}c9 no best_models.json (a checkout without data/) is no '
+          'floor, not an error', bn.conf_cutoffs(absent) == {})
+    # GEN 1: no model_sha8 column anywhere. With floors configured it
+    # writes the bytes it writes with none, and with none configured its
+    # signature is the one every sidecar before the floor carried.
+    outs = []
+    for k, best in enumerate((write_best(fx['best']), absent)):
+        bn.BEST_MODELS = best
+        out = os.path.join(tmp, f'legacy_{k}')
+        bn.build(legacy['det_root'], legacy['gate_dir'], out, force=True)
+        outs.append(open(os.path.join(out, bn.PARQUET), 'rb').read())
+    d = box_nms._stat_sig(box_nms.det_files(legacy['det_root']))
+    g = box_nms._stat_sig(box_nms.gate_files(legacy['gate_dir']))
+    old = __import__('hashlib').sha256(json.dumps(
+        [bn.SCHEMA, bn.IOU, bn.P_DOG_MIN, bn.RULE, d, g]).encode()
+    ).hexdigest()
+    lmeta = bn.read_meta(os.path.join(tmp, 'legacy_1')) or {}
+    check(f'{tag}c10 a store with no model_sha8 column writes the same '
+          'parquet bytes with floors configured as with none, and with none '
+          'its signature is the pre-floor one',
+          outs[0] == outs[1] and lmeta.get('sig') == old
+          and bn.read_meta(os.path.join(tmp, 'legacy_0'))
+          .get('counts', {}).get('suppressed_conf') == 0,
+          (outs[0] == outs[1], lmeta.get('sig') == old))
+    # the consumers, unchanged, take the floor through sup_gate
+    bn.BEST_MODELS = write_best(fx['best'])
+    bn.build(fx['det_root'], fx['gate_dir'], fx['nms_dir'], force=True)
+    cur = bn.current(fx['nms_dir'], fx['det_root'], fx['gate_dir'])
+    saved = mlm._box_nms
+    out = os.path.join(tmp, 'layers')
+    try:
+        # map_layers reloads box_nms by name; hand it this module as is
+        mlm._box_nms = lambda nd, dr, gd: (bn.current(nd, dr, gd), bn)
+        rinfo = mlm.refresh(force=True, gate_dir=fx['gate_dir'],
+                           leash_dir=fx['leash_dir'],
+                           snapshot=fx['snapshot'], out_dir=out,
+                           hide_regions=frozenset(), nms_dir=fx['nms_dir'],
+                           det_root=fx['det_root'])
+        dogs = json.load(open(os.path.join(out, 'map_layer_dogs.json')))
+        lj = json.load(open(os.path.join(out, 'map_layer_leash.json')))
+    except Exception as e:
+        dogs, lj, rinfo = {'error': repr(e)}, {}, {}
+    finally:
+        mlm._box_nms = saved
+    kept = [b for b in fx['allb'] if (b[0], b[1]) not in EXPECT_CONF]
+    check(f'{tag}c11 map layers: dogs and leash calls lose the boxes under '
+          'the floor, through the sidecar alone',
+          dogs.get('total') == len(kept)
+          and lj.get('leashed_total', 0) + lj.get('loose_total', 0)
+          == len(kept)
+          and (dogs.get('dedup') or {}).get('count_conf_min') == applied
+          and rinfo.get('count_conf_min') == applied,
+          (dogs.get('total'), len(kept), dogs.get('dedup')))
+    if cur and os.path.exists(os.path.join(REPO, 'tools', 'dashboard',
+                                           'explore_index.py')):
+        import explore_index as ei
+        explore_floor_checks(ei, bn, fx, cur, kept, tag)
+    return len(fails) == n0
+
+
+def refresh_mutant(tmp, legacy):
+    """map_layers.refresh() that stops handing the floor on (the CLI line
+    reads it) must fail conf_checks' c11."""
+    import contextlib
+    import importlib.util
+    import io
+    src = open(ml.__file__).read()
+    old = ("            'count_conf_min': (nms or {}).get('count_conf_min') "
+           "or {},\n")
+    name = 'refresh() does not hand the floor to the CLI'
+    if src.count(old) != 1:
+        check(f'rm mutant "{name}" applies', False, src.count(old))
+        return
+    os.makedirs(tmp)
+    path = os.path.join(tmp, 'ml_mut.py')
+    with open(path, 'w') as fh:
+        fh.write(src.replace(old, ''))
+    spec = importlib.util.spec_from_file_location('ml_mut', path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    fx = build_conf_store(os.path.join(tmp, 'fx'))
+    saved, saved_f = box_nms.BEST_MODELS, list(fails)
+    with contextlib.redirect_stdout(io.StringIO()):
+        try:
+            ok = conf_checks(box_nms, fx, legacy, tmp, 'mut: ', m)
+        except Exception:
+            ok = False
+    fails[:] = saved_f
+    box_nms.BEST_MODELS = saved
+    check(f'rm mutant "{name}" is caught', not ok)
+
+
+def explore_floor_checks(ei, bn, fx, cur, kept, tag=''):
+    """explore_index (module `ei`, the real one or a mutant) through the
+    floor: judged, kept and boxes lose what it took; the frames the detector
+    PROCESSED do not; the mean surest confidence is over the boxes kept --
+    a frame whose every box is under the floor has no surest box left."""
+    import store as _store
+    n0 = len(fails)
+    con = duckdb.connect()
+    con.execute('CREATE TABLE ic(image_id UBIGINT, cc VARCHAR)')
+    con.executemany('INSERT INTO ic VALUES (?, ?)',
+                    [(i, 'TST') for i in sorted({b[0]
+                                                 for b in fx['allb']})])
+    sg = _store.get_detect_root
+    try:
+        _store.get_detect_root = lambda repo_root=None: fx['det_root']
+        g, _ = ei._ledger_rollup(con, fx['gate_dir'], 'gate-*.parquet',
+                                 'p_dog', 0.5, 'gate', cur, bn)
+        dr = ei.detect_rollup(con, cur, bn)
+    except Exception as e:
+        g, dr = {'error': repr(e)}, {}
+    finally:
+        _store.get_detect_root = sg
+        con.close()
+    t, r = g.get('TST', {}), dr.get('TST', {})
+    check(f'{tag}c12 explore: judged, kept and boxes all lose the boxes '
+          'under the floor',
+          t.get('gate_judged') == len(kept)
+          and t.get('gate_kept') == len(kept)
+          and r.get('det_boxes') == len(kept), (t, r))
+    top = {}
+    for b in kept:
+        top[b[0]] = max(top.get(b[0], 0.0), b[2])
+    want = round(sum(top.values()) / len(top), 4)
+    check(f'{tag}c13 explore: frames processed keep every frame (202 lost '
+          'its boxes, not its processing); the mean surest confidence is '
+          'over the boxes kept',
+          r.get('det_images') == len({b[0] for b in fx['allb']})
+          and abs((r.get('det_mean_max_conf') or 0) - want) < 1e-4,
+          (r.get('det_images'), r.get('det_mean_max_conf'), want))
+    return len(fails) == n0
+
+
+def explore_mutants(tmp, legacy):
+    """explore_index put back wrong must fail explore_floor_checks."""
+    import contextlib
+    import importlib.util
+    import io
+    path = os.path.join(REPO, 'tools', 'dashboard', 'explore_index.py')
+    if not os.path.exists(path):
+        return
+    src = open(path).read()
+    mutants = [
+        ('the mean surest conf left on the raw image table',
+         "            row['det_mean_max_conf'] = round(float(maxc or 0), 4)\n",
+         ''),
+        ('frames processed counted off the boxes kept',
+         "        per[cc] = {'det_images': int(imgs or 0),",
+         "        per[cc] = {'det_images': int(dets or 0),"),
+    ]
+    fx = build_conf_store(os.path.join(tmp, 'fx'))
+    saved = box_nms.BEST_MODELS
+    try:
+        box_nms.BEST_MODELS = write_best(fx['best'])
+        box_nms.build(fx['det_root'], fx['gate_dir'], fx['nms_dir'],
+                      force=True)
+        cur = box_nms.current(fx['nms_dir'], fx['det_root'], fx['gate_dir'])
+    finally:
+        box_nms.BEST_MODELS = saved
+    kept = [b for b in fx['allb'] if (b[0], b[1]) not in EXPECT_CONF]
+    for k, (name, old, new) in enumerate(mutants):
+        if src.count(old) != 1:
+            check(f'em mutant "{name}" applies', False,
+                  f'target text found {src.count(old)} times')
+            continue
+        mp = os.path.join(tmp, f'ei_mut{k}.py')
+        with open(mp, 'w') as fh:
+            fh.write(src.replace(old, new))
+        spec = importlib.util.spec_from_file_location(f'ei_mut{k}', mp)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            check(f'em mutant "{name}" loads', False, repr(e))
+            continue
+        saved_f = list(fails)
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                ok = explore_floor_checks(mod, box_nms, fx, cur, kept,
+                                          'mut: ')
+            except Exception:
+                ok = False
+        fails[:] = saved_f
+        check(f'em mutant "{name}" is caught', not ok)
+
+
+def conf_mutants(tmp, legacy):
+    """Each guard put back wrong must fail conf_checks."""
+    import contextlib
+    import importlib.util
+    import io
+    src = open(box_nms.__file__).read()
+    mutants = [
+        ('the floor left out of sup_gate',
+         "'sup_gate': pa.array(in_g | in_c)", "'sup_gate': pa.array(in_g)"),
+        ('the floor left out of sup_box',
+         "'sup_box': pa.array(in_b | in_c)", "'sup_box': pa.array(in_b)"),
+        ('the boundary counted (conf < floor, not <=)',
+         'WHERE b.conf <= cut.cmin', 'WHERE b.conf < cut.cmin'),
+        ('one floor for every box, whatever drew it',
+         'FROM b JOIN cut USING (sha8)\n            WHERE',
+         'FROM b, cut\n            WHERE'),
+        ('model_sha8 never read',
+         "if 'model_sha8' in cols", "if False"),
+        ('the floor compared as a double (float32 0.3 reads > 0.3)',
+         "cut(sha8 VARCHAR, cmin FLOAT)", "cut(sha8 VARCHAR, cmin DOUBLE)"),
+        ('candidates ignored',
+         "[proj.get('best')] + list(proj.get('candidates') or [])",
+         "[proj.get('best')]"),
+        ('another project\'s floors read',
+         ".get(DET_PROJECT) or {}", ".get('dog-bin') or {}"),
+        ('the floor left out of the signature',
+         '    if cut:\n        parts.append', '    if False:\n        '
+         'parts.append'),
+        ('the signature moved for a store with no floor',
+         '    if cut:\n        parts.append', '    if True:\n        '
+         'parts.append'),
+        ('the dedup note drops the floor',
+         "'count_conf_min': meta.get('count_conf_min') or {}}",
+         "'count_conf_min': {}}"),
+        ('a floor out of range accepted', 'or not 0 <= c < 1):',
+         'or False):'),
+        ('the meta box count ignores the floor',
+         "'boxes_kept_gate': int(n_boxes - int((in_g | in_c).sum()))",
+         "'boxes_kept_gate': int(n_boxes - int(in_g.sum()))"),
+        ('an unreadable best_models.json read as no floor',
+         '    except FileNotFoundError:\n        return {}',
+         '    except (FileNotFoundError, ValueError):\n        return {}'),
+    ]
+    for k, (name, old, new) in enumerate(mutants):
+        if src.count(old) != 1:
+            check(f'cm mutant "{name}" applies', False,
+                  f'target text found {src.count(old)} times')
+            continue
+        d = os.path.join(tmp, f'mut{k}')
+        os.makedirs(d)
+        path = os.path.join(d, 'box_nms_mut.py')
+        with open(path, 'w') as fh:
+            fh.write(src.replace(old, new))
+        spec = importlib.util.spec_from_file_location('box_nms_mut', path)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+            mod.REPO = REPO
+            fx = build_conf_store(os.path.join(d, 'fx'))
+            saved = list(fails)
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    ok = conf_checks(mod, fx, legacy, d, 'mut: ')
+                except Exception:
+                    ok = False
+            fails[:] = saved
+        except Exception as e:
+            check(f'cm mutant "{name}" loads', False, repr(e))
+            continue
+        check(f'cm mutant "{name}" is caught', not ok)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='adv_box_nms_')
     try:
@@ -585,6 +1212,30 @@ def main():
         layer_checks(fx, tmp)
         explore_checks(fx)
         wiring_checks()
+        dash_src = open(DASH_PY).read()
+        page_py = os.path.join(REPO, 'tools', 'dashboard', 'explore_page.py')
+        page_src = open(page_py).read() if os.path.exists(page_py) else ''
+        if not shutil.which('node'):
+            print('SKIP w3-w5: node not on PATH')
+        elif 'count_conf_min' not in (_js_fn(dash_src, 'dedupNote',
+                                             '\n    }\n') or ''):
+            print('SKIP w3-w5: this dashboard.py has no conf-floor caption '
+                  'yet (install the switch copy, or run with DASH_PY=<copy>)')
+        elif not page_src:
+            print('SKIP w3-w5: explore_page.py is not in this checkout')
+        else:
+            caption_checks(dash_src, page_src, ml)
+            caption_mutants(dash_src, page_src)
+        ctmp = os.path.join(tmp, 'conf')
+        cfx = build_conf_store(ctmp)
+        saved = box_nms.BEST_MODELS
+        try:
+            conf_checks(box_nms, cfx, fx, ctmp)
+            conf_mutants(os.path.join(tmp, 'conf_mut'), fx)
+            explore_mutants(os.path.join(tmp, 'explore_mut'), fx)
+            refresh_mutant(os.path.join(tmp, 'refresh_mut'), fx)
+        finally:
+            box_nms.BEST_MODELS = saved
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f'\n{len(fails)} failed' if fails else '\nall passed')
