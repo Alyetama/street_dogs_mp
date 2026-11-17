@@ -3,7 +3,7 @@
 Sweep orchestrator: worklist gen -> per-drive lanes -> engine -> parquet store.
 Spec: DETECTION_RUN_STRATEGY.md section 6 (+4.6 config, 5.2 layout).
 
-    sweep.py run    --gen 1 [--max-images N] [--drives d1 d2] [--rate-cap x]
+    sweep.py run    [--gen N] [--max-images N] [--drives d1 d2] [--rate-cap x]
     sweep.py status
     sweep.py unit                # print a systemd user unit
     sweep.py verify | invariants          # whole store, no arguments
@@ -33,7 +33,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import engine  # noqa: E402
 import store  # noqa: E402
-from status import StatusWriter, read_status  # noqa: E402
+from status import StatusWriter, read_status, store_gen  # noqa: E402
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -661,7 +661,8 @@ def cmd_run(args):
                      consumers=1,
                      ring_slots=None,
                      gpu_cap=None,
-                     disk_order=None).items():
+                     disk_order=None,
+                     gen=None).items():
         if not hasattr(args, k):
             setattr(args, k, v)
     cfg = load_cfg()
@@ -682,6 +683,22 @@ def cmd_run(args):
             return 1
     import torch
     detect_root = store.get_detect_root()
+    if args.gen is None:
+        # the store's own generation, never a constant: `1` against the gen-2
+        # store locked runs/gen=0001 there and then died on a worklist that
+        # does not exist
+        args.gen = store_gen(detect_root)
+        if args.gen is None:
+            print(f'{detect_root} names no generation (no status.json gen, '
+                  f'no worklist/gen=*) -- pass --gen', file=sys.stderr)
+            return 1
+    wl = os.path.join(detect_root, 'worklist', 'gen=%04d' % args.gen,
+                      '_dirs.json')
+    if not os.path.isfile(wl):
+        # before anything is created in the store
+        print(f'no worklist for gen {args.gen}: {wl} is missing -- wrong '
+              f'--gen, or the wrong store?', file=sys.stderr)
+        return 1
     store.ensure_bootstrap(detect_root)
     run_dir = os.path.join(detect_root, 'runs', 'gen=%04d' % args.gen)
     os.makedirs(run_dir, exist_ok=True)
@@ -1035,7 +1052,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='cmd', required=True)
     r = sub.add_parser('run')
-    r.add_argument('--gen', type=int, default=1)
+    r.add_argument('--gen', type=int, default=None,
+                   help="the generation to sweep (default: the store's own, "
+                        'from its status.json, else its newest '
+                        'worklist/gen=*)')
     r.add_argument('--max-images', type=int)
     r.add_argument('--drives', nargs='+')
     r.add_argument('--rate-cap', type=float)

@@ -323,6 +323,37 @@ def plan(args):
                 f'every dog it has not reached yet (shard numbering is fixed '
                 f'at plan time). Wait for it to finish, or pass --partial to '
                 f'plan over what exists so far and accept that.')
+    root = store.get_detect_root()
+    if args.gen is None:
+        # the store's own generation, never a constant: `1` against the gen-2
+        # store matched no row and wrote an empty plan the runner "finished"
+        # at once -- every count downstream then read 0 dogs
+        from status import store_gen  # not `import status`: see status()
+        args.gen = store_gen(root)
+        if args.gen is None:
+            raise SystemExit(
+                f'{root} names no generation (no status.json gen, no '
+                f'worklist/gen=*) -- pass --gen')
+    if up:
+        # The join below is on (image_id, det_idx) alone, and det_idx is only
+        # a box within ONE store's generation: gen-1 verdicts joined to gen-2
+        # rows pick whichever box took that number (~9% a different dog) and
+        # the plan is not empty, so nothing above or below would refuse it.
+        try:
+            with open(os.path.join(up[2], 'plan.json')) as fh:
+                updoc = json.load(fh)
+            up_gen, up_root = updoc.get('gen'), updoc.get('detect_root')
+        except (OSError, ValueError, AttributeError):
+            up_gen = up_root = None
+        if up_gen != args.gen or (up_root and os.path.realpath(up_root)
+                                  != os.path.realpath(root)):
+            raise SystemExit(
+                f'the {STAGES[sp["feeds_on"]]["title"]} verdicts in {up[2]} '
+                f'are gen {up_gen} of {up_root or "an unrecorded store"}; '
+                f'this plan is gen {args.gen} of {os.path.abspath(root)} -- '
+                f'det_idx would name different boxes. Finish moving the '
+                f'verdict dir / repointing detect_root.txt (or pass the '
+                f'matching --gen). Nothing was written.')
     # Every box the upstream stage marked with its positive class, and only
     # those. The gate's verdicts live in their own store, joined back to the
     # detection rows for the coordinates -- the shards carry a verdict and a
@@ -335,7 +366,6 @@ def plan(args):
                   f"ON u.image_id = CAST(d.image_id AS VARCHAR) "
                   f"AND u.det_idx = d.det_idx "
                   f"AND u.label = '{STAGES[sp['feeds_on']]['positive']}'")
-    root = store.get_detect_root()
     img = store._sql_src(store._store_globs(root, 'img'))
     det = store._sql_src(store._store_globs(root, 'det'))
     con = duckdb.connect()
@@ -363,6 +393,15 @@ def plan(args):
         ORDER BY i.drive, i.cell, d.image_id, d.det_idx
     """, params).fetchall()
     con.close()
+    if not rows:
+        # Refused before anything is written. An empty work list is never a
+        # job: the runner would "finish" it at once and leave an empty verdict
+        # store where the old one was, and every count would read 0.
+        raise SystemExit(
+            f'no boxes to judge: gen {args.gen} of {root} has no detection '
+            f'rows' + (f' the {STAGES[sp["feeds_on"]]["title"]} called '
+                       f'{STAGES[sp["feeds_on"]]["positive"]}' if up else '')
+            + ' -- wrong --gen, or the wrong store? Nothing was written.')
     rows = _interleave(rows)
     os.makedirs(OUT_DIR, exist_ok=True)
     doc = {'gen': args.gen, 'rows': len(rows),
@@ -1829,7 +1868,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('plan'); p.set_defaults(fn=plan)
-    p.add_argument('--gen', type=int, default=1)
+    p.add_argument('--gen', type=int, default=None,
+                   help="the store's generation to plan over (default: the "
+                        "live store's, from its status.json, else its newest "
+                        'worklist/gen=*)')
     p.add_argument('--memory', default='8GB')
     p.add_argument('--partial', action='store_true',
                    help='plan a downstream stage over an unfinished upstream '

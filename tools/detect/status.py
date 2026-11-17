@@ -113,6 +113,40 @@ def side_status_paths(root=None):
     return out
 
 
+def store_gen(root=None):
+    """The generation a store holds, as an int, or None if it names none.
+
+    The ``gen`` its status.json carries (the last sweep over that store
+    published it), else the newest ``worklist/gen=NNNN`` under it -- a store
+    whose sweep has not started yet has a worklist and no status. Never a
+    constant: the gen-1 and gen-2 stores share one layout, and a tool that
+    assumed ``1`` against the gen-2 store wrote a 0-row gate plan, or went
+    looking for a worklist that is not there.
+
+    Args:
+        root: the store (default: the live one, ``detect_root()``).
+    """
+    root = (root or detect_root()).rstrip('/')
+    try:
+        with open(os.path.join(root, 'status.json')) as f:
+            g = json.load(f).get('gen')
+        if isinstance(g, int) and not isinstance(g, bool) and g >= 0:
+            return g
+    except (OSError, ValueError, AttributeError):
+        pass
+    gens = []
+    try:
+        names = os.listdir(os.path.join(root, 'worklist'))
+    except OSError:
+        names = []
+    for name in names:
+        num = name[4:] if name.startswith('gen=') else ''
+        if num.isascii() and num.isdigit() and os.path.isdir(
+                os.path.join(root, 'worklist', name)):
+            gens.append(int(num))
+    return max(gens) if gens else None
+
+
 def _r1(v):
     """Round to 1 dp for the wire; None passes through (JSON null)."""
     return None if v is None else round(float(v), 1)
