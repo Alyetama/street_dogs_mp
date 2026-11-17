@@ -182,6 +182,14 @@ def build(args):
     """
     stage = getattr(args, 'stage', DEFAULT_STAGE)
     sp, P = spec(stage), paths(stage)
+    # Refused before anything is read or written. The pool's keys are
+    # '<image_id>#<det_idx>' and det_idx is numbered per detector generation,
+    # so re-cutting an audit from a newer store re-keys the old verdicts,
+    # redraws and crops onto different boxes -- and nothing errors.
+    why = _build_refusal(P, getattr(args, 'overwrite_judged', False))
+    if why:
+        raise SystemExit(why)
+    plan = _plan_doc(P) or {}
     import duckdb
     os.makedirs(P['out'], exist_ok=True)
     con = duckdb.connect()
@@ -271,6 +279,9 @@ def build(args):
                    # keeps the model name and can keep the shard count, so
                    # the count alone cannot tell the pool is out of date
                    'protocol': _protocol_now(P),
+                   # WHICH detector's boxes: det_idx means nothing without it
+                   'gen': _plan_gen(plan) or 1,
+                   'detect_root': _plan_detect_root(plan),
                    'sequences': int(seqs)}, fh)
     for i, (lo, hi) in enumerate(BANDS):
         c = con.execute(f"SELECT count(*), count(DISTINCT seq) "
@@ -286,6 +297,85 @@ def _protocol_now(P):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import gate_store
     return gate_store.protocol_tag(P['store'])
+
+
+def _plan_doc(P):
+    """The stage store's plan.json, or None when it has none."""
+    try:
+        with open(os.path.join(P['store'], 'plan.json')) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _plan_gen(plan):
+    """The detector generation a stage's plan was cut from; None unknown."""
+    if not plan:
+        return None
+    try:
+        return int(plan.get('gen') or 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pool_gen(doc):
+    """The generation a pool was cut from. A pool.json written before the
+    key existed was cut from gen 1 -- the only generation there was."""
+    try:
+        return int((doc or {}).get('gen') or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _plan_detect_root(plan):
+    """The detect store whose det_idx the plan's keys are. A gen-1 plan did
+    not record it; that store is the pinned ledger root."""
+    root = (plan or {}).get('detect_root')
+    if root or (_plan_gen(plan) or 1) != 1:
+        return root or None
+    try:
+        with open(os.path.join(REPO, 'data', 'ledger_detect_root.txt')) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def _pool_doc(P):
+    """(pool.json as a dict, whether a pool exists at all)."""
+    try:
+        with open(os.path.join(P['out'], 'pool.json')) as fh:
+            doc = json.load(fh)
+        doc = doc if isinstance(doc, dict) else {}
+        return doc, True
+    except (OSError, ValueError):
+        return {}, os.path.exists(P['pool'])
+
+
+def _build_refusal(P, overwrite_judged=False):
+    """Why `build` must not re-cut this pool, or None.
+
+    A different generation is refused outright: its det_idx numbers other
+    boxes, so the existing verdicts, redraws and crops would silently land on
+    them. That audit belongs in a new audit dir. A pool people have answered
+    against is refused too unless asked for by name: a rebuild re-keys it."""
+    doc, exists = _pool_doc(P)
+    plan_gen = _plan_gen(_plan_doc(P))
+    if exists and plan_gen is not None and plan_gen != _pool_gen(doc):
+        return (f"refusing to rebuild {P['pool']}: this pool is "
+                f"gen-{_pool_gen(doc)} and {P['store']} is now gen-{plan_gen}. "
+                f"det_idx numbers different boxes in each generation, so its "
+                f"verdicts would land on the wrong boxes. Start a new audit "
+                f"dir for gen-{plan_gen}; do not rebuild this one.")
+    try:
+        judged = os.path.getsize(P['verdicts']) > 0
+    except OSError:
+        judged = False
+    if judged and not overwrite_judged:
+        return (f"refusing to rebuild {P['pool']}: {P['verdicts']} holds "
+                f"verdicts keyed against it, and a rebuild re-keys the pool. "
+                f"Pass --overwrite-judged if that is really meant.")
+    return None
 
 
 def pool_info(stage=DEFAULT_STAGE):
@@ -314,6 +404,23 @@ def pool_info(stage=DEFAULT_STAGE):
         and doc['protocol_now'] != ''
     doc['stale'] = (not doc['unknown']) and (now > then or proto_moved)
     doc['behind'] = max(0, now - then) if not doc['unknown'] else 0
+    # A store of ANOTHER detector generation is not this pool's future: its
+    # det_idx numbers other boxes, so "rebuild to catch up" would re-key every
+    # verdict here onto them. Not stale -- a different audit.
+    plan_gen = _plan_gen(_plan_doc(P))
+    exists = os.path.exists(os.path.join(P['out'], 'pool.json')) \
+        or os.path.exists(P['pool'])
+    doc['pool_gen'] = _pool_gen(doc)
+    doc['plan_gen'] = plan_gen
+    doc['gen_mismatch'] = bool(exists and plan_gen is not None
+                               and plan_gen != doc['pool_gen'])
+    if doc['gen_mismatch']:
+        doc['stale'] = False
+        doc['behind'] = 0
+        doc['message'] = (f"this pool is gen-{doc['pool_gen']} and the "
+                          f"{spec(stage)['title']} store is now "
+                          f"gen-{plan_gen}; start a new audit dir, do not "
+                          f"rebuild")
     return doc
 
 
@@ -838,7 +945,9 @@ def stats(args):
     print(f"{sp['title']}: {s['judged']:,} boxes judged; the model and a "
           f"person disagreed on {s['wrong']:,}")
     pi = s.get('pool_info') or {}
-    if pi.get('unknown'):
+    if pi.get('gen_mismatch'):
+        print(f"  NOTE: {pi['message']}.")
+    elif pi.get('unknown'):
         print(f"  NOTE: this pool predates provenance tracking -- rebuild to "
               f"record what it covers: `fn_audit.py build --stage {stage}`")
     elif pi.get('stale'):
@@ -898,6 +1007,9 @@ def main(argv=None):
     b.add_argument('--memory', default='8GB')
     b.add_argument('--tmp', default='/tmp/fn_audit_spill',
                    help='where duckdb may spill; needs room')
+    b.add_argument('--overwrite-judged', action='store_true',
+                   help='rebuild even though verdicts.jsonl holds answers '
+                        'keyed against the current pool (it re-keys them)')
     e = sub.add_parser('export'); e.set_defaults(fn=export)
     e.add_argument('--model', default=None,
                    help='which gate these crops were rejected by; recorded '

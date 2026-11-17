@@ -101,6 +101,25 @@ def label_studio_dir(override=None):
     return got
 
 
+def _gate_is_gen1():
+    """Refuse a gate store of another detector generation. Every join here
+    pairs its det_idx with DET/IMG, the gen-1 detect store, and det_idx
+    numbers different boxes in each generation -- a gen-2 gate would hand
+    back wrong seed widths and hint boxes, and nothing would error."""
+    try:
+        with open(os.path.join(os.path.dirname(GATE), 'plan.json')) as fh:
+            gen = int(json.load(fh).get('gen') or 1)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, TypeError, AttributeError):
+        gen = None
+    if gen != 1:
+        raise SystemExit(
+            '%s/plan.json is gen %s, not 1: its det_idx do not match the '
+            'gen-1 detect store this joins to -- refusing' %
+            (os.path.dirname(GATE), gen))
+
+
 def _duckdb():
     try:
         import duckdb
@@ -236,6 +255,7 @@ def select(con, n, batch, window=3, seconds=5.0, max_width=4096, per_cell=1):
 
 
 def _load(con, p_dog):
+    _gate_is_gen1()
     cat = _duckdb().connect(CATALOG, read_only=True)
     ga = [
         r[0] for r in cat.execute(
@@ -391,6 +411,7 @@ def seed_boxes(picks, p_dog):
     ids = sorted({str(p['seed_id']) for p in picks if p.get('seed_id')})
     if not ids:
         return {}
+    _gate_is_gen1()
     con = _duckdb().connect()
     box = dict(
         con.execute(

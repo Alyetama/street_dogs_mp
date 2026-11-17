@@ -1869,7 +1869,11 @@ function paintStats(s){
      climb, and where it crosses 50% is where the threshold belongs. */
   var pi=s.pool_info||{},warn=document.getElementById('poolwarn');
   if(warn){
-    warn.textContent=pi.stale
+    /* another detector generation numbers other boxes: never "rebuild" */
+    warn.textContent=pi.gen_mismatch
+      ? 'This pool is gen-'+pi.pool_gen+' and the store is now gen-'+
+        pi.plan_gen+' \u2014 start a new audit dir, do not rebuild this one.'
+      : pi.stale
       ? 'This pool was cut from '+pi.shards+' shards and the run has written '+
         pi.shards_now+' since \u2014 the counts below are a snapshot of part '+
         'of the store, not all of it. Rebuild the pool to take them in.'
