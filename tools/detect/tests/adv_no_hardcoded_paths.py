@@ -64,6 +64,10 @@ EXTRA = (
     'tools/detect/tests/adv_promoted_side_store.py',
     # The gate fast path's parity check (2026-11-15). New, so `git add -f`.
     'tools/detect/tests/adv_gate_fastpath.py',
+    # The fine-tuned DINOv3 leash model's run path and its check
+    # (2026-11-17). New, so `git add -f`.
+    'tools/detect/leash_vit.py',
+    'tools/detect/tests/adv_leash_vit.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked

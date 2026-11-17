@@ -565,12 +565,83 @@ def _cut(task):
         if im.mode != 'RGB':
             im = im.convert('RGB')
     except Exception:
-        return si, iid, [], 'unreadable'
+        # its own kind: the bytes came off the disk, so the drive is fine --
+        # a corrupt file, not a mount gone away (READ_ERRORS)
+        return si, iid, [], 'undecodable'
+    if _PREP is not None and _PREP.get('kind') == VIT_KIND:
+        out = cut_vit(im, boxes, _PREP)
+        im.close()
+        return si, iid, out, ''
     out = cut_crops(im, boxes)
     im.close()
     if _PREP is not None:
         out = [(di, prep_crop(c, _PREP)) for di, c in out]
     return si, iid, out, ''
+
+
+# ── the ViT leash model: wider crops, letterboxed in the decoder ───────────
+# leash_vit.KIND, repeated so a decoder needs no import to dispatch on it
+VIT_KIND = 'dinov3-leash'
+
+
+def cut_vit(im, boxes, vspec):
+    """[(det_idx, x1, y1, x2, y2)] -> [(det_idx, res x res x 3 uint8)] for
+    the ViT leash model.
+
+    The SAME boxes as cut_crops() judges -- a box whose ordinary padded crop
+    is under MIN_SIDE is skipped here too, so both models answer for one set
+    of boxes -- but each is cut in the model's own framing (leash_vit.rect_pad:
+    the box grown by half its long side) and turned into the letterboxed
+    picture the model sees, here in the decoder process.
+    """
+    import leash_vit
+    w, h = im.size
+    keep = {di for di, _ in cut_crops_rects(w, h, boxes)}
+    out = []
+    for di, x1, y1, x2, y2 in boxes:
+        if di not in keep:
+            continue
+        a, b, c, d = leash_vit.rect_pad((x1, y1, x2, y2), w, h,
+                                        vspec['frac'])
+        if c <= a or d <= b:
+            # a box under 1 px wide or tall: cut_crops' fixed PAD_PX keeps
+            # it, the model's framing has nothing to cut (none in the gen-2
+            # work list; skipped rather than crash the whole run)
+            continue
+        cr = im.crop((a, b, c, d))
+        cr.load()
+        out.append((di, leash_vit.prep_crop(cr, vspec['res'])))
+    return out
+
+
+def cut_crops_rects(w, h, boxes):
+    """[(det_idx, (a, b, c, d))]: cut_crops()' rectangles and its MIN_SIDE
+    rule, without cutting anything."""
+    out = []
+    for di, x1, y1, x2, y2 in boxes:
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        pad = int(PAD_FRAC * max(x2 - x1, y2 - y1)) + PAD_PX
+        a, b = max(0, x1 - pad), max(0, y1 - pad)
+        c, d = min(w, x2 + pad), min(h, y2 + pad)
+        if c - a < MIN_SIDE or d - b < MIN_SIDE:
+            continue
+        out.append((di, (a, b, c, d)))
+    return out
+
+
+def vit_cut_one(vspec, frame, box):
+    """One box off one frame file through the run's own path (read_frame,
+    the decoder's decode, cut_vit) -> uint8 array, or None if not cut. What
+    the parity check re-cuts its crops with."""
+    import io
+    from PIL import Image
+    im = Image.open(io.BytesIO(read_frame(frame)))
+    im.load()
+    if im.mode != 'RGB':
+        im = im.convert('RGB')
+    got = cut_vit(im, [(0,) + tuple(box)], vspec)
+    im.close()
+    return got[0][1] if got else None
 
 
 def frame_path(root, cell, iid):
@@ -1044,12 +1115,121 @@ def live_runner(out_dir=None):
     return pid if 'gate_store' in cmd else None
 
 
+# Frames a shard may lose to read errors before it is refused. The gen-2 gate
+# read all 5,155,473 planned frames without one error, so a shard short of
+# frames is a drive that went away, not a few bad files: bobcat dropped off
+# USB mid-run on 2026-11-16 and every one of its frames came back
+# 'unreadable' -- skipped, and the shards written as complete without them.
+MAX_UNREADABLE = 20
+
+
+def unreadable_roots(roots, drives):
+    """'' or why the run cannot start: a drive this run reads whose root is
+    missing or cannot be listed (a dead mount answers with EIO)."""
+    bad = []
+    for d in sorted(drives):
+        root = roots.get(d)
+        try:
+            if not root:
+                raise FileNotFoundError('no root in the plan')
+            with os.scandir(root) as it:
+                next(it, None)
+        except OSError as e:
+            bad.append(f'{d} ({root}): {e.strerror or e}\n    '
+                       + mount_hint(root))
+    if not bad:
+        return ''
+    return ('cannot read the frames of\n  ' + '\n  '.join(bad)
+            + '\nmount the drive and run again')
+
+
+def mount_point(path):
+    """The mount point a path lives under (its nearest ancestor that is
+    one), or None."""
+    p = os.path.abspath(path or '')
+    while p and p != os.path.dirname(p):
+        try:
+            if os.path.ismount(p):
+                return p
+        except OSError:
+            pass
+        p = os.path.dirname(p)
+    return None
+
+
+def mount_hint(root):
+    """How to bring back the mount a drive root lives under. A USB drive
+    that drops and comes back gets a new device node while the old mount
+    stays behind dead (every read is EIO), so it is unmounted first. Without
+    an /etc/fstab line `mount <point>` alone does not work."""
+    mp = mount_point(root)
+    if not mp or mp == '/':
+        return f'(no mount point found for {root}: is the drive attached?)'
+    try:
+        with open('/etc/fstab') as fh:
+            fstab = [ln.split() for ln in fh
+                     if ln.strip() and not ln.lstrip().startswith('#')]
+    except OSError:
+        fstab = []
+    if any(len(f) > 1 and f[1] == mp for f in fstab):
+        again = f'sudo mount {mp}'
+    else:
+        again = (f'sudo mount /dev/disk/by-label/<label> {mp}   '
+                 f'(no /etc/fstab entry for {mp})')
+    return f'remount: sudo umount -l {mp} ; {again}'
+
+
+# Error kinds the drive READERS report: the frame never came off the disk.
+# A shard with any of these is written only once its drives answer again.
+READ_ERRORS = ('unreadable', 'no_root')
+
+
+def short_done_shards(skip, shards, limit):
+    """[(shard, images in it, images planned)] for finished shards holding
+    more than `limit` fewer images than their plan -- written while a drive
+    was gone (2026-11-16), and skipped by every resume since done_shards()
+    goes by index. Every planned image of the leash stage has a row (its
+    boxes are the gate's dogs, all past MIN_SIDE); a gate image whose boxes
+    are all under MIN_SIDE has none, which `limit` absorbs."""
+    import pyarrow.parquet as pq
+    out = []
+    for si in sorted(skip):
+        if si >= len(shards):
+            continue
+        try:
+            col = pq.read_table(os.path.join(OUT_DIR, shard_name(si)),
+                                columns=['image_id'])['image_id']
+            have = len(set(col.to_pylist()))
+        except Exception:
+            have = -1
+        if have < len(shards[si]) - limit:
+            out.append((si, have, len(shards[si])))
+    return out
+
+
+def refuse_unreadable_shard(si, kinds, frames, limit):
+    """'' or why shard `si` must not be written: more than `limit` of its
+    frames could not be read. Its boxes would be missing from a shard that
+    reads as complete, and done_shards() would never revisit them."""
+    n = sum(kinds.values())
+    if n <= limit:
+        return ''
+    return (f'shard {si}: {n:,} of {frames:,} frames unreadable '
+            f'({", ".join(f"{k} {v:,}" for k, v in sorted(kinds.items()))}) '
+            f'-- not written. A drive has most likely gone away: check the '
+            f'mounts and run again (finished shards are kept; this one is '
+            f'redone). --max-unreadable raises the limit ({limit}).')
+
+
 def run(args):
     import multiprocessing as mp
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from ultralytics import YOLO
 
+    vit_dir = os.path.abspath(args.vit_model) if getattr(
+        args, 'vit_model', None) else None
+    if vit_dir and STAGE != 'leash':
+        raise SystemExit('--vit-model is a leash model: --stage leash')
     if not os.path.exists(os.path.join(OUT_DIR, 'work.parquet')):
         raise SystemExit('no plan yet -- run `gate_store.py plan` first')
     # Both refusals come BEFORE the model and the 4.7M-row work list load: the
@@ -1065,30 +1245,64 @@ def run(args):
     n = len(work['image_id'])
 
     sp = spec()
-    weights, run_name = gate_weights()
-    model = YOLO(weights)
-    names = dict(model.names)
-    got = sorted(str(v) for v in names.values())
-    if got != sorted(sp['classes']):
-        raise SystemExit(f"{weights} classifies {got} -- not a {sp['title']} "
-                         f"(expected {sorted(sp['classes'])})")
-    # index of the class whose probability is written beside every verdict
     pos = sp['positive']
-    dog_idx = [k for k, v in names.items() if v == pos][0]
     other = next(c for c in sp['classes'] if c != pos)
+    model = vspec = dog_idx = None
+    if vit_dir:
+        # The fine-tuned DINOv3 leash model (leash_vit.py): its own framing
+        # and resolution, read from the model directory, and its own batch --
+        # the one it was validated at, because under bf16 the batch shape
+        # moves p. Loaded below, after the shard bookkeeping, like YOLO.
+        import leash_vit
+        try:
+            vcfg = leash_vit.read_config(vit_dir)
+            vspec = leash_vit.spec(vit_dir)
+        except (OSError, ValueError, KeyError) as e:
+            raise SystemExit(f'--vit-model {vit_dir}: {e}')
+        if not os.path.isfile(os.path.join(vit_dir, 'parity.json')):
+            raise SystemExit(f'--vit-model {vit_dir}: no parity.json -- the '
+                             f'run cannot prove it reproduces the model')
+        run_name = os.path.basename(os.path.normpath(vit_dir))
+        imgsz = vspec['res']
+        if args.imgsz and args.imgsz != imgsz:
+            raise SystemExit(f'--imgsz {args.imgsz}: {run_name} is fixed at '
+                             f'{imgsz}')
+        eb = leash_vit.eval_batch(vcfg)
+        if args.batch and args.batch != eb:
+            print(f'--batch {args.batch} ignored: {run_name} always scores '
+                  f'in batches of {eb}, the shape it was validated at')
+        args.batch = eb
+        want = {'crop': vspec['framing'], 'imgsz': int(imgsz)}
+        _no = check_protocol(want)
+        if _no:
+            raise SystemExit(_no)
+        print(f'{sp["title"]}: {run_name} (DINOv3 ViT-L), {vspec["framing"]} '
+              f'crops letterboxed to {imgsz}, batch {args.batch}')
+    else:
+        from ultralytics import YOLO
+        weights, run_name = gate_weights()
+        model = YOLO(weights)
+        names = dict(model.names)
+        got = sorted(str(v) for v in names.values())
+        if got != sorted(sp['classes']):
+            raise SystemExit(f"{weights} classifies {got} -- not a "
+                             f"{sp['title']} (expected "
+                             f"{sorted(sp['classes'])})")
+        # index of the class whose probability is written beside every verdict
+        dog_idx = [k for k, v in names.items() if v == pos][0]
 
-    imgsz = args.imgsz or model_imgsz(model)
-    if not imgsz:
-        raise SystemExit(f'{weights} does not record the imgsz it was trained '
-                         f'at -- pass --imgsz explicitly')
-    want = {'crop': CROP_MODE, 'imgsz': int(imgsz)}
-    if not args.batch:
-        args.batch = auto_batch(imgsz)
-    _no = check_protocol(want)
-    if _no:
-        raise SystemExit(_no)
-    print(f'{sp["title"]}: {run_name}, full-resolution crops, '
-          f'predict at imgsz={imgsz}, batch {args.batch}')
+        imgsz = args.imgsz or model_imgsz(model)
+        if not imgsz:
+            raise SystemExit(f'{weights} does not record the imgsz it was '
+                             f'trained at -- pass --imgsz explicitly')
+        want = {'crop': CROP_MODE, 'imgsz': int(imgsz)}
+        if not args.batch:
+            args.batch = auto_batch(imgsz)
+        _no = check_protocol(want)
+        if _no:
+            raise SystemExit(_no)
+        print(f'{sp["title"]}: {run_name}, full-resolution crops, '
+              f'predict at imgsz={imgsz}, batch {args.batch}')
 
     # group into images, keeping the plan's order
     #
@@ -1130,20 +1344,71 @@ def run(args):
     size = _shard_size(args.shard)
     shards = [jobs[i:i + size] for i in range(0, len(jobs), size)]
     skip = done_shards()
+    short = short_done_shards(skip, shards, args.max_unreadable)
+    if short:
+        raise SystemExit(
+            f'{len(short)} finished shard(s) hold fewer images than planned '
+            f'(' + ', '.join(f'{shard_name(si)} {h:,}/{p:,}'
+                             for si, h, p in short[:6])
+            + (' ...' if len(short) > 6 else '') + ') -- written while a '
+            f'drive was unreadable, and a resume would never revisit them. '
+            f'Set the record aside: `gate_store.py archive --stage {STAGE}`'
+            f', then run again.')
     stop = stop_after(shards, skip, args.limit)
     print(f'{len(jobs):,} images in {len(shards)} shards of {size}; '
           f'{len(skip)} already done'
           + (f'; stopping after shard {stop - 1}' if stop is not None else ''))
 
-    # One predict() before anything else: it is what picks the device, fuses
-    # the model and chooses the transforms, and the fast path reuses all
-    # three rather than rebuilding any of them.
-    model.predict(probe_crops()[:1], verbose=False, device=args.device,
-                  imgsz=imgsz)
-    backend = model.predictor.model
-    prep = lut = None
-    half = bool(getattr(backend, 'fp16', False))
-    if not args.legacy_predict:
+    roots = _roots()
+    todo = [si for si in range(len(shards))
+            if si not in skip and (stop is None or si < stop)]
+    # every drive this run reads must answer BEFORE the model loads: a dead
+    # mount is a remount, not a model problem (the ViT parity frames too)
+    need = {j[2] for si in todo for j in shards[si]}
+    _no = unreadable_roots(roots, need)
+    if not _no and vit_dir:
+        _no = leash_vit.unreadable_parity_frames(vit_dir)
+    if _no:
+        raise SystemExit(_no)
+    prep = lut = fwd = None
+    half = False
+    if vit_dir:
+        # Load, then prove the whole path on crops with known answers before
+        # judging anything: parity.json names training crops by frame and
+        # box with the p the model gave them in memory when it was fit.
+        # They are re-cut from the frames by the decoder's own functions and
+        # scored in batches of the validated shape; a framing, JPEG, resize,
+        # normalisation or precision drift fails here, not in the record.
+        dev = f'cuda:{args.device}' if str(args.device).isdigit() \
+            else str(args.device)
+        try:
+            net, vcfg, vdev = leash_vit.load(vit_dir, dev)
+        except (OSError, ValueError, KeyError) as e:
+            raise SystemExit(f'--vit-model {vit_dir}: {e}')
+        if vdev.type != 'cuda':
+            raise SystemExit(f'{run_name} was validated on cuda (bf16); '
+                             f'--device {args.device} is not cuda')
+        fwd = leash_vit.Forward(net, vcfg, vdev)
+        try:
+            gap, n_par = leash_vit.parity_check(
+                fwd, lambda f, b: vit_cut_one(vspec, f, b), vit_dir)
+        except (OSError, ValueError, KeyError) as e:
+            raise SystemExit(f'{run_name} does not reproduce its own '
+                             f'predictions here: {e}')
+        print(f'parity: {n_par} training crops re-cut from their frames '
+              f'match the fit-time p to {gap:.1e}; {vdev} bf16')
+        prep = vspec
+    else:
+        # One predict() before anything else: it is what picks the device,
+        # fuses the model and chooses the transforms, and the fast path
+        # reuses all three rather than rebuilding any of them.
+        model.predict(probe_crops()[:1], verbose=False, device=args.device,
+                      imgsz=imgsz)
+        backend = model.predictor.model
+        half = bool(getattr(backend, 'fp16', False))
+    if vit_dir:
+        pass                     # proven by the parity check above
+    elif not args.legacy_predict:
         try:
             prep = classify_spec(model.predictor.transforms, imgsz)
             lut = value_lut(model.predictor.transforms).to(backend.device)
@@ -1158,10 +1423,8 @@ def run(args):
     else:
         print('legacy predict(): PIL crops, preprocessed in this process')
 
-    pin_protocol(want)
-    roots = _roots()
-    todo = [si for si in range(len(shards))
-            if si not in skip and (stop is None or si < stop)]
+    pin_protocol(dict(want, model=run_name, **(
+        {'kind': vspec['kind'], 'model_dir': vit_dir} if vit_dir else {})))
     readers = reader_counts(args.readers,
                             {j[2] for si in todo for j in shards[si]})
     disk_order = drive_map(args.disk_order, '--disk-order')
@@ -1169,6 +1432,9 @@ def run(args):
           f'{args.ahead} shards look-ahead, '
           f'disk order {disk_order or "off"}')
     t0, seen, bad = time.time(), 0, 0
+    bad_in = {si: {} for si in todo}       # shard -> {error kind: frames}
+    bad_drives = {}                        # shard -> drives a read failed on
+    drive_of = {}                          # shard -> {image_id: drive}
     # frames the shards on disk already account for -- `seen` counts only what
     # THIS process walked, and a resumed run starts it at zero
     base = sum(len(shards[i]) for i in skip if i < len(shards))
@@ -1199,7 +1465,9 @@ def run(args):
         GPU; settle() reads it, so the next batch is gathered meanwhile."""
         if not batch:
             return
-        if prep is None:
+        if fwd is not None:
+            got = fwd(batch)        # P(leashed), queued on the device
+        elif prep is None:
             got = [float(r.probs.data[dog_idx]) for r in model.predict(
                 batch, verbose=False, device=args.device, imgsz=imgsz)]
         else:
@@ -1233,6 +1501,21 @@ def run(args):
                 continue
             closing.discard(si)
             _no = refuse_short_shard(si, len(shards[si]), len(shards), size)
+            if _no:
+                raise SystemExit(_no)
+            _no = refuse_unreadable_shard(si, bad_in.pop(si, {}),
+                                          len(shards[si]),
+                                          args.max_unreadable)
+            # Under the limit is not enough when the failures were reads: a
+            # drive that died with a few of this shard's frames left gives
+            # only those few errors here, and the shard would be written
+            # short for good. Its drives must answer now.
+            if not _no and bad_drives.get(si):
+                _no = unreadable_roots(roots, bad_drives.pop(si) - {None})
+                if _no:
+                    _no = (f'shard {si}: frames failed to read, and their '
+                           f'drive is gone -- not written.\n' + _no)
+            drive_of.pop(si, None)
             if _no:
                 raise SystemExit(_no)
             r = rows.pop(si)
@@ -1280,6 +1563,13 @@ def run(args):
                 seen += 1
                 if err:
                     bad += 1
+                    k = bad_in.setdefault(si, {})
+                    k[err] = k.get(err, 0) + 1
+                    if err in READ_ERRORS:
+                        if si not in drive_of:
+                            drive_of[si] = {j[0]: j[2] for j in shards[si]}
+                        bad_drives.setdefault(si, set()).add(
+                            drive_of[si].get(iid))
                 for di, crop in crops:
                     batch.append(crop)
                     meta.append((si, iid, di))
@@ -1528,6 +1818,15 @@ def main(argv=None):
                         'stage at the batch it started with')
     r.add_argument('--shard', type=int, default=SHARD_ROWS)
     r.add_argument('--device', default=0)
+    r.add_argument('--max-unreadable', type=int, default=MAX_UNREADABLE,
+                   help='frames a shard may lose to read errors before it '
+                        f'is refused, not written (default {MAX_UNREADABLE})')
+    r.add_argument('--vit-model', default=None, metavar='DIR',
+                   help='leash stage: judge with the fine-tuned DINOv3 leash '
+                        'model in DIR (config.json, trainable.pt, '
+                        'parity.json; see leash_vit.py) instead of the '
+                        'promoted YOLO model. Needs torch + transformers + '
+                        'pyarrow in the running interpreter')
     r.add_argument('--imgsz', type=int, default=0,
                    help='predict at this size instead of the one the '
                         'model was trained at (for experiments only)')
