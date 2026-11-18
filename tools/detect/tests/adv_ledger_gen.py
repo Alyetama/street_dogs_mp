@@ -52,7 +52,9 @@ and counted.
       build_detector_negatives.flagged_ids read only detect_root()'s gen;
       v3 reads the gate audit of THAT generation's dir (a gen-1 build keeps
       its gen-1 confirmations however far the page has moved on), and a
-      gen >= 2 audit redraw only of that generation's pool
+      gen >= 2 audit redraw only of that generation's pool; v3 corrections
+      never take a leash-audit redraw (framed with the leash, not a dog-only
+      box) and say how many they skipped
   a1  audit.corrections: only 'audit:<stage>' rows of the pool's gen
       -- not the review page's, not the other audit's (the old bug); and for
       gen >= 2 only its own pool's
@@ -833,7 +835,9 @@ def reader_checks(w, fx, tag):
                 v3.DETECT_ROOT = root
                 out[root] = sorted(v3.confirmed_positive_ids())
             v3.DETECT_ROOT = fx.g1
-            fix1 = v3.corrections()
+            said = io.StringIO()
+            with contextlib.redirect_stdout(said):
+                fix1 = v3.corrections()
             v3.DETECT_ROOT = fx.g2
             fix2 = v3.corrections()
             bn.DETECT_ROOT = fx.g1
@@ -861,11 +865,17 @@ def reader_checks(w, fx, tag):
             fh.write(real_doc)
         check(f'{tag}r5 a pool cut from another store than the build\'s is '
               f'refused (audit_ctx_for)', refused)
-        check(f'{tag}r5 v3 corrections: the store\'s gen only',
+        # '12' det 0: the gate audit's redraw (4..8) stands, the later
+        # leash-audit one (5..9, drawn round the leash) does not replace it
+        check(f'{tag}r5 v3 corrections: the store\'s gen only, never a '
+              f'leash-audit redraw',
               fix1 == {('11', 0): (1.0, 1.0, 5.0, 5.0),
-                       ('12', 0): (5.0, 5.0, 9.0, 9.0)}
+                       ('12', 0): (4.0, 4.0, 8.0, 8.0)}
               and fix2 == {('11', 0): (2.0, 2.0, 6.0, 6.0),
                            ('13', 0): (3.0, 3.0, 7.0, 7.0)}, (fix1, fix2))
+        check(f'{tag}r5 v3 corrections count the leash-audit redraws skipped',
+              '1 leash-audit box redraw(s) skipped' in said.getvalue(),
+              said.getvalue())
         check(f'{tag}r5 build_detector_negatives flags: the store\'s gen',
               neg1 == ['11', '12'] and neg2 == ['11', '13'], (neg1, neg2))
 
@@ -1119,6 +1129,10 @@ MUTANTS = [
        "                    continue\n"
        "                crop = str(d.get('crop') or '')",
        "                crop = str(d.get('crop') or '')")]),
+    ('v3 corrections take leash-audit redraws', 'build_dogdet_v3',
+     [("                if d.get('crop') == 'audit:leash':\n"
+       "                    leash += 1\n"
+       "                    continue\n", '')]),
     ('negatives flags of every generation', 'build_detector_negatives',
      [("                    if fa.gen_of(r.get(fa.GEN_FIELD)) != gen:\n"
        "                        other += 1\n"

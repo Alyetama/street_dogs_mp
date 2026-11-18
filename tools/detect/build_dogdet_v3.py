@@ -310,12 +310,18 @@ def corrections():
     crop_sources.audit_ctx_for applies to the confirmations): a generation
     number names a detector, not a store, and a redraw of another store's
     det_idx would move a box nobody redrew. Rows that do not are skipped and
-    counted."""
+    counted.
+
+    A leash-audit redraw (`crop` 'audit:leash') is never a detector box: the
+    leash page frames a leashed dog WITH its leash (the leash model's crop),
+    so taken here it would teach the one-class dog detector a box that runs
+    out along the leash. Every such row is skipped, and counted, whatever its
+    generation or pool."""
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import fn_audit as fa
     gen = ledger_gen()
     out = {}
-    other = other_pool = 0
+    other = other_pool = leash = 0
     pools = {}
 
     def pool_of(stage):
@@ -332,6 +338,9 @@ def corrections():
         for line in open(CORRECTIONS):
             if line.strip():
                 d = json.loads(line)
+                if d.get('crop') == 'audit:leash':
+                    leash += 1
+                    continue
                 if fa.gen_of(d.get(fa.GEN_FIELD)) != gen:
                     other += 1
                     continue
@@ -346,6 +355,9 @@ def corrections():
                     float(d['x2']), float(d['y2']))
     except OSError:
         pass
+    if leash:
+        print(f'{leash} leash-audit box redraw(s) skipped (framed with the '
+              f'leash, not dog-only detector boxes)', flush=True)
     if other:
         print(f'{other} box correction(s) of another detector generation '
               f'skipped (the store is gen {gen})', flush=True)
