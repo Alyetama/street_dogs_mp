@@ -346,6 +346,11 @@ def check_leash_argv_reserves(families=None):
     if families:
         bd.FAMILIES['leash']['reserves'] = families
     try:
+        # the store says which detector generation it is: the build digests
+        # the audit ledgers of that generation (build_dataset.stores_for)
+        os.makedirs(os.path.join(TMP, 'nostore'), exist_ok=True)
+        with open(os.path.join(TMP, 'nostore', 'status.json'), 'w') as fh:
+            json.dump({'gen': 1}, fh)
         with contextlib.redirect_stdout(io.StringIO()):
             bd.build('leash', out=os.path.join(TMP, 'bd_out_%d' % len(
                 os.listdir(TMP))), no_export=True, no_embed_dedup=True,
@@ -377,9 +382,11 @@ def _audit_fixture(stage, answers):
     """An audit directory for `stage`: verdicts, full/ crops, one edited/
     crop (key ...2#0, redrawn to (2, 3, 20, 30)) and a pool parquet."""
     base = os.path.join(TMP, 'audit_fixture_' + stage)
-    paths = {'out': base, 'pool': os.path.join(base, 'pool.parquet'),
+    paths = {'out': base, 'gen': 1,
+             'pool': os.path.join(base, 'pool.parquet'),
              'verdicts': os.path.join(base, 'verdicts.jsonl'),
              'full': os.path.join(base, 'full'),
+             'edited': os.path.join(base, 'edited'),
              'pages': os.path.join(base, 'pages')}
     os.makedirs(paths['pages'], exist_ok=True)
     yes, no = answers
@@ -411,15 +418,33 @@ def check_audit_coverage():
     import fn_audit as fa
     fx = {'leash': _audit_fixture('leash', ('leashed', 'unleashed')),
           'gate': _audit_fixture('gate', ('dog', 'not_dog'))}
-    real_paths, real_corr = fa.paths, cs.read_audit_corrections
-    fa.paths = lambda stage='gate': dict(fx[stage])
+    real = (fa.paths, cs.read_audit_corrections, cs.audit_ctx_for,
+            fa.audit_gens)
+    fa.paths = lambda stage='gate', *, gen: dict(fx[stage])
     cs.read_audit_corrections = lambda stage, path=None, **_: {
         ('500000000002', 0): (2.0, 3.0, 20.0, 30.0)}
+    # the fixture IS the build's generation's audit (gen 1): which audit a
+    # build reads is adv_ledger_gen's r5; here, what it makes of one
+    cs.audit_ctx_for = lambda stage, root: fa.AuditCtx(
+        stage=stage, gen=1, pool_id=fa.G1_POOL_ID, P=dict(fx[stage]),
+        meta={'gen': 1, 'pool_id': fa.G1_POOL_ID, 'detect_root': root},
+        frozen=True)
+    fa.audit_gens = lambda stage: [1]
+    store = os.path.join(TMP, 'audit_fixture_store')
+    os.makedirs(store, exist_ok=True)
+    with open(os.path.join(store, 'status.json'), 'w') as fh:
+        json.dump({'gen': 1}, fh)
     try:
-        got = {st: cs.audit_candidates(st) for st in fx}
+        got = {st: cs.audit_candidates(st, detect_root=store) for st in fx}
     finally:
-        fa.paths, cs.read_audit_corrections = real_paths, real_corr
+        (fa.paths, cs.read_audit_corrections, cs.audit_ctx_for,
+         fa.audit_gens) = real
     bad = []
+    for st, (rows, _c) in sorted(got.items()):
+        if any((r['provenance'].get('gen'), r['provenance'].get('pool'))
+               != (1, fa.G1_POOL_ID) for r in rows):
+            bad.append('D3 %s: an audit row does not name the generation and '
+                       'pool it is a label of' % (st,))
     for st, (rows, counts) in sorted(got.items()):
         keys = {r['provenance']['key_or_task_id']: r for r in rows}
         labelled = {'500000000001#0', '500000000002#0', '500000000004#1'}
@@ -563,7 +588,8 @@ def check_missing_boto3_fatal():
     cs.drive_roots = lambda: {}
     cs.exclusions = lambda fam, root=None: ({}, {})
     cs._duck = lambda memory='12GB': _C()
-    cs.audit_candidates = lambda stage, con=None: ([], collections.Counter())
+    cs.audit_candidates = lambda stage, con=None, **_: (
+        [], collections.Counter())
     cs.leash_call_candidates = lambda root, **k: ([], collections.Counter(),
                                                   [])
     cs.frame_label_candidates = lambda path=None: ([], {},
@@ -766,7 +792,7 @@ def check_reserve_tool(dataset_ids=None):
         json.dump({'keys': ['x'], 'created_at': 'then'}, fh)
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            rts.main(['--family', 'leash', '--out', out])
+            rts.main(['--family', 'leash', '--gen', '1', '--out', out])
         bad.append('D7 an existing reservation was overwritten without '
                    '--force')
     except SystemExit as e:
@@ -1043,7 +1069,7 @@ def run_collect(family, by_source, tasks=None, store_wh=None, seqs=None,
     cs.drive_roots = lambda: {DRV: os.path.join(TMP, DRV)}
     cs.exclusions = lambda fam, root=None: (dict(excl or {}), {})
     cs._duck = lambda memory='12GB': _C()
-    cs.audit_candidates = lambda stage, con=None: counted(rows_of(
+    cs.audit_candidates = lambda stage, con=None, **_: counted(rows_of(
         'gate_audit' if stage == 'gate' else 'leash_audit'))
     cs.flag_candidates = lambda label, root, **k: counted(rows_of(
         'hard_negative' if label == 'false_positive' else 'hard_positive'))
@@ -2332,7 +2358,7 @@ def smoke_reserve_counts():
     for fam, n in want.items():
         p = subprocess.run([sys.executable,
                             os.path.join(DETECT, 'reserve_test_set.py'),
-                            '--family', fam, '--dry-run'],
+                            '--family', fam, '--gen', '1', '--dry-run'],
                            capture_output=True, text=True, timeout=600)
         m = re.search(r'-> eligible (\d+)', p.stdout or '')
         if p.returncode != 0 or not m:

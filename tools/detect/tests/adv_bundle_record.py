@@ -297,6 +297,11 @@ def check_build_keeps_stage_records():
         bd.Runner.run = fake_run
         bd.git_head = lambda: {'commit': 'x', 'dirty': False}
         bd.D = lambda *p: os.path.join(reserves, *p)
+        # the store names its detector generation: a build digests the audit
+        # ledgers of that generation (build_dataset.stores_for)
+        os.makedirs(os.path.join(where, 'gen1'), exist_ok=True)
+        with open(os.path.join(where, 'gen1', 'status.json'), 'w') as fh:
+            json.dump({'gen': 1}, fh)
         with contextlib.redirect_stdout(io.StringIO()):
             man = bd.build('leash', detect_root=os.path.join(where, 'gen1'),
                            ls_export_path=export)

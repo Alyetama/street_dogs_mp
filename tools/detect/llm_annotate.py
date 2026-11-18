@@ -301,17 +301,27 @@ def _audit():
     return fn_audit
 
 
+# WHICH audit the 'audit_finds' source is: the gen-1 gate audit, by name, for
+# good. Its ledger here is keyed (pool='audit_finds', key) with no generation
+# in it, and 347 rows were asked of gen-1 crops -- read against another
+# generation's ledger, those keys would be scored against verdicts on other
+# boxes (det_idx is numbered per detector generation). A later generation's
+# audit is a NEW source, 'audit_finds_gen<N>', never this one moved.
+AUDIT_FINDS_GEN = 1
+
+
 def _audit_pool():
-    """The audit's own answers: {key: (human answer, crop path)}.
+    """The audit's own answers: {key: (human answer, crop path)} -- the
+    gen-1 gate audit's (AUDIT_FINDS_GEN), its ledger and its crops together.
 
     full/ rather than crops/: crops/ is downscaled for the contact sheet and
     full/ is the picture the gate itself was judged on, so this asks the
     model about the same pixels the measurement is about.
     """
     fa = _audit()
-    root = os.path.join(REPO, 'data', 'fn_audit', 'full')
+    root = fa.paths('gate', gen=AUDIT_FINDS_GEN)['full']
     out = {}
-    for v in fa.read_verdicts(stage='gate'):
+    for v in fa.read_verdicts(stage='gate', gen=AUDIT_FINDS_GEN):
         ans = fa.verdict_of(v.get('verdict'), 'gate')
         # 'unsure' is an answer a person can give and is not a yes or a no,
         # so there is nothing here to agree or disagree with.
@@ -405,7 +415,14 @@ SOURCES = {
         'human': True,
         'enabled': True,
         'reader': _audit_pool,
-        'ledger': 'data/fn_audit/verdicts.jsonl',
+        # the same file _audit_pool() reads, spelled from fn_audit's name for
+        # it (repo-relative, for the page): gen 1's ledger. This one name is
+        # worth fn_audit at import -- it imports nothing but the standard
+        # library -- where a second spelling of the path is how a reader
+        # ends up on one generation's ledger and another's crops
+        'ledger': os.path.join('data', _audit().audit_name(
+            _audit().spec('gate')['audit_dir'], AUDIT_FINDS_GEN),
+            'verdicts.jsonl'),
         'note': 'crops drawn evenly across the gate’s ten score bands, '
                 'so near-threshold cases are hugely over-represented',
     },

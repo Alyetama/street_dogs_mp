@@ -141,6 +141,11 @@ FAMILY_SOURCES = {
 # trains on the detector box production cuts, and keeps the redraw only as
 # provenance.redraw_box. leash_call_candidates follows the leash rule too.
 EDITED_WINS = {'gate': True, 'leash': False}
+# The source name each audit stage's rows go by. A lookup, not
+# `'gate_audit' if stage == 'gate' else 'leash_audit'`: that spelling called
+# every stage that is not the gate the leash audit, and a stage nobody listed
+# here must be a KeyError, not a mislabelled row.
+AUDIT_SOURCE = {'gate': 'gate_audit', 'leash': 'leash_audit'}
 CONF_TOL = 0.006          # the review ledgers round conf to two decimals
 LS_IOU = 0.5              # a drawn box IS a detector box at this overlap
 JPEG_Q = 95               # what audit.py writes its full/ crops at
@@ -414,25 +419,33 @@ def frame_path(roots, cell, drive, image_id):
 
 # ── the ledgers ─────────────────────────────────────────────────────────────
 
-def read_audit_corrections(stage, path=None, gen=None, counts=None):
-    """{(image_id, det_idx): (x1, y1, x2, y2)} -- the audit page's redraws.
+def read_audit_corrections(stage, path=None, *, gen, counts=None):
+    """{(image_id, det_idx): (x1, y1, x2, y2)} -- the audit page's redraws on
+    generation `gen`'s pool of this stage.
 
     Only `crop == "audit:<stage>"` records, last write wins: that is the box
     the page cut its edited/ crop from, which is what the framing check below
     re-cuts to prove the file on disk is what it claims to be.
 
-    And only records of `gen` -- default: the generation of the stage's audit
-    pool (fn_audit.pool_gen), whose det_idx the keys are. A redraw of another
-    generation's pool (untagged reads as gen 1) is skipped and counted in
-    `counts['other_gen']`.
+    And only records OF THAT POOL. `gen` is required -- there used to be a
+    default, "the stage's audit pool", from when each stage had one -- and a
+    row's `gen` (untagged reads as gen 1) must be it. For gen >= 2 the row's
+    `pool` must also be the pool's pool_id (fn_audit.pool_meta): a redraw is
+    of one pool's box, and a second pool of the same generation (a new model)
+    would key the same det_idx. A gen-1 row may carry no pool or G1_POOL_ID.
+    Rows of another generation or pool are skipped and counted in
+    `counts['other_gen']` / `counts['other_pool']`. A pool that cannot vouch
+    for itself (pool_meta refuses) has no redraws: `counts['pool_gen_unknown']`.
     """
     import fn_audit as fa
     want = 'audit:%s' % stage
-    gen = fa.pool_gen(stage) if gen is None else gen
     out = {}
-    if gen is None:
-        # a pool.json that names no generation: no redraw can be told to be
-        # its own (and an unreadable row tag, gen_of None, must not match)
+    try:
+        pool_id = fa.pool_meta(stage, gen)['pool_id']
+    except fa.PoolIdentityError:
+        # a pool.json that names no usable identity: no redraw can be told
+        # to be its own (and an unreadable row tag, gen_of None, must not
+        # match)
         if counts is not None:
             counts['pool_gen_unknown'] += 1
         return out
@@ -449,6 +462,11 @@ def read_audit_corrections(stage, path=None, gen=None, counts=None):
                     if counts is not None:
                         counts['other_gen'] += 1
                     continue
+                rp = r.get(fa.POOL_FIELD)
+                if (gen >= 2 or rp is not None) and rp != pool_id:
+                    if counts is not None:
+                        counts['other_pool'] += 1
+                    continue
                 try:
                     out[(str(r['image_id']), int(r.get('det_idx') or 0))] = (
                         float(r['x1']), float(r['y1']),
@@ -460,8 +478,73 @@ def read_audit_corrections(stage, path=None, gen=None, counts=None):
     return out
 
 
-def pool_rows(stage, keys, con=None):
-    """{(image_id, det_idx): (x1, y1, x2, y2, cell, drive)} from the audit pool.
+def audit_ctx_for(stage, detect_root):
+    """fn_audit.AuditCtx of the audit whose boxes are `detect_root`'s, or
+    None when that generation has no audit dir.
+
+    THE RULE every reader of an audit ledger outside the page follows: the
+    generation is the build's own (join_gen(detect_root)), never "the stage's
+    audit" and never the live one, and the pool must say it was cut from this
+    very store -- realpath(pool.json detect_root) == realpath(detect_root).
+    A gen-1 pool never recorded its store; its detect_root is the ledger pin
+    (fn_audit.pool_meta), so a gen-1 build on any other store is refused too.
+    Other generations' audits are counted by the callers and never read.
+    A generation with no audit dir at all is None (nothing to read); one
+    whose dir exists but whose pool cannot vouch for itself is SystemExit --
+    a build does not quietly drop a ledger people answered into. Unless
+    nobody ever could have: a dir with no drawn log, no page and no ledger
+    (what a `fn_audit.py build` that failed its checks, or stopped between
+    its renames, leaves behind) put nothing in front of anyone, so no
+    verdict or redraw can be keyed to it -- a redraw too needs its key on a
+    page (audit.save_correction). That is None with a note, not a build
+    stopped until somebody deletes the dir by hand.
+    """
+    import fn_audit as fa
+    gen = join_gen(detect_root)
+    P = fa.paths(stage, gen=gen)
+    if gen >= 2 and not os.path.isdir(P['out']):
+        return None
+    try:
+        c = fa.ctx(stage, gen)
+    except fa.PoolIdentityError as e:
+        shown = [k for k in ('drawn', 'verdicts', 'pages')
+                 if os.path.exists(P[k])]
+        if gen >= 2 and not shown:
+            print('note: the gen-%d %s audit dir %s holds no pool (%s), and '
+                  'nothing was ever drawn from it -- no gen-%d %s audit '
+                  'labels' % (gen, stage, P['out'], e, gen, stage),
+                  flush=True)
+            return None
+        raise SystemExit('the gen-%d %s audit cannot be read: %s'
+                         % (gen, stage, e))
+    have = c.meta.get('detect_root')
+    if not have or os.path.realpath(have) != os.path.realpath(detect_root):
+        raise SystemExit(
+            'the gen-%d %s audit pool was cut from %s, and this build joins '
+            'against %s: its det_idx would land on another store\'s boxes'
+            % (gen, stage, have, detect_root))
+    return c
+
+
+def other_gen_verdicts(stage, gen):
+    """{other generation: verdict count} for the audits a build of `gen`
+    does NOT read -- so what is left out is said aloud, not silently gone.
+    A ledger that cannot be read counts as -1."""
+    import fn_audit as fa
+    out = {}
+    for g in fa.audit_gens(stage):
+        if g == gen:
+            continue
+        try:
+            out[g] = len(fa.read_verdicts(stage=stage, gen=g))
+        except (fa.GenError, ValueError, OSError):
+            out[g] = -1
+    return out
+
+
+def pool_rows(stage, keys, con=None, *, gen):
+    """{(image_id, det_idx): (x1, y1, x2, y2, cell, drive)} from generation
+    `gen`'s audit pool of this stage.
 
     The pool is what the audit page cut its full/ crops from, so its box is
     the detector box the reviewer was shown.
@@ -479,7 +562,8 @@ def pool_rows(stage, keys, con=None):
             "SELECT p.image_id, p.det_idx, p.x1, p.y1, p.x2, p.y2, p.cell, "
             "p.drive FROM read_parquet('%s') p JOIN want_p w "
             "ON p.image_id = w.i AND p.det_idx = w.d"
-            % fn_audit.paths(stage)['pool'].replace("'", "''")).fetchall()
+            % fn_audit.paths(stage, gen=gen)['pool'].replace("'", "''")
+        ).fetchall()
     finally:
         if own:
             con.close()
@@ -710,8 +794,15 @@ def flag_candidates(label, detect_root, ledger=None, corrections=None,
     return rows, c
 
 
-def audit_candidates(stage, con=None):
-    """(rows, counts) for one audit ledger, reusing the page's own crops.
+def audit_candidates(stage, con=None, *, detect_root):
+    """(rows, counts) for the audit ledger of `detect_root`'s generation,
+    reusing the page's own crops.
+
+    WHICH LEDGER: audit_ctx_for(stage, detect_root) -- the build's own
+    generation, its pool checked to be cut from this very store. The other
+    generations' verdicts are counted (counts['other_gen_verdicts']) and not
+    read: their det_idx are another detector's. Every row's provenance names
+    the `gen` and `pool` it is a label of.
 
     full/<key>.jpg is cut by audit.py with gate_store's constants from the
     full-resolution frame -- production framing already, so it is reused, not
@@ -737,19 +828,34 @@ def audit_candidates(stage, con=None):
               only chooses which crop of an audited box the classifier sees.
     """
     import fn_audit as fa
-    sp, P = fa.spec(stage), fa.paths(stage)
-    source = 'gate_audit' if stage == 'gate' else 'leash_audit'
-    labels = sp['answers'][:2]
-    aimed = fa.targeted(stage)
-    edited_dir = os.path.join(P['out'], 'edited')
+    source = AUDIT_SOURCE[stage]
     c = collections.Counter()
+    gen = join_gen(detect_root)
+    other = other_gen_verdicts(stage, gen)
+    if other:
+        c['other_gen_verdicts'] = sum(n for n in other.values() if n > 0)
+        _say('%s: %s verdict(s) of other detector generations left out (this '
+             'build joins gen %d boxes)' % (source, ', '.join(
+                 'gen %d: %s' % (g, n if n >= 0 else 'unreadable')
+                 for g, n in sorted(other.items())), gen))
+    ac = audit_ctx_for(stage, detect_root)
+    if ac is None:
+        c['no_audit_for_gen_%d' % gen] = 1
+        c['rows'] = 0
+        return [], c
+    sp, P = fa.spec(stage), ac.P
+    labels = sp['answers'][:2]
+    aimed = fa.targeted(stage, gen=ac.gen)
+    edited_dir = P['edited']
     # the pool's generation: verdicts and pool share one audit dir (and so one
     # gen); the corrections file is shared by every page and generation
-    corr = read_audit_corrections(stage, gen=fa.pool_gen(stage), counts=c)
+    corr = read_audit_corrections(stage, gen=ac.gen, counts=c)
     if c['other_gen']:
         c['corrections_other_gen'] = c.pop('other_gen')
+    if c['other_pool']:
+        c['corrections_other_pool'] = c.pop('other_pool')
     picked = []
-    for v in fa.read_verdicts(stage=stage):
+    for v in fa.read_verdicts(stage=stage, gen=ac.gen):
         c['verdicts'] += 1
         cls = fa.verdict_of(v.get('verdict'), stage)
         if cls not in labels:
@@ -761,7 +867,8 @@ def audit_candidates(stage, con=None):
             c['bad_key'] += 1
             continue
         picked.append((v, cls, iid, int(di)))
-    pool = pool_rows(stage, [(iid, di) for _, _, iid, di in picked], con)
+    pool = pool_rows(stage, [(iid, di) for _, _, iid, di in picked], con,
+                     gen=ac.gen)
     edited_wins = EDITED_WINS[stage]
     rows = []
     for v, cls, iid, di in picked:
@@ -787,7 +894,9 @@ def audit_candidates(stage, con=None):
         if prow is None:
             c['no_pool_row'] += 1
         prov = {'ledger': P['verdicts'], 'key_or_task_id': str(v['key']),
-                'by': v.get('by'), 'ts': v.get('ts')}
+                'by': v.get('by'), 'ts': v.get('ts'),
+                # WHICH boxes this label is of: det_idx means nothing alone
+                'gen': ac.gen, 'pool': ac.pool_id}
         if redraw is not None and framing != 'audit_edited':
             # metadata only: the crop above is the detector box's
             prov['redraw_box'] = [float(x) for x in redraw]
@@ -1013,23 +1122,31 @@ def other_family_vetoes(family, detect_root, con=None):
     c = collections.Counter()
 
     def audit(stage, want):
+        # the build's own generation only (audit_ctx_for): a veto keyed by
+        # another detector's det_idx would drop a box nobody judged
+        ac = audit_ctx_for(stage, detect_root)
+        if ac is None:
+            c['no_audit_for_gen'] += 1
+            return
         picked = []
-        for v in fa.read_verdicts(stage=stage):
+        for v in fa.read_verdicts(stage=stage, gen=ac.gen):
             cls = fa.verdict_of(v.get('verdict'), stage)
             if cls not in want:
                 continue
             iid, _, di = str(v['key']).partition('#')
             if iid.isdigit() and di.isdigit():
                 picked.append((iid, int(di), cls, v))
-        pool = pool_rows(stage, [(i, d) for i, d, _, _ in picked], con)
-        src = 'gate_audit' if stage == 'gate' else 'leash_audit'
+        pool = pool_rows(stage, [(i, d) for i, d, _, _ in picked], con,
+                         gen=ac.gen)
+        src = AUDIT_SOURCE[stage]
         for iid, di, cls, v in picked:
             pr = pool.get((iid, di))
             out.append({'image_id': iid, 'det_key': 'd%d' % di,
                         'box': [float(x) for x in pr[:4]] if pr else None,
                         'label': cls, 'source': src,
                         'uid': uid_for(src, iid, 'd%d' % di),
-                        'by': v.get('by'), 'ts': v.get('ts')})
+                        'by': v.get('by'), 'ts': v.get('ts'),
+                        'gen': ac.gen, 'pool': ac.pool_id})
             c[src] += 1
 
     if family == 'leash':
@@ -1085,6 +1202,20 @@ def apply_box_vetoes(rows, vetoes, drop_labels, kind):
     hit was such an overlap), so a dense multi-dog frame where two real dogs
     overlap that much can be found and looked at.
     """
+    # ONE GENERATION OR NONE. Equal d-keys are matched as one box below, and
+    # that is only true within one detector generation: an audit row or veto
+    # of another generation on the same frame names another box under the
+    # same key. Every audit row and veto says which generation it is
+    # (provenance.gen / gen); more than one among them is a build that read
+    # two generations, and it stops here rather than veto the wrong boxes.
+    gens = {(r.get('provenance') or {}).get('gen') for r in rows} | \
+        {v.get('gen') for v in vetoes}
+    gens.discard(None)
+    if len(gens) > 1:
+        raise SystemExit('apply_box_vetoes (%s): rows and vetoes of detector '
+                         'generations %s in one build -- equal det keys would '
+                         'match boxes of different detectors'
+                         % (kind, sorted(gens)))
     by_img = collections.defaultdict(list)
     for v in vetoes:
         by_img[v['image_id']].append(v)
@@ -1377,11 +1508,11 @@ def collect(family, stage, tasks, export_path, detect_root=None, roots=None,
                 cand += r
                 counts['sources']['hard_negative' if label == 'false_positive'
                                   else 'hard_positive'] = dict(c, rows=len(r))
-            r, c = audit_candidates('gate', con)
+            r, c = audit_candidates('gate', con, detect_root=detect_root)
             cand += r
             counts['sources']['gate_audit'] = dict(c)
         else:
-            r, c = audit_candidates('leash', con)
+            r, c = audit_candidates('leash', con, detect_root=detect_root)
             cand += r
             counts['sources']['leash_audit'] = dict(c)
             r, c, lc_conf = leash_call_candidates(detect_root)

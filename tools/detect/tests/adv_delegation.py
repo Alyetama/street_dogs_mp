@@ -40,6 +40,17 @@ DASH = os.path.join(REPO, 'tools', 'dashboard')
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
 sys.path.insert(0, DASH)
 
+# AUDIT_PY / DASH_PY / FA_PY: an edited copy of audit.py, dashboard.py or
+# fn_audit.py stands in for the live one -- imported and read as if it were
+# installed (tools/detect/tests/_stand_in.py). Unset, nothing changes.
+if any(os.environ.get(k) for k in ('AUDIT_PY', 'DASH_PY', 'FA_PY')):
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location('_stand_in', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '_stand_in.py'))
+    _stand_in = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_stand_in)
+    _stand_in.install(REPO)
+
 
 def _md5(path):
     """The ledger exactly as it is, so "untouched" is a fact not a hope."""
@@ -184,7 +195,7 @@ def _ledger(d, tmp, rows, stage_rows):
     for stage in fa.STAGES:
         sd = os.path.join(tmp, stage)
         os.makedirs(sd, exist_ok=True)
-        base = dict(fa.paths(stage))
+        base = dict(fa.paths(stage, gen=1))
         base.update(out=sd, verdicts=os.path.join(sd, 'v.jsonl'),
                     drawn=os.path.join(sd, 'drawn.jsonl'),
                     pages=os.path.join(sd, 'pages'),
@@ -196,6 +207,33 @@ def _ledger(d, tmp, rows, stage_rows):
     return lay
 
 
+def _gen2_ledger(fa, sd, rows):
+    """A gen-2 gate audit dir in `sd` whose pool (pool_id 'PD') pool_meta
+    accepts, holding verdict `rows` -- the shape a gen-2 ledger has."""
+    import hashlib
+    os.makedirs(sd, exist_ok=True)
+    lay = dict(fa.paths('gate', gen=1))
+    lay.update(out=sd, gen=2, verdicts=os.path.join(sd, 'v.jsonl'),
+               drawn=os.path.join(sd, 'drawn.jsonl'),
+               pages=os.path.join(sd, 'pages'),
+               pool=os.path.join(sd, 'pool.parquet'),
+               pool_json=os.path.join(sd, 'pool.json'))
+    with open(lay['pool'], 'wb') as fh:
+        fh.write(b'POOL2')
+    st = os.stat(lay['pool'])
+    with open(lay['pool_json'], 'w') as fh:
+        json.dump({'stage': 'gate', 'gen': 2, 'pool_id': 'PD',
+                   'state': 'ready', 'detect_root': sd, 'model': 'm',
+                   'protocol': 'full@640', 'view_frame': 'pad012',
+                   'roots': {'d': sd}, 'parquet_size': st.st_size,
+                   'parquet_mtime_ns': st.st_mtime_ns,
+                   'sha256': hashlib.sha256(b'POOL2').hexdigest()}, fh)
+    with open(lay['verdicts'], 'w') as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + '\n')
+    return lay
+
+
 def counting_checks(bad, d, A):
     """How many, since when, on which surface -- against known ledgers."""
     import fn_audit as fa
@@ -203,6 +241,7 @@ def counting_checks(bad, d, A):
     keep = {k: getattr(d, k) for k in
             ('HN_DIR', 'HN_CROPS', 'HN_FULL', 'HN_LABELS', 'HP_DIR')}
     kept_flags, real_paths = d._flagged, fa.paths
+    real_gens = fa.audit_gens
     T0 = 1_800_000_000                          # the moment work was handed out
 
     def crop(i, at, who):
@@ -236,7 +275,8 @@ def counting_checks(bad, d, A):
             'leash': [{'key': 'l1#0', 'verdict': 'leashed', 'ts': T0 + 12,
                        'by': 'sam'}],
         })
-        fa.paths = lambda stage='gate': lay[stage]
+        fa.paths = lambda stage='gate', *, gen=1: lay[stage]
+        fa.audit_gens = lambda stage: [1]
         for surface, want in (('review', 3), ('gate', 3), ('leash', 1),
                               ('any', 7)):
             got = d.done_by('sam', surface, T0)
@@ -256,6 +296,27 @@ def counting_checks(bad, d, A):
         for nobody in ('', None, 'nobody'):
             if d.done_by(nobody, 'any', 0) != 0:
                 bad.append('%r is credited with work' % (nobody,))
+
+        # ── EVERY GENERATION OF AN AUDIT COUNTS, ONCE ──
+        # Each detector generation's audit is its own ledger, so a verdict
+        # sits in exactly one: a target set before the switch keeps counting
+        # what was done on gen 1, and one answer on each counts as two.
+        g2 = _gen2_ledger(fa, os.path.join(tmp, 'gate_gen2'), [
+            {'key': 'h1#0', 'verdict': 'dog', 'ts': T0 + 13, 'by': 'sam',
+             'gen': 2, 'pool': 'PD'}])
+        both = {1: lay['gate'], 2: g2}
+        fa.paths = lambda stage='gate', *, gen=1: (
+            both[gen] if stage == 'gate' else lay[stage])
+        fa.audit_gens = lambda stage: [1, 2] if stage == 'gate' else [1]
+        if d.done_by('sam', 'gate', T0) != 4:
+            bad.append('done_by(sam, gate) over gen 1 and gen 2 = %s, want '
+                       '3 + 1 — a generation\'s audit went uncounted, or one '
+                       'was counted twice' % d.done_by('sam', 'gate', T0))
+        if d.done_by('sam', 'any', T0) != 8:
+            bad.append('done_by(sam, any) over both gate generations = %s, '
+                       'want 8' % d.done_by('sam', 'any', T0))
+        fa.paths = lambda stage='gate', *, gen=1: lay[stage]
+        fa.audit_gens = lambda stage: [1]
 
         # ── the record a page reads ──
         p = os.path.join(tmp, 'a.db')
@@ -287,6 +348,7 @@ def counting_checks(bad, d, A):
                        'day the reader still has' % (txt,))
     finally:
         fa.paths = real_paths
+        fa.audit_gens = real_gens
         for k, v in keep.items():
             setattr(d, k, v)
         d._flagged = kept_flags
@@ -680,10 +742,15 @@ def admin_checks(bad, A, auth, d):
 def strip_checks(bad, d):
     """One strip, three pages, and nothing at all when nothing is delegated."""
     import audit
+    import fn_audit as fa
     import work_strip as W
-    pages = {'review': d.REVIEW_HTML,
-             'gate': audit.page_html('gate', account=('', '')),
-             'leash': audit.page_html('leash', account=('', ''))}
+
+    def page(stage):
+        # the gen-1 audit as a route resolves it: frozen or not, the strip
+        # is the same
+        return audit.page_html(fa.ctx(stage, 1), account=('', ''))
+    pages = {'review': d.REVIEW_HTML, 'gate': page('gate'),
+             'leash': page('leash')}
     for name, html in pages.items():
         for need, why in (
                 ('.asg1{', 'the strip has no styling'),

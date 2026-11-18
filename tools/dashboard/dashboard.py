@@ -11553,12 +11553,20 @@ class BoardHandler(SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
-    def _audit_stage(self, q=None):
+    def _audit_stage(self, q=None, strict=False):
         """Which audit a request is for. Unknown names are the default, never
-        a directory: the stage reaches a path."""
+        a directory: the stage reaches a path.
+
+        `strict` is for the writes: there an unknown or missing stage is None
+        and the route answers 400 with nothing written. Falling back to the
+        gate is a page render's kindness; for a POST it filed a leash answer
+        into the gate's ledger under a key that may name a gate box."""
         a = _audit()
         if a is None:
             return None
+        if strict:
+            v = (q or {}).get('stage', [None])[0]
+            return v if v in a.STAGES else None
         p = self.path.split('?', 1)[0]
         # /audit/<stage>, and /audit/<anything>/<stage>/... -- named rather
         # than listed, because the list was crop/ alone and the day a frame/
@@ -11572,9 +11580,109 @@ class BoardHandler(SimpleHTTPRequestHandler):
         v = (q or {}).get('stage', [None])[0]
         return v if v in a.STAGES else a.DEFAULT_STAGE
 
+    # A generation as a path token (/audit/crop/<stage>/g2/<key>.jpg) or a
+    # query value: a plain decimal >= 1, nothing else.
+    _AUDIT_GEN_RE = re.compile(r'[1-9][0-9]{0,3}')
+
+    def _audit_gen(self, stage, q=None, token=None, default=None, body=None):
+        """The detector generation a request is for -> (gen, None), or
+        (None, (status, why)).
+
+        In order: a `g<N>` path token (crop and frame URLs), the POST body's
+        `gen`, then `?gen=`. Two of them that disagree are a 400. With none:
+
+          'live'  the page GET -- the stage's live generation
+                  (fn_audit.live_gen; none that can be told is a 409);
+          1       a crop/frame URL with no token or an API GET with no gen:
+                  only a tab served before generations had their own dirs
+                  sends those, and its every key was gen 1's;
+          None    a POST: refused, "page out of date -- reload". Reading a
+                  missing gen as 1 would let a dropped parameter on a gen-2
+                  tab write a gen-2 answer onto a gen-1 key that collides.
+        """
+        got = []
+        if token is not None:
+            got.append(('path', token[1:] if token[:1] == 'g' else token))
+        if body is not None and body.get('gen') is not None:
+            g = body.get('gen')
+            got.append(('body', str(g) if isinstance(g, int)
+                        and not isinstance(g, bool) else repr(g)))
+        v = (q or {}).get('gen', [None])[0]
+        if v is not None:
+            got.append(('query', v))
+        vals = set()
+        for where, v in got:
+            if not self._AUDIT_GEN_RE.fullmatch(str(v)):
+                return None, (400, f'{where} gen {v!r} is not a generation')
+            vals.add(int(v))
+        if len(vals) > 1:
+            return None, (400, 'the request names two generations '
+                               f'({sorted(vals)}) -- nothing done')
+        if vals:
+            return vals.pop(), None
+        if default == 'live':
+            try:
+                return _fn_audit.live_gen(stage)[0], None
+            except _fn_audit.GenError as e:
+                return None, (409, str(e))
+        if default is None:
+            return None, (400, 'this page is out of date (it names no audit '
+                               'generation) — reload it; nothing was '
+                               'recorded')
+        return int(default), None
+
+    def _audit_ctx(self, stage, gen):
+        """fn_audit.ctx(stage, gen) -> (ctx, None), or (None, (status, why)):
+        409 for a pool that cannot vouch for itself (not built, a build that
+        stopped, a pool.json of another generation), 400 for a bad name."""
+        try:
+            return _fn_audit.ctx(stage, gen), None
+        except _fn_audit.GenError as e:
+            return None, (409, str(e))
+        except (KeyError, ValueError) as e:
+            return None, (400, str(e))
+
+    def _audit_pool_ok(self, ctx, q=None, body=None):
+        """None when the request's `pool` (body, else query) is ctx's or
+        absent on a GET; else (409, why). A tab of another pool reads and
+        writes nothing here."""
+        p = (body or {}).get('pool')
+        if p is None:
+            p = (q or {}).get('pool', [None])[0]
+        if p is None or p == ctx.pool_id:
+            return None
+        return (409, f'this page is for audit pool {p!r}; the gen-{ctx.gen} '
+                     f'{ctx.stage} audit is pool {ctx.pool_id!r} — '
+                     f'reload it')
+
+    def _audit_split(self, prefix, path):
+        """'/audit/crop/<stage>/[g<N>/]<key>.jpg' -> (stage, token, key).
+        The stage is the path's (else the default); the key is whatever is
+        left, matched later against the shape it is minted in -- nothing a
+        client sends is ever joined onto a directory."""
+        stage = self._audit_stage()
+        rest = path[len(prefix):-4]
+        if rest.startswith(stage + '/'):
+            rest = rest[len(stage) + 1:]
+        token = None
+        head, sep, tail = rest.partition('/')
+        if sep and head[:1] == 'g' and self._AUDIT_GEN_RE.fullmatch(head[1:]):
+            token, rest = head, tail
+        return stage, token, rest
+
+    def _audit_hint(self, body_html):
+        self._html(('<!doctype html><meta charset=utf-8>'
+                    '<body style="background:#13151a;color:#98a2ad;'
+                    'font:14px system-ui;padding:40px;line-height:1.6">'
+                    + body_html + '</body>').encode('utf-8'))
+
     def _audit_get(self):
-        """The audit pages, their crops and their two read endpoints."""
+        """The audit pages, their crops and their read endpoints -- each for
+        ONE generation of one stage, resolved once (_audit_gen, _audit_ctx)
+        and handed to audit.py as an fn_audit.AuditCtx."""
+        import html as _h
         path = self.path.split('?', 1)[0]
+        q = parse_qs(urlparse(self.path).query)
         a = _audit()
         pages = ['/audit'] + ([f'/audit/{k}' for k in a.STAGES] if a else [])
         if path in pages:
@@ -11587,63 +11695,82 @@ class BoardHandler(SimpleHTTPRequestHandler):
                            b'<code>tools/detect/fn_audit.py</code>.</body>')
                 return True
             stage = self._audit_stage()
-            if not a.pool_ready(stage):
-                self._html(
-                    ('<!doctype html><meta charset=utf-8>'
-                     '<body style="background:#13151a;color:#98a2ad;'
-                     'font:14px system-ui;padding:40px;line-height:1.6">'
-                     f'No audit pool for the {a.STAGES[stage]["title"]} yet.'
-                     '<br>Build one from whatever it has judged so far:<br><br>'
-                     f'<code>python tools/detect/fn_audit.py build '
-                     f'--stage {stage}</code></body>').encode('utf-8'))
+            title = _h.escape(a.STAGES[stage]['title'])
+            gen, err = self._audit_gen(stage, q, default='live')
+            if err:
+                self._audit_hint(
+                    f'Which generation the {title} audit is cannot be told: '
+                    f'{_h.escape(err[1])}<br><br>'
+                    f'<a href="/audit/{stage}?gen=1" style="color:#e8a645">'
+                    f'Open the gen-1 audit</a> (closed for new pages; its '
+                    f'answers can still be changed).')
                 return True
-            self._html(a.page_html(stage, account=account_strip(
-                getattr(self, 'session', None))).encode('utf-8'))
-            return True
-        if path.startswith('/audit/crop/') and path.endswith('.jpg'):
-            stage = self._audit_stage()
-            rest = path[len('/audit/crop/'):-4]
-            if a and rest.startswith(stage + '/'):
-                rest = rest[len(stage) + 1:]
-            # the key is matched against the shape it is minted in; nothing a
-            # client sends is ever joined onto a directory
-            p = a.crop_path(rest, stage) if a else None
-            if not p:
-                self.send_error(404)
-                return True
-            try:
-                with open(p, 'rb') as fh:
-                    body = fh.read()
-            except OSError:
-                self.send_error(404)
-                return True
-            self.send_response(200)
-            self.send_header('Content-Type', 'image/jpeg')
-            self.send_header('Content-Length', str(len(body)))
-            self.send_header('Cache-Control', 'public, max-age=86400')
-            self.end_headers()
-            self.wfile.write(body)
-            return True
-        if path == '/api/audit/page':
-            q = parse_qs(urlparse(self.path).query)
-            stage = self._audit_stage(q)
-            if a is None or not a.pool_ready(stage):
-                self._json({'error': 'pool not built'})
+            ctx, err = self._audit_ctx(stage, gen)
+            if ctx is None or not a.pool_ready(ctx):
+                # NEVER a silent fall back to another generation: its keys
+                # name other boxes. Say which pool is missing and how to cut
+                # it, and link the generation that exists.
+                why = _h.escape(err[1]) if err else 'no pool.parquet'
+                other = '' if gen == 1 else (
+                    f'<br><br><a href="/audit/{stage}?gen=1" '
+                    f'style="color:#e8a645">Open the gen-1 audit</a> '
+                    f'(closed for new pages; its answers can still be '
+                    f'changed).')
+                self._audit_hint(
+                    f'No gen-{gen} audit pool for the {title} yet ({why}).'
+                    '<br>Build one from the store of that generation:<br><br>'
+                    f'<code>python tools/detect/fn_audit.py build '
+                    f'--stage {stage} --gen {gen} --tmp &lt;spill dir on a '
+                    f'large disk&gt;</code>' + other)
                 return True
             try:
-                i = int((q.get('i', ['-1'])[0]))
-            except ValueError:
-                i = -1
-            self._json(a.api_page(i, n=a.page_size(q.get('n', [None])[0]),
-                                  band=a.band_arg(q.get('band', [None])[0]),
-                                  stage=stage))
+                body = a.page_html(ctx, account=account_strip(
+                    getattr(self, 'session', None)))
+            except _fn_audit.GenError as e:
+                self._audit_hint(f'The gen-{gen} {title} audit cannot be '
+                                 f'served: {_h.escape(str(e))}')
+                return True
+            self._html(body.encode('utf-8'))
             return True
-        if path.startswith('/audit/frame/') and path.endswith('.jpg'):
-            stage = self._audit_stage()
-            rest = path[len('/audit/frame/'):-4]
-            if a and rest.startswith(stage + '/'):
-                rest = rest[len(stage) + 1:]
-            body, meta = (a.frame_view(rest, stage) if a else (None, None))
+        for prefix in ('/audit/crop/', '/audit/frame/'):
+            if not (path.startswith(prefix) and path.endswith('.jpg')):
+                continue
+            if a is None:
+                self.send_error(404)
+                return True
+            stage, token, rest = self._audit_split(prefix, path)
+            # no token: a URL minted before generations had their own dirs,
+            # so its key is gen 1's (and so is anything it has cached)
+            gen, err = self._audit_gen(stage, q, token=token, default=1)
+            ctx = None
+            if not err:
+                ctx, err = self._audit_ctx(stage, gen)
+            if ctx is not None and not err:
+                err = self._audit_pool_ok(ctx, q)
+            if ctx is None or err:
+                self.send_error(err[0] if err else 404)
+                return True
+            if prefix == '/audit/crop/':
+                p = a.crop_path(rest, ctx)
+                if not p:
+                    self.send_error(404)
+                    return True
+                try:
+                    with open(p, 'rb') as fh:
+                        body = fh.read()
+                except OSError:
+                    self.send_error(404)
+                    return True
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(body)))
+                # a day of cache is safe because the URL names the
+                # generation: one URL is one box, for ever
+                self.send_header('Cache-Control', 'public, max-age=86400')
+                self.end_headers()
+                self.wfile.write(body)
+                return True
+            body, meta = a.frame_view(rest, ctx)
             if not body:
                 self.send_error(404)
                 return True
@@ -11654,40 +11781,150 @@ class BoardHandler(SimpleHTTPRequestHandler):
             # The geometry rides along with the picture. Asking for it
             # separately meant opening the same 8000x4000 frame twice for one
             # click -- a quarter of a second of decoding to learn four numbers
-            # that the decode had already produced.
+            # that the decode had already produced. It names the generation,
+            # pool and box_sig the editor must post back with a redraw.
             self.send_header('X-Audit-Meta', json.dumps(meta))
             self.send_header('Access-Control-Expose-Headers', 'X-Audit-Meta')
             self.end_headers()
             self.wfile.write(body)
             return True
-        if path == '/api/audit/judged':
-            q = parse_qs(urlparse(self.path).query)
+        if path in ('/api/audit/page', '/api/audit/judged',
+                    '/api/audit/stats'):
             stage = self._audit_stage(q)
-            if a is None or not a.pool_ready(stage):
-                self._json({'items': [], 'total': 0, 'pages': 1, 'page': 0})
+            empty = {'/api/audit/page': {'error': 'pool not built'},
+                     '/api/audit/judged': {'items': [], 'total': 0,
+                                           'pages': 1, 'page': 0},
+                     '/api/audit/stats': {'judged': 0, 'bands': []}}[path]
+            if a is None:
+                self._json(empty)
                 return True
-            which = q.get('which', ['all'])[0]
-            if not a.judged_which_ok(which, stage):
-                which = 'all'
+            # no gen: a tab served before generations had their own dirs,
+            # whose pages, keys and stats were all gen 1's
+            gen, err = self._audit_gen(stage, q, default=1)
+            ctx = None
+            if not err:
+                ctx, err = self._audit_ctx(stage, gen)
+            if ctx is not None and not err:
+                err = self._audit_pool_ok(ctx, q)
+            if err:
+                self._json(dict(empty, error=err[1]), err[0])
+                return True
+            if not a.pool_ready(ctx):
+                self._json(empty)
+                return True
             try:
-                pg = int(q.get('page', ['0'])[0])
-            except ValueError:
-                pg = 0
-            self._json(a.judged(stage, which, pg,
-                                a.page_size(q.get('n', [None])[0])))
-            return True
-        if path == '/api/audit/stats':
-            q = parse_qs(urlparse(self.path).query)
-            stage = self._audit_stage(q)
-            # WHOSE ANSWERS, off the session the gate resolved and never off
-            # the query string. The split is a measurement of a person, and
-            # one any signed-in reader could ask for by name is a scoreboard
-            # of their colleagues.
-            who = (self.session or {}).get('username') or ''
-            self._json(a.stats(stage, who=who) if a and a.pool_ready(stage)
-                       else {'judged': 0, 'bands': []})
+                if path == '/api/audit/page':
+                    try:
+                        i = int((q.get('i', ['-1'])[0]))
+                    except ValueError:
+                        i = -1
+                    self._json(a.api_page(
+                        ctx, i, n=a.page_size(q.get('n', [None])[0]),
+                        band=a.band_arg(q.get('band', [None])[0])))
+                elif path == '/api/audit/judged':
+                    which = q.get('which', ['all'])[0]
+                    if not a.judged_which_ok(which, stage):
+                        which = 'all'
+                    try:
+                        pg = int(q.get('page', ['0'])[0])
+                    except ValueError:
+                        pg = 0
+                    self._json(a.judged(ctx, which, pg,
+                                        a.page_size(q.get('n', [None])[0])))
+                elif path == '/api/audit/stats':
+                    # WHOSE ANSWERS, off the session the gate resolved and
+                    # never off the query string. The split is a measurement
+                    # of a person, and one any signed-in reader could ask for
+                    # by name is a scoreboard of their colleagues.
+                    who = (self.session or {}).get('username') or ''
+                    self._json(a.stats(ctx, who=who))
+            except _audit_refusals(a) as e:
+                # a page, ledger or log row of another generation or pool,
+                # or a draw this generation does not take: said, not served
+                self._json(dict(empty, error=str(e)), 409)
             return True
         return False
+
+    def _audit_post(self, path):
+        """POST /api/audit/{box,draw,verdict}: one write into ONE generation
+        of one stage's audit.
+
+        Every write names its stage (strictly: no default), its generation
+        and its pool, and each must be this server's: an unknown stage is a
+        400, a missing generation a 400 "reload" (never read as gen 1), a
+        pool that is not the generation's own a 409. Then audit.py checks
+        the rest -- the key is on one of that generation's pages, a redraw
+        is of that pool's box (box_sig) -- and nothing is written on any
+        refusal."""
+        a = _audit()
+        try:
+            data = self._body()
+            if data is None:
+                return
+            if not isinstance(data, dict):
+                self._json({'ok': False, 'error': 'send a JSON object'}, 400)
+                return
+            if a is None:
+                self._json({'ok': False,
+                            'error': 'the audit module would not load'})
+                return
+            q = parse_qs(urlparse(self.path).query)
+            stage = self._audit_stage(q, strict=True)
+            if stage is None:
+                self._json({'ok': False, 'msg': 'unknown audit stage',
+                            'error': 'unknown audit stage'}, 400)
+                return
+            gen, err = self._audit_gen(stage, q, default=None, body=data)
+            ctx = None
+            if not err:
+                ctx, err = self._audit_ctx(stage, gen)
+            if ctx is not None and not err:
+                if (data.get('pool') is None
+                        and q.get('pool', [None])[0] is None):
+                    err = (400, 'this page is out of date (it names no '
+                                'audit pool) — reload it; nothing was '
+                                'recorded')
+                else:
+                    err = self._audit_pool_ok(ctx, q, body=data)
+            if err:
+                self._json({'ok': False, 'msg': err[1], 'error': err[1]},
+                           err[0])
+                return
+            if not a.pool_ready(ctx):
+                # which pool, so a leash annotator is not sent to build the
+                # gate's, nor a gen-2 one to rebuild gen 1
+                why = (f'the gen-{gen} {stage} audit pool is not built — '
+                       f'run tools/detect/fn_audit.py build --stage {stage} '
+                       f'--gen {gen} --tmp DIR')
+                self._json({'ok': False, 'msg': why, 'error': why}, 409)
+                return
+            pool = data.get('pool')
+            if pool is None:
+                pool = q.get('pool', [None])[0]
+            if path == '/api/audit/box':
+                got = a.save_correction(
+                    data.get('key'), data.get('box') or [], ctx, pool=pool,
+                    box_sig=data.get('box_sig'), by=self._annotator())
+            elif path == '/api/audit/draw':
+                got = a.api_draw(ctx, n=a.page_size(data.get('n')),
+                                 band=a.band_arg(data.get('band')))
+            else:
+                v = data.get('verdict')
+                got = a.record(data.get('key'),
+                               None if v is None else str(v), ctx,
+                               pool=pool, by=self._annotator())
+            self._json(got, got.pop('status', 200)
+                       if isinstance(got, dict) else 200)
+        except Exception as e:
+            # getattr: during an install the other module can be the old one
+            # for a moment, without Refused / GenError -- this handler must
+            # still answer, not raise AttributeError over the real error
+            refused = isinstance(e, getattr(a, 'Refused', ()))
+            if refused or isinstance(e, getattr(_fn_audit, 'GenError', ())):
+                self._json({'ok': False, 'msg': str(e), 'error': str(e),
+                            'closed': refused}, 409)
+                return
+            self._json({'ok': False, 'msg': str(e), 'error': str(e)})
 
     def _datasets_get(self):
         """The datasets page, its three listings and its two pictures.
@@ -12706,52 +12943,9 @@ class BoardHandler(SimpleHTTPRequestHandler):
                        % (type(e).__name__, )}
             self._json(got, 200 if got.get('ok') else 400)
             return
-        if self.path.split('?', 1)[0] == '/api/audit/box':
-            try:
-                data = self._body()
-                if data is None:
-                    return
-                a = _audit()
-                stage = self._audit_stage(parse_qs(urlparse(self.path).query))
-                self._json(a.save_correction(
-                    data.get('key'), data.get('box') or [], stage,
-                    by=self._annotator())
-                    if a and a.pool_ready(stage)
-                    else {'ok': False, 'msg': 'pool not built'})
-            except Exception as e:
-                self._json({'ok': False, 'msg': str(e)})
-            return
-        if self.path.split('?', 1)[0] in ('/api/audit/draw',
+        if self.path.split('?', 1)[0] in ('/api/audit/box', '/api/audit/draw',
                                           '/api/audit/verdict'):
-            try:
-                data = self._body()
-                if data is None:
-                    return
-                a = _audit()
-                stage = (self._audit_stage(parse_qs(urlparse(self.path).query))
-                         if a else None)
-                if a is None:
-                    self._json({'error': 'the audit module would not load'})
-                elif not a.pool_ready(stage):
-                    # which pool, so a leash annotator is not sent to build
-                    # the gate's
-                    self._json({'error': f'the {stage} audit pool is not '
-                                         f'built — run tools/detect/'
-                                         f'fn_audit.py build --stage {stage}'})
-                elif self.path.startswith('/api/audit/draw'):
-                    self._json(a.api_draw(
-                        n=a.page_size(data.get('n')),
-                        band=a.band_arg(data.get('band')), stage=stage))
-                else:
-                    v = data.get('verdict')
-                    self._json(a.record(
-                        data.get('key'),
-                        None if v is None else str(v),
-                        {'band': data.get('band'), 'p_dog': data.get('p_dog'),
-                         'seq': data.get('seq')}, stage=stage,
-                        by=self._annotator()))
-            except Exception as e:
-                self._json({'ok': False, 'error': str(e)})
+            self._audit_post(self.path.split('?', 1)[0])
             return
         if self.path.split('?', 1)[0] == '/api/board':
             try:
@@ -13204,6 +13398,13 @@ def serve(args):
         _q = os.path.join(_src_dir, _m)
         if os.path.exists(_q):
             _watched.add(_q)
+    # fn_audit.py too, though it is not a page: it owns the audit's paths,
+    # generations and pool identity, and this process imports it at boot. An
+    # edit to it alone sat behind the running copy -- which, once paths()
+    # took a generation, is an old paths() answering a new audit.py.
+    _q = os.path.join(os.path.dirname(_src_dir), 'detect', 'fn_audit.py')
+    if os.path.exists(_q):
+        _watched.add(_q)
     _src_mtimes = {q: os.path.getmtime(q) for q in _watched}
 
     def _reexec_if_stale():
@@ -13808,29 +14009,54 @@ def _done_review(user, since, until=None):
                and (until is None or it['flagged_at'] < until))
 
 
+def _audit_refusals(a):
+    """The exception classes an audit read answers 409 for: fn_audit's
+    GenError and audit.py's Refused. Looked up with getattr, so a moment of
+    an install in which one module is still the old one (without them) is
+    an ordinary error reply rather than an AttributeError inside the except
+    clause."""
+    return tuple(c for c in (getattr(_fn_audit, 'GenError', None),
+                             getattr(a, 'Refused', None))
+                 if isinstance(c, type))
+
+
 def _done_audit(user, stage, since, until=None):
-    """Answers this person gave on one audit sheet since then.
+    """Answers this person gave on one audit sheet since then -- over EVERY
+    generation of it (fn_audit.audit_gens).
 
     read_verdicts() is the one reader of those ledgers: it collapses a crop
     answered twice to its latest answer, drops the withdrawals, and resolves
     the legacy author -- so counting its output counts verdicts rather than
     lines, which is what somebody is being asked for five hundred of.
+
+    Summed across generations because each generation's audit is its own
+    ledger, so a verdict sits in exactly one of them: a target set before the
+    switch to gen 2 keeps counting what was done on gen 1, and nothing is
+    counted twice. A ledger that cannot be read (or holds a row of another
+    generation, which read_verdicts raises on) counts nothing rather than
+    taking the work strip down with it.
     """
-    def read():
+    def gens():
         try:
-            return _fn_audit.read_verdicts(stage=stage)
+            return _fn_audit.audit_gens(stage)
         except Exception:
-            return []
-    rows = _memo('audit:' + str(stage), read)
+            return [1]
     n = 0
-    for v in rows:
-        if not _fn_audit.verdict_of(v.get('verdict'), stage):
-            continue
-        if v.get(AUTHOR_FIELD) != user:
-            continue
-        ts = int(v.get('ts') or 0)
-        if ts >= since and (until is None or ts < until):
-            n += 1
+    for g in _memo('audit:' + str(stage) + ':gens', gens):
+        def read(g=g):
+            try:
+                return _fn_audit.read_verdicts(stage=stage, gen=g)
+            except Exception:
+                return []
+        rows = _memo(f'audit:{stage}:g{g}', read)
+        for v in rows:
+            if not _fn_audit.verdict_of(v.get('verdict'), stage):
+                continue
+            if v.get(AUTHOR_FIELD) != user:
+                continue
+            ts = int(v.get('ts') or 0)
+            if ts >= since and (until is None or ts < until):
+                n += 1
     return n
 
 

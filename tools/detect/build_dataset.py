@@ -175,55 +175,92 @@ FAMILIES = {
     },
 }
 
-# Every store an annotation can be in, and which build reads it. Named here
-# so the manifest can digest all of them without a second list going stale.
-STORES = {
-    'hard_negatives': {'ledger': D('hard_negatives', 'labels.jsonl'),
-                       'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
-    'hard_positives': {'ledger': D('hard_positives', 'labels.jsonl'),
-                       'crops': None, 'for': ('dogdet', 'dogbin')},
-    # the review page's redraws AND the audit page's ("audit:<stage>"), so
-    # every crop family reads it
-    'box_corrections': {'ledger': D('box_corrections', 'boxes.jsonl'),
-                        'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
-    # the annotate page: dog boxes for the detector and the dog-bin, and
-    # "no dog in this frame" as a veto for both crop families
-    'frame_labels': {'ledger': D('frame_labels', 'labels.jsonl'),
-                     'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
-    # THE AUDIT CROPS ARE READ WHERE THE PAGE CUT THEM: full/ (the detector's
-    # box, production framing) and edited/ (a person's redraw). The
-    # audit_finds*/ exports are NOT inputs -- their manifests had gone stale
-    # (62 lines over 35,810 files), and the leash one had never been written.
-    # each audit is read by BOTH crop families: its own as labels, the other
-    # one's as vetoes on the same boxes (crop_sources.other_family_vetoes)
-    'gate_audit': {'ledger': D('fn_audit', 'verdicts.jsonl'),
-                   'crops': D('fn_audit', 'full'),
-                   'for': ('dogdet', 'dogbin', 'leash')},
-    'gate_audit_edited': {'ledger': D('fn_audit', 'pool.parquet'),
-                          'crops': D('fn_audit', 'edited'),
-                          'for': ('dogbin',)},
-    'leash_audit': {'ledger': D('leash_audit', 'verdicts.jsonl'),
-                    'crops': D('leash_audit', 'full'),
-                    'for': ('leash', 'dogbin')},
-    'leash_audit_edited': {'ledger': D('leash_audit', 'pool.parquet'),
-                           'crops': D('leash_audit', 'edited'),
-                           'for': ('leash',)},
-    'leash_calls': {'ledger': D('leash_labels', 'leash.db'),
-                    'crops': None, 'for': ('leash', 'dogbin')},
-    # what takes a label OUT, digested like what puts one in
-    'label_flags': {'ledger': D('label_flags', 'label_flags.db'),
-                    'crops': None, 'for': ('dogbin', 'leash')},
-    'leash_label_conflicts': {'ledger': D('leash_label_conflicts.json'),
-                              'crops': None, 'for': ('leash',)},
-    'dogbin_acceptance_set': {'ledger': D('dogbin_acceptance_set.json'),
-                              'crops': None, 'for': ('dogbin',)},
-    'dogbin_test_set': {'ledger': D('dogbin_test_v1.json'),
-                        'crops': None, 'for': ('dogbin',)},
-    'leash_acceptance_set': {'ledger': D('leash_acceptance_set.json'),
-                             'crops': None, 'for': ('leash',)},
-    'leash_test_set': {'ledger': D('leash_test_v1.json'),
-                       'crops': None, 'for': ('leash',)},
-}
+def _audit_name(stage, gen):
+    """data/<audit dir> of generation `gen` of one audit stage --
+    fn_audit.audit_name, imported late (fn_audit is stdlib-only, but this
+    module is imported by the dashboard's training page)."""
+    if DETECT not in sys.path:
+        sys.path.insert(0, DETECT)
+    import fn_audit
+    return fn_audit.audit_name(fn_audit.spec(stage)['audit_dir'], gen)
+
+
+def stores(gen=1):
+    """Every store an annotation can be in, and which build reads it, for a
+    build whose boxes are detector generation `gen`. Named here so the
+    manifest can digest all of them without a second list going stale.
+
+    The audit ledgers are per generation (fn_audit.paths(stage, gen=N)): a
+    build reads the audit of its own detect store's generation and no other
+    (crop_sources.audit_ctx_for), so the digests have to describe THOSE
+    files -- a gen-2 build digesting data/fn_audit would record a ledger it
+    never read. stores_for(detect_root) picks the generation.
+    """
+    ga, la = _audit_name('gate', gen), _audit_name('leash', gen)
+    return {
+        'hard_negatives': {'ledger': D('hard_negatives', 'labels.jsonl'),
+                           'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
+        'hard_positives': {'ledger': D('hard_positives', 'labels.jsonl'),
+                           'crops': None, 'for': ('dogdet', 'dogbin')},
+        # the review page's redraws AND the audit page's ("audit:<stage>"),
+        # so every crop family reads it
+        'box_corrections': {'ledger': D('box_corrections', 'boxes.jsonl'),
+                            'crops': None,
+                            'for': ('dogdet', 'dogbin', 'leash')},
+        # the annotate page: dog boxes for the detector and the dog-bin, and
+        # "no dog in this frame" as a veto for both crop families
+        'frame_labels': {'ledger': D('frame_labels', 'labels.jsonl'),
+                         'crops': None, 'for': ('dogdet', 'dogbin', 'leash')},
+        # THE AUDIT CROPS ARE READ WHERE THE PAGE CUT THEM: full/ (the
+        # detector's box, production framing) and edited/ (a person's
+        # redraw). The audit_finds*/ exports are NOT inputs -- their
+        # manifests had gone stale (62 lines over 35,810 files), and the leash
+        # one had never been written. Each audit is read by BOTH crop
+        # families: its own as labels, the other one's as vetoes on the same
+        # boxes (crop_sources.other_family_vetoes)
+        'gate_audit': {'ledger': D(ga, 'verdicts.jsonl'),
+                       'crops': D(ga, 'full'), 'gen': gen,
+                       'for': ('dogdet', 'dogbin', 'leash')},
+        'gate_audit_edited': {'ledger': D(ga, 'pool.parquet'),
+                              'crops': D(ga, 'edited'), 'gen': gen,
+                              'for': ('dogbin',)},
+        'leash_audit': {'ledger': D(la, 'verdicts.jsonl'),
+                        'crops': D(la, 'full'), 'gen': gen,
+                        'for': ('leash', 'dogbin')},
+        'leash_audit_edited': {'ledger': D(la, 'pool.parquet'),
+                               'crops': D(la, 'edited'), 'gen': gen,
+                               'for': ('leash',)},
+        'leash_calls': {'ledger': D('leash_labels', 'leash.db'),
+                        'crops': None, 'for': ('leash', 'dogbin')},
+        # what takes a label OUT, digested like what puts one in
+        'label_flags': {'ledger': D('label_flags', 'label_flags.db'),
+                        'crops': None, 'for': ('dogbin', 'leash')},
+        'leash_label_conflicts': {'ledger': D('leash_label_conflicts.json'),
+                                  'crops': None, 'for': ('leash',)},
+        'dogbin_acceptance_set': {'ledger': D('dogbin_acceptance_set.json'),
+                                  'crops': None, 'for': ('dogbin',)},
+        'dogbin_test_set': {'ledger': D('dogbin_test_v1.json'),
+                            'crops': None, 'for': ('dogbin',)},
+        'leash_acceptance_set': {'ledger': D('leash_acceptance_set.json'),
+                                 'crops': None, 'for': ('leash',)},
+        'leash_test_set': {'ledger': D('leash_test_v1.json'),
+                           'crops': None, 'for': ('leash',)},
+    }
+
+
+def stores_for(detect_root):
+    """stores() of the generation `detect_root`'s boxes are
+    (crop_sources.join_gen) -- the files a build on that store reads."""
+    if DETECT not in sys.path:
+        sys.path.insert(0, DETECT)
+    import crop_sources
+    return stores(crop_sources.join_gen(detect_root))
+
+
+# The table for a build on the pinned ledger store -- the default build
+# (detect_root defaults to data/ledger_detect_root.txt, gen 1), and what the
+# training page lists. A build on another store reads stores_for(its root).
+STORES = stores(1)
 
 
 # ── Label Studio ────────────────────────────────────────────────────────────
@@ -524,11 +561,16 @@ def listing(path):
         return None
 
 
-def store_state(name):
-    """One annotation store, exactly as it is right now."""
-    spec = STORES[name]
+def store_state(name, table=None):
+    """One annotation store, exactly as it is right now. `table` is the
+    stores() of the build's generation (default STORES, gen 1)."""
+    spec = (table or STORES)[name]
     out = {'ledger': spec['ledger'], 'sha256': sha256(spec['ledger']),
            'lines': None, 'crops': spec['crops'], 'files': None}
+    if 'gen' in spec:
+        # which generation's audit dir this is: the same file names exist
+        # under every generation, and the digest alone does not say which
+        out['gen'] = spec['gen']
     # Lines only where lines mean something. leash.db is SQLite, and counting
     # newlines in it produces a number that looks like a verdict count and is
     # not one.
@@ -1406,7 +1448,8 @@ def family_reserves(family, extra=None, no_reserve=False, test_set=None):
         raise SystemExit(
             'reserve file(s) missing: %s\n  a crop build excludes its '
             'acceptance and test sets by image_id and sequence; draw the test '
-            'set first (tools/detect/reserve_test_set.py --family %s), or '
+            'set first (tools/detect/reserve_test_set.py --family %s --gen '
+            '<the audit generation>), or '
             'pass --no-reserve to build with none, on the record'
             % (', '.join(missing), family))
     return paths
@@ -1485,8 +1528,10 @@ def build(family, out=None, by='', duckdb_python=None, crop_python=None,
     # this dataset.
     head = git_head()
 
-    # the ledgers as they are RIGHT NOW, before anything reads them
-    inputs = {k: store_state(k) for k, v in STORES.items()
+    # the ledgers as they are RIGHT NOW, before anything reads them -- the
+    # ones of THIS build's detector generation (stores_for)
+    table = stores_for(detect_root)
+    inputs = {k: store_state(k, table) for k, v in table.items()
               if family in v['for']}
 
     # 5, not 4: the classify path gained the embedding-dedup step, and a
@@ -1944,9 +1989,10 @@ def main(argv=None):
                                          (' (' + ' '.join(flags) + ')')
                                          if flags else ' (no per-creator '
                                          'cap, no size-band balance)'))
-        for k, v in sorted(STORES.items()):
+        table = stores_for(a.detect_root) if a.detect_root else STORES
+        for k, v in sorted(table.items()):
             if a.family in v['for']:
-                st = store_state(k)
+                st = store_state(k, table)
                 print('  %-18s sha %s  %s lines'
                       % (k, (st['sha256'] or '-')[:12], st['lines']))
         return 0

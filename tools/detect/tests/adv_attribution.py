@@ -54,6 +54,17 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
 
+# AUDIT_PY / DASH_PY / FA_PY: an edited copy of audit.py, dashboard.py or
+# fn_audit.py stands in for the live one -- imported and read as if it were
+# installed (tools/detect/tests/_stand_in.py). Unset, nothing changes.
+if any(os.environ.get(k) for k in ('AUDIT_PY', 'DASH_PY', 'FA_PY')):
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location('_stand_in', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '_stand_in.py'))
+    _stand_in = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_stand_in)
+    _stand_in.install(REPO)
+
 # A string only this file invents. Nothing that reaches a real store can
 # carry it, so finding it in one names the redirect that did not take.
 MARK = 'zzattrguard'
@@ -66,6 +77,11 @@ LIVE = (
     (os.path.join(REPO, 'data', 'hard_negatives', 'labels.jsonl'), 'jsonl'),
     (os.path.join(REPO, 'data', 'fn_audit', 'verdicts.jsonl'), 'jsonl'),
     (os.path.join(REPO, 'data', 'leash_audit', 'verdicts.jsonl'), 'jsonl'),
+    # each detector generation's audit is its own ledger (fn_audit.paths);
+    # gen 2's, whether or not it has been built yet
+    (os.path.join(REPO, 'data', 'fn_audit_gen2', 'verdicts.jsonl'), 'jsonl'),
+    (os.path.join(REPO, 'data', 'leash_audit_gen2', 'verdicts.jsonl'),
+     'jsonl'),
     (os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl'), 'jsonl'),
     (os.path.join(REPO, 'data', 'hard_negatives', 'reviewed.jsonl'), 'jsonl'),
     (os.path.join(REPO, 'data', 'leash_labels', 'leash.db'), 'db'),
@@ -272,17 +288,97 @@ def _lines(path):
 
 
 def _audit_layout(fa, tmp, stage='gate'):
-    """A whole audit stage in a temp directory, the way adv_fn_audit does."""
-    lay = dict(fa.paths(stage))
+    """A whole gen-1 audit stage in a temp directory, the way adv_fn_audit
+    does -- with one page holding this file's key, because a verdict is
+    taken only for a box the audit put on a page."""
+    lay = dict(fa.paths(stage, gen=1))
     lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
                verdicts=os.path.join(tmp, 'v.jsonl'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
                full=os.path.join(tmp, 'full'),
                crops=os.path.join(tmp, 'crops'),
+               edited=os.path.join(tmp, 'edited'),
+               edited_thumbs=os.path.join(tmp, 'edited_thumbs'),
                dataset=os.path.join(tmp, 'ds'),
-               pool=os.path.join(tmp, 'pool.parquet'))
+               pool=os.path.join(tmp, 'pool.parquet'),
+               pool_json=os.path.join(tmp, 'pool.json'))
     os.makedirs(lay['pages'], exist_ok=True)
+    with open(os.path.join(lay['pages'], '00000.json'), 'w') as fh:
+        json.dump({'index': 0, 'band': 3, 'items': [
+            {'key': MARK + '#0', 'image_id': '1606751523958968',
+             'det_idx': 0, 'band': 3, 'p_dog': 0.31, 'seq': 's1',
+             'box': [1.0, 2.0, 30.0, 40.0]}]}, fh)
     return lay
+
+
+def _ctx(fa, lay, stage='gate'):
+    """The gen-1 AuditCtx a route would resolve, over a sandbox layout."""
+    return fa.AuditCtx(stage=stage, gen=1, pool_id=fa.G1_POOL_ID, P=lay,
+                       meta={'gen': 1, 'pool_id': fa.G1_POOL_ID,
+                             'view_frame': 'pad012',
+                             'model': fa.STAGES[stage]['model']},
+                       frozen=False)
+
+
+# the pool box the sandbox _pool_row stubs hand out, as frame_view's box_sig
+SIG = [1.0, 2.0, 30.0, 40.0]
+
+
+def _export_byline_checks(bad, fa, tmp):
+    """fa.export of a sandbox gen-2 audit: every manifest row names a judge,
+    the legacy author for a ledger row that carries none."""
+    import argparse
+    import contextlib
+    import hashlib
+    import io
+    import duckdb
+    os.makedirs(tmp, exist_ok=True)
+    lay = dict(fa.paths('gate', gen=1))
+    lay.update({k: os.path.join(tmp, k) for k in
+                ('out', 'pages', 'drawn', 'crops', 'full', 'edited',
+                 'edited_thumbs')},
+               gen=2, verdicts=os.path.join(tmp, 'v.jsonl'),
+               pool=os.path.join(tmp, 'pool.parquet'),
+               pool_json=os.path.join(tmp, 'pool.json'),
+               dataset=os.path.join(tmp, 'ds'))
+    os.makedirs(lay['full'])
+    con = duckdb.connect()
+    con.execute(
+        "COPY (SELECT * FROM (VALUES ('11', 0, 1.0, 1.0, 9.0, 9.0), "
+        "('12', 0, 1.0, 1.0, 9.0, 9.0)) t(image_id, det_idx, x1, y1, x2, y2)"
+        ") TO '%s' (FORMAT PARQUET)" % lay['pool'])
+    con.close()
+    st = os.stat(lay['pool'])
+    with open(lay['pool_json'], 'w') as fh:
+        json.dump({'stage': 'gate', 'gen': 2, 'pool_id': 'PA',
+                   'state': 'ready', 'detect_root': tmp, 'model': 'm2',
+                   'protocol': 'full@640', 'view_frame': 'pad012',
+                   'roots': {'d': tmp}, 'parquet_size': st.st_size,
+                   'parquet_mtime_ns': st.st_mtime_ns,
+                   'sha256': hashlib.sha256(
+                       open(lay['pool'], 'rb').read()).hexdigest()}, fh)
+    for k in ('11_0', '12_0'):
+        open(os.path.join(lay['full'], k + '.jpg'), 'wb').close()
+    with open(lay['verdicts'], 'w') as fh:
+        fh.write(json.dumps({'key': '11#0', 'verdict': 'dog', 'seq': 's1',
+                             'gen': 2, 'pool': 'PA'}) + '\n')
+        fh.write(json.dumps({'key': '12#0', 'verdict': 'dog', 'seq': 's2',
+                             'gen': 2, 'pool': 'PA',
+                             fa.AUTHOR_FIELD: WHO}) + '\n')
+    real_paths, real_live = fa.paths, fa.live_gen
+    fa.paths = lambda stage='gate', *, gen=1: lay
+    fa.live_gen = lambda stage: (2, tmp)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            fa.export(argparse.Namespace(stage='gate', gen=2))
+    finally:
+        fa.paths, fa.live_gen = real_paths, real_live
+    man = _lines(os.path.join(lay['dataset'], 'manifest.jsonl'))
+    byline = {r['image_id']: r.get('judged_by') for r in man}
+    if byline != {'11': fa.LEGACY_AUTHOR, '12': WHO}:
+        bad.append(f'the exported manifest attributes rows to {byline} — a '
+                   f'dataset row with no judge is the reason this field '
+                   f'exists')
 
 
 def new_record_checks(bad):
@@ -327,11 +423,11 @@ def new_record_checks(bad):
             # 3. both audit verdict ledgers
             for stage in fa.STAGES:
                 lay = _audit_layout(fa, os.path.join(tmp, stage), stage)
-                fa.paths = lambda s=stage, _l=lay: _l
+                fa.paths = lambda s=stage, *, gen=1, _l=lay: _l
                 sp = fa.spec(stage)
-                out = audit.record(MARK + '#0', sp['positive'],
-                                   {'band': 3, 'p_dog': 0.31}, stage=stage,
-                                   by=WHO)
+                c = _ctx(fa, lay, stage)
+                out = audit.record(MARK + '#0', sp['positive'], c,
+                                   pool=c.pool_id, by=WHO)
                 rows = _lines(lay['verdicts'])
                 if not out.get('ok') or not rows:
                     bad.append(f'{stage}: recording a verdict with an '
@@ -343,17 +439,19 @@ def new_record_checks(bad):
             # 4. a box redrawn on the audit page, which writes the same
             #    corrections ledger from the other side
             lay = _audit_layout(fa, os.path.join(tmp, 'corr'))
-            fa.paths = lambda s='gate', _l=lay: _l
+            fa.paths = lambda s='gate', *, gen=1, _l=lay: _l
+            c = _ctx(fa, lay)
             audit.BOX_FILE = os.path.join(tmp, 'audit_boxes.jsonl')
             real_row, real_cut = audit._pool_row, audit._cut_one
-            audit._pool_row = lambda key, stage='gate': {
+            audit._pool_row = lambda key, ctx: {
                 'key': MARK + '#0', 'image_id': '1606751523958968',
                 'det_idx': 0, 'x1': 1.0, 'y1': 2.0, 'x2': 30.0, 'y2': 40.0}
             audit._cut_one = lambda *a, **k: False
             try:
                 # a box that MOVED: the pool's own box, unchanged, is
                 # refused as nobody's geometry
-                out = audit.save_correction(MARK + '#0', [1, 2, 31, 41],
+                out = audit.save_correction(MARK + '#0', [1, 2, 31, 41], c,
+                                            pool=c.pool_id, box_sig=SIG,
                                             by=WHO)
                 rows = _lines(audit.BOX_FILE)
                 if not out.get('ok') or not rows:
@@ -441,7 +539,8 @@ def legacy_read_checks(bad):
         real_box = audit.BOX_FILE
         try:
             lay = _audit_layout(fa, tmp)
-            fa.paths = lambda s='gate', _l=lay: _l
+            fa.paths = lambda s='gate', *, gen=1, _l=lay: _l
+            c = _ctx(fa, lay)
             # before anything reads a correction: corrections() is called from
             # inside judged(), and the live ledger is not this test's to read
             # a fixture out of
@@ -454,7 +553,8 @@ def legacy_read_checks(bad):
                 fh.write(json.dumps({'key': MARK + 'new#0', 'verdict': 'dog',
                                      'band': 0, 'p_dog': 0.05,
                                      'ts': 1_800_000_000, A: WHO}) + '\n')
-            got = {v['key']: v.get(A) for v in fa.read_verdicts(stage='gate')}
+            got = {v['key']: v.get(A)
+                   for v in fa.read_verdicts(stage='gate', gen=1)}
             if got != {MARK + 'old#0': fa.LEGACY_AUTHOR,
                        MARK + 'new#0': WHO}:
                 bad.append(f'read_verdicts hands out {got}; the ledger\'s own '
@@ -463,7 +563,7 @@ def legacy_read_checks(bad):
 
             # the "my annotations" list
             rows = {it['key']: it.get(A)
-                    for it in audit.judged(which='all')['items']}
+                    for it in audit.judged(c, which='all')['items']}
             if rows != {MARK + 'old#0': fa.LEGACY_AUTHOR,
                         MARK + 'new#0': WHO}:
                 bad.append(f'the annotations list shows {rows}')
@@ -471,25 +571,17 @@ def legacy_read_checks(bad):
             # the sheet, read back
             doc = audit.with_verdicts(
                 {'items': [{'key': MARK + 'old#0'}, {'key': MARK + 'new#0'},
-                           {'key': MARK + 'none#0'}]})
+                           {'key': MARK + 'none#0'}]}, c)
             seen = [(it['key'], it.get(A)) for it in doc['items']]
             if seen != [(MARK + 'old#0', fa.LEGACY_AUTHOR),
                         (MARK + 'new#0', WHO), (MARK + 'none#0', None)]:
                 bad.append(f'a page read back says {seen}; a judged box names '
                            f'its judge and an unjudged one names nobody')
 
-            # the dataset export's manifest
-            import argparse
-            import contextlib
-            import io
-            with contextlib.redirect_stdout(io.StringIO()):
-                fa.export(argparse.Namespace(stage='gate', model='m'))
-            man = _lines(os.path.join(lay['dataset'], 'manifest.jsonl'))
-            byline = {r['image_id']: r.get('judged_by') for r in man}
-            if byline and set(byline.values()) - {fa.LEGACY_AUTHOR, WHO}:
-                bad.append(f'the exported manifest attributes rows to '
-                           f'{byline} — a dataset row with no judge is the '
-                           f'reason this field exists')
+            # the dataset export's manifest -- of a gen-2 audit, the only
+            # kind export writes now (gen 1 is frozen), whose ledger rows
+            # carry their generation and pool; one of them predates `by`
+            _export_byline_checks(bad, fa, os.path.join(tmp, 'g2'))
 
             # the box corrections, both readers -- each its own page's row:
             # the audit reads only 'audit:<stage>' rows of its pool's gen
@@ -501,7 +593,7 @@ def legacy_read_checks(bad):
                         'crop': crop, 'image_id': '1606751523958969',
                         'det_idx': 0, 'x1': 1, 'y1': 2, 'x2': 3, 'y2': 4,
                         'saved_at': 1_700_000_000}) + '\n')
-            fixed = audit.corrections('gate').get(('1606751523958969', 0))
+            fixed = audit.corrections(c).get(('1606751523958969', 0))
             if not fixed or fixed[5] != fa.LEGACY_AUTHOR:
                 bad.append(f'a box drawn before accounts reads as {fixed}; '
                            f'the audit page has to be able to say who drew it')
@@ -775,9 +867,10 @@ def refusal_checks(bad):
         real_row, real_cut = audit._pool_row, audit._cut_one
         try:
             lay = _audit_layout(fa, tmp)
-            fa.paths = lambda s='gate', _l=lay: _l
+            fa.paths = lambda s='gate', *, gen=1, _l=lay: _l
+            c = _ctx(fa, lay)
             audit.BOX_FILE = os.path.join(tmp, 'audit_boxes.jsonl')
-            audit._pool_row = lambda key, stage='gate': {
+            audit._pool_row = lambda key, ctx: {
                 'key': MARK + '#0', 'image_id': '1606751523958968',
                 'det_idx': 0, 'x1': 1.0, 'y1': 2.0, 'x2': 30.0, 'y2': 40.0}
             audit._cut_one = lambda *a, **k: False
@@ -801,11 +894,14 @@ def refusal_checks(bad):
                                            by=nobody),
                      dash.BOX_LABELS),
                     ('audit.record',
-                     lambda: audit.record(MARK + '#0', 'dog', by=nobody),
+                     lambda: audit.record(MARK + '#0', 'dog', c,
+                                          pool=c.pool_id, by=nobody),
                      lay['verdicts']),
                     ('audit.save_correction',
                      lambda: audit.save_correction(MARK + '#0',
-                                                   [1, 2, 31, 41], by=nobody),
+                                                   [1, 2, 31, 41], c,
+                                                   pool=c.pool_id,
+                                                   box_sig=SIG, by=nobody),
                      audit.BOX_FILE),
                     ('leash_store.record',
                      lambda: ls.record(CROP, 'leashed', path=db, gen=1,
@@ -877,8 +973,12 @@ STORE_NAMES = ('mod', 'a')
 
 def _annotation_writes(tree):
     """Every annotation write inside do_POST, as (node, printable name)."""
+    # _audit_post is do_POST's audit branch, moved into a method of its own
+    # when the audit writes grew their generation checks: its writes are
+    # do_POST's writes
     posts = [n for n in ast.walk(tree)
-             if isinstance(n, ast.FunctionDef) and n.name == 'do_POST']
+             if isinstance(n, ast.FunctionDef)
+             and n.name in ('do_POST', '_audit_post')]
     out = []
     for post in posts:
         for node in ast.walk(post):
@@ -935,7 +1035,7 @@ def caller_checks(bad):
             bad.append(f'_annotator reads {wire} — a client that can name its '
                        f'own annotator can sign somebody else\'s name to a '
                        f'verdict')
-    post = src[src.index('def do_POST'):]
+    post = src[src.index('def _audit_post'):]
     if "get('by'" in post or 'get("by"' in post:
         bad.append('a POST handler takes the annotator out of the request '
                    'body; the session is the only authority for who is '
@@ -970,7 +1070,7 @@ def route_checks(bad):
         real_flags = lf.DB_PATH
         try:
             lay = _audit_layout(fa, tmp)
-            fa.paths = lambda s='gate', _l=lay: _l
+            fa.paths = lambda s='gate', *, gen=1, _l=lay: _l
             audit.BOX_FILE = os.path.join(tmp, 'audit_boxes.jsonl')
             open(lay['pool'], 'wb').close()   # pool_ready() only asks it is there
             ls.DB_PATH = os.path.join(tmp, 'leash.db')
@@ -978,7 +1078,7 @@ def route_checks(bad):
             ls.FULL_OUT = os.path.join(tmp, 'leash_full')
             lf.DB_PATH = os.path.join(tmp, 'label_flags.db')
             real_row = audit._pool_row
-            audit._pool_row = lambda key, stage='gate': {
+            audit._pool_row = lambda key, ctx: {
                 'key': MARK + '#0', 'image_id': '1606751523958968',
                 'det_idx': 0, 'x1': 1.0, 'y1': 2.0, 'x2': 30.0, 'y2': 40.0}
 
@@ -1005,13 +1105,20 @@ def route_checks(bad):
                 ('/api/review/box', {'name': CROP, 'det_idx': 0,
                                      'box': [1, 2, 30, 40]},
                  lambda: _lines(dash.BOX_LABELS)),
+                # the generation and pool the page was served with ride on
+                # every audit write; one without them is refused before the
+                # annotator is ever asked for
                 ('/api/audit/verdict?stage=gate', {'key': MARK + '#0',
                                                    'verdict': 'dog',
-                                                   'band': 3, 'p_dog': 0.31},
+                                                   'gen': 1,
+                                                   'pool': fa.G1_POOL_ID},
                  lambda: _lines(lay['verdicts'])),
                 # moved off the pool's box: the unchanged one is refused
                 ('/api/audit/box?stage=gate', {'key': MARK + '#0',
-                                               'box': [1, 2, 31, 41]},
+                                               'box': [1, 2, 31, 41],
+                                               'gen': 1,
+                                               'pool': fa.G1_POOL_ID,
+                                               'box_sig': SIG},
                  lambda: _lines(audit.BOX_FILE)),
                 ('/api/review/leash', {'name': CROP, 'label': 'leashed'},
                  lambda: [dict(r) for r in
@@ -1067,7 +1174,7 @@ def surface_checks(bad):
     import audit
     A = fa.AUTHOR_FIELD
 
-    page = audit.page_html('gate')
+    page = audit.page_html(_ctx(fa, fa.paths('gate', gen=1)))
     if 'it.by' not in page:
         bad.append('the audit page never renders an annotation\'s author — '
                    'the "my annotations" view cannot say whose they are')
@@ -1284,11 +1391,12 @@ def redecision_checks(bad):
 
             # append-only, last line wins: the reader keeps bob's answer
             lay = _audit_layout(fa, os.path.join(tmp, 'audit'))
-            fa.paths = lambda s='gate', _l=lay: _l
-            audit.record(MARK + '#0', 'dog', by=alice)
-            audit.record(MARK + '#0', 'not_dog', by=bob)
+            fa.paths = lambda s='gate', *, gen=1, _l=lay: _l
+            c = _ctx(fa, lay)
+            audit.record(MARK + '#0', 'dog', c, pool=c.pool_id, by=alice)
+            audit.record(MARK + '#0', 'not_dog', c, pool=c.pool_id, by=bob)
             seen = [(v['key'], v.get(A))
-                    for v in fa.read_verdicts(stage='gate')]
+                    for v in fa.read_verdicts(stage='gate', gen=1)]
             if seen != [(MARK + '#0', bob)]:
                 bad.append(f'the audit ledger reads back {seen}; a mind '
                            f'changed later is another line and the reader '

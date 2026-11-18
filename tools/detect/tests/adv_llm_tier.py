@@ -299,6 +299,13 @@ def own_checks(bad):
         'audit_finds/manifest.jsonl', 'audit_finds_leash/manifest.jsonl',
         'leash_labels/leash.db', 'label_flags/label_flags.db',
         'dashboard/triage.jsonl')]
+    # every later generation's audit ledger and export too, by fn_audit's own
+    # names for them (gen 2 always, built yet or not)
+    for _st in sorted(fa.STAGES):
+        for _g in sorted(set(fa.audit_gens(_st)) | {2}):
+            _p = fa.paths(_st, gen=_g)
+            forbidden += [_p['verdicts'],
+                          os.path.join(_p['dataset'], 'manifest.jsonl')]
     # and the escapes: a relative climb out, the store's parent, and the
     # sibling whose name merely starts the same way
     forbidden += [os.path.join(P['out'], '..', 'hard_positives', 'x.jsonl'),
@@ -784,14 +791,14 @@ def audit_checks(bad):
     """
     tmp = tempfile.mkdtemp(prefix='llmguard_audit_')
     real_paths = fa.paths
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
                verdicts=os.path.join(tmp, 'verdicts.jsonl'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
                crops=os.path.join(tmp, 'crops'), full=os.path.join(tmp, 'full'),
                dataset=os.path.join(tmp, 'ds'),
                pool=os.path.join(tmp, 'pool.parquet'))
-    fa.paths = lambda stage='gate': lay
+    fa.paths = lambda stage='gate', *, gen=1: lay
     try:
         os.makedirs(lay['pages'])
         keys = [(0, MARK + 'a0'), (0, MARK + 'a1'), (3, MARK + 'b0'),
@@ -807,7 +814,8 @@ def audit_checks(bad):
                 fh.write(json.dumps({'key': key, 'band': band,
                                      'verdict': v}) + '\n')
         totals = [(lo, hi, 100) for lo, hi in fa.BANDS]
-        before = json.dumps(fa.summarise(totals=totals), sort_keys=True)
+        before = json.dumps(fa.summarise(totals=totals, gen=1),
+                            sort_keys=True)
         with _Store() as st:
             st.crops('audit_finds', llm.HUMAN_YES, 1)
             # the shape it really writes, for the audit's own keys
@@ -823,8 +831,10 @@ def audit_checks(bad):
                         'prompt_version': llm.PROMPT_VERSION,
                         'model': llm.MODEL, 'ts': time.time()}
                        for i in range(len(fa.BANDS))])
-            after = json.dumps(fa.summarise(totals=totals), sort_keys=True)
-            keys_after = {v.get('key') for v in fa.read_verdicts(stage='gate')}
+            after = json.dumps(fa.summarise(totals=totals, gen=1),
+                               sort_keys=True)
+            keys_after = {v.get('key') for v in
+                          fa.read_verdicts(stage='gate', gen=1)}
         if before != after:
             bad.append('L9 the audit summary MOVED when the LLM store was '
                        'written to -- an answer from a general-purpose model '
@@ -1052,6 +1062,11 @@ def untouched_checks(bad):
         'leash_audit/verdicts.jsonl', 'leash_audit/drawn.jsonl',
         'audit_finds/manifest.jsonl', 'audit_finds_leash/manifest.jsonl',
         'dashboard/triage.jsonl')]
+    for _st in sorted(fa.STAGES):
+        for _g in sorted(set(fa.audit_gens(_st)) | {2}):
+            _p = fa.paths(_st, gen=_g)
+            stores += [_p['verdicts'], _p['drawn'],
+                       os.path.join(_p['dataset'], 'manifest.jsonl')]
     for p in stores:
         if MARK in _read(p):
             bad.append(f'L-fixture this check wrote into the LIVE store {p} '

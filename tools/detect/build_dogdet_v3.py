@@ -77,7 +77,6 @@ TRAINING_ROOT = _training_root()
 # dogdet_v2 happened to be cut from.
 V2 = os.path.join(TRAINING_ROOT, 'dogdet_v2')
 HARD_POS = os.path.join(REPO, 'data', 'hard_positives', 'labels.jsonl')
-AUDIT_VERDICTS = os.path.join(REPO, 'data', 'fn_audit', 'verdicts.jsonl')
 CORRECTIONS = os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl')
 # The store n_det and the det-0 boxes are read from. main() sets it from
 # --detect-root; unset, detect_root() resolves the pinned ledger root.
@@ -249,11 +248,18 @@ def confirmed_positive_ids():
     detect_root()'s detector generation only (ledger_gen).
 
     A hard positive tagged with another generation was confirmed on another
-    detector's box, and the gate audit's verdicts are its pool's generation
-    (fn_audit.pool_gen): either is skipped, and said so.
+    detector's box, and is skipped, and said so. The gate audit is read from
+    THIS generation's audit dir (crop_sources.audit_ctx_for: its pool cut
+    from detect_root() itself), never "the stage's audit" -- so a build on
+    the gen-1 store keeps every gen-1 confirmation after the audit page has
+    moved on to gen 2, and the other generations' verdicts are counted and
+    left out. Image-level ("this frame has a dog"), so a generation has no
+    box to put on the wrong one here; it is read per generation anyway,
+    because which frames a person looked at is a fact about one pool.
     """
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import fn_audit as fa
+    import crop_sources
     gen = ledger_gen()
     out = set()
     other = 0
@@ -271,17 +277,22 @@ def confirmed_positive_ids():
     if other:
         print(f'{other} hard positive(s) of another detector generation '
               f'skipped (the store is gen {gen})', flush=True)
-    try:
-        pool = fa.pool_gen('gate')
-        if pool != gen:
-            print(f'the gate audit pool is gen {pool}, the store gen {gen}: '
-                  f'its verdicts are skipped', flush=True)
-        else:
-            for v in fa.read_verdicts(stage='gate'):
-                if fa.verdict_of(v.get('verdict'), 'gate') == 'dog':
-                    out.add(str(v['key']).split('#')[0])
-    except Exception:
-        pass
+    others = crop_sources.other_gen_verdicts('gate', gen)
+    if others:
+        print('gate audit verdicts of other detector generations left out '
+              '(the store is gen %d): %s' % (gen, ', '.join(
+                  f'gen {g}: {n if n >= 0 else "unreadable"}'
+                  for g, n in sorted(others.items()))), flush=True)
+    # A ledger that cannot be read, or holds a foreign row, stops the build
+    # (SystemExit / GenError) -- it used to be swallowed here, which read as
+    # "nobody confirmed anything".
+    ac = crop_sources.audit_ctx_for('gate', detect_root())
+    if ac is None:
+        print(f'no gen-{gen} gate audit: no audit confirmations', flush=True)
+        return out
+    for v in fa.read_verdicts(stage='gate', gen=ac.gen):
+        if fa.verdict_of(v.get('verdict'), 'gate') == 'dog':
+            out.add(str(v['key']).split('#')[0])
     return out
 
 
@@ -289,12 +300,34 @@ def corrections():
     """{(image_id, det_idx): box} from the box-corrections ledger, last write
     wins -- the records of detect_root()'s generation only (ledger_gen): a
     redraw keyed by another detector's det_idx would move a box nobody
-    redrew."""
+    redrew.
+
+    An audit page's redraw (`crop` 'audit:<stage>') of gen >= 2 must also
+    name that generation's pool (`pool` == fn_audit.pool_meta pool_id): a
+    second pool of one generation would key the same det_idx, and a redraw
+    is of one pool's box. And that pool must have been cut from detect_root()
+    itself (realpath of its pool.json detect_root -- the rule
+    crop_sources.audit_ctx_for applies to the confirmations): a generation
+    number names a detector, not a store, and a redraw of another store's
+    det_idx would move a box nobody redrew. Rows that do not are skipped and
+    counted."""
     sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
     import fn_audit as fa
     gen = ledger_gen()
     out = {}
-    other = 0
+    other = other_pool = 0
+    pools = {}
+
+    def pool_of(stage):
+        if stage not in pools:
+            try:
+                meta = fa.pool_meta(stage, gen)
+                cut = meta.get('detect_root')
+                pools[stage] = (meta['pool_id'] if cut and os.path.realpath(
+                    cut) == os.path.realpath(detect_root()) else None)
+            except (fa.PoolIdentityError, KeyError):
+                pools[stage] = None
+        return pools[stage]
     try:
         for line in open(CORRECTIONS):
             if line.strip():
@@ -302,6 +335,12 @@ def corrections():
                 if fa.gen_of(d.get(fa.GEN_FIELD)) != gen:
                     other += 1
                     continue
+                crop = str(d.get('crop') or '')
+                if gen >= 2 and crop.startswith('audit:'):
+                    want = pool_of(crop[len('audit:'):])
+                    if want is None or d.get(fa.POOL_FIELD) != want:
+                        other_pool += 1
+                        continue
                 out[(str(d['image_id']), int(d.get('det_idx') or 0))] = (
                     float(d['x1']), float(d['y1']),
                     float(d['x2']), float(d['y2']))
@@ -310,6 +349,9 @@ def corrections():
     if other:
         print(f'{other} box correction(s) of another detector generation '
               f'skipped (the store is gen {gen})', flush=True)
+    if other_pool:
+        print(f'{other_pool} gen-{gen} audit redraw(s) of no current gen-'
+              f'{gen} pool cut from {detect_root()} skipped', flush=True)
     return out
 
 

@@ -62,6 +62,18 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+
+# AUDIT_PY / DASH_PY / FA_PY: an edited copy of audit.py, dashboard.py or
+# fn_audit.py stands in for the live one -- imported and read as if it were
+# installed (tools/detect/tests/_stand_in.py). Unset, nothing changes.
+if any(os.environ.get(k) for k in ('AUDIT_PY', 'DASH_PY', 'FA_PY')):
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location('_stand_in', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '_stand_in.py'))
+    _stand_in = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_stand_in)
+    _stand_in.install(REPO)
+
 INDEX = os.path.join(REPO, 'data', 'dashboard', 'index.html')
 sys.path.insert(0, os.path.dirname(HERE))
 import status as st  # noqa: E402
@@ -3174,6 +3186,11 @@ GATE_DENIED = (
     ('/flagged', 'json401', 'the flag ledger'),
     ('/audit/crop/gate/x.jpg', 'json401', 'an audit crop'),
     ('/audit/frame/gate/x.jpg', 'json401', 'an audit frame'),
+    # the generation-qualified forms the pages build now
+    ('/audit/crop/gate/g2/1_0.jpg', 'json401', 'a gen-2 audit crop'),
+    ('/audit/frame/leash/g2/1_0.jpg?pool=x', 'json401',
+     'a gen-2 audit frame'),
+    ('/audit/gate?gen=1', 'redirect', 'a frozen generation\'s audit page'),
     ('/datasets/thumb?key=x&rel=y', 'json401', 'a dataset thumbnail'),
     ('/datasets/image?key=x&rel=y', 'json401', 'a dataset image'),
     ('/recent_crops/x.jpg', 'json401', 'a crop from the rolling pool'),

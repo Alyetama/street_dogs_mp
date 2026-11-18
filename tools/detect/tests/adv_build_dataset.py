@@ -852,6 +852,11 @@ def composition_checks(bad, bd):
         calls[:] = []
         real_d = bd.D
         bd.D = lambda *p: os.path.join(tmp, *p)
+        # the store says which detector generation it is: a build digests the
+        # audit ledgers of its own store's generation (build_dataset.stores_for)
+        os.makedirs(os.path.join(tmp, 'gen1'), exist_ok=True)
+        with open(os.path.join(tmp, 'gen1', 'status.json'), 'w') as fh:
+            json.dump({'gen': 1}, fh)
         man = bd.build('dogbin', detect_root=os.path.join(tmp, 'gen1'))
 
         def argv_named(want):

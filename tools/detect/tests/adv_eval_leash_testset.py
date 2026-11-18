@@ -16,6 +16,11 @@ off a folder. What is held here:
   * a missing corrections ledger is said, and its items are in no redraw
     slice rather than all in 'no audit redraw';
   * the label is items[].label, not a class directory;
+  * the set's own detector generation (`gen`, absent = 1) picks the audit
+    it is scored from: a gen-1 set reads leash_audit, a gen-2 set the gen-2
+    leash audit and never the gen-1 crops of the same keys (det_idx names
+    another box there) -- and with no gen-2 audit to read, it refuses
+    before any model is loaded; a `gen` that names no generation refuses;
   * the slices -- audit redraw and redraw IoU < 0.5 against the pool box,
     crop short-side bands, region from the pool's grid cell, against the
     regional prior -- are computed right on a hand-built case, and an
@@ -119,8 +124,11 @@ def make_world(name):
     iid, det, b = GATE_REDRAW
     corr.append({'crop': 'audit:gate', 'image_id': iid, 'det_idx': det,
                  'x1': b[0], 'y1': b[1], 'x2': b[2], 'y2': b[3]})
+    # gen 1: the boxes of the gen-1 leash audit, as leash_test_v1 was frozen
+    # from (reserve_test_set records it; a set from before the field reads
+    # as 1, which check_test_set_gen holds)
     doc = {'family': 'leash', 'stage': 'leash', 'created': '2026-11-14',
-           'crops_from': alt, 'items': items,
+           'gen': 1, 'crops_from': alt, 'items': items,
            'keys': [it['key'] for it in items]}
     doc_path = os.path.join(root, 'data', 'leash_test_v1.json')
     with open(doc_path, 'w') as fh:
@@ -402,6 +410,67 @@ def check_cli_refuses_before_model():
         return ['cli: --test-set with a changed crop did not refuse (%r)'
                 % msg]
     return []
+
+
+def check_test_set_gen():
+    """A set is scored on the audit of the generation it was frozen from.
+
+    Its keys are '<image_id>#<det_idx>' and det_idx is numbered per detector
+    generation, so the gen-2 leash audit holds most of the same keys on other
+    boxes: a gen-2 set scored against leash_audit/full would be scored on
+    pictures of other dogs, with every sha256 refusing at best. So `gen`
+    (absent = 1) is read off the doc, gen 1 is scored from the module's
+    gen-1 paths, any other generation from that generation's own audit --
+    and with none to read, refused before a model is loaded."""
+    bad = []
+    for doc, want in (({}, 1), ({'gen': 1}, 1), ({'gen': 2}, 2)):
+        try:
+            got = E.test_set_gen(doc)
+        except SystemExit as e:
+            got = 'refused: %s' % e
+        if got != want:
+            bad.append('gen: %r read as %r, want %r' % (doc, got, want))
+    for g in ('2', True, -1, 0, 2.0):
+        if _refused(lambda: E.test_set_gen({'gen': g})) is None:
+            bad.append('gen: a set naming gen %r was not refused' % (g,))
+    if E.audit_paths(1) != (E.AUDIT_FULL, E.AUDIT_POOL):
+        bad.append('gen: a gen-1 set is not scored from the gen-1 audit '
+                   '(%r)' % (E.audit_paths(1),))
+    # no gen-2 leash audit anywhere: an empty repo root under fn_audit, so
+    # the answer does not depend on whether the real one has been built
+    doc_path, full, _, pool_path, corr_path = make_world('gen2')
+    with open(doc_path) as fh:
+        doc = json.load(fh)
+    doc['gen'] = 2
+    with open(doc_path, 'w') as fh:
+        json.dump(doc, fh)
+    fa = E._fa
+    real_repo = fa.REPO
+    saved = E.AUDIT_FULL, E.AUDIT_POOL, E.CORRECTIONS
+    fa.REPO = tempfile.mkdtemp(prefix='norepo_', dir=TMP)
+    # the gen-1 paths point at the world's crops, whose bytes match the
+    # set: scored there, the run would go on to load a model
+    E.AUDIT_FULL, E.AUDIT_POOL, E.CORRECTIONS = full, pool_path, corr_path
+    try:
+        msg = _refused(lambda: E.audit_paths(2))
+        if not msg or 'gen-2' not in msg:
+            bad.append('gen: a gen-2 set with no gen-2 audit was not refused '
+                       '(%r)' % (msg,))
+        try:
+            msg = _refused(lambda: E.main(['--weights', 'none.pt',
+                                           '--test-set', doc_path,
+                                           '--device', 'cpu']))
+        except ImportError as e:
+            msg = None
+            bad.append('gen: a gen-2 set was scored on the gen-1 crops -- it '
+                       'got as far as loading a model (%s)' % e)
+        if msg is not None and 'gen-2' not in msg:
+            bad.append('gen: the CLI refused a gen-2 set for another reason '
+                       '(%r)' % (msg,))
+    finally:
+        fa.REPO = real_repo
+        E.AUDIT_FULL, E.AUDIT_POOL, E.CORRECTIONS = saved
+    return bad
 
 
 def check_missing_ledger():
@@ -781,6 +850,19 @@ MUTANTS = [
     ('--out without --test-set ignored',
      _src_mutant('    if args.out:\n', '    if False:\n',
                  check_cli_out_needs_test_set)),
+    # the detector generation a set is scored on
+    ("a set's own gen ignored (every set read as gen 1)",
+     _src_mutant('    return got\n\n\ndef audit_paths(gen):',
+                 '    return 1\n\n\ndef audit_paths(gen):',
+                 check_test_set_gen)),
+    ('every generation scored from the gen-1 audit',
+     _src_mutant('    if gen == 1:\n        return AUDIT_FULL, AUDIT_POOL\n',
+                 '    if True:\n        return AUDIT_FULL, AUDIT_POOL\n',
+                 check_test_set_gen)),
+    ('the CLI scores a set on the gen-1 crops whatever its gen',
+     _src_mutant('    full, pool = audit_paths(gen)\n',
+                 '    full, pool = AUDIT_FULL, AUDIT_POOL\n',
+                 check_test_set_gen)),
 ]
 
 
@@ -788,7 +870,8 @@ def main():
     checks = [check_resolves_keys, check_refuses_sha_mismatch,
               check_refuses_missing, check_refuses_bad_doc, check_slices,
               check_region_of_cell, check_metrics_hand, check_run_test_set,
-              check_cli_refuses_before_model, check_missing_ledger,
+              check_cli_refuses_before_model, check_test_set_gen,
+              check_missing_ledger,
               check_print_one_class, check_bootstrap, check_cli_model_path,
               check_cli_out_needs_test_set]
     bad = []

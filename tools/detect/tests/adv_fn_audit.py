@@ -31,6 +31,31 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.join(REPO, 'tools', 'dashboard'))
 sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
 
+# AUDIT_PY / DASH_PY / FA_PY: an edited copy of audit.py, dashboard.py or
+# fn_audit.py stands in for the live one -- imported and read as if it were
+# installed (tools/detect/tests/_stand_in.py). Unset, nothing changes.
+if any(os.environ.get(k) for k in ('AUDIT_PY', 'DASH_PY', 'FA_PY')):
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location('_stand_in', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '_stand_in.py'))
+    _stand_in = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_stand_in)
+    _stand_in.install(REPO)
+
+
+def _ctx(lay, stage='gate', gen=1, frozen=False, pool_id=None, **meta):
+    """An fn_audit.AuditCtx over a sandbox layout `lay`: what a route would
+    resolve, pointed at a temp dir. audit.py reads and writes only through
+    ctx.P, so this -- not a patched fa.paths -- is what keeps a check off the
+    live audit. Not frozen unless asked: a sandbox audit takes new pages."""
+    import fn_audit as fa
+    m = {'gen': gen, 'stage': stage, 'state': 'ready', 'view_frame': 'pad012',
+         'pool_id': pool_id or (fa.G1_POOL_ID if gen == 1 else 'PX'),
+         'model': fa.STAGES[stage]['model'], 'detect_root': None}
+    m.update(meta)
+    return fa.AuditCtx(stage=stage, gen=gen, pool_id=m['pool_id'], P=lay,
+                       meta=m, frozen=frozen)
+
 
 def band_checks(bad):
     """The band a score falls in is computed twice -- once in Python for the
@@ -100,7 +125,7 @@ def weighting_checks(bad):
     # band 0 (rejected) all clean; band 4 (rejected, near the line) all dogs
     vs = ([{'key': f'a{i}', 'band': 0, 'verdict': 'not_dog'} for i in range(10)]
           + [{'key': f'e{i}', 'band': 4, 'verdict': 'dog'} for i in range(5)])
-    s = fa.summarise(vs, totals)
+    s = fa.summarise(vs, totals, gen=1)
     rej = s['rejected']
     want = (0.0 * 900 + 1.0 * 5) / 905
     if abs(rej['rate'] - want) > 1e-9:
@@ -110,7 +135,7 @@ def weighting_checks(bad):
         bad.append('the rate is a flat mean over the bands')
     # a dog found above the threshold is NOT a miss -- the gate kept it
     vs2 = vs + [{'key': 'k1', 'band': n - 1, 'verdict': 'dog'}]
-    s2 = fa.summarise(vs2, totals)
+    s2 = fa.summarise(vs2, totals, gen=1)
     if abs(s2['rejected']['rate'] - rej['rate']) > 1e-12:
         bad.append('a dog found in a band the gate KEPT changed the '
                    'thrown-away rate — it is not a miss, the gate agreed')
@@ -119,7 +144,7 @@ def weighting_checks(bad):
                    f"{s2['kept']['wrong']}")
     # a NOT-dog above the threshold is the false positive
     vs3 = vs + [{'key': 'k2', 'band': n - 1, 'verdict': 'not_dog'}]
-    s3 = fa.summarise(vs3, totals)
+    s3 = fa.summarise(vs3, totals, gen=1)
     if s3['kept']['wrong'] != 1 or s3['kept']['rate'] <= 0:
         bad.append(f"a not-dog the gate kept is a false positive and was not "
                    f"counted: {s3['kept']}")
@@ -128,12 +153,14 @@ def weighting_checks(bad):
         bad.append(f"covered = {s['covered']} with most bands unsampled")
     # 'unsure' is neither a find nor a clean look
     s4 = fa.summarise([{'key': 'a', 'band': 4, 'verdict': 'unsure'},
-                       {'key': 'b', 'band': 4, 'verdict': 'dog'}], totals)
+                       {'key': 'b', 'band': 4, 'verdict': 'dog'}], totals,
+                      gen=1)
     if s4['bands'][4]['judged'] != 1:
         bad.append(f"'unsure' counted in the denominator: "
                    f"{s4['bands'][4]['judged']}")
     # the old vocabulary still reads
-    s5 = fa.summarise([{'key': 'a', 'band': 4, 'verdict': 'missed'}], totals)
+    s5 = fa.summarise([{'key': 'a', 'band': 4, 'verdict': 'missed'}], totals,
+                      gen=1)
     if s5['bands'][4]['dogs'] != 1:
         bad.append("a verdict written as 'missed' before the wording changed "
                    "is no longer counted")
@@ -196,7 +223,7 @@ def sheets_checks(bad):
     mark = 'zzguard_'
     real_paths = fa.paths
     tmp = _tf.mkdtemp()
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
                verdicts=os.path.join(tmp, 'v.jsonl'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
@@ -204,7 +231,7 @@ def sheets_checks(bad):
                crops=os.path.join(tmp, 'crops'),
                dataset=os.path.join(tmp, 'ds'),
                pool=os.path.join(tmp, 'pool.parquet'))
-    fa.paths = lambda stage='gate': lay
+    fa.paths = lambda stage='gate', *, gen=1: lay
     try:
         os.makedirs(lay['pages'])
         # Bands 2 and 5 were shown and nobody answered them. That is the case
@@ -227,7 +254,7 @@ def sheets_checks(bad):
                                  ('x0', 0, 'dog')):
                 fh.write(json.dumps({'key': mark + key, 'band': band,
                                      'verdict': v}) + '\n')
-        got = {b: sorted(k) for b, k in fa.sheets('gate').items()}
+        got = {b: sorted(k) for b, k in fa.sheets('gate', gen=1).items()}
         want = {0: [mark + k for k in ('a0', 'a1', 'a2', 'a3', 'a4', 'a5')],
                 2: [mark + 'b0', mark + 'b1'],
                 5: [mark + 'c0', mark + 'c1'],
@@ -238,7 +265,7 @@ def sheets_checks(bad):
                        f'and nothing else is')
         totals = [(lo, hi, 1000 if i == 0 else 500 if i == 9 else 10)
                   for i, (lo, hi) in enumerate(fa.BANDS)]
-        s = fa.summarise(totals=totals)
+        s = fa.summarise(totals=totals, gen=1)
         b = s['bands']
         for i, sh, an in ((0, 6, 2), (2, 2, 0), (5, 2, 0), (9, 3, 1),
                           (1, 0, 0)):
@@ -263,14 +290,14 @@ def sheets_checks(bad):
         # a page still being written is not a sheet
         with open(os.path.join(lay['pages'], '00002.json.tmp'), 'w') as fh:
             json.dump({'items': [{'key': mark + 'half', 'band': 3}]}, fh)
-        if 3 in fa.sheets('gate'):
+        if 3 in fa.sheets('gate', gen=1):
             bad.append('a half-written page counted as shown — draw_page '
                        'writes the document beside its final name and moves '
                        'it, so a glob that matches the temp reads a page '
                        'nobody has been served')
         # and a sheet drawn since the last poll is counted
         _sheet(lay['pages'], 2, [(3, mark + 'd0')])
-        s2 = fa.summarise(totals=totals)
+        s2 = fa.summarise(totals=totals, gen=1)
         if s2['sheets']['shown'] != 14:
             bad.append(f"a sheet drawn after the last poll is not counted: "
                        f"{s2['sheets']} — the cache is keyed on something "
@@ -278,7 +305,9 @@ def sheets_checks(bad):
     finally:
         fa.paths = real_paths
     for name in fa.STAGES:
-        hit = _leaked(fa.paths(name), mark)
+        # every generation's live ledgers, not only gen 1's
+        hit = [h for g in fa.audit_gens(name)
+               for h in _leaked(fa.paths(name, gen=g), mark)]
         if hit:
             bad.append(f'this check wrote its own keys into the LIVE {name} '
                        f'audit ({hit}) — redirecting fa.paths did not take, '
@@ -322,14 +351,14 @@ def targeted_draw_checks(bad):
     mark = 'zzaim_'
     real_paths = fa.paths
     tmp = _tf.mkdtemp()
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
                verdicts=os.path.join(tmp, 'v.jsonl'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
                full=os.path.join(tmp, 'full'), crops=os.path.join(tmp, 'crops'),
                dataset=os.path.join(tmp, 'ds'),
                pool=os.path.join(tmp, 'pool.parquet'))
-    fa.paths = lambda stage='gate': lay
+    fa.paths = lambda stage='gate', *, gen=1: lay
     try:
         os.makedirs(lay['pages'])
         spread = [(0, mark + f's{i}') for i in range(4)]
@@ -348,7 +377,7 @@ def targeted_draw_checks(bad):
         totals = [(lo, hi, 1000 if i == 0 else 10)
                   for i, (lo, hi) in enumerate(fa.BANDS)]
         fa._SHEETS.clear()
-        s = fa.summarise(totals=totals)
+        s = fa.summarise(totals=totals, gen=1)
         b0 = s['bands'][0]
         if (b0['judged'], b0['dogs']) != (4, 1) or abs(b0['rate'] - .25) > 1e-9:
             bad.append(f"band 0 reads {b0['dogs']}/{b0['judged']} = "
@@ -378,7 +407,7 @@ def targeted_draw_checks(bad):
         # just as well against a summarise() that counts nothing.
         _sheet(lay['pages'], 1, aimed, band='rejected')
         fa._SHEETS.clear()
-        s2 = fa.summarise(totals=totals)
+        s2 = fa.summarise(totals=totals, gen=1)
         c0 = s2['bands'][0]
         if (c0['judged'], c0['dogs'], c0['aimed']) != (8, 5, 0):
             bad.append(f"a SPREAD sheet's answers are being held out too: "
@@ -392,7 +421,9 @@ def targeted_draw_checks(bad):
         fa.paths = real_paths
         fa._SHEETS.clear()
     for name in fa.STAGES:
-        hit = _leaked(fa.paths(name), mark)
+        # every generation's live ledgers, not only gen 1's
+        hit = [h for g in fa.audit_gens(name)
+               for h in _leaked(fa.paths(name, gen=g), mark)]
         if hit:
             bad.append(f'this check wrote its own keys into the LIVE {name} '
                        f'audit ({hit}) — redirecting fa.paths did not take, '
@@ -429,7 +460,7 @@ def legacy_checks(bad):
     totals = [(lo, hi, 100) for lo, hi in fa.BANDS]
     s = fa.summarise([{'key': 'a', 'band': 4, 'verdict': 'missed'},
                       {'key': 'b', 'band': 4, 'verdict': 'correct'}],
-                     totals, shown={})
+                     totals, shown={}, gen=1)
     if (s['bands'][4]['judged'], s['bands'][4]['dogs']) != (2, 1):
         bad.append(f"the older wording is not counted: band 4 reads "
                    f"{s['bands'][4]['judged']} judged and "
@@ -446,9 +477,9 @@ def legacy_checks(bad):
         for name, sp in fa.STAGES.items():
             if not sp['legacy']:
                 continue
-            lay = dict(real_paths(name))
+            lay = dict(real_paths(name, gen=1))
             lay['verdicts'] = os.path.join(tmp, name + '.jsonl')
-            fa.paths = lambda stage=name, _l=lay: _l
+            fa.paths = lambda stage=name, *, gen=1, _l=lay: _l
             words = sorted(sp['legacy'])
             with open(lay['verdicts'], 'w') as fh:
                 for i, w in enumerate(words):
@@ -456,7 +487,7 @@ def legacy_checks(bad):
                                          'verdict': w}) + '\n')
             doc = audit.with_verdicts(
                 {'items': [{'key': f'{i}#0'} for i in range(len(words))]},
-                name)
+                _ctx(lay, name))
             got = [it.get('verdict') for it in doc['items']]
             if [g for g in got if g not in sp['answers']]:
                 bad.append(f'{name}: a page read back carries {got}; the '
@@ -466,19 +497,31 @@ def legacy_checks(bad):
     finally:
         fa.paths = real_paths
     # and every word anybody has ever written into a live ledger still reads
+    # -- in EVERY generation's ledger (fa.audit_gens): gen 1 holds the
+    # thirty-six thousand gate verdicts made before the switch, and a gen-2
+    # ledger is where every answer since goes. Reading only the default
+    # generation's would stop scanning one of them the day it changed.
     for name in fa.STAGES:
-        p = real_paths(name)['verdicts']
-        if not os.path.exists(p):
-            continue
-        lost = {}
-        for v in fa.read_verdicts(p, name):
-            w = v.get('verdict')
-            if w is not None and fa.verdict_of(w, name) is None:
-                lost[w] = lost.get(w, 0) + 1
-        for w, n in sorted(lost.items()):
-            bad.append(f'{n} answers in the live {name} ledger are written '
-                       f'{w!r} and nothing maps that any more — they are '
-                       f'human verdicts and they have stopped counting')
+        for g in fa.audit_gens(name):
+            p = real_paths(name, gen=g)['verdicts']
+            if not os.path.exists(p):
+                continue
+            lost = {}
+            try:
+                rows = fa.read_verdicts(p, stage=name, gen=g)
+            except fa.GenError as e:
+                bad.append(f'the live gen-{g} {name} ledger holds a row of '
+                           f'another generation or pool: {e}')
+                continue
+            for v in rows:
+                w = v.get('verdict')
+                if w is not None and fa.verdict_of(w, name) is None:
+                    lost[w] = lost.get(w, 0) + 1
+            for w, n in sorted(lost.items()):
+                bad.append(f'{n} answers in the live gen-{g} {name} ledger '
+                           f'are written {w!r} and nothing maps that any '
+                           f'more — they are human verdicts and they have '
+                           f'stopped counting')
 
 
 def ledger_checks(bad):
@@ -497,7 +540,7 @@ def ledger_checks(bad):
             # a withdrawal: the box goes back to unjudged, it does not become
             # a third kind of answer
             fh.write(json.dumps({'key': 'c', 'verdict': None}) + '\n')
-        got = {v['key']: v['verdict'] for v in fa.read_verdicts(p)}
+        got = {v['key']: v['verdict'] for v in fa.read_verdicts(p, stage='gate', gen=1)}
         if got != {'a': 'not_dog', 'b': 'unsure'}:
             bad.append(f'ledger read {got}; a changed mind must win and a '
                        f'corrupt line must be skipped, not fatal')
@@ -522,12 +565,19 @@ def serving_checks(bad):
     if 'import gate_store' not in src:
         bad.append('the padding is copied rather than imported from the '
                    'runner — two numbers that must agree, kept by hand')
+    import fn_audit as fa
+    import tempfile as _tf
+    tmp = _tf.mkdtemp()
+    c = _ctx({k: os.path.join(tmp, k) for k in fa.paths('gate', gen=1)})
     for hostile in ('../../../etc/passwd', 'a/../b', '..', '', None,
                     'x' * 40, '1_2.jpg', '1#2', '/etc/passwd'):
-        if audit.crop_path(hostile) is not None:
+        if audit.crop_path(hostile, c) is not None:
             bad.append(f'crop_path({hostile!r}) resolved to a path')
-    if audit.record('k', 'looks fine to me')['ok']:
+    if audit.record('k', 'looks fine to me', c, pool=c.pool_id,
+                    by='t')['ok']:
         bad.append('an unknown verdict was recorded')
+    if os.listdir(tmp):
+        bad.append(f'a refused verdict wrote {os.listdir(tmp)}')
 
 
 def isolation_checks(bad):
@@ -554,21 +604,41 @@ def isolation_checks(bad):
     def quiet_export():
         """export() reports what it wrote; a guard's output is its own."""
         with contextlib.redirect_stdout(io.StringIO()):
-            fa.export(types.SimpleNamespace(model='dogbin_008',
-                                            stage='gate'))
+            fa.export(types.SimpleNamespace(stage='gate', gen=2))
     # every path this stage owns, redirected in one place -- the module no
-    # longer keeps them as globals because two audits share the process
-    real_paths = fa.paths
-    lay = dict(real_paths('gate'))
-    lay.update(out=tmp, verdicts=os.path.join(tmp, 'v.jsonl'),
+    # longer keeps them as globals because two audits share the process.
+    # The export is the LIVE generation's only (gen 1 is frozen), so this is
+    # a gen-2 audit: a pool the export can vouch for, and live_gen saying so
+    real_paths, real_live = fa.paths, fa.live_gen
+    lay = dict(real_paths('gate', gen=1))
+    lay.update(out=tmp, gen=2, verdicts=os.path.join(tmp, 'v.jsonl'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
                full=os.path.join(tmp, 'full'),
                crops=os.path.join(tmp, 'crops'),
+               edited=os.path.join(tmp, 'edited'),
+               edited_thumbs=os.path.join(tmp, 'edited_thumbs'),
                pages=os.path.join(tmp, 'pages'),
+               pool=os.path.join(tmp, 'pool.parquet'),
+               pool_json=os.path.join(tmp, 'pool.json'),
                dataset=os.path.join(tmp, 'ds'))
-    fa.paths = lambda stage='gate': lay
-    for c in ('dog', 'not_dog'):
-        os.makedirs(os.path.join(lay['dataset'], c), exist_ok=True)
+    import duckdb
+    import hashlib
+    duckdb.connect().execute(
+        "COPY (SELECT * FROM (VALUES ('1', 0, 1.0, 1.0, 9.0, 9.0), "
+        "('2', 0, 1.0, 1.0, 9.0, 9.0), ('3', 0, 1.0, 1.0, 9.0, 9.0), "
+        "('4', 0, 1.0, 1.0, 9.0, 9.0)) t(image_id, det_idx, x1, y1, x2, y2)"
+        ") TO '%s' (FORMAT PARQUET)" % lay['pool'])
+    st = os.stat(lay['pool'])
+    with open(lay['pool_json'], 'w') as fh:
+        json.dump({'stage': 'gate', 'gen': 2, 'pool_id': 'PX',
+                   'state': 'ready', 'detect_root': tmp, 'model': 'm2',
+                   'protocol': 'full@640', 'view_frame': 'pad012',
+                   'roots': {'d': tmp}, 'parquet_size': st.st_size,
+                   'parquet_mtime_ns': st.st_mtime_ns,
+                   'sha256': hashlib.sha256(
+                       open(lay['pool'], 'rb').read()).hexdigest()}, fh)
+    fa.paths = lambda stage='gate', *, gen=1: lay
+    fa.live_gen = lambda stage: (2, tmp)
     try:
         full = os.path.join(tmp, 'full')
         os.makedirs(full, exist_ok=True)
@@ -578,7 +648,8 @@ def isolation_checks(bad):
             for key, v in (('1#0', 'missed'), ('2#0', 'correct'),
                            ('3#0', 'unsure')):
                 fh.write(json.dumps({'key': key, 'verdict': v,
-                                     'seq': 's' + key[0]}) + '\n')
+                                     'seq': 's' + key[0], 'gen': 2,
+                                     'pool': 'PX'}) + '\n')
             # 4#0 is in the pool and the gate called it not_dog -- and no
             # human has looked at it. It must not appear anywhere.
         quiet_export()
@@ -600,10 +671,15 @@ def isolation_checks(bad):
         if any(r.get('verdict') not in ('dog', 'not_dog') for r in man):
             bad.append(f'a manifest row carries a verdict no human gave: '
                        f'{[r.get("verdict") for r in man]}')
+        if any((r.get('gen'), r.get('pool'), r.get('judged_model'))
+               != (2, 'PX', 'm2') for r in man):
+            bad.append('a manifest row does not name the generation, pool '
+                       'and model of the box it labels')
         # changing your mind moves the file rather than leaving both
         with open(lay['verdicts'], 'a') as fh:
             fh.write(json.dumps({'key': '1#0', 'verdict': 'correct',
-                                 'seq': 's1'}) + '\n')
+                                 'seq': 's1', 'gen': 2,
+                                 'pool': 'PX'}) + '\n')
         quiet_export()
         got = {c: sorted(os.listdir(os.path.join(lay['dataset'], c)))
                for c in ('dog', 'not_dog')}
@@ -613,7 +689,7 @@ def isolation_checks(bad):
             bad.append('the dataset ships without the note saying it is a '
                        'stratified sample of one model\'s rejections')
     finally:
-        fa.paths = real_paths
+        fa.paths, fa.live_gen = real_paths, real_live
     # only human verdicts are labels at all
     for name, sp in fa.STAGES.items():
         for v in (sp['positive'], sp['negative']):
@@ -625,26 +701,39 @@ def isolation_checks(bad):
     # was one. It is structural: the pool the page serves from carries the
     # SCORE and not the LABEL, so the gate's own verdict is not available to
     # anything that could write it down.
+    #
+    # Every live pool of every generation (fa.audit_gens). A gen-1 pool that
+    # is not there is tolerated as it always was; a gen >= 2 pool that
+    # audit_gens LISTS has a pool.json vouching for its parquet, so failing to
+    # read it is a failure, not a pass by silence.
     try:
         import duckdb
-        cols = [r[0] for r in duckdb.connect().execute(
-            f"DESCRIBE SELECT * FROM read_parquet("
-            f"'{real_paths('gate')['pool']}') LIMIT 1"
-        ).fetchall()]
-        if 'label' in cols:
-            bad.append("the pool carries the gate's own label — the one thing "
-                       "that must never be reachable from the page that "
-                       "records human answers")
-        if 'p_dog' not in cols:
-            bad.append('the pool carries no score, so nothing can be banded')
+        for name in fa.STAGES:
+            for g in fa.audit_gens(name):
+                pool = real_paths(name, gen=g)['pool']
+                try:
+                    cols = [r[0] for r in duckdb.connect().execute(
+                        f"DESCRIBE SELECT * FROM read_parquet("
+                        f"'{pool}') LIMIT 1").fetchall()]
+                except Exception as e:         # noqa: BLE001
+                    if g >= 2 or ('No files found' not in str(e)
+                                  and 'IO Error' not in str(e)):
+                        bad.append(f'could not read the gen-{g} {name} pool '
+                                   f'schema: {e}')
+                    continue
+                if 'label' in cols:
+                    bad.append(f"the gen-{g} {name} pool carries the model's "
+                               f"own label — the one thing that must never "
+                               f"be reachable from the page that records "
+                               f"human answers")
+                if 'p_dog' not in cols:
+                    bad.append(f'the gen-{g} {name} pool carries no score, '
+                               f'so nothing can be banded')
     except ModuleNotFoundError:
         # the pool is duckdb's file and only one of this repo's interpreters
         # has it; reported rather than failed, because a check that cannot run
         # has not found anything
         print('SKIP: no duckdb in this interpreter — pool schema not read')
-    except Exception as e:                     # noqa: BLE001
-        if 'No files found' not in str(e) and 'IO Error' not in str(e):
-            bad.append(f'could not read the pool schema: {e}')
     # A correction is geometry and must stay geometry: nothing the audit
     # writes to the shared box store may carry a verdict, a class or a score.
     import inspect as _in
@@ -727,10 +816,13 @@ def correction_checks(bad):
     from PIL import Image as _Im
     tmp = _tf.mkdtemp()
     real_paths = audit.fa.paths
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay.update(out=tmp, crops=os.path.join(tmp, 'crops'),
-               full=os.path.join(tmp, 'full'))
-    audit.fa.paths = lambda stage='gate': lay
+               full=os.path.join(tmp, 'full'),
+               edited=os.path.join(tmp, 'edited'),
+               edited_thumbs=os.path.join(tmp, 'edited_thumbs'))
+    audit.fa.paths = lambda stage='gate', *, gen=1: lay
+    c1 = _ctx(lay)
     src_dir = os.path.join(tmp, 'src', 'cell', 'ground_animal_images')
     os.makedirs(src_dir, exist_ok=True)
     _Im.new('RGB', (400, 300), (30, 40, 50)).save(
@@ -739,7 +831,7 @@ def correction_checks(bad):
             'drive': 'd', 'x1': 40, 'y1': 40, 'x2': 140, 'y2': 140}
     roots = {'d': os.path.join(tmp, 'src')}
     try:
-        audit._cut_one(cand, roots, 'gate')
+        audit._cut_one(cand, roots, c1)
         thumb = os.path.join(lay['crops'], '9_0.jpg')
         full = os.path.join(lay['full'], '9_0.jpg')
         if not (os.path.exists(thumb) and os.path.exists(full)):
@@ -748,7 +840,7 @@ def correction_checks(bad):
         was = open(full, 'rb').read()
         wasthumb = open(thumb, 'rb').read()
         bigger = dict(cand, x1=20, y1=20, x2=200, y2=200)
-        audit._cut_one(bigger, roots, 'gate', into='edited', force=True)
+        audit._cut_one(bigger, roots, c1, into='edited', force=True)
         if open(full, 'rb').read() != was:
             bad.append('a redrawn box overwrote full/ — the picture the '
                        'model was judged on changed after the fact')
@@ -764,8 +856,8 @@ def correction_checks(bad):
         if not os.path.exists(rt):
             bad.append('a redraw wrote no thumbnail, so the tile would keep '
                        'showing the framing you just replaced')
-        elif audit.crop_path('9_0', 'gate') != rt:
-            bad.append(f'the served crop is {audit.crop_path("9_0", "gate")}, '
+        elif audit.crop_path('9_0', c1) != rt:
+            bad.append(f'the served crop is {audit.crop_path("9_0", c1)}, '
                        f'not the redrawn one')
         # A crop is cached for a day, so the tile must be able to ASK for the
         # new one. Without a version from the SERVER this worked until the
@@ -782,7 +874,7 @@ def correction_checks(bad):
                                      'x1': 1, 'y1': 1, 'x2': 9, 'y2': 9,
                                      'saved_at': 1234}) + '\n')
             doc = audit.with_verdicts(
-                {'items': [{'key': '9#0'}]}, 'gate')
+                {'items': [{'key': '9#0'}]}, c1)
             it = doc['items'][0]
             if not it.get('corrected'):
                 bad.append('a redrawn box is not marked on the tile')
@@ -806,11 +898,20 @@ def correction_checks(bad):
     bf3, row3, cut3, seen3 = (audit.BOX_FILE, audit._pool_row,
                               audit._cut_one, audit.fa.read_verdicts)
     audit.BOX_FILE = os.path.join(t3, 'boxes.jsonl')
-    audit._pool_row = lambda key, stage='gate': {
+    audit._pool_row = lambda key, ctx: {
         'key': '5#0', 'image_id': '5', 'det_idx': 0,
         'x1': 100.123, 'y1': 200.0, 'x2': 300.0, 'y2': 400.0}
     audit._cut_one = lambda *a, **k: False
-    audit.fa.read_verdicts = lambda **k: []
+    audit.fa.read_verdicts = lambda *a, **k: []
+    # the real gen-1 pool.json is only READ (_same_pool re-reads it), and
+    # nothing here reaches its dir: BOX_FILE is the temp file above
+    c3 = _ctx({k: os.path.join(t3, k)
+               for k in audit.fa.paths('gate', gen=1)})
+    sig3 = [100.1, 200.0, 300.0, 400.0]
+    # 5#0 was on a page: a redraw of a key nobody was shown is refused
+    os.makedirs(c3.P['pages'])
+    with open(os.path.join(c3.P['pages'], '00000.json'), 'w') as fh:
+        json.dump({'items': [{'key': '5#0'}]}, fh)
 
     def _n3():
         try:
@@ -818,17 +919,20 @@ def correction_checks(bad):
         except OSError:
             return 0
     try:
-        same = audit.save_correction('5#0', [100.12, 200, 300, 400], by='t')
+        same = audit.save_correction('5#0', [100.12, 200, 300, 400], c3,
+                                     pool=c3.pool_id, box_sig=sig3, by='t')
         if same.get('ok') or _n3():
             bad.append('the detector\'s own box, unchanged, was saved as a '
                        'correction -- the model\'s geometry reads as a '
                        'person\'s to every consumer of the store')
         n = _n3()
-        moved = audit.save_correction('5#0', [90, 200, 300, 400], by='t')
+        moved = audit.save_correction('5#0', [90, 200, 300, 400], c3,
+                                      pool=c3.pool_id, box_sig=sig3, by='t')
         if not moved.get('ok') or _n3() != n + 1:
             bad.append(f'a moved box was not saved: {moved}')
         n = _n3()
-        back = audit.save_correction('5#0', [100.12, 200, 300, 400], by='t')
+        back = audit.save_correction('5#0', [100.12, 200, 300, 400], c3,
+                                     pool=c3.pool_id, box_sig=sig3, by='t')
         if not back.get('ok') or _n3() != n + 1:
             bad.append('putting the model\'s box back over a redraw was '
                        'refused, so a redraw can never be withdrawn: '
@@ -859,20 +963,22 @@ def correction_checks(bad):
     import tempfile as _tf2
     t2 = _tf2.mkdtemp()
     rp2 = audit.fa.paths
-    l2 = dict(rp2('gate'))
+    l2 = dict(rp2('gate', gen=1))
     l2.update(out=t2, full=os.path.join(t2, 'full'),
+              edited=os.path.join(t2, 'edited'),
               dataset=os.path.join(t2, 'ds'))
-    audit.fa.paths = lambda stage='gate': l2
+    c2 = _ctx(l2)
+    audit.fa.paths = lambda stage='gate', *, gen=1: l2
     try:
         os.makedirs(l2['full'], exist_ok=True)
         os.makedirs(os.path.join(t2, 'edited'), exist_ok=True)
         open(os.path.join(l2['full'], '7_0.jpg'), 'wb').write(b'ORIGINAL')
-        audit.place('7#0', 'dog', 'gate')
+        audit.place('7#0', 'dog', c2)
         got = os.path.join(l2['dataset'], 'dog', '7_0.jpg')
         if not os.path.exists(got) or open(got, 'rb').read() != b'ORIGINAL':
             bad.append('a judged crop was not filed into the dataset')
         open(os.path.join(t2, 'edited', '7_0.jpg'), 'wb').write(b'REDRAWN')
-        audit.place('7#0', 'dog', 'gate', force=True)
+        audit.place('7#0', 'dog', c2, force=True)
         if open(got, 'rb').read() != b'REDRAWN':
             bad.append('re-filing after a redraw left the old framing in the '
                        'dataset — place() returns early on a file that is '
@@ -884,7 +990,8 @@ def correction_checks(bad):
     # the pool is swapped in, not written over: a rebuild takes minutes and
     # the dashboard serves pages out of that file the whole time
     fsrc = open(os.path.join(REPO, 'tools', 'detect', 'fn_audit.py')).read()
-    if ".tmp' (FORMAT PARQUET" not in fsrc or "os.replace(P['pool']" not in fsrc:
+    if "tmp = P['pool'] + '.tmp'" not in fsrc or \
+            "os.replace(tmp, P['pool'])" not in fsrc:
         bad.append('the pool is written in place — for the minutes a rebuild '
                    'takes, every page is drawn from a half-written file')
     # and the export prefers the redrawn one
@@ -911,40 +1018,54 @@ def concurrency_checks(bad):
         import audit
     except Exception:
         return
-    draw_lock, ledger_lock = audit._locks('gate')
+    import fn_audit as _fa0
+    draw_lock, ledger_lock = audit._locks(
+        _ctx(_fa0.paths('gate', gen=1)))
     if draw_lock is ledger_lock:
         bad.append('drawing and recording share one lock — a verdict waits '
                    'for a page to finish cutting')
     real = audit.materialise
-    audit.materialise = (lambda c, workers=8, stage='gate':
+    audit.materialise = (lambda ctx, c, workers=8:
                          (_t.sleep(0.6), c)[1])
     orig_sample, orig_pc = audit.sample, audit.page_count
-    audit.sample = lambda n=25, band=None, seed=None, stage='gate': [
+    orig_index = audit._page_index
+    audit.sample = lambda ctx, n=25, band=None, seed=None: [
         {'key': 'z#0', 'seq': 'zz', 'image_id': 'z', 'det_idx': 0,
-         'p_dog': 0.1, 'conf': 0.5, 'band': 1, 'drive': 'd', 'cell': 'c'}]
+         'p_dog': 0.1, 'conf': 0.5, 'band': 1, 'drive': 'd', 'cell': 'c',
+         'x1': 0, 'y1': 0, 'x2': 9, 'y2': 9}]
+    # the probe's key is on a page, as every key a verdict is taken for must
+    # be -- otherwise record() refuses it before the lock this is timing
+    audit._page_index = lambda ctx: {'probe#0': {'key': 'probe#0',
+                                                 'box': [0, 0, 9, 9]}}
     try:
         import tempfile as _tf
         tmp = _tf.mkdtemp()
         real_paths = audit.fa.paths
-        lay = dict(real_paths('gate'))
+        lay = dict(real_paths('gate', gen=1))
         lay.update(out=tmp, pages=os.path.join(tmp, 'pages'),
                    drawn=os.path.join(tmp, 'drawn.jsonl'),
                    verdicts=os.path.join(tmp, 'v.jsonl'),
                    full=os.path.join(tmp, 'full'),
                    dataset=os.path.join(tmp, 'ds'))
-        audit.fa.paths = lambda stage='gate': lay
-        live = audit.fa.paths.__wrapped__('gate')['pages'] \
-            if hasattr(audit.fa.paths, '__wrapped__') else real_paths('gate')['pages']
+        audit.fa.paths = lambda stage='gate', *, gen=1: lay
+        cc = _ctx(lay)
+        live = audit.fa.paths.__wrapped__('gate', gen=1)['pages'] \
+            if hasattr(audit.fa.paths, '__wrapped__') else real_paths('gate', gen=1)['pages']
         before = len(os.listdir(live)) if os.path.isdir(live) else 0
-        t = threading.Thread(target=lambda: audit.draw_page(n=1), daemon=True)
+        t = threading.Thread(target=lambda: audit.draw_page(cc, n=1),
+                             daemon=True)
         t.start()
         _t.sleep(0.15)
         a = _t.time()
         # named, or the write is refused before it ever reaches the lock this
         # is timing and the measurement passes by measuring nothing
-        audit.record('probe#0', 'unsure', by='probe')
+        rec = audit.record('probe#0', 'unsure', cc, pool=cc.pool_id,
+                           by='probe')
         waited = _t.time() - a
         t.join(timeout=5)
+        if not rec.get('ok'):
+            bad.append(f'the probe verdict was refused ({rec}), so the '
+                       f'timing below measured nothing')
         if waited > 0.25:
             bad.append(f'a verdict waited {waited:.2f}s while a page was '
                        f'cut — cutting must hold no lock a verdict needs')
@@ -957,6 +1078,7 @@ def concurrency_checks(bad):
     finally:
         audit.materialise, audit.sample, audit.page_count = (
             real, orig_sample, orig_pc)
+        audit._page_index = orig_index
         try:
             audit.fa.paths = real_paths
         except NameError:
@@ -979,13 +1101,13 @@ def persistence_checks(bad):
     import tempfile as _tf
     tmp = _tf.mkdtemp()
     real_paths = audit.fa.paths
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay['verdicts'] = os.path.join(tmp, 'v.jsonl')
-    audit.fa.paths = lambda stage='gate': lay
+    audit.fa.paths = lambda stage='gate', *, gen=1: lay
     try:
         with open(lay['verdicts'], 'w') as fh:
             fh.write(json.dumps({'key': 'a#0', 'verdict': 'missed'}) + '\n')
-        got = audit.with_verdicts(json.loads(json.dumps(doc)))
+        got = audit.with_verdicts(json.loads(json.dumps(doc)), _ctx(lay))
         # in this stage's own wording, not the ledger's: the row is one of the
         # thirty-eight written before the vocabulary changed, and the tile can
         # only paint the words it was built with
@@ -1018,27 +1140,44 @@ def passive_load_checks(bad):
     st = {'queued': 0}
     real = (audit.prefetch, audit.get_page, audit.page_count,
             audit.with_verdicts)
-    audit.prefetch = (lambda band=None, n=25, stage='gate':
+    audit.prefetch = (lambda ctx, band=None, n=25:
                       st.update(queued=st['queued'] + 1))
-    audit.page_count = lambda stage='gate': 3
-    audit.with_verdicts = lambda doc, stage='gate': doc
-    audit.get_page = lambda i, stage='gate': {
+    audit.page_count = lambda ctx: 3
+    audit.with_verdicts = lambda doc, ctx: doc
+    audit.get_page = lambda i, ctx: {
         'index': i, 'items': [{'key': f'p{i}#0'}]}
+    import fn_audit as _fa1
+    cp = _ctx(_fa1.paths('gate', gen=1))
     try:
         # the load every /audit/<stage> page issues: i=-1, nothing judged
         for _ in range(3):
-            audit.api_page(-1)
+            audit.api_page(cp, -1)
         if st['queued']:
             bad.append(f"{st['queued']} page draw(s) were queued by bare "
                        f"page-loads of an unjudged audit — a monitoring GET "
                        f"is spending stratified sample")
         # and the moment the page carries one verdict, the next page is cut
-        audit.get_page = lambda i, stage='gate': {
+        audit.get_page = lambda i, ctx: {
             'index': i, 'items': [{'key': f'p{i}#0', 'verdict': 'dog'}]}
-        audit.api_page(-1)
+        audit.api_page(cp, -1)
         if st['queued'] != 1:
             bad.append('a judged last page did not queue the next draw, so '
                        'every Next now pays the full cut')
+        # ...and on a FROZEN generation nothing is queued and nothing drawn,
+        # judged page or not: it takes no new pages
+        st['queued'] = 0
+        drew = []
+        real_dp = audit.draw_page
+        audit.draw_page = lambda *a, **k: drew.append(1) or {'items': []}
+        try:
+            fz = _ctx(_fa1.paths('gate', gen=1), frozen=True)
+            audit.api_page(fz, -1)
+            past = audit.api_page(fz, 3)
+        finally:
+            audit.draw_page = real_dp
+        if st['queued'] or drew or not past.get('closed'):
+            bad.append(f'a frozen generation queued {st["queued"]} and drew '
+                       f'{len(drew)} page(s) ({past}) — it takes no new pages')
     finally:
         (audit.prefetch, audit.get_page, audit.page_count,
          audit.with_verdicts) = real
@@ -1057,20 +1196,21 @@ def selection_checks(bad):
         return
     seen = {}
     real = audit.prefetch
-    audit.prefetch = (lambda band=None, n=25, stage='gate':
+    audit.prefetch = (lambda ctx, band=None, n=25:
                       seen.update(band=band, n=n))
     real_get, real_count = audit.get_page, audit.page_count
     real_wv = audit.with_verdicts
     # one verdict on the page: the prefetch follows JUDGING now, so a page
     # that queues the next one has to be a page somebody has worked on --
     # see passive_load_checks for the other half of that contract
-    audit.get_page = lambda i, stage='gate': {
+    audit.get_page = lambda i, ctx: {
         'index': i, 'band': 4, 'n': 50,
         'items': [{'key': 'a#0', 'verdict': 'dog'}]}
-    audit.with_verdicts = lambda doc, stage='gate': doc
-    audit.page_count = lambda stage='gate': 3
+    audit.with_verdicts = lambda doc, ctx: doc
+    audit.page_count = lambda ctx: 3
+    import fn_audit as _fa2
     try:
-        audit.api_page(2, n=50, band=4)
+        audit.api_page(_ctx(_fa2.paths('gate', gen=1)), 2, n=50, band=4)
         if seen.get('band') != 4 or seen.get('n') != 50:
             bad.append(f'reading the last page of a band-4 audit queued '
                        f'{seen} — the next page would be from bands the '
@@ -1133,7 +1273,7 @@ def draw_filter_checks(bad):
     mark = 'zzdraw_'
     tmp = _tf.mkdtemp()
     real_paths = fa.paths
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay.update(out=tmp, pool=os.path.join(tmp, 'pool.parquet'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
                verdicts=os.path.join(tmp, 'v.jsonl'),
@@ -1141,9 +1281,10 @@ def draw_filter_checks(bad):
                crops=os.path.join(tmp, 'crops'),
                full=os.path.join(tmp, 'full'),
                dataset=os.path.join(tmp, 'ds'))
-    fa.paths = lambda stage='gate': lay
+    fa.paths = lambda stage='gate', *, gen=1: lay
+    cd = _ctx(lay)
     real_mat = audit.materialise
-    audit.materialise = lambda c, workers=8, stage='gate': c
+    audit.materialise = lambda ctx, c, workers=8: c
     try:
         # seq 'm1' holds a coin-flip AND a sure call: each walk must offer
         # the sequence through the box that belongs on that walk.
@@ -1180,7 +1321,7 @@ def draw_filter_checks(bad):
             # them together would hide which of them a walk actually drew
             return sorted(round(c['p_dog'], 3) for c in cands)
 
-        got = audit.sample(n=3, band='rejected~least', stage='gate')
+        got = audit.sample(cd, n=3, band='rejected~least')
         if ps(got) != [0.45, 0.48, 0.49]:
             bad.append(f'least-confident below the line drew {ps(got)}, not '
                        f'the three scores nearest the threshold')
@@ -1188,15 +1329,15 @@ def draw_filter_checks(bad):
         if not m1 or round(m1[0]['p_dog'], 2) != 0.49:
             bad.append('a sequence holding a 0.49 and a 0.02 was offered '
                        'through the wrong box on a least-confident walk')
-        got = audit.sample(n=2, band='rejected~most', stage='gate')
+        got = audit.sample(cd, n=2, band='rejected~most')
         if ps(got) != [0.001, 0.002]:
             bad.append(f'most-confident below the line drew {ps(got)}, not '
                        f'the scores nearest 0')
-        got = audit.sample(n=2, band='kept~most', stage='gate')
+        got = audit.sample(cd, n=2, band='kept~most')
         if ps(got) != [0.95, 0.99]:
             bad.append(f'most-confident above the line drew {ps(got)}, not '
                        f'the scores nearest 1')
-        got = audit.sample(n=4, band='all~most', stage='gate')
+        got = audit.sample(cd, n=4, band='all~most')
         lo = sum(1 for c in got if c['p_dog'] < fa.THRESHOLD)
         if (lo, len(got) - lo) != (2, 2):
             bad.append(f"most-confident over 'all' split "
@@ -1213,7 +1354,7 @@ def draw_filter_checks(bad):
         # the walk is deterministic, so only the drawn record moves it on
         with open(lay['drawn'], 'w') as fh:
             fh.write(json.dumps({'key': f'{mark}0#0', 'seq': 'm1'}) + '\n')
-        got = audit.sample(n=2, band='rejected~least', stage='gate')
+        got = audit.sample(cd, n=2, band='rejected~least')
         if ps(got) != [0.45, 0.48] or any(c['seq'] == 'm1' for c in got):
             bad.append(f'a drawn sequence came round again on a '
                        f'least-confident walk ({ps(got)}) — a deterministic '
@@ -1227,7 +1368,7 @@ def draw_filter_checks(bad):
         # all. The spread branch over-draws and absorbs it; the walk must too.
         with open(lay['drawn'], 'w') as fh:
             fh.write(json.dumps({'key': f'{mark}2#0'}) + '\n')
-        got = audit.sample(n=3, band='rejected~least', stage='gate')
+        got = audit.sample(cd, n=3, band='rejected~least')
         if len(got) != 3:
             bad.append(f'a least-confident page came back {len(got)} of 3 '
                        f'after one key-only ledger row ({ps(got)}) — the '
@@ -1243,25 +1384,27 @@ def draw_filter_checks(bad):
         os.remove(lay['drawn'])
         # the page document keeps the compound value, so a page read back
         # says how it was chosen, not only where from
-        doc = audit.draw_page(n=2, band='rejected~least', stage='gate')
+        doc = audit.draw_page(cd, n=2, band='rejected~least')
         if doc.get('band') != 'rejected~least':
             bad.append(f"a page drawn least-confident is stored as "
                        f"band={doc.get('band')!r} — the position line can "
                        f"no longer say what was drawn")
-        doc2 = audit.draw_page(n=2, band='rejected~least', stage='gate')
+        doc2 = audit.draw_page(cd, n=2, band='rejected~least')
         if {c['key'] for c in doc.get('items') or []} & \
                 {c['key'] for c in doc2.get('items') or []}:
             bad.append('two least-confident pages shared a crop — drawn '
                        'boxes must never be shown twice, whatever the draw')
         # and the spread is untouched: no mode means the even draw
-        got = audit.sample(n=4, band='rejected', stage='gate')
+        got = audit.sample(cd, n=4, band='rejected')
         if any(c['p_dog'] >= fa.THRESHOLD for c in got):
             bad.append('a plain rejected draw reached above the threshold')
     finally:
         audit.materialise = real_mat
         fa.paths = real_paths
     for name in fa.STAGES:
-        hit = _leaked(fa.paths(name), mark)
+        # every generation's live ledgers, not only gen 1's
+        hit = [h for g in fa.audit_gens(name)
+               for h in _leaked(fa.paths(name, gen=g), mark)]
         if hit:
             bad.append(f'this check wrote its own keys into the LIVE {name} '
                        f'audit ({hit}) — redirecting fa.paths did not take, '
@@ -1290,12 +1433,12 @@ def split_checks(bad):
     mark = 'zzsplit_'
     tmp = _tf.mkdtemp()
     real_paths = fa.paths
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay.update(out=tmp, verdicts=os.path.join(tmp, 'v.jsonl'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
                pages=os.path.join(tmp, 'pages'),
                pool=os.path.join(tmp, 'pool.parquet'))
-    fa.paths = lambda stage='gate': lay
+    fa.paths = lambda stage='gate', *, gen=1: lay
     try:
         rows = [
             (f'{mark}a#0', 'dog', 'sam'), (f'{mark}b#0', 'dog', 'sam'),
@@ -1316,7 +1459,8 @@ def split_checks(bad):
                 if who:
                     rec[fa.AUTHOR_FIELD] = who
                 fh.write(json.dumps(rec) + '\n')
-        got = audit.class_split('gate', who='sam')
+        cs_ = _ctx(lay)
+        got = audit.class_split(cs_, who='sam')
         want_all = {'dog': 4, 'not_dog': 3, 'unsure': 1}
         want_mine = {'dog': 2, 'not_dog': 2, 'unsure': 0}
         if got['all'] != want_all:
@@ -1324,16 +1468,16 @@ def split_checks(bad):
         if got['mine'] != want_mine:
             bad.append(f'sam\'s share is {got["mine"]}, want {want_mine} — '
                        f'one annotator is credited with another\'s answers')
-        if audit.class_split('gate', who='ana')['mine'] != \
+        if audit.class_split(cs_, who='ana')['mine'] != \
                 {'dog': 1, 'not_dog': 1, 'unsure': 1}:
             bad.append('the split does not follow the annotator asked for')
-        if audit.class_split('gate', who=fa.LEGACY_AUTHOR)['mine']['dog'] != 1:
+        if audit.class_split(cs_, who=fa.LEGACY_AUTHOR)['mine']['dog'] != 1:
             bad.append('a row written before accounts existed is not the '
                        'admin\'s in the split')
         # NOBODY IS NOT EVERYBODY. Signed out, or a name nobody holds, gets a
         # share of nothing -- never the whole sheet relabelled as theirs.
         for nobody in (None, '', 'ghost'):
-            share = audit.class_split('gate', who=nobody)
+            share = audit.class_split(cs_, who=nobody)
             if any(share['mine'].values()):
                 bad.append(f'{nobody!r} is credited with {share["mine"]}')
             if share['all'] != want_all:
@@ -1355,7 +1499,9 @@ def split_checks(bad):
     finally:
         fa.paths = real_paths
     for name in fa.STAGES:
-        hit = _leaked(fa.paths(name), mark)
+        # every generation's live ledgers, not only gen 1's
+        hit = [h for g in fa.audit_gens(name)
+               for h in _leaked(fa.paths(name, gen=g), mark)]
         if hit:
             bad.append(f'this check wrote its own keys into the LIVE {name} '
                        f'audit ({hit})')
@@ -1373,7 +1519,7 @@ def split_checks(bad):
     except OSError as e:
         bad.append(f'could not read the route: {e}')
         return
-    i = src.find("if path == '/api/audit/stats':")
+    i = src.find("path == '/api/audit/stats':")
     blk = src[i:src.find('return True', i)] if i >= 0 else ''
     if not blk:
         bad.append('the stats route is gone, or moved somewhere this check '
@@ -1440,12 +1586,12 @@ def period_filter_checks(bad):
     mark = 'zzperiod_'
     tmp = _tf.mkdtemp()
     real_paths = fa.paths
-    lay = dict(real_paths('gate'))
+    lay = dict(real_paths('gate', gen=1))
     lay.update(out=tmp, verdicts=os.path.join(tmp, 'v.jsonl'),
                drawn=os.path.join(tmp, 'drawn.jsonl'),
                pages=os.path.join(tmp, 'pages'),
                pool=os.path.join(tmp, 'pool.parquet'))
-    fa.paths = lambda stage='gate': lay
+    fa.paths = lambda stage='gate', *, gen=1: lay
     try:
         rows = ((f'{mark}k1#0', 'dog', midnight + 60),       # today
                 (f'{mark}k2#0', 'dog', midnight - 3600),     # yesterday
@@ -1471,7 +1617,7 @@ def period_filter_checks(bad):
                             ('all~' + day(1) + '..' + day(1), 1),
                             ('dog~' + d30, 2),
                             ('dog', 4), ('not_dog~' + d0, 0)):
-            got = audit.judged('gate', which, 0, 25)
+            got = audit.judged(_ctx(lay), which, 0, 25)
             if got['total'] != want:
                 bad.append(f'judged({which!r}) holds {got["total"]} rows, '
                            f'want {want} — the window is not filtering, or '
@@ -1481,7 +1627,7 @@ def period_filter_checks(bad):
                            f'{got["total"]} rows — the button would count '
                            f'rows the view no longer shows')
         # pagination is over the FILTERED rows, so the page count is truthful
-        got = audit.judged('gate', 'all~' + d30, 0, 2)
+        got = audit.judged(_ctx(lay), 'all~' + d30, 0, 2)
         if (got['total'], got['pages']) != (3, 2):
             bad.append(f'a thirty-day window at 2 per page reads '
                        f'{got["total"]} rows on {got["pages"]} pages — the '
@@ -1491,20 +1637,23 @@ def period_filter_checks(bad):
         # ...and what comes back is what BIT: an unreadable date is echoed as
         # no window, never as itself, or the page names a narrowing the
         # server did not make
-        junk = audit.judged('gate', 'all~7d', 0, 25)
+        junk = audit.judged(_ctx(lay), 'all~7d', 0, 25)
         if junk['total'] != 5 or junk.get('period'):
             bad.append(f'a stale preset window ({junk.get("period")!r}) is '
                        f'served as something, or claimed after the fact')
         # a row with no ts cannot prove it is inside any window
         keys30 = {i['key']
-                  for i in audit.judged('gate', 'all~' + d30, 0, 25)['items']}
+                  for i in audit.judged(_ctx(lay), 'all~' + d30, 0,
+                                        25)['items']}
         if f'{mark}k5#0' in keys30:
             bad.append('a row with no ts passed a date window — it cannot '
                        'prove when it was judged')
     finally:
         fa.paths = real_paths
     for name in fa.STAGES:
-        hit = _leaked(fa.paths(name), mark)
+        # every generation's live ledgers, not only gen 1's
+        hit = [h for g in fa.audit_gens(name)
+               for h in _leaked(fa.paths(name, gen=g), mark)]
         if hit:
             bad.append(f'this check wrote its own keys into the LIVE {name} '
                        f'audit ({hit}) — redirecting fa.paths did not take, '
@@ -1531,7 +1680,7 @@ def tab_checks(bad):
               'leash': 'Leash audit'}
     order = ('review', 'gate', 'leash')
     for stage in fa.STAGES:
-        html = audit.page_html(stage)
+        html = audit.page_html(_ctx(fa.paths(stage, gen=1), stage))
         nav = '<nav class="jtabs" aria-label="judging surfaces">'
         if html.count(nav) != 1:
             bad.append(f'{stage}: the page carries {html.count(nav)} shared '
@@ -1617,7 +1766,7 @@ def mobile_checks(bad):
         with sync_playwright() as p:
             br = p.chromium.launch()
             for stage in _fa.STAGES:
-                html = audit.page_html(stage)
+                html = audit.page_html(_ctx(_fa.paths(stage, gen=1), stage))
                 ctx = br.new_context(viewport={'width': 390, 'height': 844},
                                      is_mobile=True, has_touch=True)
                 pg = ctx.new_page()
@@ -1673,21 +1822,26 @@ def prefetch_checks(bad):
         return
     st = {'pages': 5, 'drew': 0, 'queued': 0}
 
-    def drew(n=25, band=None, stage='gate'):
+    def drew(ctx, n=25, band=None):
         st['drew'] += 1
         st['pages'] += 1
         return {'index': st['pages'] - 1, 'items': [{'key': 'new#0'}]}
 
     real = (audit.page_count, audit.get_page, audit.draw_page, audit.prefetch,
             audit.with_verdicts)
-    audit.page_count = lambda stage='gate': st['pages']
-    audit.get_page = lambda i, stage='gate': {'index': i,
-                                              'items': [{'key': f'p{i}#0'}]}
+    audit.page_count = lambda ctx: st['pages']
+    audit.get_page = lambda i, ctx: {'index': i,
+                                     'items': [{'key': f'p{i}#0'}]}
     audit.draw_page = drew
-    audit.prefetch = (lambda band=None, n=25, stage='gate':
+    audit.prefetch = (lambda ctx, band=None, n=25:
                       st.update(queued=st['queued'] + 1))
-    audit.with_verdicts = lambda doc, stage='gate': doc
-    held = audit._PREFETCH.get('gate')
+    audit.with_verdicts = lambda doc, ctx: doc
+    import fn_audit as _fa3
+    cf = _ctx(_fa3.paths('gate', gen=1))
+    # keyed per (stage, generation): the two generations of one stage are
+    # two audits, and one's queued page is not the other's
+    PK = ('gate', 1)
+    held = audit._PREFETCH.get(PK)
     try:
         # a prefetch mid-flight, which is exactly the state a reader is in one
         # click after a page was handed to them
@@ -1695,9 +1849,9 @@ def prefetch_checks(bad):
                                              st.update(pages=st['pages'] + 1)),
                              daemon=True)
         t.start()
-        audit._PREFETCH['gate'] = t
+        audit._PREFETCH[PK] = t
         a = _t.time()
-        r = audit.api_page(5)
+        r = audit.api_page(cf, 5)
         waited = _t.time() - a
         if r.get('index') != 5 or r.get('total') != 6:
             bad.append(f"asking for the page after the last one gave page "
@@ -1713,9 +1867,9 @@ def prefetch_checks(bad):
                        f'served it')
         t.join(timeout=5)
         # nothing queued: cut it now, and line up the one after it
-        audit._PREFETCH.pop('gate', None)
+        audit._PREFETCH.pop(PK, None)
         st['queued'] = 0
-        r = audit.api_page(6)
+        r = audit.api_page(cf, 6)
         if st['drew'] != 1 or r.get('index') != 6:
             bad.append(f"with nothing queued, the next page drew "
                        f"{st['drew']} page(s) and came back as "
@@ -1725,7 +1879,7 @@ def prefetch_checks(bad):
                        'the next Next pays the cut again')
         # and a hand-typed index still cannot spend sample
         st['drew'] = 0
-        r = audit.api_page(9999)
+        r = audit.api_page(cf, 9999)
         if r.get('index') != st['pages'] - 1 or st['drew']:
             bad.append(f"i=9999 drew {st['drew']} page(s) and came back as "
                        f"{r.get('index')}; anything past the queued page is a "
@@ -1734,9 +1888,9 @@ def prefetch_checks(bad):
         (audit.page_count, audit.get_page, audit.draw_page, audit.prefetch,
          audit.with_verdicts) = real
         if held is None:
-            audit._PREFETCH.pop('gate', None)
+            audit._PREFETCH.pop(PK, None)
         else:
-            audit._PREFETCH['gate'] = held
+            audit._PREFETCH[PK] = held
 
 
 def page_checks(bad):
@@ -1773,7 +1927,11 @@ def _page_once(bad, audit, probe, stage):
     import tempfile as _tf
     # the built page for a stage, not the template -- the template still has
     # its placeholders in and would throw ReferenceError on the first line
-    html = audit.page_html(stage)
+    import fn_audit as _fa4
+    c = stage if isinstance(stage, _fa4.AuditCtx) else \
+        _ctx(_fa4.paths(stage, gen=1), stage)
+    stage = c.stage
+    html = audit.page_html(c)
     script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
     css = html[html.index('<style>') + 7:html.index('</style>')]
     with _tf.NamedTemporaryFile('w', suffix='.js', delete=False) as f:
@@ -2557,6 +2715,80 @@ chk(!/held out/.test(els.figline.innerHTML),
   'the headline claims answers were held out when none were: ' +
   els.figline.innerHTML);
 view = 'sheet'; anno = 'all'; period = ''; mode = 'spread';
+
+// ── every request names its generation and pool ──
+// A key names a box only within one detector generation, so the crop URL
+// carries it (a day of browser cache under a key-only URL showed a gen-1
+// crop on a gen-2 tile) and every fetch and POST carries gen AND pool; the
+// server refuses one that is not its own.
+chk(cropSrc({key:'5#0'}).indexOf('/audit/crop/' + STAGE + '/g' + GEN + '/5_0.jpg')
+    === 0, 'the crop URL does not name the generation: ' + cropSrc({key:'5#0'}));
+var GB = []; var _f2 = fetch, _st2 = setTimeout;
+setTimeout = function (f) { f(); return 1 };
+fetch = function (u, o) {
+  GB.push([u, (o && o.body) || '']);
+  if (/audit\/judged/.test(u)) return {then:function (f) {
+    var r = f({ok:true, json:function () {
+      return {items:[], total:0, page:0, pages:1, counts:{all:0}} }});
+    return {then:function (g) { g && g(r);
+        return {catch:function () { return {} }} },
+      catch:function () { return {then:function () { return {} }} }};
+  }};
+  return _f2(u, o);
+};
+FETCHES.length = 0;
+view = 'judged'; load(0); view = 'sheet';
+loadStats(); load(0); draw();
+page = {index:0, dropped:0, items:[{key:'7#0', image_id:'7', det_idx:0,
+  p_dog:0.3, conf:0.5, band:3, seq:'s7', drive:'d', cell:'c'}]};
+render(); cur = 0; lb.hidden = false;
+send('7#0', POS, page.items[0]);
+EDIT.meta = {off_x:0, off_y:0, scale:1, view_w:1000, view_h:800,
+  model_box:[0,0,10,10], box:[0,0,10,10], box_sig:[1.5, 2, 30, 40]};
+EDIT.start = [0,0,10,10]; EDIT.box = [0,0,20,20]; edSave();
+listeners.grid.click({target: {closest: function (sel) {
+  return sel === '[data-edit]' ? {getAttribute: function () { return '0' }}
+                               : null }}});
+var api = GB.filter(function (x) { return /\/api\/audit\//.test(x[0]) });
+chk(api.length >= 6, 'the generation probes made ' + api.length + ' requests');
+api.forEach(function (x) {
+  chk(/[?&]gen=/.test(x[0]) && /[?&]pool=/.test(x[0]),
+    'a request does not carry gen= and pool=: ' + x[0]);
+});
+var fr = GB.filter(function (x) { return /\/audit\/frame\//.test(x[0]) });
+chk(fr.length && fr.every(function (x) {
+      return x[0].indexOf('/audit/frame/' + STAGE + '/g' + GEN + '/') === 0 &&
+             /[?&]pool=/.test(x[0]) }),
+  'the frame URL does not name the generation and pool: ' +
+  JSON.stringify(fr));
+var vb = GB.filter(function (x) { return /audit\/verdict/.test(x[0]) });
+chk(vb.length && vb.every(function (x) {
+      var b = JSON.parse(x[1]);
+      return b.gen === GEN && b.pool === POOL && !('p_dog' in b) &&
+             !('band' in b) && !('seq' in b) }),
+  'a verdict POST must carry gen and pool and none of the meta the server '
+  + 'looks up itself: ' + JSON.stringify(vb));
+var bb = GB.filter(function (x) { return /audit\/box/.test(x[0]) });
+chk(bb.length && bb.every(function (x) {
+      var b = JSON.parse(x[1]);
+      return b.gen === GEN && b.pool === POOL &&
+             JSON.stringify(b.box_sig) === '[1.5,2,30,40]' }),
+  'a redraw POST does not echo the frame\'s box_sig, gen and pool: '
+  + JSON.stringify(bb));
+var db = GB.filter(function (x) { return /audit\/draw/.test(x[0]) });
+chk(db.length && db.every(function (x) {
+      var b = JSON.parse(x[1]); return b.gen === GEN && b.pool === POOL }),
+  'a draw POST does not carry gen and pool: ' + JSON.stringify(db));
+// a generation that takes no new pages draws nothing, from any control
+READONLY = true; CLOSED = 'closed for the test'; GB.length = 0;
+draw(); dirty = true; total = 1; idx = 0; goNext(); applyFilter();
+chk(!GB.some(function (x) { return /audit\/draw/.test(x[0]) }),
+  'a READONLY page still asked for a draw: ' + JSON.stringify(GB));
+setPos();
+chk(els.next.disabled === true,
+  'a READONLY page offers "next" past its last stored page');
+READONLY = false; CLOSED = null;
+fetch = _f2; setTimeout = _st2; EDIT.meta = null; EDIT.box = null;
 """
 
 
@@ -2575,11 +2807,18 @@ def stage_checks(bad):
     import gate_store as gs
     seen = {}
     for name, sp in fa.STAGES.items():
-        pp = fa.paths(name)
-        for k, v in pp.items():
-            if seen.setdefault((k, v), name) != name:
-                bad.append(f'stages {seen[(k, v)]} and {name} share {k}: {v} '
-                           f'— one audit would write into the other')
+        # every generation's dirs, gen 2 whether it is built yet or not: no
+        # two (stage, gen) audits may share a file. The live stage store
+        # (store/shards/work) is one per stage and shared by its gens.
+        for g in sorted(set(fa.audit_gens(name)) | {1, 2}):
+            pp = fa.paths(name, gen=g)
+            for k, v in pp.items():
+                if k == 'gen' or (g > 1 and k in ('store', 'shards',
+                                                  'work')):
+                    continue
+                if seen.setdefault((k, v), (name, g)) != (name, g):
+                    bad.append(f'{seen[(k, v)]} and {(name, g)} share {k}: '
+                               f'{v} — one audit would write into the other')
         # the shards it reads are the stage's own, and the runner agrees
         # about where they live and what the score column is called
         run = gs.STAGES.get(name)
@@ -2617,7 +2856,7 @@ def stage_checks(bad):
     # Checked in the source: exactly one builder, and it uses STAGE.
     import re as _re
     for name in fa.STAGES:
-        html = audit.page_html(name)
+        html = audit.page_html(_ctx(fa.paths(name, gen=1), name))
         script = html[html.rindex('<script>'):]
         hand = _re.findall(r"['\"]/audit/crop/[^'\"]*['\"]", script)
         if len(hand) != 1:
@@ -2636,7 +2875,8 @@ def stage_checks(bad):
     # to one would contradict that in the same screen.
     import re as _re
     for name, sp in fa.STAGES.items():
-        m = _re.search(r'DEFAULT_BAND="([^"]*)"', audit.page_html(name))
+        m = _re.search(r'DEFAULT_BAND="([^"]*)"',
+                       audit.page_html(_ctx(fa.paths(name, gen=1), name)))
         got = m.group(1) if m else None
         want = 'rejected' if sp['asymmetric'] else 'all'
         if got != want:
@@ -2645,7 +2885,7 @@ def stage_checks(bad):
                        f'{"asymmetric" if sp["asymmetric"] else "symmetric"}')
     # and the page is built per stage, with nothing left unsubstituted
     for name in fa.STAGES:
-        html = audit.page_html(name)
+        html = audit.page_html(_ctx(fa.paths(name, gen=1), name))
         if '__' in html.replace('__', '', 0) and '__H1__' in html:
             bad.append(f'{name} page has unsubstituted placeholders')
         for tok in ('__BANDS__', '__STAGE__', '__POS__', '__H1__'):

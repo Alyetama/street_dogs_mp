@@ -231,15 +231,23 @@ def g8(bad):
         return
     repo = tempfile.mkdtemp()
     fa.REPO = repo
-    P = fa.paths('gate')
+    P = fa.paths('gate', gen=1)
     os.makedirs(P['out'])
     os.makedirs(P['store'])
     open(os.path.join(P['store'], 'gate-00000.parquet'), 'w')
     json.dump({'shards': 1}, open(os.path.join(P['out'], 'pool.json'), 'w'))
-    if fa.pool_info('gate')['stale']:
+    # the gen-1 store is the LIVE one here (its plan names its gen-1 detect
+    # store), so the gen-1 pool can be behind it at all -- a frozen
+    # generation is never stale
+    det = os.path.join(repo, 'det1')
+    os.makedirs(det)
+    json.dump({'gen': 1}, open(os.path.join(det, 'status.json'), 'w'))
+    json.dump({'gen': 1, 'detect_root': det},
+              open(os.path.join(P['store'], 'plan.json'), 'w'))
+    if fa.pool_info('gate', gen=1)['stale']:
         bad.append('g8: a legacy pool over a legacy store was called stale')
     gs.pin_protocol({'crop': 'full', 'imgsz': 640}, P['store'])
-    if not fa.pool_info('gate')['stale']:
+    if not fa.pool_info('gate', gen=1)['stale']:
         bad.append('g8: a pool cut from 224 verdicts is not stale after a '
                    '640 re-run with the same shard count')
 

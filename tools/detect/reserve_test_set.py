@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Reserve a frozen, sequence-disjoint test set out of the audit verdicts.
 
-    python tools/detect/reserve_test_set.py --family dogbin --dry-run
-    python tools/detect/reserve_test_set.py --family dogbin
-    python tools/detect/reserve_test_set.py --family leash
+    python tools/detect/reserve_test_set.py --family dogbin --gen 1 --dry-run
+    python tools/detect/reserve_test_set.py --family dogbin --gen 1
+    python tools/detect/reserve_test_set.py --family leash --gen 1
+
+`--gen` is required: it names which generation's audit the verdicts are
+drawn from (fn_audit.paths(stage, gen=N)), and the doc records it with the
+pool's id and detect store. A key is '<image_id>#<det_idx>' and det_idx is
+numbered per detector generation, so a set is scored against the crops and
+pool of the generation it records (eval_leash.test_set_gen) and no other.
 
 WHY. A model is only as honestly measured as the crops it never trained on,
 and the two acceptance sets this project has are small (dogbin: 214
@@ -424,6 +430,10 @@ def main(argv=None):
     ap.add_argument('--python', default=os.environ.get('DUCKDB_PYTHON')
                     or sys.executable,
                     help='interpreter with duckdb, for the sequence lookup')
+    ap.add_argument('--gen', type=int, required=True,
+                    help='which detector generation\'s audit to draw the '
+                         'verdicts from (there is no default: its keys are '
+                         'that generation\'s boxes)')
     ap.add_argument('--force', action='store_true')
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args(argv)
@@ -469,13 +479,18 @@ def main(argv=None):
         acc = json.load(fh)
     acc_ids = {str(i) for i in acc.get('image_ids') or []}
 
-    P = fa.paths(stage)
+    try:
+        ac = fa.ctx(stage, a.gen)
+    except (fa.GenError, ValueError) as e:
+        raise SystemExit('no gen-%s %s audit to reserve from: %s'
+                         % (a.gen, stage, e))
+    P = ac.P
     labels = fa.spec(stage)['answers'][:2]
     verdicts = []
-    for v in fa.read_verdicts(stage=stage):
+    for v in fa.read_verdicts(stage=stage, gen=ac.gen):
         v['_label'] = fa.verdict_of(v.get('verdict'), stage)
         verdicts.append(v)
-    aimed = fa.targeted(stage)
+    aimed = fa.targeted(stage, gen=ac.gen)
     excluded, _digests = crop_sources.exclusions(a.family, root)
 
     want = (comp_ids | acc_ids
@@ -520,7 +535,7 @@ def main(argv=None):
     if a.dry_run:
         print('\n--dry-run: nothing written')
         return 0
-    pool = fa.pool_info(stage)
+    pool = fa.pool_info(stage, gen=ac.gen)
     # the protocol the pool's scores were made under; a pool cut before the
     # key existed was cut from the legacy 224 verdicts (fn_audit.pool_info)
     pool_protocol = pool.get('protocol') or 'legacy'
@@ -532,6 +547,10 @@ def main(argv=None):
                    'split. build_dataset.py passes this file to '
                    'rebuild_crop_dataset.py --reserve.' % (a.family,),
         'family': a.family, 'stage': stage, 'seed': a.seed, 'frac': frac,
+        # WHICH boxes the keys below are: the generation, the pool and the
+        # detect store they were cut from (eval_leash.test_set_gen reads it)
+        fa.GEN_FIELD: ac.gen, 'pool_id': ac.pool_id,
+        'detect_root': ac.meta.get('detect_root'),
         'ledger': {'path': P['verdicts'], 'sha256': sha256(P['verdicts'])},
         'crops_from': P['full'],
         'crop_framing': 'audit_full (gate_store.cut_crops constants, the '
@@ -563,16 +582,16 @@ def main(argv=None):
         # weighting itself stays valid as a design weight.
         'p_model_protocol': pool_protocol,
         'band_populations': {
-            'bands': [list(b) for b in fa.band_totals(stage)],
+            'bands': [list(b) for b in fa.band_totals(stage, gen=ac.gen)],
             'pool': pool,
-            'note': 'bands are %s scores (pool protocol %r) on gen-1 '
+            'note': 'bands are %s scores (pool protocol %r) on gen-%d '
                     'detector boxes. They define the sampling strata ONLY: '
                     'items[].p_model is that stratifying score, not a '
                     'measurement of the model, and must not be read as its '
                     'accuracy. Sheet answer rates were 42-62%%, so the '
                     'within-band class mix is selection-biased and weighted '
                     'rates are upper bounds'
-                    % (fa.spec(stage)['model'], pool_protocol)},
+                    % (ac.meta['model'], pool_protocol, ac.gen)},
         'strata': [{'band': b, 'label': lab, 'eligible_units': len(el),
                     'reserved_units': len(rs)}
                    for (b, lab), (el, rs) in sorted(strata.items())],

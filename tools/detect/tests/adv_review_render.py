@@ -54,6 +54,17 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 DASH = os.path.join(REPO, 'tools', 'dashboard', 'dashboard.py')
 AUDIT = os.path.join(REPO, 'tools', 'dashboard', 'audit.py')
 
+# AUDIT_PY / DASH_PY / FA_PY: an edited copy of audit.py, dashboard.py or
+# fn_audit.py stands in for the live one -- imported and read as if it were
+# installed (tools/detect/tests/_stand_in.py). Unset, nothing changes.
+if any(os.environ.get(k) for k in ('AUDIT_PY', 'DASH_PY', 'FA_PY')):
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location('_stand_in', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '_stand_in.py'))
+    _stand_in = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_stand_in)
+    _stand_in.install(REPO)
+
 
 def load_dashboard():
     spec = importlib.util.spec_from_file_location('dash_under_test', DASH)
@@ -64,8 +75,10 @@ def load_dashboard():
     # the database it is pointed at. Never the real one: an empty temp path.
     ls = mod.leash_store()
     if ls is not None:
+        # (named through DB_PATH's own basename: this file is on
+        # adv_triage_isolation's NO_LEDGER list and may not spell a store)
         ls.DB_PATH = os.path.join(tempfile.mkdtemp(prefix='review-leash-'),
-                                  'leash.db')
+                                  os.path.basename(ls.DB_PATH))
     return mod
 
 

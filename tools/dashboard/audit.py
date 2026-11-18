@@ -4,16 +4,33 @@
 Serving side of tools/detect/fn_audit.py. The pool is built once by that
 script; everything here is per-request.
 
-THE CROP THE PERSON SEES IS THE CROP THE MODEL SAW. PAD_FRAC and PAD_PX are
-imported from the runner rather than copied, because a crop framed even
-slightly differently is a different picture and the whole exercise would be
-measuring a model that never ran.
+THE TILE THE PERSON SEES IS FRAMED THE WAY THE MODEL SAW IT. The thumbnail in
+crops/ is cut in the pool's own view_frame (fn_audit.VIEW_FRAMES): 'pad012'
+is gate_store.cut_crops' framing (PAD_FRAC and PAD_PX, imported from the
+runner rather than copied), 'pad050' is the DINOv3 leash model's
+(leash_vit.rect_pad at half the long side). A crop framed even slightly
+differently is a different picture, and the exercise would be measuring a
+model that never ran. full/ and edited/ are NOT the model's view: they are
+cut_crops framing for every stage and generation, because crop_sources reuses
+them as production crops and re-cuts a sample with cut_crops to prove it
+(framing_check_audit) -- a pad050 full/ would fail every rebuild.
 
 A PAGE IS A DRAW, AND A DRAW IS KEPT. "Never show the same box twice" and
 "let me page back to the one I skipped" are the same requirement seen from two
-sides: each draw is written to data/fn_audit/pages/, so paging back re-reads a
-page instead of re-rolling it, and every box ever drawn is excluded from every
-later draw whether it was judged or not.
+sides: each draw is written to the audit dir's pages/, so paging back re-reads
+a page instead of re-rolling it, and every box ever drawn is excluded from
+every later draw whether it was judged or not.
+
+ONE GENERATION PER REQUEST. A key is '<image_id>#<det_idx>', and det_idx
+numbers a different box in every detector generation -- of the gen-1 gate
+verdict keys, three in four exist in the gen-2 store and most of those are
+another box. So every function here takes an fn_audit.AuditCtx, resolved once
+per request by the route, and reads and writes only through ctx.P: the pool,
+ledger, pages, crops and dataset of that one (stage, generation). Every row
+written carries `gen` and `pool`; a verdict is accepted only for a key on one
+of that generation's pages, a redraw only against the box_sig of that
+generation's pool box. A frozen generation (not the live store's) takes no
+new pages; its answers can still be changed.
 """
 
 import glob
@@ -47,30 +64,67 @@ LEGACY_AUTHOR = fa.LEGACY_AUTHOR
 # no author would read as the admin's forever. A refused write is one visible
 # failure at the first click; a forged one is a fact about a person.
 NO_AUTHOR = 'no annotator — this write was not made by a signed-in account'
-# Paths are looked up per request, never held in module state: one process
-# serves both audits and two requests can be in flight at once, so a global
-# "current stage" would have one page writing into the other's ledger.
+# What a tab opened against another pool is told. Its page, crops and keys are
+# that pool's, and a key names another box here -- so nothing it sends is
+# written, and the only cure is the page this pool serves.
+STALE_PAGE = 'this page is out of date (another audit pool) — reload it'
+
+
+class Refused(Exception):
+    """A request this generation's audit will not carry out, said so rather
+    than half-done: a draw on a frozen generation or a moved model, a dataset
+    dir that belongs to another pool. The route answers `status` with the
+    message; nothing has been written when it is raised."""
+    status = 409
+
+
+# Paths are resolved ONCE per request, never held in module state: one process
+# serves both audits of every generation and two requests can be in flight at
+# once, so a global "current stage" would have one page writing into the
+# other's ledger -- and a function re-resolved at every step could straddle
+# two generations inside one request. So the route builds an fn_audit.AuditCtx
+# and every function here reads ctx.P, never fa.paths.
 #
-# A function, not `P = fa.paths`. Binding the function object once looked
-# identical and was not: a test that redirects fa.paths at a temp directory
-# had no effect here, so the guard that fakes a draw wrote seventeen fixture
-# pages into the live audit and the first tile of the real one came back as
-# alt text for a box named "z".
-def P(stage=DEFAULT_STAGE):
-    return fa.paths(stage)
-# Two locks per stage, because they guard two different things and one of them
-# is slow. A draw holds its lock across the sample and the page write; cutting
-# the crops -- seconds, or twenty of them off cold drives -- happens between
-# them with nothing held. Sharing one lock meant every verdict recorded while
-# the next page was being cut waited for the cutting to finish, which is
-# exactly when someone is judging.
+# (There was a `P(stage)` here that called fa.paths per use, because binding
+# the function object once let a test's redirected fa.paths miss this module
+# and write seventeen fixture pages into the live audit. A ctx carries the
+# paths it was built with, which closes that the other way round: what a
+# test or a route resolved is exactly what gets written.)
+#
+# Two locks per (stage, generation), because they guard two different things
+# and one of them is slow. A draw holds its lock across the sample and the
+# page write; cutting the crops -- seconds, or twenty of them off cold drives
+# -- happens between them with nothing held. Sharing one lock meant every
+# verdict recorded while the next page was being cut waited for the cutting
+# to finish, which is exactly when someone is judging. Per generation because
+# each generation is its own ledger and drawn log.
 _LOCKS = {}
+_LOCKS_LOCK = threading.Lock()
 
 
-def _locks(stage):
-    if stage not in _LOCKS:
-        _LOCKS[stage] = (threading.Lock(), threading.Lock())
-    return _LOCKS[stage]
+def _locks(ctx):
+    k = (ctx.stage, ctx.gen)
+    with _LOCKS_LOCK:
+        if k not in _LOCKS:
+            _LOCKS[k] = (threading.Lock(), threading.Lock())
+        return _LOCKS[k]
+
+
+def _row_tags(ctx, d, where):
+    """Raise fa.GenError unless ledger/log row `d` is this ctx's generation
+    and pool: an untagged row is gen 1 (and only gen 1 may hold one), and a
+    gen-1 row may carry no pool or G1_POOL_ID."""
+    tag = d.get(fa.GEN_FIELD)
+    if ctx.gen >= 2 and tag is None:
+        raise fa.GenError(f'{where}: a row with no {fa.GEN_FIELD} in the '
+                          f'gen-{ctx.gen} audit')
+    if fa.gen_of(tag) != ctx.gen:
+        raise fa.GenError(f'{where}: a {fa.GEN_FIELD} {tag!r} row in the '
+                          f'gen-{ctx.gen} audit')
+    got = d.get(fa.POOL_FIELD)
+    if (ctx.gen >= 2 or got is not None) and got != ctx.pool_id:
+        raise fa.GenError(f'{where}: a row of pool {got!r} in the audit of '
+                          f'pool {ctx.pool_id}')
 
 
 # from the runner, never copied -- see the module docstring
@@ -84,14 +138,22 @@ except Exception:                       # pragma: no cover - runner is present
 CROP_PX = 320          # bigger than the model's 224: a person needs to see it
 
 
-def _roots():
-    """Drive label -> grid root, out of the gate's plan.
+def _roots(ctx):
+    """Drive label -> grid root for this generation's pool.
+
+    A gen >= 2 pool recorded the roots its plan named when it was built
+    (pool.json `roots`): its drive/cell columns are that plan's, so the
+    frames are found where its sweep read them, whatever a later plan says.
+    Gen 1 recorded none, and reads the gate's plan as it always has -- the
+    roots are the same six drives in every plan so far.
 
     The plan carries them because the runner could not look them up itself.
     Same reason applies here in reverse -- this runs inside the dashboard, so
     it could ask directly, but reading the plan means the audit cuts from
-    exactly the roots the gate read.
+    exactly the roots the sweep read.
     """
+    if ctx.gen >= 2:
+        return dict(ctx.meta.get('roots') or {})
     try:
         with open(os.path.join(REPO, 'data', 'gate', 'plan.json')) as fh:
             got = json.load(fh).get('roots') or {}
@@ -103,31 +165,38 @@ def _roots():
     return dash._grid_roots()
 
 
-def pool_ready(stage=DEFAULT_STAGE):
-    return os.path.exists(P(stage)['pool'])
+def pool_ready(ctx):
+    return os.path.exists(ctx.P['pool'])
 
 
-def _drawn_keys(stage=DEFAULT_STAGE):
-    """Every box ever put in front of anyone, judged or not.
+def _drawn_keys(ctx):
+    """Every box ever put in front of anyone in this generation's audit,
+    judged or not.
 
     Two sources, because either alone can be incomplete: the draw log is what
     was shown, and the verdict ledger is what was answered. A box can be
-    answered without the draw log surviving -- the pool was rebuilt once and
-    the log went with it -- and an answered box is seen by definition, so it
-    must never come back round.
+    answered without the draw log surviving -- the gen-1 pool was rebuilt
+    once and the log went with it -- and an answered box is seen by
+    definition, so it must never come back round.
+
+    A row of another generation or pool in either file raises fa.GenError:
+    these two files are this pool's alone, and a foreign key would retire --
+    or worse, hide -- a box it does not name here.
     """
     keys, seqs = set(), set()
-    pp = P(stage)
+    pp = ctx.P
     for path in (pp['drawn'], pp['verdicts']):
         try:
             with open(path) as fh:
-                for line in fh:
+                for n, line in enumerate(fh, 1):
                     try:
                         d = json.loads(line)
                     except ValueError:
                         continue
                     if not isinstance(d, dict):
                         continue
+                    if d.get('key') or d.get('seq'):
+                        _row_tags(ctx, d, f'{path}:{n}')
                     if d.get('key'):
                         keys.add(d['key'])
                     if d.get('seq'):
@@ -153,9 +222,9 @@ def band_list(band, stage=DEFAULT_STAGE):
     return [i] if 0 <= i < n else list(range(n))
 
 
-def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
-    """A page of candidates: stratified by band, one box per sequence, none
-    ever drawn before.
+def sample(ctx, n=25, band=None, seed=None):
+    """A page of candidates from ctx's pool: stratified by band, one box per
+    sequence, none ever drawn before.
 
     One box per sequence is the load-bearing part. Mapillary frames come a
     second apart down one road, so a sequence's boxes are the same handful of
@@ -172,7 +241,8 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     """
     import duckdb
     sel, mode = band_mode(band)
-    keys, seqs = _drawn_keys(stage)
+    keys, seqs = _drawn_keys(ctx)
+    pool = fa._q(ctx.P['pool'])
     con = duckdb.connect()
     con.execute("SET preserve_insertion_order=false")
     con.execute("CREATE TEMP TABLE seen_seq(seq VARCHAR)")
@@ -183,7 +253,7 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     # the whole reason to run this -- only exist where the gate said no, so
     # "rejected" is a first-class choice and the page's default rather than
     # something to be assembled by picking five bands one at a time.
-    bands = band_list(sel, stage)
+    bands = band_list(sel, ctx.stage)
     # Evenly over the bands asked for, with the remainder going to the ones
     # NEAREST the threshold -- that is where a wrong answer is most likely to
     # be found, and flooring instead quietly dropped four crops off every
@@ -214,7 +284,7 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
         # this reason.
         rows = con.execute(f"""
             WITH fresh AS (
-                SELECT p.* FROM read_parquet('{P(stage)['pool']}') p
+                SELECT p.* FROM read_parquet('{pool}') p
                 ANTI JOIN seen_seq s ON s.seq = p.seq
                 WHERE p.band IN ({','.join(str(int(b)) for b in bands)})
             ), one_per_seq AS (
@@ -236,7 +306,7 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     else:
         rows = con.execute(f"""
             WITH fresh AS (
-                SELECT p.* FROM read_parquet('{P(stage)['pool']}') p
+                SELECT p.* FROM read_parquet('{pool}') p
                 ANTI JOIN seen_seq s ON s.seq = p.seq
                 WHERE p.band IN ({','.join(str(int(b)) for b in bands)})
             ), one_per_seq AS (
@@ -275,25 +345,69 @@ def sample(n=25, band=None, seed=None, stage=DEFAULT_STAGE):
     return out
 
 
-def _cut_one(cand, roots, stage=DEFAULT_STAGE, into=None, force=False):
+def _cut_rect(w, h, box):
+    """gate_store.cut_crops' rectangle for `box` on a w x h frame, or None
+    when its MIN_SIDE rule skips the box -- the same arithmetic, so a crop
+    here is byte for byte the runner's cut."""
+    x1, y1, x2, y2 = (int(v) for v in box)
+    pad = int(PAD_FRAC * max(x2 - x1, y2 - y1)) + PAD_PX
+    a, b = max(0, x1 - pad), max(0, y1 - pad)
+    c, d = min(w, x2 + pad), min(h, y2 + pad)
+    if c - a < MIN_SIDE or d - b < MIN_SIDE:
+        return None
+    return a, b, c, d
+
+
+def _view_rect(view_frame, w, h, box):
+    """The rectangle the pool's MODEL judged `box` in, or None.
+
+    'pad012' is cut_crops' own rectangle. 'pad050' (and any other leash_vit
+    framing) is gate_store.cut_vit's: the box must first survive cut_crops'
+    MIN_SIDE rule -- both models answer for one set of boxes -- and is then
+    grown by leash_vit.rect_pad. A framing neither knows is None: a tile this
+    page cannot frame the way its model saw it is not shown at all."""
+    rect = _cut_rect(w, h, box)
+    if rect is None or view_frame == 'pad012':
+        return rect
+    try:
+        import leash_vit
+        frac = leash_vit.FRAMINGS[view_frame]
+    except (ImportError, KeyError):
+        return None
+    a, b, c, d = leash_vit.rect_pad(box, w, h, frac)
+    return (a, b, c, d) if c > a and d > b else None
+
+
+def _cut_one(cand, roots, ctx, into=None, force=False):
     """Cut one crop to disk. Returns True if the file is there afterwards.
 
-    `into='edited'` writes only the full-resolution cut, into the corrected
-    directory: that path exists so a hand-drawn box can be re-cut without
-    disturbing full/, which is the picture the model was actually given.
+    Two pictures, framed for two readers. full/ (and edited/) is the training
+    crop -- cut_crops framing, pad012, for every stage and generation, since
+    crop_sources hands it on as a production crop and re-cuts a sample with
+    cut_crops to prove it. crops/ (and edited_thumbs/) is the TILE, cut in
+    the pool's view_frame: what the person is asked about is the picture the
+    model was asked about, which for the gen-2 leash model is pad050.
+
+    `into='edited'` writes the redrawn box into the corrected directories:
+    that path exists so a hand-drawn box can be re-cut without disturbing
+    full/, which is the picture the model was actually given.
     """
     from PIL import Image
-    pp = P(stage)
+    pp = ctx.P
+    view = ctx.meta.get('view_frame') or 'pad012'
     name = cand['key'].replace('#', '_') + '.jpg'
     if into == 'edited':
-        os.makedirs(os.path.join(pp['out'], 'edited'), exist_ok=True)
-        os.makedirs(os.path.join(pp['out'], 'edited_thumbs'), exist_ok=True)
+        os.makedirs(pp['edited'], exist_ok=True)
+        os.makedirs(pp['edited_thumbs'], exist_ok=True)
     # A redraw writes its own thumbnail rather than over the model's. The
     # tile shows the redrawn one -- you drew it, you should see it -- and
     # crops/ still holds the picture the model was given, which is what makes
     # the measurement re-checkable afterwards.
-    dst = (os.path.join(pp['out'], 'edited_thumbs', name) if into == 'edited'
+    dst = (os.path.join(pp['edited_thumbs'], name) if into == 'edited'
            else os.path.join(pp['crops'], name))
+    # Safe to trust a file that is already there: a gen >= 2 dir started
+    # empty (build refuses any other), and gen 1 is the dir its pool was cut
+    # into, so every file in it was cut from this pool's boxes.
     if os.path.exists(dst) and not force:
         return True
     root = roots.get(cand['drive'])
@@ -310,23 +424,22 @@ def _cut_one(cand, roots, stage=DEFAULT_STAGE, into=None, force=False):
         return False
     try:
         w, h = im.size
-        x1, y1, x2, y2 = (int(cand['x1']), int(cand['y1']),
-                          int(cand['x2']), int(cand['y2']))
-        pad = int(PAD_FRAC * max(x2 - x1, y2 - y1)) + PAD_PX
-        a, b = max(0, x1 - pad), max(0, y1 - pad)
-        c, d = min(w, x2 + pad), min(h, y2 + pad)
-        if c - a < MIN_SIDE or d - b < MIN_SIDE:
+        box = (cand['x1'], cand['y1'], cand['x2'], cand['y2'])
+        rect = _cut_rect(w, h, box)
+        tile = _view_rect(view, w, h, box)
+        if rect is None or tile is None:
             return False
-        crop = im.crop((a, b, c, d))
+        crop = im.crop(rect)
         # full resolution first: this is the one a future dataset uses, and
         # thumbnail() resizes in place
-        base = os.path.join(pp['out'], 'edited') if into == 'edited' \
-            else pp['full']
+        base = pp['edited'] if into == 'edited' else pp['full']
         os.makedirs(base, exist_ok=True)
         fdst = os.path.join(base, name)
         ftmp = fdst + '.tmp'
         crop.save(ftmp, 'JPEG', quality=95)
         os.replace(ftmp, fdst)
+        if tile != rect:
+            crop = im.crop(tile)
         crop.thumbnail((CROP_PX, CROP_PX), Image.LANCZOS)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         tmp = dst + '.tmp'
@@ -339,7 +452,7 @@ def _cut_one(cand, roots, stage=DEFAULT_STAGE, into=None, force=False):
         im.close()
 
 
-def materialise(cands, workers=8, stage=DEFAULT_STAGE):
+def materialise(ctx, cands, workers=8):
     """Cut every crop on a page, in parallel.
 
     Decoding one 8000x4000 frame is ~116 ms and each candidate is a different
@@ -348,26 +461,30 @@ def materialise(cands, workers=8, stage=DEFAULT_STAGE):
     so threads are enough and there is no process pool to pay for.
     """
     from concurrent.futures import ThreadPoolExecutor
-    roots = _roots()
-    os.makedirs(P(stage)['crops'], exist_ok=True)
+    roots = _roots(ctx)
+    os.makedirs(ctx.P['crops'], exist_ok=True)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        ok = list(ex.map(lambda c: _cut_one(c, roots, stage), cands))
+        ok = list(ex.map(lambda c: _cut_one(c, roots, ctx), cands))
     return [c for c, good in zip(cands, ok) if good]
 
 
-def _pool_row(key, stage=DEFAULT_STAGE):
-    """One box out of the pool, by key, with the geometry to cut it."""
-    iid, _, di = str(key).rpartition('_')
+def _pool_row(key, ctx):
+    """One box out of ctx's pool, by key, with the geometry to cut it."""
+    iid, _, di = str(key).replace('#', '_').rpartition('_')
     if not iid or not di.isdigit():
         return None
     try:
         import duckdb
-        row = duckdb.connect().execute(
-            f"""SELECT band, image_id, det_idx, p_dog, x1, y1, x2, y2,
-                       cell, drive, seq, conf
-                FROM read_parquet('{P(stage)['pool']}')
-                WHERE image_id = ? AND det_idx = ?""",
-            [iid, int(di)]).fetchone()
+        con = duckdb.connect()
+        try:
+            row = con.execute(
+                f"""SELECT band, image_id, det_idx, p_dog, x1, y1, x2, y2,
+                           cell, drive, seq, conf
+                    FROM read_parquet('{fa._q(ctx.P['pool'])}')
+                    WHERE image_id = ? AND det_idx = ?""",
+                [iid, int(di)]).fetchone()
+        finally:
+            con.close()
     except Exception:
         return None
     if not row:
@@ -392,16 +509,36 @@ VIEW_PAD = 2.2
 VIEW_MAX = 1100
 
 
-def corrections(stage):
+def _box_sig(cand):
+    """The pool's own box for a key, as the editor round-trips it: frame
+    pixels, rounded to 0.1. frame_view hands it out with the picture and
+    save_correction takes a redraw only when the same value comes back -- so
+    a box drawn over one generation's frame can never be saved against
+    another's det_idx of the same key, which names a different box."""
+    return [round(float(cand[k]), 1) for k in ('x1', 'y1', 'x2', 'y2')]
+
+
+def _sig_of(v):
+    """A posted box_sig as four floats at 0.1, or None for anything else."""
+    try:
+        got = [round(float(x), 1) for x in v]
+    except (TypeError, ValueError):
+        return None
+    return got if len(got) == 4 else None
+
+
+def corrections(ctx):
     """{(image_id, det_idx): (x1, y1, x2, y2, saved_at, by)} -- last wins.
 
     THIS stage's redraws of THIS pool only: rows whose crop is
-    'audit:<stage>' (as crop_sources.read_audit_corrections reads them) and
-    whose `gen` is the pool's (fa.pool_gen; an untagged row is gen 1). The
-    file is shared with the review page and the other audit, under the same
-    (image_id, det_idx) key: read whole, a review-page redraw or the leash
-    audit's leash-inclusive box showed on a gate tile as this audit's
-    correction, and a gen-1 redraw would sit on a gen-2 pool's det_idx.
+    'audit:<stage>' (as crop_sources.read_audit_corrections reads them),
+    whose `gen` is ctx's (an untagged row is gen 1) and whose `pool` is
+    ctx's pool -- required for gen >= 2, and for gen 1 either absent or
+    G1_POOL_ID. The file is shared with the review page, the other audit and
+    every generation of both, under the same (image_id, det_idx) key: read
+    whole, a review-page redraw or the leash audit's leash-inclusive box
+    showed on a gate tile as this audit's correction, and a gen-1 redraw
+    would sit on a gen-2 pool's det_idx -- which names another box.
 
     The timestamp is carried because the tile has to be able to ASK for the
     redrawn crop. Crops are served with a day of browser cache, so without a
@@ -411,11 +548,8 @@ def corrections(stage):
     The author is carried through fa.author_of, so a box drawn before there
     were accounts reads as the admin here rather than as None.
     """
-    want, gen = f"audit:{stage}", fa.pool_gen(stage)
+    want, gen, pool = f"audit:{ctx.stage}", ctx.gen, ctx.pool_id
     out = {}
-    if gen is None:
-        # a pool.json that names no generation: no redraw is this pool's
-        return out
     try:
         with open(BOX_FILE) as fh:
             for line in fh:
@@ -427,6 +561,9 @@ def corrections(stage):
                     continue
                 if d.get('crop') != want or \
                         fa.gen_of(d.get(fa.GEN_FIELD)) != gen:
+                    continue
+                rp = d.get(fa.POOL_FIELD)
+                if (gen >= 2 or rp is not None) and rp != pool:
                     continue
                 try:
                     out[(str(d['image_id']), int(d.get('det_idx') or 0))] = (
@@ -441,7 +578,24 @@ def corrections(stage):
     return out
 
 
-def save_correction(key, box, stage=DEFAULT_STAGE, by=None):
+def _same_pool(ctx):
+    """None when ctx's pool is still the one on disk, else why not.
+
+    Re-read at the moment of writing: a ctx is resolved when the request
+    starts, and a pool.json that has since been damaged or replaced (or a
+    gen >= 2 parquet that is no longer the file it describes) is a pool
+    nothing more may be written against."""
+    try:
+        now = fa.pool_meta(ctx.stage, ctx.gen)
+    except (fa.PoolIdentityError, ValueError) as e:
+        return f'{e} -- nothing saved'
+    if now.get('pool_id') != ctx.pool_id:
+        return (f"the gen-{ctx.gen} pool is now {now.get('pool_id')!r}, not "
+                f"{ctx.pool_id!r} -- nothing saved; reload")
+    return None
+
+
+def save_correction(key, box, ctx, pool=None, box_sig=None, by=None):
     """Record a hand-drawn box and re-cut the crop a future model trains on.
 
     It does NOT touch what the audit measured. The verdict on this box is a
@@ -449,14 +603,43 @@ def save_correction(key, box, stage=DEFAULT_STAGE, by=None):
     the same score whatever anyone redraws afterwards. A correction says only
     "if you train on this crop, train on this framing" -- so the model's cut
     stays in full/ and the corrected one is written beside it.
+
+    `pool` and `box_sig` are what the page was showing: the pool id it was
+    served with, and the box_sig frame_view gave out with the frame the box
+    was drawn on. Both must be ctx's -- a redraw drawn over another
+    generation's frame is in that frame's coordinates and of that
+    generation's box, and saving it here would put it on another box under
+    the same key (_box_sig). The key must also be on one of this
+    generation's pages (_page_index), as for a verdict: a redraw becomes a
+    detector training box (build_dogdet_v3.corrections), and a box nobody
+    was shown is nobody's to redraw -- the frame route serves any pool key,
+    so a box_sig alone does not prove the box was ever put in front of
+    anyone. On the frozen gen 1 that is also what keeps a redraw to "a key
+    already on a gen-1 page". Refusals that a reload cures carry status 409.
+
+    The ledger is read BEFORE anything is written: a row of another
+    generation or pool in it is a 409 with nothing saved, rather than an
+    error after the redraw had already landed and been cut.
     """
-    cand = _pool_row(str(key).replace('#', '_'), stage)
+    if pool != ctx.pool_id:
+        return {'ok': False, 'msg': STALE_PAGE, 'status': 409}
+    cand = _pool_row(key, ctx)
     if not cand:
         return {'ok': False, 'msg': 'not a box in this pool'}
+    if cand['key'] not in _page_index(ctx):
+        return {'ok': False, 'status': 409,
+                'msg': f"{cand['key']!r} is on no page of the gen-{ctx.gen} "
+                       f"{fa.spec(ctx.stage)['title']} audit — nothing "
+                       f"saved"}
     # geometry drawn by hand is an annotation like any other, and the same
     # rule applies to it: no annotator, no line. See NO_AUTHOR.
     if not by:
         return {'ok': False, 'msg': NO_AUTHOR}
+    if _sig_of(box_sig) != _box_sig(cand):
+        return {'ok': False, 'status': 409,
+                'msg': 'that box was drawn on another pool’s frame '
+                       '(box_sig does not match) — reload the page; '
+                       'nothing saved'}
     try:
         x1, y1, x2, y2 = (float(box[0]), float(box[1]),
                           float(box[2]), float(box[3]))
@@ -473,61 +656,79 @@ def save_correction(key, box, stage=DEFAULT_STAGE, by=None):
     same = all(round(v, 2) == round(float(cand[k]), 2)
                for v, k in zip((x1, y1, x2, y2), ('x1', 'y1', 'x2', 'y2')))
     if same and (str(cand['image_id']),
-                 int(cand['det_idx'])) not in corrections(stage):
+                 int(cand['det_idx'])) not in corrections(ctx):
         return {'ok': False,
                 'msg': "that is the model's own box, unchanged -- nothing "
                        "to save"}
-    # the pool's generation: cand's det_idx is that pool's, and the file is
-    # shared with every other page and generation. A pool.json that names
-    # none (damaged) is refused, not guessed to be gen 1.
-    gen = fa.pool_gen(stage)
-    if gen is None:
-        return {'ok': False,
-                'msg': 'this pool names no detector generation (pool.json '
-                       'unreadable or its gen malformed) -- nothing saved'}
-    rec = {'crop': f"audit:{stage}", 'image_id': str(cand['image_id']),
+    # the pool's generation and identity: cand's det_idx is that pool's, and
+    # the file is shared with every other page and generation
+    rec = {'crop': f"audit:{ctx.stage}", 'image_id': str(cand['image_id']),
            'det_idx': int(cand['det_idx']),
            'x1': round(x1, 2), 'y1': round(y1, 2),
            'x2': round(x2, 2), 'y2': round(y2, 2),
            'saved_at': int(time.time()), AUTHOR_FIELD: str(by),
-           fa.GEN_FIELD: gen}
+           fa.GEN_FIELD: ctx.gen, fa.POOL_FIELD: ctx.pool_id}
+    # what this box was answered, if anything -- read now, so a ledger that
+    # holds a foreign row (or a pool replaced since this request began)
+    # stops the redraw before it is written
+    try:
+        seen = {v['key']: v.get('verdict')
+                for v in fa.read_verdicts(ctx.P['verdicts'], stage=ctx.stage,
+                                          gen=ctx.gen)}
+    except fa.GenError as e:
+        return {'ok': False, 'status': 409, 'msg': f'{e} -- nothing saved'}
     with _BOX_LOCK:
+        # a pool.json damaged or replaced since the request began names no
+        # pool this row can belong to: refused, not guessed to be gen 1
+        why = _same_pool(ctx)
+        if why:
+            return {'ok': False, 'msg': why, 'status': 409}
         os.makedirs(os.path.dirname(BOX_FILE), exist_ok=True)
         with open(BOX_FILE, 'a') as fh:
             fh.write(json.dumps(rec) + '\n')
     edited = dict(cand, x1=x1, y1=y1, x2=x2, y2=y2)
-    ok = _cut_one(edited, _roots(), stage, into='edited', force=True)
+    ok = _cut_one(edited, _roots(ctx), ctx, into='edited', force=True)
     # If this box has already been judged it is already IN the dataset, cut to
     # the old framing. The rebuild would pick the new one up, but until
     # someone ran it the exported crop and the box on record disagreed -- so
     # the crop is re-filed here, the moment the correction is made.
-    placed = None
-    seen = {v['key']: v.get('verdict') for v in fa.read_verdicts(stage=stage)}
+    placed, why = None, None
     if cand['key'] in seen:
-        placed = place(cand['key'], seen[cand['key']], stage,
-                       force=True)
-    return {'ok': True, 'recut': bool(ok), 'refiled': placed}
+        try:
+            placed = place(cand['key'], seen[cand['key']], ctx, force=True)
+        except Refused as e:
+            placed, why = False, str(e)
+    out = {'ok': True, 'recut': bool(ok), 'refiled': placed}
+    if why:
+        out['place_error'] = why
+    return out
 
 
-def frame_view(key, stage=DEFAULT_STAGE):
+def frame_view(key, ctx):
     """A window of the source frame around this box, and the maths to map it.
 
     The full frame is 8000x4000 and nobody can drag a handle on that, so a
     region around the box is cut and scaled down. Everything the client sends
     back is in VIEW pixels; `scale` and the offsets turn them into the
     original pixels the store speaks.
+
+    The meta names the generation and pool it was cut from, and `box_sig`:
+    the pool box in FRAME pixels (_box_sig()), which the editor posts back
+    with the redraw so save_correction can tell this frame's box from another
+    generation's under the same key. (`model_box` is in view pixels and is
+    for drawing; it is no identity.)
     """
     from PIL import Image
-    cand = _pool_row(str(key).replace('#', '_'), stage)
+    cand = _pool_row(key, ctx)
     if not cand:
         return None, None
-    root = _roots().get(cand['drive'])
+    root = _roots(ctx).get(cand['drive'])
     if not root:
         return None, None
     src = os.path.join(root, cand['cell'], 'ground_animal_images',
                        f"{cand['image_id']}.jpg")
-    cur = corrections(stage).get((str(cand['image_id']),
-                                  int(cand['det_idx'])))
+    cur = corrections(ctx).get((str(cand['image_id']),
+                                int(cand['det_idx'])))
     x1, y1, x2, y2 = (cur[:4] if cur else (cand['x1'], cand['y1'],
                                            cand['x2'], cand['y2']))
     try:
@@ -552,7 +753,9 @@ def frame_view(key, stage=DEFAULT_STAGE):
         buf = io.BytesIO()
         view.save(buf, 'JPEG', quality=88)
         return buf.getvalue(), {
-            'key': cand['key'], 'stage': stage,
+            'key': cand['key'], 'stage': ctx.stage,
+            'gen': ctx.gen, 'pool': ctx.pool_id,
+            'box_sig': _box_sig(cand),
             'off_x': a, 'off_y': b, 'scale': scale,
             'view_w': view.width, 'view_h': view.height,
             'orig_w': w, 'orig_h': h,
@@ -568,62 +771,205 @@ def frame_view(key, stage=DEFAULT_STAGE):
         im.close()
 
 
-def crop_path(key, stage=DEFAULT_STAGE):
-    """Absolute path of a cut crop, cutting it again if it has gone.
+def crop_path(key, ctx):
+    """Absolute path of a cut crop in ctx's audit dir, cutting it again if it
+    has gone.
 
-    A page is kept for ever and its crops are not: the pool can be rebuilt,
-    the crop directory cleared, a disk swapped. When that happens the page
-    still lists the boxes and every tile comes back as alt text -- which reads
-    as a broken page rather than a missing file. The box is still in the pool,
-    so it can just be cut again.
+    A page is kept for ever and its crops are not: the crop directory can be
+    cleared, a disk swapped. When that happens the page still lists the
+    boxes and every tile comes back as alt text -- which reads as a broken
+    page rather than a missing file. The box is still in the pool, so it can
+    just be cut again.
 
     The key is checked against the shape it is generated in, so nothing a
-    client sends reaches a path.
+    client sends reaches a path. And only a box this generation put on a
+    page (_page_index) is cut again: a GET is no way to add files to an
+    audit dir -- least of all the frozen gen 1's -- for a pool key nobody
+    was ever shown.
     """
     import re
     if not re.fullmatch(r'[0-9]{1,32}_[0-9]{1,6}', str(key or '')):
         return None
-    pp = P(stage)
-    redrawn = os.path.join(pp['out'], 'edited_thumbs', f'{key}.jpg')
+    pp = ctx.P
+    redrawn = os.path.join(pp['edited_thumbs'], f'{key}.jpg')
     if os.path.exists(redrawn):
         return redrawn
     p = os.path.join(pp['crops'], f'{key}.jpg')
     if os.path.exists(p):
         return p
-    cand = _pool_row(key, stage)
-    if cand and _cut_one(cand, _roots(), stage) and os.path.exists(p):
+    iid, _, di = str(key).rpartition('_')
+    try:
+        shown = f'{iid}#{di}' in _page_index(ctx)
+    except fa.GenError:
+        shown = False
+    if not shown:
+        return None
+    cand = _pool_row(key, ctx)
+    if cand and _cut_one(cand, _roots(ctx), ctx) and os.path.exists(p):
         return p
     return None
 
 
-def _page_file(i, stage=DEFAULT_STAGE):
-    return os.path.join(P(stage)['pages'], f'{int(i):05d}.json')
+def _page_file(i, ctx):
+    return os.path.join(ctx.P['pages'], f'{int(i):05d}.json')
 
 
-def page_count(stage=DEFAULT_STAGE):
+def page_count(ctx):
     try:
-        return len(glob.glob(os.path.join(P(stage)['pages'], '*.json')))
+        return len(glob.glob(os.path.join(ctx.P['pages'], '*.json')))
     except OSError:
         return 0
 
 
-def get_page(i, stage=DEFAULT_STAGE):
+def _doc_tags(ctx, doc, where):
+    """fa.GenError unless page document `doc` is ctx's generation and pool.
+    Gen-1 pages predate the tags and may carry none."""
+    if isinstance(doc, dict):
+        _row_tags(ctx, doc, where)
+
+
+def get_page(i, ctx):
+    """Page `i` of ctx's audit, or None. A page document of another
+    generation or pool raises fa.GenError: its keys name other boxes."""
+    f = _page_file(i, ctx)
     try:
-        with open(_page_file(i, stage)) as fh:
-            return json.load(fh)
+        with open(f) as fh:
+            doc = json.load(fh)
     except (OSError, ValueError):
         return None
+    _doc_tags(ctx, doc, f)
+    return doc
 
 
-def draw_page(n=25, band=None, stage=DEFAULT_STAGE):
-    """Draw, cut, and keep. Returns the page document."""
-    draw_lock, _ = _locks(stage)
-    pp = P(stage)
+# {(stage, gen, pages dir): (stamp, {key: item}, {page file: mtime})} -- see
+# _page_index. _INDEX_BUILD holds one lock per key, so concurrent requests
+# wait for one build instead of each reading every page.
+_INDEX = {}
+_INDEX_LOCK = threading.Lock()
+_INDEX_BUILD = {}
+_KEY_RE = re.compile(r'[0-9]{1,32}#[0-9]{1,6}')
+
+
+def _page_items(ctx, n, idx):
+    """Add page file `n`'s items to `idx` -> True, or False when it cannot
+    be read (it is then tried again next time); fa.GenError on a page
+    document of another generation or pool."""
+    try:
+        with open(n) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    _doc_tags(ctx, doc, n)
+    # a page item's key was minted by draw_page from a pool row, so it is
+    # taken as it stands; only the ledger needs the shape filter
+    for it in (doc.get('items') or []) if isinstance(doc, dict) else []:
+        if isinstance(it, dict) and isinstance(it.get('key'), str) \
+                and it['key']:
+            idx[it['key']] = it
+    return True
+
+
+def _page_index(ctx):
+    """{key: item} -- every box this generation's audit ever put on a page,
+    with the facts a verdict on it records (band, p_dog, seq, box).
+
+    THE CHECK THAT A VERDICT, A REDRAW OR A RE-CUT IS ABOUT A BOX THIS AUDIT
+    SHOWED. record() and save_correction() take a key only if it is here,
+    crop_path() cuts a missing crop only for a key that is here, and
+    record() takes band/p_dog/seq from here rather than from the client: a
+    tab of another generation posts keys that exist in this pool too (three
+    in four gen-1 gate keys do, most as another box), and the gen-1 ledger
+    already holds a key spelled "None" from when nothing checked.
+
+    Gen 1 adds the keys its ledger answered (key-shaped ones only): the
+    gen-1 ledger outlived one rebuild of its pool, so some answered crops are
+    on no surviving page, and "change an answer" must still reach them. Those
+    carry the ledger's own last band/p_dog/seq/box, so each ledger row is
+    held to the same tags read_verdicts holds it to (_row_tags): a row of
+    another generation or pool in the gen-1 ledger raises fa.GenError here
+    rather than hand its box -- another generation's -- to a new gen-1 row.
+    The ledger part is read when the index is first built; record() only
+    ever adds keys already in it.
+
+    Memoized on (page count, newest page mtime), and brought up to date
+    incrementally: pages are written once, under an index that is the count
+    before them, and never touched again, so a new stamp only reads the page
+    files not seen before. A page seen before that has changed or gone is
+    not how pages behave, and the whole index is rebuilt then.
+    """
+    k = (ctx.stage, ctx.gen, ctx.P['pages'])
+    with _INDEX_LOCK:
+        build_lock = _INDEX_BUILD.setdefault(k, threading.Lock())
+    with build_lock:
+        try:
+            names = glob.glob(os.path.join(ctx.P['pages'], '*.json'))
+            mtimes = {n: os.path.getmtime(n) for n in names}
+        except OSError:
+            names, mtimes = [], {}
+        stamp = (len(mtimes), max(mtimes.values(), default=0))
+        with _INDEX_LOCK:
+            got = _INDEX.get(k)
+        if got is not None and got[0] == stamp:
+            return got[1]
+        if got is not None and all(mtimes.get(n) == t
+                                   for n, t in got[2].items()):
+            # only new page files: read those, over a copy (a caller may
+            # hold the old dict)
+            idx = dict(got[1])
+            for n in sorted(set(mtimes) - set(got[2])):
+                if not _page_items(ctx, n, idx):
+                    mtimes.pop(n)
+        else:
+            idx = {}
+            if ctx.gen == 1:
+                path = ctx.P['verdicts']
+                try:
+                    with open(path) as fh:
+                        for no, line in enumerate(fh, 1):
+                            try:
+                                d = json.loads(line)
+                            except ValueError:
+                                continue
+                            if not isinstance(d, dict):
+                                continue
+                            if d.get('key'):
+                                _row_tags(ctx, d, f'{path}:{no}')
+                            if not _KEY_RE.fullmatch(str(d.get('key') or '')):
+                                continue
+                            it = idx.setdefault(d['key'], {'key': d['key']})
+                            for f in ('band', 'p_dog', 'seq', 'box'):
+                                if d.get(f) is not None:
+                                    it[f] = d[f]
+                except OSError:
+                    pass
+            for n in sorted(mtimes):
+                if not _page_items(ctx, n, idx):
+                    mtimes.pop(n)
+        with _INDEX_LOCK:
+            # the stamp of what was READ: a page that could not be is a miss
+            # next time, and read then
+            _INDEX[k] = ((len(mtimes), max(mtimes.values(), default=0)),
+                         idx, mtimes)
+        return idx
+
+
+def draw_page(ctx, n=25, band=None):
+    """Draw, cut, and keep. Returns the page document.
+
+    Refused (Refused, nothing reserved) on a generation that takes no new
+    pages -- frozen, or a pool whose store has since been judged by another
+    model (fa.draw_refusal)."""
+    why = fa.draw_refusal(ctx)
+    if why:
+        raise Refused(why)
+    draw_lock, _ = _locks(ctx)
+    pp = ctx.P
+    tags = {fa.GEN_FIELD: ctx.gen, fa.POOL_FIELD: ctx.pool_id}
     with draw_lock:
-        cands = sample(n=n, band=band, stage=stage)
+        cands = sample(ctx, n=n, band=band)
         if not cands:
-            return {'index': page_count(stage), 'items': [], 'exhausted': True,
-                    'band': band, 'n': n, 'dropped': 0}
+            return dict(tags, index=page_count(ctx), items=[], exhausted=True,
+                        band=band, n=n, dropped=0)
         # Reserved before a single frame is opened. A box counts as drawn the
         # moment it is chosen, not when it is judged or even when it is
         # successfully cut: a concurrent draw must not pick it, and a box
@@ -632,45 +978,61 @@ def draw_page(n=25, band=None, stage=DEFAULT_STAGE):
         os.makedirs(pp['out'], exist_ok=True)
         with open(pp['drawn'], 'a') as fh:
             for c in cands:
-                fh.write(json.dumps({'key': c['key'], 'seq': c['seq']}) + '\n')
+                fh.write(json.dumps(dict({'key': c['key'], 'seq': c['seq']},
+                                         **tags)) + '\n')
 
-    got = materialise(cands, stage=stage)   # slow, and holds nothing
+    got = materialise(ctx, cands)   # slow, and holds nothing
 
     with draw_lock:
-        idx = page_count(stage)
+        idx = page_count(ctx)
         # Frames that would not open. Usually a jpg pruned off a drive after
         # the sweep read it. Counted rather than hidden, so a short page reads
         # as a short page and not as a page that lost its crops.
-        doc = {'index': idx, 'band': band, 'n': n, 'stage': stage,
-               'created': time.time(),
-               'dropped': len(cands) - len(got),
-               'items': [{k: c[k] for k in
-                          ('key', 'image_id', 'det_idx', 'p_dog', 'conf',
-                           'band', 'seq', 'drive', 'cell')} for c in got]}
+        doc = dict(tags, **{
+            'index': idx, 'band': band, 'n': n, 'stage': ctx.stage,
+            'created': time.time(),
+            'dropped': len(cands) - len(got),
+            # the box rides on the item: a verdict records the box it was
+            # given on, and _page_index hands it to record() from here
+            'items': [dict({k: c[k] for k in
+                            ('key', 'image_id', 'det_idx', 'p_dog', 'conf',
+                             'band', 'seq', 'drive', 'cell')},
+                           box=[float(c[k]) for k in
+                                ('x1', 'y1', 'x2', 'y2')]) for c in got]})
         os.makedirs(pp['pages'], exist_ok=True)
-        tmp = _page_file(idx, stage) + '.tmp'
+        tmp = _page_file(idx, ctx) + '.tmp'
         with open(tmp, 'w') as fh:
             json.dump(doc, fh)
-        os.replace(tmp, _page_file(idx, stage))
+        os.replace(tmp, _page_file(idx, ctx))
         return doc
 
 
-def place(key, verdict, stage=DEFAULT_STAGE, force=False):
-    """Put one judged crop into the dataset, or take it out.
+def place(key, verdict, ctx, force=False):
+    """Put one judged crop into ctx's dataset, or take it out.
 
     Hard-linked, not copied: the full-resolution cut already exists and a
     second copy of it would drift from the first the moment either is
     re-cut. 'unsure' is not a class -- it is removed from both, so changing
     your mind to "I cannot tell" does not leave a stale label behind.
+
+    Only into a dataset dir that is this pool's (fa.dataset_marker_refusal):
+    a file named <image_id>_<det_idx>.jpg names a different box in another
+    generation, so a dir another pool filled is neither written nor
+    deleted from -- Refused, before anything is touched. A gen >= 2 dir is
+    given its marker on first use; gen 1's data/audit_finds* predate the
+    marker and stay as they are.
     """
-    sp, pp = fa.spec(stage), P(stage)
+    sp, pp = fa.spec(ctx.stage), ctx.P
+    why = fa.dataset_marker_refusal(ctx)
+    if why:
+        raise Refused(why)
     name = str(key).replace('#', '_') + '.jpg'
     # the hand-drawn framing when there is one, exactly as export() chooses:
     # two paths that pick a different file for the same crop is a dataset that
     # depends on which one ran last
-    fixed = os.path.join(pp['out'], 'edited', name)
+    fixed = os.path.join(pp['edited'], name)
     src = fixed if os.path.exists(fixed) else os.path.join(pp['full'], name)
-    want = fa.verdict_of(verdict, stage)
+    want = fa.verdict_of(verdict, ctx.stage)
     classes = (sp['positive'], sp['negative'])
     if want not in classes:
         want = None
@@ -684,6 +1046,7 @@ def place(key, verdict, stage=DEFAULT_STAGE, force=False):
             pass
     if not want or not os.path.exists(src):
         return False
+    fa.write_dataset_marker(ctx)
     dst = os.path.join(pp['dataset'], want, name)
     if os.path.exists(dst):
         # `force` is what a correction needs: the file is already filed under
@@ -704,7 +1067,7 @@ def place(key, verdict, stage=DEFAULT_STAGE, force=False):
     return True
 
 
-def record(key, verdict, meta=None, stage=DEFAULT_STAGE, by=None):
+def record(key, verdict, ctx, pool=None, by=None):
     """Append one human judgement, and who made it.
 
     Append-only and re-readable: a mind changed later is another line, and the
@@ -712,41 +1075,87 @@ def record(key, verdict, meta=None, stage=DEFAULT_STAGE, by=None):
     mid-write costs one line rather than the file.
 
     ``by`` is the signed-in username. It is required -- see NO_AUTHOR.
+
+    ``pool`` is the pool id the page was served with, and must be ctx's. The
+    key must be on one of this generation's pages (_page_index), and the row
+    takes its band, p_dog, seq and box from THERE, never from the client: a
+    tab of another generation posts keys that exist here too, naming other
+    boxes. Every row names its generation and pool. A frozen generation
+    still takes answers on keys already drawn -- changing an answer is not
+    a new page. Refusals that a reload cures carry status 409.
     """
+    stage = ctx.stage
     # `None` clears: undo is a verdict being withdrawn, not a third opinion,
     # and the ledger is append-only so it is written as one more line.
     if verdict is not None and fa.verdict_of(verdict, stage) is None:
         return {'ok': False, 'msg': f'unknown verdict {verdict!r}'}
     if not by:
         return {'ok': False, 'msg': NO_AUTHOR}
+    if pool != ctx.pool_id:
+        return {'ok': False, 'msg': STALE_PAGE, 'status': 409}
+    key = str(key)
+    item = _page_index(ctx).get(key)
+    if item is None:
+        return {'ok': False, 'status': 409,
+                'msg': f'{key!r} is on no page of the gen-{ctx.gen} '
+                       f'{fa.spec(stage)["title"]} audit — nothing '
+                       f'recorded'}
+    box = item.get('box')
+    if box is None:
+        # a gen-1 page drawn before pages carried the box: the pool has it
+        got = _pool_row(key, ctx)
+        if got:
+            box = [float(got[k]) for k in ('x1', 'y1', 'x2', 'y2')]
     verdict = fa.verdict_of(verdict, stage) if verdict is not None else None
-    rec = {'key': str(key), 'verdict': verdict, 'ts': time.time(),
-           AUTHOR_FIELD: str(by)}
+    rec = {'key': key, 'verdict': verdict, 'ts': time.time(),
+           AUTHOR_FIELD: str(by),
+           fa.GEN_FIELD: ctx.gen, fa.POOL_FIELD: ctx.pool_id}
+    if box is not None:
+        rec['box'] = [float(v) for v in box]
     for k in ('band', 'p_dog', 'seq'):
-        if meta and meta.get(k) is not None:
-            rec[k] = meta[k]
-    _, ledger_lock = _locks(stage)
-    pp = P(stage)
+        if item.get(k) is not None:
+            rec[k] = item[k]
+    _, ledger_lock = _locks(ctx)
+    pp = ctx.P
     with ledger_lock:
+        why = _same_pool(ctx)
+        if why:
+            return {'ok': False, 'msg': why.replace('nothing saved',
+                                                    'nothing recorded'),
+                    'status': 409}
         os.makedirs(pp['out'], exist_ok=True)
         with open(pp['verdicts'], 'a') as fh:
             fh.write(json.dumps(rec) + '\n')
         # the ledger is the record; the dataset is a view of it, kept in step
-        # as each verdict lands so it is never a rebuild away from usable
-        placed = place(key, verdict, stage)
+        # as each verdict lands so it is never a rebuild away from usable. A
+        # dataset dir that is not this pool's is left alone and said so: the
+        # answer is on record either way, and export rebuilds the view.
+        try:
+            placed = place(key, verdict, ctx)
+        except Refused as e:
+            return {'ok': True, 'placed': False, 'place_error': str(e)}
     return {'ok': True, 'placed': placed}
 
 
-def stats(stage=DEFAULT_STAGE, who=None):
-    s = fa.summarise(stage=stage)
-    s['counts'] = _judged_counts(stage)
-    s['pages'] = page_count(stage)
-    s['drawn'] = len(_drawn_keys(stage)[0])
-    s['split'] = class_split(stage, who=who)
+def _verdicts(ctx):
+    """ctx's verdict ledger through fa.read_verdicts -- the one reader, and
+    the one place a row of another generation or pool raises."""
+    return fa.read_verdicts(ctx.P['verdicts'], stage=ctx.stage, gen=ctx.gen)
+
+
+def stats(ctx, who=None):
+    s = fa.summarise(verdicts=_verdicts(ctx), stage=ctx.stage, gen=ctx.gen)
+    s['counts'] = _judged_counts(ctx)
+    s['pages'] = page_count(ctx)
+    s['drawn'] = len(_drawn_keys(ctx)[0])
+    s['split'] = class_split(ctx, who=who)
+    # the page's own question, beside the pool's state: why it takes no new
+    # pages, when it does not (frozen, or its model moved on)
+    s['closed'] = fa.draw_refusal(ctx)
     return s
 
 
-def class_split(stage=DEFAULT_STAGE, who=None):
+def class_split(ctx, who=None):
     """How the answers on this sheet fall between the two classes.
 
         {'answers', 'positive', 'negative', 'who', 'mine', 'all'}
@@ -763,14 +1172,20 @@ def class_split(stage=DEFAULT_STAGE, who=None):
     the withdrawals, and resolves the rows written before this project had
     accounts to their author. A second count with its own ideas about any of
     those is a second answer to "how many have I done".
+
+    A row of another generation or pool raises (fa.GenError) rather than
+    reading as nothing: a split of a damaged ledger is not an empty one.
     """
+    stage = ctx.stage
     sp = fa.spec(stage)
     answers = list(sp['answers'])
     mine = {a: 0 for a in answers}
     every = {a: 0 for a in answers}
     who = str(who or '')
     try:
-        rows = fa.read_verdicts(stage=stage)
+        rows = _verdicts(ctx)
+    except fa.GenError:
+        raise
     except Exception:
         rows = []
     for v in rows:
@@ -939,6 +1354,22 @@ h1{font-size:20px;font-weight:660;letter-spacing:-.3px}
   border-radius:11px;padding:9px 14px;margin-bottom:12px;font-size:12px;
   color:var(--acc)}
 .poolwarn[hidden]{display:none}
+/* WHICH BOXES. A key names a box only within one detector generation, so the
+   page says which generation's boxes it is showing, beside the heading where
+   it is read first, and links the other generation's audit rather than
+   folding the two together. The closed banner is outside the figures panel:
+   a sheet that takes no new pages has to say so where the draw button was,
+   not in a panel that starts folded. */
+.gench{display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap;
+  margin-top:7px;font-size:11.5px;color:var(--mut);background:var(--panel2);
+  border:1px solid var(--bd);border-radius:999px;padding:3px 11px}
+.gench b{color:var(--tx);font-weight:620}
+.gench a{color:var(--acc);text-decoration:none}
+.gench a:hover{text-decoration:underline}
+.genwarn{background:rgba(232,166,69,.09);border:1px solid rgba(232,166,69,.3);
+  border-radius:11px;padding:9px 14px;margin:0 0 12px;font-size:12.5px;
+  color:var(--acc)}
+.genwarn[hidden]{display:none}
 .bands{background:var(--panel);border:1px solid var(--bd);border-radius:14px;
   padding:14px 18px 16px;margin-bottom:16px;
   /* Five tracks, 470px of them fixed before the bar column gets a pixel, so
@@ -1218,10 +1649,12 @@ __WORKCSS__
 </style></head><body><div class="wrap">
 <header>
   <div><h1>__H1__</h1>
-    <div class="sub">__SUB__</div></div>
+    <div class="sub">__SUB__</div>
+    <div class="gench" id="gench">__GENCHIP__</div></div>
   <div class="hdrend"><a class="back" href="/">&larr; dashboard</a>__ACCOUNT__</div>
 </header>
 __TABS__
+<div class="genwarn" id="genwarn"__GENWARNHID__>__GENWARN__</div>
 <!-- WHAT YOU HAVE BEEN ASKED FOR, under the tabs and above the sheet. Empty
      and invisible unless somebody has an open target that applies to THIS
      surface -- a leash target draws no bar over the dog-bin sheet, where
@@ -1377,6 +1810,14 @@ __WORKSTRIP__
 var BANDS=__BANDS__,STAGE=__STAGE__,POS=__POS__,NEG=__NEG__,
     YES=__YES__,NO=__NO__,BELOW=__BELOW__,ABOVE=__ABOVE__,TITLE=__TITLE__,
     DEFAULT_BAND=__DEFBAND__,THRESH=__THRESH__;
+/* WHICH POOL THIS PAGE IS. A key names a box only within one detector
+   generation, so every request carries the generation and pool the page was
+   served with -- the server refuses one that is not its own, and a tab left
+   open across a switch is told to reload instead of answering for boxes it
+   never showed. READONLY is a generation that takes no new pages (frozen, or
+   its model moved on): answers can still be changed, nothing is drawn. */
+var GEN=__GEN__,POOL=__POOL__,READONLY=__READONLY__,CLOSED=__CLOSED__;
+function GQ(){return '&gen='+GEN+'&pool='+encodeURIComponent(POOL)}
 var grid=document.getElementById('grid'),empty=document.getElementById('empty'),
     posEl=document.getElementById('pos'),lb=document.getElementById('lb'),
     lbimg=document.getElementById('lbimg'),lbtxt=document.getElementById('lbtxt');
@@ -1447,8 +1888,11 @@ function cropSrc(it){
      never changes -- and wrong the moment one does. A redrawn box carries a
      version so the browser fetches the new cut instead of the one it already
      has. */
-  return '/audit/crop/'+STAGE+'/'+esc(String(it.key).replace('#','_'))+'.jpg'+
-    (it.v?('?v='+it.v):'');
+  /* ...and the GENERATION is in the path, for the same reason: a day-cached
+     picture under a URL that named only the key would show a gen-1 crop on
+     a gen-2 tile of the same key, which is a different box. */
+  return '/audit/crop/'+STAGE+'/g'+GEN+'/'+
+    esc(String(it.key).replace('#','_'))+'.jpg'+(it.v?('?v='+it.v):'');
 }
 
 /* The verdict is sent the moment it is given and the card is marked from the
@@ -1481,14 +1925,18 @@ function judge(i,verdict){
   offerUndo(it,i,verdict);
   send(it.key,verdict,it);
 }
+/* The key, the answer and which pool -- nothing else. The band, the score
+   and the box are the server's to look up from the page the key was drawn
+   on: a value the client sends is a value a stale tab can get wrong. */
 function send(key,verdict,it){
-  fetch('/api/audit/verdict?stage='+STAGE,{method:'POST',
+  fetch('/api/audit/verdict?stage='+STAGE+GQ(),{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({key:key,verdict:verdict,band:it?it.band:null,
-                         p_dog:it?it.p_dog:null,seq:it?it.seq:null})})
+    body:JSON.stringify({key:key,verdict:verdict,gen:GEN,pool:POOL})})
     .then(function(r){return r.json()})
-    .then(function(j){if(!j||!j.ok)toast('not recorded');
-                      else {loadStats();refreshWorkStrip()}})
+    .then(function(j){
+      if(!j||!j.ok)toast('not recorded'+(j&&j.msg?' \u2014 '+j.msg:''));
+      else {if(j.place_error)toast('recorded, not filed \u2014 '+j.place_error);
+            loadStats();refreshWorkStrip()}})
     .catch(function(){toast('not recorded')});
 }
 function hide(i){
@@ -1587,6 +2035,8 @@ function render(){
          ? 'Nothing judged '+narrowed+' — widen the filters to see the rest.'
          : 'Nothing judged at this stage yet — verdicts land here as you '+
            'record them on the sheet.')
+      : READONLY
+      ? 'No pages to show \u2014 '+(CLOSED||'this audit takes no new pages')+'.'
       : page&&page.exhausted
       ? 'No sequences left to draw in this band. Every one has been shown.'
       : 'Nothing here yet. Draw a page.';
@@ -1666,9 +2116,10 @@ function setPos(){
     (page&&page.items&&page.items.length?' \u00b7 '+remaining()+' left':'')):'—';
   ['prev','prev2'].forEach(function(id){
     document.getElementById(id).disabled=busy||idx<=0});
+  /* a closed generation has no page after its last one to draw */
   ['next','next2'].forEach(function(id){
     document.getElementById(id).disabled=busy||
-      (view!=='sheet'&&idx+1>=total)});
+      ((view!=='sheet'||READONLY)&&idx+1>=total)});
   var f=document.getElementById('foot');
   if(f)f.hidden=!(page&&page.items&&page.items.length);
   var p2=document.getElementById('pos2');
@@ -1683,7 +2134,7 @@ function loadJudged(at){
   busy=true;setPos();
   /* the period rides the verdict filter -- which~period -- the same way the
      draw mode rides the band, so the route passes one string through */
-  fetch('/api/audit/judged?stage='+STAGE+'&which='+
+  fetch('/api/audit/judged?stage='+STAGE+GQ()+'&which='+
         encodeURIComponent(anno+(period?'~'+period:''))+'&page='+at+'&n='+size)
     .then(function(r){return r.json()})
     .then(function(j){
@@ -1713,18 +2164,19 @@ function paintNAll(){
 function load(at){
   if(view!=='sheet')return loadJudged(at);
   busy=true;setPos();
-  fetch('/api/audit/page?stage='+STAGE+'&i='+at+'&n='+size+
+  fetch('/api/audit/page?stage='+STAGE+GQ()+'&i='+at+'&n='+size+
         (band==null?'':'&band='+encodeURIComponent(wireBand()))).then(function(r){return r.json()})
     .then(function(j){busy=false;if(!j||j.error){toast(j&&j.error||'failed');setPos();return}
       show(j.page,j.index,j.total)})
     .catch(function(){busy=false;toast('failed');setPos()});
 }
 function draw(){
+  if(READONLY){toast(CLOSED||'this audit takes no new pages');return}
   busy=true;setPos();
   document.getElementById('fresh').textContent='cutting…';
-  fetch('/api/audit/draw?stage='+STAGE,{method:'POST',
+  fetch('/api/audit/draw?stage='+STAGE+GQ(),{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({band:wireBand(),n:size})})
+    body:JSON.stringify({band:wireBand(),n:size,gen:GEN,pool:POOL})})
     .then(function(r){return r.json()})
     .then(function(j){busy=false;
       document.getElementById('fresh').textContent='↻ draw a new page';
@@ -1735,7 +2187,7 @@ function draw(){
       toast('failed');setPos()});
 }
 function loadStats(){
-  fetch('/api/audit/stats?stage='+STAGE).then(function(r){return r.json()}).then(paintStats)
+  fetch('/api/audit/stats?stage='+STAGE+GQ()).then(function(r){return r.json()}).then(paintStats)
     .catch(function(){});
 }
 /* WHOSE ANSWERS, AND ALL OF THEM. Two facts the page could not answer
@@ -1894,8 +2346,14 @@ function paintStats(s){
      climb, and where it crosses 50% is where the threshold belongs. */
   var pi=s.pool_info||{},warn=document.getElementById('poolwarn');
   if(warn){
+    /* A frozen generation is not behind anything -- the live store numbers
+       other boxes -- and a pool whose store has been judged by another model
+       since is a different audit: both say what they are and never
+       "rebuild", which would re-key every answer here. */
     /* another detector generation numbers other boxes: never "rebuild" */
-    warn.textContent=pi.gen_mismatch
+    warn.textContent=pi.frozen||pi.model_moved
+      ? String(pi.message||'')
+      : pi.gen_mismatch
       ? 'This pool is gen-'+pi.pool_gen+' and the store is now gen-'+
         pi.plan_gen+' \u2014 start a new audit dir, do not rebuild this one.'
       : pi.stale
@@ -2028,7 +2486,7 @@ function paintFilter(){
     dn.textContent=mode==='spread'?'':
       'answers here are finds, not measurement — a page drawn from one '+
       'end of a band is held out of the rates';
-    dn.hidden=!dn.textContent;
+    dn.hidden=!dn.textContent||READONLY;
   }
 }
 /* Both choices are remembered. Working through an audit is a long sitting and
@@ -2075,6 +2533,7 @@ function applyFilter(){
   filterT=setTimeout(function go(){
     filterT=null;
     if(busy){filterT=setTimeout(go,150);return}   /* let a cut in flight land */
+    if(READONLY){toast(CLOSED||'this audit takes no new pages');return}
     if(view!=='sheet'){
       /* the ledger read-back is paged by index and filtered by verdict, not by
          the model's score -- so say where the choice landed rather than
@@ -2133,7 +2592,7 @@ bandSel.addEventListener('change',function(){
   applyFilter();
 });
 function goNext(){
-  if(view!=='sheet'){if(idx+1<total)load(idx+1);return}
+  if(view!=='sheet'||READONLY){if(idx+1<total)load(idx+1);return}
   /* Ask for the next page and let the server decide whether it already has
      one. Deciding here meant deciding from a `total` counted BEFORE the
      prefetch that was started to serve this very click, so it was always one
@@ -2159,11 +2618,11 @@ document.getElementById('views').addEventListener('click',function(e){
   /* drawing new crops, and choosing where to draw them from, are things only
      the sheet does; filtering annotations only means anything in the other */
   var sheet=view==='sheet';
-  document.getElementById('fresh').hidden=!sheet;
-  document.getElementById('sides').hidden=!sheet;
-  document.getElementById('draws').hidden=!sheet;
+  document.getElementById('fresh').hidden=!sheet||READONLY;
+  document.getElementById('sides').hidden=!sheet||READONLY;
+  document.getElementById('draws').hidden=!sheet||READONLY;
   var dn=document.getElementById('drawnote');
-  if(dn)dn.hidden=!sheet||mode==='spread';
+  if(dn)dn.hidden=!sheet||mode==='spread'||READONLY;
   paintNAll();
   document.getElementById('annowrap').hidden=sheet;
   document.getElementById('periodwrap').hidden=sheet;
@@ -2226,7 +2685,8 @@ function edStart(){
   /* One request. The geometry comes back in a header on the picture itself,
      because both are products of the same decode and asking twice meant
      opening an 8000x4000 frame twice for one click. */
-  fetch('/audit/frame/'+STAGE+'/'+it.key.replace('#','_')+'.jpg')
+  fetch('/audit/frame/'+STAGE+'/g'+GEN+'/'+it.key.replace('#','_')+'.jpg'+
+        '?pool='+encodeURIComponent(POOL))
     .then(function(r){
       if(!r.ok)throw 0;
       var m=JSON.parse(r.headers.get('X-Audit-Meta')||'null');
@@ -2295,9 +2755,12 @@ function edSave(){
   var it=page&&page.items[cur],m=EDIT.meta,b=EDIT.box;
   if(!it||!m||!b)return;
   if(!edMoved()){toast('the box has not moved -- nothing to save');return}
-  fetch('/api/audit/box?stage='+STAGE,{method:'POST',
+  /* box_sig is the pool box the frame was cut around, as the server gave
+     it: the server takes the redraw only if it is still that box, so a
+     frame of one generation can never be saved against another's key */
+  fetch('/api/audit/box?stage='+STAGE+GQ(),{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({key:it.key,box:[
+    body:JSON.stringify({key:it.key,gen:GEN,pool:POOL,box_sig:m.box_sig,box:[
       m.off_x+b[0]/m.scale, m.off_y+b[1]/m.scale,
       m.off_x+b[2]/m.scale, m.off_y+b[3]/m.scale]})})
     .then(function(r){return r.json()})
@@ -2397,7 +2860,16 @@ document.addEventListener('keydown',function(e){
   else if(e.key==='n'||e.key==='N'){goNext();e.preventDefault()}
 });
 /* boot: the last page if there is one, otherwise an invitation */
-fetch('/api/audit/page?stage='+STAGE+'&i=-1&n='+size+
+/* A generation that takes no new pages says so on its controls, not only in
+   a toast after a click: every control that would draw is off. */
+if(READONLY){
+  ['fresh','sides','draws','drawnote'].forEach(function(id){
+    var e=document.getElementById(id);if(e)e.hidden=true});
+  ['size','bandsel'].forEach(function(id){
+    var e=document.getElementById(id);
+    if(e){e.disabled=true;e.title=CLOSED||''}});
+}
+fetch('/api/audit/page?stage='+STAGE+GQ()+'&i=-1&n='+size+
       (band==null?'':'&band='+encodeURIComponent(wireBand()))).then(function(r){return r.json()})
   .then(function(j){
     if(j&&j.page)show(j.page,j.index,j.total);
@@ -2410,14 +2882,46 @@ __WORKJS__
 _TEMPLATE = AUDIT_HTML
 
 
-def page_html(stage=DEFAULT_STAGE, account=('', '')):
-    """The page, with this stage's words in it.
+def _gen_chip(ctx):
+    """The header chip: whose boxes this page shows, and the way to the
+    stage's other generations -- each its own audit, never folded in."""
+    import html as _h
+    try:
+        live = fa.live_gen(ctx.stage)[0]
+    except fa.GenError:
+        live = None
+    bits = [f'<b>gen-{ctx.gen}</b> detector boxes']
+    if ctx.gen >= 2:
+        bits.append(f'judged by {_h.escape(str(ctx.meta.get("model") or "?"))}')
+    gens = fa.audit_gens(ctx.stage)
+    # the live generation is linked even before its pool is cut: the page
+    # there says what to build, which beats a frozen page with no way on
+    if live is not None and live not in gens:
+        gens.append(live)
+    for g in gens:
+        if g == ctx.gen:
+            continue
+        label = (f'back to the gen-{g} audit' if g == live else
+                 f'view gen-{g} answers (read-only draws)')
+        bits.append(f'<a href="/audit/{_h.escape(ctx.stage)}?gen={g}">'
+                    f'{label}</a>')
+    return ' \u00b7 '.join(bits)
+
+
+def page_html(ctx, account=('', '')):
+    """The page, with this stage's words and this generation's pool in it.
 
     One template, because the two audits differ in vocabulary and in nothing
     else -- same grid, same keys, same undo. A second copy would be a second
-    place to fix every bug found in the first.
+    place to fix every bug found in the first. GEN and POOL are templated in
+    and ride on every request the page makes (see the script header); a
+    generation that takes no new pages (fa.draw_refusal) is served READONLY
+    with its reason on a banner.
     """
+    import html as _h
+    stage = ctx.stage
     sp = fa.spec(stage)
+    closed = fa.draw_refusal(ctx)
     # The shared tab strip, one contract across every judging page: the same
     # markup on the review queue and both audits, with 'jtab on' (and
     # aria-current) on the page being read. The labels and hrefs are the
@@ -2454,6 +2958,13 @@ def page_html(stage=DEFAULT_STAGE, account=('', '')):
                  ('__ACCOUNT__', acct_html),
                  ('__BANDS__', json.dumps(fa.BANDS)),
                  ('__STAGE__', json.dumps(stage)),
+                 ('__GEN__', json.dumps(ctx.gen)),
+                 ('__POOL__', json.dumps(ctx.pool_id)),
+                 ('__READONLY__', json.dumps(bool(closed))),
+                 ('__CLOSED__', json.dumps(closed)),
+                 ('__GENCHIP__', _gen_chip(ctx)),
+                 ('__GENWARNHID__', '' if closed else ' hidden'),
+                 ('__GENWARN__', _h.escape(closed or '')),
                  ('__POS__', json.dumps(sp['positive'])),
                  ('__NEG__', json.dumps(sp['negative'])),
                  ('__YES__', json.dumps(sp['yes'])),
@@ -2492,22 +3003,28 @@ def page_html(stage=DEFAULT_STAGE, account=('', '')):
 _PREFETCH = {}
 
 
-def prefetch(band=None, n=25, stage=DEFAULT_STAGE):
-    """Draw the next page in the background, unless one is already coming."""
-    t = _PREFETCH.get(stage)
+def prefetch(ctx, band=None, n=25):
+    """Draw the next page in the background, unless one is already coming
+    -- or this generation takes no new pages at all (fa.draw_refusal), when
+    there is nothing to queue. One per (stage, generation): the two
+    generations of one stage are two audits with their own drawn logs."""
+    if fa.draw_refusal(ctx):
+        return
+    k = (ctx.stage, ctx.gen)
+    t = _PREFETCH.get(k)
     if t is not None and t.is_alive():
         return
     def go():
         try:
-            draw_page(n=n, band=band, stage=stage)
+            draw_page(ctx, n=n, band=band)
         except Exception:
             pass
     t = threading.Thread(target=go, daemon=True)
-    _PREFETCH[stage] = t
+    _PREFETCH[k] = t
     t.start()
 
 
-def await_prefetch(stage=DEFAULT_STAGE, timeout=120):
+def await_prefetch(ctx, timeout=120):
     """Wait for the queued page to land, if one is being cut.
 
     Asking for the page after the last one usually means the prefetch is
@@ -2516,12 +3033,12 @@ def await_prefetch(stage=DEFAULT_STAGE, timeout=120):
     page nobody ever sees is a page of sample spent. This costs at worst the
     cut the reader was going to pay for anyway.
     """
-    t = _PREFETCH.get(stage)
+    t = _PREFETCH.get((ctx.stage, ctx.gen))
     if t is not None and t.is_alive():
         t.join(timeout)
 
 
-def with_verdicts(doc, stage=DEFAULT_STAGE):
+def with_verdicts(doc, ctx):
     """Stamp each item with the answer already on record for it.
 
     A page document is the draw, not the judging, so paging back to one
@@ -2532,9 +3049,10 @@ def with_verdicts(doc, stage=DEFAULT_STAGE):
         return doc
     # the answer AND who gave it: the page is reading the ledger back, and on
     # a shared queue "already judged" is half the fact
+    stage = ctx.stage
     seen = {v['key']: (v.get('verdict'), v.get(AUTHOR_FIELD))
-            for v in fa.read_verdicts(stage=stage)}
-    fixed = corrections(stage)
+            for v in _verdicts(ctx)}
+    fixed = corrections(ctx)
     for it in doc['items']:
         # through verdict_of, because the page paints from this stage's own
         # two words and the gate's ledger still holds forty rows written in
@@ -2724,7 +3242,7 @@ def judged_which_ok(which, stage=DEFAULT_STAGE):
     return not sep or PERIOD_SEP in period
 
 
-def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
+def judged(ctx, which='flagged', page=0, n=25):
     """Crops already answered, newest first.
 
     `flagged` is the positive class -- the dogs found, the leashes seen --
@@ -2732,13 +3250,14 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
     answer that disagrees with the model, which is the same set plus the
     false positives above the threshold. `all` is everything, unsure included.
     """
+    stage = ctx.stage
     sp = fa.spec(stage)
     period = ''
     if isinstance(which, str) and '~' in which:
         which, _, period = which.partition('~')
     period = period_norm(period)
     lo, hi = period_range(period)
-    rows = [v for v in fa.read_verdicts(stage=stage)
+    rows = [v for v in _verdicts(ctx)
             if fa.verdict_of(v.get('verdict'), stage)]
     if lo is not None or hi is not None:
         # In the server, before pagination -- a hide on the client would
@@ -2748,7 +3267,8 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
         v['verdict'] = fa.verdict_of(v['verdict'], stage)
     # p_dog is what decides the tag, the score chip and the threshold rule.
     # Early rows predate it being sent, so the missing ones are looked up in
-    # one query rather than one per crop.
+    # one query rather than one per crop -- in THIS generation's pool, the
+    # only one these keys name boxes in.
     need = [v['key'] for v in rows if v.get('p_dog') is None]
     if need:
         got = {}
@@ -2761,7 +3281,7 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
                             [(a, int(b or 0)) for a, b in keys])
             for iid, di, p, band in con.execute(
                     f"""SELECT p.image_id, p.det_idx, p.p_dog, p.band
-                        FROM read_parquet('{P(stage)['pool']}') p
+                        FROM read_parquet('{fa._q(ctx.P['pool'])}') p
                         JOIN want w ON w.i = p.image_id AND w.d = p.det_idx"""
             ).fetchall():
                 got[f'{iid}#{di}'] = (float(p), int(band))
@@ -2784,7 +3304,7 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
     total = len(rows)
     pages = max(1, -(-total // max(1, n)))
     page = max(0, min(pages - 1, int(page)))
-    fixed = corrections(stage)
+    fixed = corrections(ctx)
     out = []
     for v in rows[page * n:(page + 1) * n]:
         iid, _, di = str(v['key']).partition('#')
@@ -2805,18 +3325,19 @@ def judged(stage=DEFAULT_STAGE, which='flagged', page=0, n=25):
         out.append(it)
     return {'items': out, 'total': total, 'page': page, 'pages': pages,
             'which': which, 'period': period, 'stage': stage,
-            'counts': _judged_counts(stage, period)}
+            'gen': ctx.gen, 'pool': ctx.pool_id,
+            'counts': _judged_counts(ctx, period)}
 
 
-def _judged_counts(stage=DEFAULT_STAGE, period=None):
+def _judged_counts(ctx, period=None):
     """How many sit behind each view, so the switch can say so.
 
     The window narrows this too: a button reading 356 over a list filtered
     to one day's twelve is a count of something the view no longer shows.
     """
     lo, hi = period_range(period)
-    vs = [v for v in fa.read_verdicts(stage=stage)
-          if fa.verdict_of(v.get('verdict'), stage)]
+    vs = [v for v in _verdicts(ctx)
+          if fa.verdict_of(v.get('verdict'), ctx.stage)]
     rows = [v for v in vs if in_period(v.get('ts'), lo, hi)]
     # `all` is the number the annotations list is showing. `ledger` is the
     # whole ledger whatever the period -- the tab keeps this badge when the
@@ -2826,7 +3347,15 @@ def _judged_counts(stage=DEFAULT_STAGE, period=None):
     return {'all': len(rows), 'ledger': len(vs)}
 
 
-def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):
+def _closed_reply(ctx, why):
+    """What api_page answers where it would otherwise draw on a generation
+    that takes no new pages: the reason, and no page -- the client keeps
+    the page it has and says why."""
+    return {'error': why, 'closed': True, 'exhausted': True,
+            'gen': ctx.gen, 'pool': ctx.pool_id}
+
+
+def api_page(ctx, i, n=25, band=None):
     """One page by index; -1 means the most recent. Draws if there are none.
 
     One past the last stored page is a request for the page that was queued
@@ -2834,30 +3363,39 @@ def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):
     the page already on screen, so the client could never reach the queued
     one: it drew instead, paid the full cut, and the prefetched page was
     stepped over with its boxes and sequences already retired.
+
+    On a generation that takes no new pages (frozen, or its model moved) the
+    two places this would draw -- no pages yet, or one past the last -- draw
+    nothing and answer _closed_reply; stored pages are served as ever.
     """
-    total = page_count(stage)
+    total = page_count(ctx)
+    closed = fa.draw_refusal(ctx)
     if total == 0:
-        doc = draw_page(n=n, band=band, stage=stage)
-        return {'page': with_verdicts(doc, stage), 'index': doc.get('index', 0),
-                'total': max(1, page_count(stage))}
+        if closed:
+            return _closed_reply(ctx, closed)
+        doc = draw_page(ctx, n=n, band=band)
+        return {'page': with_verdicts(doc, ctx), 'index': doc.get('index', 0),
+                'total': max(1, page_count(ctx))}
     if i is None or int(i) < 0:
         i = total - 1
     i = int(i)
     if i == total:
-        await_prefetch(stage)
-        total = page_count(stage)
+        if closed:
+            return _closed_reply(ctx, closed)
+        await_prefetch(ctx)
+        total = page_count(ctx)
         if i >= total:                  # nothing was queued, so cut it now
-            doc = draw_page(n=n, band=band, stage=stage)
-            total = max(1, page_count(stage))
+            doc = draw_page(ctx, n=n, band=band)
+            total = max(1, page_count(ctx))
             if doc.get('items'):
-                prefetch(band=band, n=n, stage=stage)   # and queue the next
-            return {'page': with_verdicts(doc, stage),
+                prefetch(ctx, band=band, n=n)   # and queue the next
+            return {'page': with_verdicts(doc, ctx),
                     'index': doc.get('index', total - 1), 'total': total}
     i = max(0, min(total - 1, i))
-    doc = get_page(i, stage)
+    doc = get_page(i, ctx)
     if doc is None:
         return {'error': f'page {i} is missing'}
-    doc = with_verdicts(doc, stage)
+    doc = with_verdicts(doc, ctx)
     # Line up the next page -- but only once judging has actually touched this
     # one. Boxes are retired the moment they are drawn, so queueing on the
     # bare GET meant every passive load of the audit page spent 25 boxes of
@@ -2868,16 +3406,18 @@ def api_page(i, n=25, band=None, stage=DEFAULT_STAGE):
     # The cost is one synchronous cut at the reviewer's FIRST page turn of a
     # session (the "nothing was queued" branch above), after which the
     # prefetch chain runs as before.
-    if i >= total - 1 and any(it.get('verdict')
-                              for it in doc.get('items') or []):
-        prefetch(band=band, n=n, stage=stage)
+    if not closed and i >= total - 1 and any(
+            it.get('verdict') for it in doc.get('items') or []):
+        prefetch(ctx, band=band, n=n)
     return {'page': doc, 'index': i, 'total': total}
 
 
-def api_draw(n=25, band=None, stage=DEFAULT_STAGE):
-    doc = draw_page(n=n, band=band, stage=stage)
-    total = max(1, page_count(stage))
+def api_draw(ctx, n=25, band=None):
+    """A fresh page, on request. Refused (Refused, 409) on a generation that
+    takes no new pages."""
+    doc = draw_page(ctx, n=n, band=band)
+    total = max(1, page_count(ctx))
     if doc.get('items'):
-        prefetch(band=band, n=n, stage=stage)
-    return {'page': with_verdicts(doc, stage),
+        prefetch(ctx, band=band, n=n)
+    return {'page': with_verdicts(doc, ctx),
             'index': doc.get('index', total - 1), 'total': total}

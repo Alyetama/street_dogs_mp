@@ -31,8 +31,10 @@ and counted.
   l2  read_calls reads an old database without migrating it (bytes and
       columns unchanged) and gives gen None
   g1  fn_audit.gen_of: None -> 1, an int -> itself, '2'/True/-1/2.0 -> None;
-      pool_gen reads pool.json (none -> 1; unreadable, or a malformed gen,
-      -> None)
+      pool_gen(stage, gen=N) says whether gen N's pool can vouch for itself:
+      gen 1 reads a missing or untagged pool.json as 1 and anything else
+      (unreadable, a malformed gen, any gen but 1) as None; gen >= 2 has no
+      legacy default -- a missing pool.json is None
   s1  sweep.preview_refusal: no preview crops from a sweep of another
       generation than the pinned store's (recent_crops is the review queue)
   g2  crop_sources.store_gen_of: status.json, else the only shards/gen=*;
@@ -43,13 +45,17 @@ and counted.
       gen-2 store with gen-2 ones, counting other_gen; a store naming no
       generation is refused
   r3  crop_sources.leash_call_candidates likewise, from leash.db's column
-  r4  read_audit_corrections: only 'audit:<stage>' rows of the pool's gen
-      (default) or of an explicit gen
+  r4  read_audit_corrections: `gen` required; only 'audit:<stage>' rows of
+      that gen, and for gen >= 2 of that gen's pool (`pool`), counting
+      other_gen / other_pool
   r5  build_dogdet_v3 confirmed_positive_ids / corrections and
-      build_detector_negatives.flagged_ids read only detect_root()'s gen,
-      and v3 skips the gate audit's verdicts when its pool is another gen
-  a1  audit.corrections(stage): only 'audit:<stage>' rows of the pool's gen
-      -- not the review page's, not the other audit's (the old bug)
+      build_detector_negatives.flagged_ids read only detect_root()'s gen;
+      v3 reads the gate audit of THAT generation's dir (a gen-1 build keeps
+      its gen-1 confirmations however far the page has moved on), and a
+      gen >= 2 audit redraw only of that generation's pool
+  a1  audit.corrections: only 'audit:<stage>' rows of the pool's gen
+      -- not the review page's, not the other audit's (the old bug); and for
+      gen >= 2 only its own pool's
   m   mutants: each guard removed, or a generation hardcoded, is caught
 
 Everything runs in a temp tree: the modules are loaded from copies whose
@@ -174,22 +180,42 @@ def set_pin(fx, root):
         fh.write(root + '\n')
 
 
-def audit_layout(d, pool_gen=None):
-    """fn_audit.paths(stage) for a stage whose audit dir is `d`."""
-    lay = {'out': d, 'pool': os.path.join(d, 'pool.parquet'),
+def audit_layout(d, pool_gen=None, gen=1, stage='gate', detect_root=None,
+                 pool_id='P2'):
+    """fn_audit.paths(stage, gen=gen) for an audit dir `d`.
+
+    Gen 1: a legacy pool.json ({'stage': 'x'}, `gen` = pool_gen when given).
+    Gen >= 2: a pool.parquet stand-in and a pool.json that pool_meta accepts
+    -- pool `pool_id`, cut from `detect_root`."""
+    lay = {'out': d, 'gen': gen, 'pool': os.path.join(d, 'pool.parquet'),
+           'pool_json': os.path.join(d, 'pool.json'),
            'verdicts': os.path.join(d, 'verdicts.jsonl'),
            'drawn': os.path.join(d, 'drawn.jsonl'),
            'crops': os.path.join(d, 'crops'), 'full': os.path.join(d, 'full'),
+           'edited': os.path.join(d, 'edited'),
+           'edited_thumbs': os.path.join(d, 'edited_thumbs'),
            'pages': os.path.join(d, 'pages'),
            'dataset': os.path.join(d, 'dataset'),
            'store': os.path.join(d, 'store'),
            'shards': os.path.join(d, 'store', 'x-*.parquet'),
            'work': os.path.join(d, 'store', 'work.parquet')}
     os.makedirs(d, exist_ok=True)
-    doc = {'stage': 'x'}
-    if pool_gen is not None:
-        doc['gen'] = pool_gen
-    with open(os.path.join(d, 'pool.json'), 'w') as fh:
+    if gen == 1:
+        doc = {'stage': 'x'}
+        if pool_gen is not None:
+            doc['gen'] = pool_gen
+    else:
+        import hashlib
+        with open(lay['pool'], 'wb') as fh:
+            fh.write(b'POOL%d' % gen)
+        st = os.stat(lay['pool'])
+        doc = {'stage': stage, 'gen': gen, 'pool_id': pool_id,
+               'state': 'ready', 'detect_root': detect_root, 'model': 'm',
+               'protocol': 'full@640', 'view_frame': 'pad012',
+               'roots': {'d': d}, 'parquet_size': st.st_size,
+               'parquet_mtime_ns': st.st_mtime_ns,
+               'sha256': hashlib.sha256(b'POOL%d' % gen).hexdigest()}
+    with open(lay['pool_json'], 'w') as fh:
         json.dump(doc, fh)
     return lay
 
@@ -396,33 +422,53 @@ def writer_checks(w, fx, tag):
     # the audit page's box editor
     audit, fa = w.audit, w.fa
     real_paths = fa.paths
+    sig = [1.0, 2.0, 30.0, 40.0]           # the stub pool box, as box_sig
     try:
-        for pool_gen, want in ((None, 1), (2, 2)):
+        audit._pool_row = lambda key, ctx: {
+            'key': '777#3', 'image_id': '777', 'det_idx': 3,
+            'x1': 1.0, 'y1': 2.0, 'x2': 30.0, 'y2': 40.0,
+            'cell': 'c', 'drive': 'd'}
+        audit._cut_one = lambda *a, **k: True
+        audit._roots = lambda ctx=None: {}
+        for gen, want in ((1, (1, fa.G1_POOL_ID)), (2, (2, 'P2'))):
             d = fresh(fx, 'audit_w')
-            lay = audit_layout(os.path.join(d, 'gate'), pool_gen)
-            fa.paths = lambda stage='gate', _l=lay: _l
+            lay = audit_layout(os.path.join(d, 'gate'), gen=gen,
+                               detect_root=fx.g2)
+            fa.paths = lambda stage='gate', *, gen, _l=lay: _l
+            c = fa.ctx('gate', gen)
+            # the box was on a page of this generation: a redraw of a key
+            # nobody was shown is refused (audit._page_index)
+            os.makedirs(c.P['pages'], exist_ok=True)
+            with open(os.path.join(c.P['pages'], '00000.json'), 'w') as fh:
+                json.dump({'gen': gen, 'pool': c.pool_id,
+                           'items': [{'key': '777#3'}]}, fh)
             audit.BOX_FILE = os.path.join(d, 'boxes.jsonl')
-            audit._pool_row = lambda key, stage='gate': {
-                'key': '777#3', 'image_id': '777', 'det_idx': 3,
-                'x1': 1.0, 'y1': 2.0, 'x2': 30.0, 'y2': 40.0,
-                'cell': 'c', 'drive': 'd'}
-            audit._cut_one = lambda *a, **k: True
-            audit._roots = lambda: {}
-            out = audit.save_correction('777#3', [1, 2, 31, 41],
-                                        stage='gate', by=WHO)
+            out = audit.save_correction('777#3', [1, 2, 31, 41], c,
+                                        pool=c.pool_id, box_sig=sig, by=WHO)
             got = lines(audit.BOX_FILE)
-            check(f'{tag}w4 save_correction writes audit:gate and the pool\'s '
-                  f'gen ({want})',
-                  out.get('ok') and [(r.get('crop'), r.get('gen'))
-                                     for r in got] == [('audit:gate', want)],
-                  (out, got))
-        # a pool.json that names no generation: refused, nothing written
+            check(f'{tag}w4 save_correction writes audit:gate with its '
+                  f'ctx\'s gen and pool {want}',
+                  out.get('ok') and [(r.get('crop'), r.get('gen'),
+                                      r.get('pool')) for r in got]
+                  == [('audit:gate',) + want], (out, got))
+            # a frame of another generation: its pool id, or the box_sig of
+            # another box under the same key -- refused, nothing written
+            for kw in ({'pool': 'P-other', 'box_sig': sig},
+                       {'pool': c.pool_id, 'box_sig': [10, 10, 60, 60]},
+                       {'pool': c.pool_id, 'box_sig': None}):
+                out = audit.save_correction('777#3', [1, 2, 32, 42], c,
+                                            by=WHO, **kw)
+                check(f'{tag}w4 gen {gen}: a redraw with {kw} is refused',
+                      not out.get('ok') and lines(audit.BOX_FILE) == got,
+                      out)
+        # the pool.json damaged AFTER the request resolved its ctx: refused
+        # at the write, nothing written -- never guessed to be gen 1
         for body in ('{not json', '{"gen": "2"}', '[2]'):
-            with open(os.path.join(lay['out'], 'pool.json'), 'w') as fh:
+            with open(lay['pool_json'], 'w') as fh:
                 fh.write(body)
             audit.BOX_FILE = os.path.join(d, 'boxes_bad.jsonl')
-            out = audit.save_correction('777#3', [1, 2, 32, 42],
-                                        stage='gate', by=WHO)
+            out = audit.save_correction('777#3', [1, 2, 32, 42], c,
+                                        pool=c.pool_id, box_sig=sig, by=WHO)
             got = lines(audit.BOX_FILE)
             check(f'{tag}w4 save_correction refuses a pool.json of {body!r}',
                   not out.get('ok') and got == [], (out, got))
@@ -564,39 +610,62 @@ def reader_checks(w, fx, tag):
     real_paths = fa.paths
     d = fresh(fx, 'readers')
     try:
-        lays = {'gate': audit_layout(os.path.join(d, 'gate'), 2),
-                'leash': audit_layout(os.path.join(d, 'leash'))}
-        fa.paths = lambda stage='gate': lays[stage]
-        check(f'{tag}g1 pool_gen reads pool.json (none -> 1)',
-              (fa.pool_gen('gate'), fa.pool_gen('leash')) == (2, 1),
-              (fa.pool_gen('gate'), fa.pool_gen('leash')))
+        lays = {('gate', 1): audit_layout(os.path.join(d, 'gate')),
+                ('leash', 1): audit_layout(os.path.join(d, 'leash')),
+                ('gate', 2): audit_layout(os.path.join(d, 'gate_gen2'),
+                                          gen=2, detect_root=fx.g2),
+                ('leash', 2): audit_layout(os.path.join(d, 'leash_gen2'),
+                                           gen=2, stage='leash',
+                                           detect_root=fx.g2)}
+        fa.paths = lambda stage='gate', *, gen: lays[(stage, gen)]
+        got = (fa.pool_gen('gate', gen=1), fa.pool_gen('leash', gen=1),
+               fa.pool_gen('gate', gen=2))
+        check(f'{tag}g1 pool_gen: an untagged gen-1 pool is 1, a ready '
+              f'gen-2 pool 2', got == (1, 1, 2), got)
         odd = os.path.join(d, 'odd')
-        lays['odd'] = audit_layout(odd)
+        keep = lays[('gate', 1)]
+        lays[('gate', 1)] = audit_layout(odd)
         seen = []
         for body in ('{not json', '[2]', '{"gen": "2"}', '{"gen": true}',
-                     '{"gen": 0}', '{"stage": "x"}'):
+                     '{"gen": 0}', '{"gen": 2}', '{"stage": "x"}'):
             with open(os.path.join(odd, 'pool.json'), 'w') as fh:
                 fh.write(body)
-            seen.append(fa.pool_gen('odd'))
+            seen.append(fa.pool_gen('gate', gen=1))
         os.remove(os.path.join(odd, 'pool.json'))
-        seen.append(fa.pool_gen('odd'))
-        check(f'{tag}g1 pool_gen: unreadable or a malformed gen -> None, '
-              f'0 -> 0, no gen or no pool.json -> 1',
-              seen == [None, None, None, None, 0, 1, 1], seen)
+        seen.append(fa.pool_gen('gate', gen=1))
+        check(f'{tag}g1 pool_gen of gen 1: unreadable, a malformed gen or '
+              f'any gen but 1 -> None; no gen or no pool.json -> 1',
+              seen == [None, None, None, None, None, None, 1, 1], seen)
+        g2j = lays[('gate', 2)]['pool_json']
+        os.rename(g2j, g2j + '.away')
+        miss = fa.pool_gen('gate', gen=2)
+        os.rename(g2j + '.away', g2j)
+        check(f'{tag}g1 a gen-2 dir with no pool.json is no pool (not gen 1)',
+              miss is None, miss)
+        try:
+            fa.pool_gen('gate')
+            nodefault = False
+        except TypeError:
+            nodefault = True
+        check(f'{tag}g1 pool_gen has no default generation', nodefault)
         # ...and a pool naming none is no pool's: its readers keep nothing,
-        # not the rows whose own tag is unreadable too
+        # not even an untagged row that would otherwise be gen 1's
         bad = os.path.join(d, 'bad_tags.jsonl')
-        write_jsonl(bad, [{'crop': 'audit:odd', 'image_id': '61',
-                           'det_idx': 0, 'x1': 1, 'y1': 1, 'x2': 5, 'y2': 5,
-                           'gen': '2'}])
+        write_jsonl(bad, [{'crop': 'audit:gate', 'image_id': '61',
+                           'det_idx': 0, 'x1': 1, 'y1': 1, 'x2': 5, 'y2': 5}])
         with open(os.path.join(odd, 'pool.json'), 'w') as fh:
             fh.write('{"gen": "2"}')
+        none_read = cs.read_audit_corrections('gate', bad, gen=1)
+        check(f'{tag}g1 a pool naming no usable gen: read_audit_corrections '
+              f'keeps nothing', none_read == {}, none_read)
         w.audit.BOX_FILE = bad
-        none_read = (cs.read_audit_corrections('odd', bad),
-                     w.audit.corrections('odd'))
-        check(f'{tag}g1 a pool naming no gen: read_audit_corrections and '
-              f'audit.corrections keep nothing', none_read == ({}, {}),
-              none_read)
+        try:
+            got = w.audit.corrections(fa.ctx('gate', 1))
+        except fa.PoolIdentityError:
+            got = {}
+        check(f'{tag}g1 ...and audit.corrections keeps nothing', got == {},
+              got)
+        lays[('gate', 1)] = keep
 
         # the sweep's live preview crops are the review page's queue
         set_pin(fx, fx.g1)
@@ -641,7 +710,9 @@ def reader_checks(w, fx, tag):
             {'crop': 'y.jpg', 'image_id': '11', 'det_idx': 0,
              'x1': 2, 'y1': 2, 'x2': 6, 'y2': 6, 'gen': 2},
             {'crop': 'audit:gate', 'image_id': '13', 'det_idx': 0,
-             'x1': 3, 'y1': 3, 'x2': 7, 'y2': 7, 'gen': 2},
+             'x1': 3, 'y1': 3, 'x2': 7, 'y2': 7, 'gen': 2, 'pool': 'P2'},
+            {'crop': 'audit:gate', 'image_id': '14', 'det_idx': 0,
+             'x1': 6, 'y1': 6, 'x2': 9, 'y2': 9, 'gen': 2, 'pool': 'OTHER'},
             {'crop': 'audit:gate', 'image_id': '12', 'det_idx': 0,
              'x1': 4, 'y1': 4, 'x2': 8, 'y2': 8},
             {'crop': 'audit:leash', 'image_id': '12', 'det_idx': 0,
@@ -721,16 +792,26 @@ def reader_checks(w, fx, tag):
               and lc1.get('other_gen') == 1 and lc2.get('other_gen') == 2,
               (l1, dict(lc1), l2, dict(lc2)))
 
-        c = {'other_gen': 0}
-        a_pool = cs.read_audit_corrections('gate', corr, counts=c)
-        a_one = cs.read_audit_corrections('gate', corr, gen=1)
-        a_leash = cs.read_audit_corrections('leash', corr)
-        check(f'{tag}r4 read_audit_corrections: its stage, the pool\'s gen '
-              f'by default',
-              a_pool == {('13', 0): (3.0, 3.0, 7.0, 7.0)}
-              and a_one == {('12', 0): (4.0, 4.0, 8.0, 8.0)}
+        import collections
+        c1, c2 = collections.Counter(), collections.Counter()
+        a_one = cs.read_audit_corrections('gate', corr, gen=1, counts=c1)
+        a_two = cs.read_audit_corrections('gate', corr, gen=2, counts=c2)
+        a_leash = cs.read_audit_corrections('leash', corr, gen=1)
+        check(f'{tag}r4 read_audit_corrections: its stage, its gen, and for '
+              f'gen 2 its pool',
+              a_one == {('12', 0): (4.0, 4.0, 8.0, 8.0)}
+              and a_two == {('13', 0): (3.0, 3.0, 7.0, 7.0)}
               and a_leash == {('12', 0): (5.0, 5.0, 9.0, 9.0)}
-              and c['other_gen'] == 1, (a_pool, a_one, a_leash, c))
+              and c1['other_gen'] == 2 and c2['other_gen'] == 1
+              and c2['other_pool'] == 1,
+              (a_one, a_two, a_leash, dict(c1), dict(c2)))
+        try:
+            cs.read_audit_corrections('gate', corr)
+            nodefault = False
+        except TypeError:
+            nodefault = True
+        check(f'{tag}r4 read_audit_corrections has no default gen',
+              nodefault)
 
         # the detector builders
         v3, bn = w.v3, w.bn
@@ -740,15 +821,17 @@ def reader_checks(w, fx, tag):
             {'image_id': '42', 'label': 'true_positive', 'gen': 2},
             {'image_id': '43', 'label': 'true_positive', 'gen': 1},
             {'image_id': '44', 'label': 'false_positive', 'gen': 1}])
-        write_jsonl(lays['gate']['verdicts'],
+        write_jsonl(lays[('gate', 1)]['verdicts'],
                     [{'key': '51#0', 'verdict': 'dog'}])
+        write_jsonl(lays[('gate', 2)]['verdicts'],
+                    [{'key': '52#0', 'verdict': 'dog', 'gen': 2,
+                      'pool': 'P2'}])
         v3.CORRECTIONS = corr
         out = {}
         with contextlib.redirect_stdout(io.StringIO()):
-            for root, pool in ((fx.g1, 1), (fx.g1, 2), (fx.g2, 2)):
-                lays['gate'] = audit_layout(lays['gate']['out'], pool)
+            for root in (fx.g1, fx.g2):
                 v3.DETECT_ROOT = root
-                out[(root, pool)] = sorted(v3.confirmed_positive_ids())
+                out[root] = sorted(v3.confirmed_positive_ids())
             v3.DETECT_ROOT = fx.g1
             fix1 = v3.corrections()
             v3.DETECT_ROOT = fx.g2
@@ -758,10 +841,26 @@ def reader_checks(w, fx, tag):
             bn.DETECT_ROOT = fx.g2
             neg2 = sorted(bn.flagged_ids(hn))
         check(f'{tag}r5 v3 confirmed positives: the store\'s gen, and the '
-              f'gate audit only when its pool is that gen',
-              out == {(fx.g1, 1): ['41', '43', '51'],
-                      (fx.g1, 2): ['41', '43'],
-                      (fx.g2, 2): ['42', '51']}, out)
+              f'gate audit of that gen\'s own dir',
+              out == {fx.g1: ['41', '43', '51'],
+                      fx.g2: ['42', '52']}, out)
+        # ...whose pool must say it was cut from that very store
+        g2j = lays[('gate', 2)]['pool_json']
+        with open(g2j) as fh:
+            real_doc = fh.read()
+        doc = json.loads(real_doc)
+        doc['detect_root'] = fx.g5
+        with open(g2j, 'w') as fh:
+            json.dump(doc, fh)
+        try:
+            cs.audit_ctx_for('gate', fx.g2)
+            refused = False
+        except SystemExit:
+            refused = True
+        with open(g2j, 'w') as fh:
+            fh.write(real_doc)
+        check(f'{tag}r5 a pool cut from another store than the build\'s is '
+              f'refused (audit_ctx_for)', refused)
         check(f'{tag}r5 v3 corrections: the store\'s gen only',
               fix1 == {('11', 0): (1.0, 1.0, 5.0, 5.0),
                        ('12', 0): (5.0, 5.0, 9.0, 9.0)}
@@ -773,19 +872,29 @@ def reader_checks(w, fx, tag):
         # the audit page's own reader
         audit = w.audit
         audit.BOX_FILE = corr
-        lays['gate'] = audit_layout(lays['gate']['out'], 1)
-        g1 = audit.corrections('gate')
-        lays['gate'] = audit_layout(lays['gate']['out'], 2)
-        g2 = audit.corrections('gate')
-        lv = audit.corrections('leash')
-        check(f'{tag}a1 audit.corrections(stage): its own stage\'s rows of '
-              f'its pool\'s gen, never the review page\'s',
+        g1 = audit.corrections(fa.ctx('gate', 1))
+        g2 = audit.corrections(fa.ctx('gate', 2))
+        lv = audit.corrections(fa.ctx('leash', 1))
+        check(f'{tag}a1 audit.corrections(ctx): its own stage\'s rows of '
+              f'its pool\'s gen (and pool), never the review page\'s',
               {k: v[:4] for k, v in g1.items()}
               == {('12', 0): (4.0, 4.0, 8.0, 8.0)}
               and {k: v[:4] for k, v in g2.items()}
               == {('13', 0): (3.0, 3.0, 7.0, 7.0)}
               and {k: v[:4] for k, v in lv.items()}
               == {('12', 0): (5.0, 5.0, 9.0, 9.0)}, (g1, g2, lv))
+        # a row of ANOTHER generation that names the gen-1 pool id (a writer
+        # bug, or a hand edit) is still not gen 1's: the generation and the
+        # pool are both checked, neither stands in for the other
+        odd_gen = os.path.join(d, 'boxes_gen3.jsonl')
+        write_jsonl(odd_gen, [{'crop': 'audit:gate', 'image_id': '16',
+                               'det_idx': 0, 'x1': 1, 'y1': 1, 'x2': 2,
+                               'y2': 2, 'gen': 3, 'pool': fa.G1_POOL_ID}])
+        audit.BOX_FILE = odd_gen
+        got = audit.corrections(fa.ctx('gate', 1))
+        check(f'{tag}a1 a gen-3 row under the gen-1 pool id is not gen 1\'s',
+              got == {}, got)
+        audit.BOX_FILE = corr
     finally:
         fa.paths = real_paths
 
@@ -852,18 +961,33 @@ MUTANTS = [
        "                    if True:\n")]),
     ('save_correction writes no gen', 'audit',
      [("'saved_at': int(time.time()), AUTHOR_FIELD: str(by),\n"
-       "           fa.GEN_FIELD: gen}",
-       "'saved_at': int(time.time()), AUTHOR_FIELD: str(by)}")]),
+       "           fa.GEN_FIELD: ctx.gen, fa.POOL_FIELD: ctx.pool_id}",
+       "'saved_at': int(time.time()), AUTHOR_FIELD: str(by),\n"
+       "           fa.POOL_FIELD: ctx.pool_id}")]),
     ('save_correction hardcodes gen 1', 'audit',
-     [('fa.GEN_FIELD: gen}', 'fa.GEN_FIELD: 1}')]),
-    ('save_correction writes under a pool naming no gen', 'audit',
-     [("    gen = fa.pool_gen(stage)\n    if gen is None:\n"
-       "        return {'ok': False,\n", "    gen = fa.pool_gen(stage)\n"
-       "    if False:\n        return {'ok': False,\n")]),
-    ('audit.corrections reads under a pool naming no gen', 'audit',
-     [("    if gen is None:\n"
-       "        # a pool.json that names no generation: no redraw is this "
-       "pool's\n        return out\n", '')]),
+     [("int(time.time()), AUTHOR_FIELD: str(by),\n"
+       "           fa.GEN_FIELD: ctx.gen, fa.POOL_FIELD",
+       "int(time.time()), AUTHOR_FIELD: str(by),\n"
+       "           fa.GEN_FIELD: 1, fa.POOL_FIELD")]),
+    ('save_correction writes no pool', 'audit',
+     [("           fa.GEN_FIELD: ctx.gen, fa.POOL_FIELD: ctx.pool_id}\n"
+       "    # what this box was answered",
+       "           fa.GEN_FIELD: ctx.gen}\n    # what this box was answered")]),
+    ('save_correction writes under a pool.json damaged since', 'audit',
+     [("        why = _same_pool(ctx)\n        if why:\n"
+       "            return {'ok': False, 'msg': why, 'status': 409}\n"
+       "        os.makedirs(os.path.dirname(BOX_FILE)",
+       "        os.makedirs(os.path.dirname(BOX_FILE)")]),
+    ('save_correction takes another pool\'s page', 'audit',
+     [("    if pool != ctx.pool_id:\n"
+       "        return {'ok': False, 'msg': STALE_PAGE, 'status': 409}\n"
+       "    cand = _pool_row(key, ctx)",
+       "    cand = _pool_row(key, ctx)")]),
+    ('save_correction ignores box_sig', 'audit',
+     [("    if _sig_of(box_sig) != _box_sig(cand):", "    if False:")]),
+    ('audit.corrections ignores the pool', 'audit',
+     [("                if (gen >= 2 or rp is not None) and rp != pool:\n"
+       "                    continue\n", "")]),
     ('audit.corrections reads every page\'s rows (the old bug)', 'audit',
      [("                if d.get('crop') != want or \\\n"
        "                        fa.gen_of(d.get(fa.GEN_FIELD)) != gen:\n",
@@ -880,17 +1004,23 @@ MUTANTS = [
        '\n        return None\n    return tag\n',
        '    try:\n        return int(tag)\n'
        '    except (TypeError, ValueError):\n        return None\n')]),
-    ('pool_gen ignores pool.json', 'fn_audit',
-     [("    return gen_of(doc.get('gen')) if isinstance(doc, dict) else None",
-       '    return LEGACY_GEN')]),
-    ('pool_gen reads a damaged pool.json as gen 1', 'fn_audit',
-     [('    except (OSError, ValueError):\n        return None\n'
-       "    return gen_of(doc.get('gen'))",
-       '    except (OSError, ValueError):\n        return LEGACY_GEN\n'
-       "    return gen_of(doc.get('gen'))")]),
-    ('pool_gen reads gen 0 (or a bad gen) as 1, the old way', 'fn_audit',
-     [("    return gen_of(doc.get('gen')) if isinstance(doc, dict) else None",
-       "    return _pool_gen(doc)")]),
+    ('pool_gen ignores pool_meta', 'fn_audit',
+     [("        return pool_meta(stage, gen)['gen']",
+       '        return _want_gen(gen)')]),
+    ('pool_meta reads a damaged gen-1 pool.json as gen 1', 'fn_audit',
+     [("            doc, why = None, f'{f} is unreadable ({type(e).__name__})'",
+       "            doc, why = {}, ''")]),
+    ('pool_meta takes any gen in the gen-1 dir', 'fn_audit',
+     [("                elif gen_of(doc.get('gen')) != 1:",
+       "                elif gen_of(doc.get('gen')) is None:")]),
+    ('a gen-2 dir with no pool.json reads as gen 1', 'fn_audit',
+     [("        if g == 1:\n            return _gen1_meta(stage, {})\n",
+       "        return _gen1_meta(stage, {})\n")]),
+    ('paths defaults to gen 1', 'fn_audit',
+     [("def paths(stage=DEFAULT_STAGE, *, gen):",
+       "def paths(stage=DEFAULT_STAGE, *, gen=1):"),
+      ("def pool_gen(stage=DEFAULT_STAGE, *, gen):",
+       "def pool_gen(stage=DEFAULT_STAGE, *, gen=1):")]),
     ('read_flags ignores gen', 'harvest_flagged',
      [("                    if gen_of(r.get(GEN_FIELD)) != gen:\n"
        "                        if counts is not None:\n"
@@ -914,14 +1044,16 @@ MUTANTS = [
        "                    if counts is not None:\n"
        "                        counts['other_gen'] += 1\n"
        "                    continue\n", '')]),
-    ('read_audit_corrections reads under a pool naming no gen',
+    ('read_audit_corrections reads under a pool naming no identity',
      'crop_sources',
-     [("    if gen is None:\n        # a pool.json that names no generation",
-       "    if False:\n        # a pool.json that names no generation")]),
-    ('read_audit_corrections defaults to gen 1, not the pool\'s',
-     'crop_sources',
-     [('    gen = fa.pool_gen(stage) if gen is None else gen',
-       '    gen = 1 if gen is None else gen')]),
+     [("        pool_id = fa.pool_meta(stage, gen)['pool_id']",
+       "        pool_id = fa.G1_POOL_ID")]),
+    ('read_audit_corrections ignores the pool', 'crop_sources',
+     [("                if (gen >= 2 or rp is not None) and rp != pool_id:",
+       "                if False:")]),
+    ('read_audit_corrections defaults to gen 1', 'crop_sources',
+     [("def read_audit_corrections(stage, path=None, *, gen, counts=None):",
+       "def read_audit_corrections(stage, path=None, *, gen=1, counts=None):")]),
     ('join_gen takes 1 for a store naming none', 'crop_sources',
      [('    if gen is None:\n        raise SystemExit(\n'
        "            '%s names no detector generation",
@@ -969,14 +1101,24 @@ MUTANTS = [
        "                        continue\n"
        "                    out.add(str(d['image_id']))",
        "                    out.add(str(d['image_id']))")]),
-    ('v3 reads the gate audit across generations', 'build_dogdet_v3',
-     [('        if pool != gen:', '        if False:')]),
+    ('v3 reads the gen-2 gate audit whatever the store', 'build_dogdet_v3',
+     [("    for v in fa.read_verdicts(stage='gate', gen=ac.gen):",
+       "    for v in fa.read_verdicts(stage='gate', gen=2):")]),
+    ('v3 skips its own generation\'s gate audit', 'build_dogdet_v3',
+     [("    if ac is None:\n        print(f'no gen-{gen} gate audit",
+       "    if True:\n        print(f'no gen-{gen} gate audit")]),
+    ('v3 takes a gen-2 audit redraw of any pool', 'build_dogdet_v3',
+     [("                    if want is None or d.get(fa.POOL_FIELD) != want:",
+       "                    if False:")]),
+    ('audit_ctx_for skips the detect_root check', 'crop_sources',
+     [("    if not have or os.path.realpath(have) != os.path.realpath(detect_root):",
+       "    if False:")]),
     ('v3 corrections of every generation', 'build_dogdet_v3',
      [("                if fa.gen_of(d.get(fa.GEN_FIELD)) != gen:\n"
        "                    other += 1\n"
        "                    continue\n"
-       "                out[(str(d['image_id'])",
-       "                out[(str(d['image_id'])")]),
+       "                crop = str(d.get('crop') or '')",
+       "                crop = str(d.get('crop') or '')")]),
     ('negatives flags of every generation', 'build_detector_negatives',
      [("                    if fa.gen_of(r.get(fa.GEN_FIELD)) != gen:\n"
        "                        other += 1\n"
@@ -1005,7 +1147,8 @@ def main():
                         contextlib.redirect_stderr(io.StringIO()):
                     try:
                         caught = not run_all(w, fx, 'mut: ')
-                    except Exception:                 # noqa: BLE001
+                    # a reader that now refuses (SystemExit) is caught too
+                    except (Exception, SystemExit):   # noqa: BLE001
                         caught = True
             finally:
                 restore()

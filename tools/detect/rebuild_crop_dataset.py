@@ -1468,6 +1468,21 @@ def check_rows(rows, reserves=(), cap=None, max_noseq_frac=None,
                     if not (r.get('provenance') or {}).get('ledger'))
     if noprov:
         fail('%d crop(s) carry no provenance ledger' % (len(noprov),), noprov)
+    # ...and of ONE detector generation. An audit row names the generation
+    # its det_idx and box are (provenance.gen, crop_sources.audit_candidates);
+    # the dedup and box-twin checks below treat equal (image_id, det_key) as
+    # one box, which is only true within one generation. crop_sources reads
+    # the build's own generation only; two here means something else did.
+    gens = collections.defaultdict(list)
+    for r in rows:
+        g = (r.get('provenance') or {}).get('gen')
+        if g is not None:
+            gens[g].append(r['uid'])
+    if len(gens) > 1:
+        fail('crops of %d detector generations (%s) in one dataset'
+             % (len(gens), ', '.join('gen %s: %d' % (g, len(u)) for g, u in
+                                     sorted(gens.items(), key=str))),
+             sorted(u for g in sorted(gens, key=str)[1:] for u in gens[g]))
     # 5. sequence-less crops: none, unless the build said so -- then train
     # only, and few
     ns = [r for r in rows if r.get('seq_status') == 'noseq'

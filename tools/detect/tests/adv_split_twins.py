@@ -400,12 +400,16 @@ def check_test_draw_main():
     caps['700000000003'] = cap('c6', 0, 0)
     caps['700000000099'] = cap('c6', 4, 1)       # compared image: twin of 003
     fa = types.ModuleType('fn_audit')
-    fa.paths = lambda stage: {'full': TMP, 'verdicts': acc_p}
+    fa.paths = lambda stage, *, gen: {'full': TMP, 'verdicts': acc_p}
     fa.spec = lambda stage: {'answers': ['leashed', 'unleashed'],
                              'model': 'm'}
-    fa.read_verdicts = lambda stage=None: []
+    fa.GenError = type('GenError', (Exception,), {})
+    fa.ctx = lambda stage, gen: types.SimpleNamespace(
+        stage=stage, gen=gen, pool_id='g1-legacy', P=fa.paths(stage, gen=gen),
+        meta={'model': 'm', 'detect_root': None}, frozen=True)
+    fa.read_verdicts = lambda stage=None, *, gen: []
     fa.verdict_of = lambda v, stage: v
-    fa.targeted = lambda stage: set()
+    fa.targeted = lambda stage, *, gen: set()
     patches = [
         (sys.modules, 'fn_audit', fa),
         (crop_sources, 'exclusions', lambda fam, root: (set(), {})),
@@ -430,7 +434,7 @@ def check_test_draw_main():
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
-            rc = rts.main(['--family', 'leash', '--dry-run',
+            rc = rts.main(['--family', 'leash', '--gen', '1', '--dry-run',
                            '--compare', os.path.join(TMP, 'cmp'),
                            '--acceptance', acc_p])
     except SystemExit as e:

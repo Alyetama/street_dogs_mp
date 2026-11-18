@@ -87,6 +87,11 @@ EXTRA = (
     # Every new human-ledger row names its detector generation, and every
     # reader keeps only the store's own (2026-11-17). New, so `git add -f`.
     'tools/detect/tests/adv_ledger_gen.py',
+    # The audit pages sample gen 2 and never attach anything to a box of
+    # another generation, and the stand-in that points the older checks at
+    # edited copies (2026-11-17). New, so `git add -f`.
+    'tools/detect/tests/adv_audit_gen2.py',
+    'tools/detect/tests/_stand_in.py',
 )
 
 # '.js' IS NOT HERE, deliberately. It used to be, and it took ten tracked

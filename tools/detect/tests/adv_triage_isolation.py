@@ -137,6 +137,35 @@ LEDGER_WORDS = (
 STORES = os.environ.get('ISOLATION_STORES') or REPO
 DATA = os.path.join(STORES, 'data')
 
+# EVERY GENERATION'S AUDIT, not only the dirs gen 1 kept its legacy names in.
+# From the gen-2 detector on, each detector generation's audit is its own
+# pair of dirs (fn_audit.audit_name: data/fn_audit_gen2, data/leash_audit_gen2
+# and the datasets data/audit_finds_gen2, data/audit_finds_leash_gen2), and
+# its ledgers take human answers exactly as gen 1's did. Derived from
+# fn_audit -- the generations whose pool vouches for itself (audit_gens),
+# under the store root being scanned -- rather than spelled out, so the
+# gen-3 audit is guarded the day it is built. A gen-N dir whose pool does
+# NOT vouch for itself (a build that stopped) is deliberately left out: its
+# files then fail t5g until somebody has looked.
+sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
+import fn_audit as _fa  # noqa: E402
+
+
+def _later_audits():
+    """[(stage, out dir name, dataset dir name)] of every gen >= 2 audit."""
+    real = _fa.REPO
+    _fa.REPO = STORES
+    try:
+        return [(s, _fa.audit_name(_fa.spec(s)['audit_dir'], g),
+                 _fa.audit_name(_fa.spec(s)['dataset'], g))
+                for s in sorted(_fa.STAGES) for g in _fa.audit_gens(s)
+                if g >= 2]
+    finally:
+        _fa.REPO = real
+
+
+LATER_AUDITS = _later_audits()
+
 # EVERY file a human verdict or a hand-drawn box reaches, and the model's own
 # file it must stay out of. t5 used to name two of these -- the two
 # labels.jsonl -- while ten more grew up beside them, so the check that was
@@ -161,7 +190,11 @@ HUMAN_STORES = (
     'fn_audit/drawn.jsonl',
     'leash_audit/drawn.jsonl',
     'audit_finds/manifest.jsonl',  # the exported dataset
-    'audit_finds_leash/manifest.jsonl')
+    'audit_finds_leash/manifest.jsonl') + tuple(
+    # the same three files of every later generation's audit (LATER_AUDITS)
+    f for _s, _out, _ds in LATER_AUDITS
+    for f in (_out + '/verdicts.jsonl', _out + '/drawn.jsonl',
+              _ds + '/manifest.jsonl'))
 LEASH_DB = 'leash_labels/leash.db'
 FLAGS_DB = 'label_flags/label_flags.db'
 MODEL_OWN = ('dashboard/triage.jsonl', )
@@ -836,9 +869,12 @@ sys.path.insert(0, os.path.join(REPO, 'tools', 'detect'))
 import fn_audit as fa  # noqa: E402
 
 vd_bad, ex_bad, n_vd = [], [], 0
-for _stage in sorted(fa.STAGES):
-    _sp = fa.STAGES[_stage]
-    _rel = _sp['audit_dir'] + '/verdicts.jsonl'
+# every generation's ledger and dataset: gen 1 under its legacy names, and
+# each later one (LATER_AUDITS)
+_audits = [(_s, fa.STAGES[_s]['audit_dir'], fa.STAGES[_s]['dataset'])
+           for _s in sorted(fa.STAGES)] + LATER_AUDITS
+for _stage, _out, _ds in _audits:
+    _rel = _out + '/verdicts.jsonl'
     for _i, _r in records(_rel):
         n_vd += 1
         # a null verdict is read as a withdrawal, not as a third answer
@@ -849,9 +885,9 @@ for _stage in sorted(fa.STAGES):
     # row, as provenance. The label must still be the person's answer and
     # nothing else -- a label taken from p_dog would train the next model on
     # the current one's opinion, which is the whole thing this file is about.
-    for _i, _r in records(_sp['dataset'] + '/manifest.jsonl'):
+    for _i, _r in records(_ds + '/manifest.jsonl'):
         if _r.get('label') != fa.verdict_of(_r.get('verdict'), _stage):
-            ex_bad.append(f'{_sp["dataset"]}:{_i} labelled '
+            ex_bad.append(f'{_ds}:{_i} labelled '
                           f'{_r.get("label")!r} on verdict '
                           f'{_r.get("verdict")!r}')
 check(f't5f all {n_vd:,} audit verdicts are answers the page offers',
@@ -898,7 +934,14 @@ BULK_DIRS = (
     'mistakes',  # per-run mistake dumps from run_mistakes.py
     'missing_worklist',
     'missing_worklist_after',
-    'missing_unrecoverable')
+    'missing_unrecoverable',
+    # the gen-1 gate and leash stores, moved aside whole when the stages
+    # switched to the gen-2 detector (2026-11-17): the gate's gen-1 shards,
+    # plan and work.parquet, and the leash's archive/ of an earlier re-run.
+    # Model verdicts on gen-1 boxes, as 'gate' and 'leash' are on gen-2 ones;
+    # no person's decision is in either.
+    'gate_gen1_20261117',
+    'leash_gen1_20261117')
 # Files that are not anybody's verdict but sit where the ledgers do. Named one
 # by one on purpose: a NEW one still has to be reviewed before this passes.
 MODEL_WORKING = (
@@ -976,7 +1019,18 @@ MODEL_WORKING = (
     'detector_diagnosis/jobs.json',
     'detector_diagnosis/jobs.json.orig',
     'detector_diagnosis/infer.py',
-)
+    # what the gen-2 switch (2026-11-17) set aside: the promoted-model table
+    # as it stood before it, and the gen-1 store's path as detect_root.txt
+    # held it. Pointers to models and stores; no verdict in either.
+    'best_models.json.pre-switch-20261117',
+    'detect_root.txt.gen1',
+) + tuple(
+    # a later generation's pool, its identity and its dataset dir's marker
+    # (fn_audit.DATASET_MARKER: which pool filled it) -- the model's boxes
+    # and scores and their bookkeeping, as fn_audit/pool.* are for gen 1
+    f for _s, _out, _ds in LATER_AUDITS
+    for f in (_out + '/pool.parquet', _out + '/pool.json',
+              _out + '/status.json', _ds + '/' + _fa.DATASET_MARKER))
 # Suffixes that are never a store wherever they turn up: page assets, logs,
 # plain-text config, sqlite journals, and the .bak/.tmp a rotation leaves.
 NOT_A_STORE = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.txt', '.log', '.md',

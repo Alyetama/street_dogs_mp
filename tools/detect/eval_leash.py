@@ -175,10 +175,20 @@ def report(tag, p_pos, p_neg, np):
 # ── the frozen test set ────────────────────────────────────────────────────
 # Repo-relative, never the absolute path the doc was written with: the repo
 # is moved between drives, and the stored crops_from is only a fallback.
+#
+# PER DETECTOR GENERATION. A test item's key '<image_id>#<det_idx>' names a
+# box of the audit pool it was frozen from, and det_idx is numbered per
+# generation -- the gen-2 leash audit holds the same keys on other boxes. So
+# the crops, the pool and the redraws a set is scored against are those of
+# the generation the set records (`gen`, absent: 1, which is what
+# leash_test_v1 was frozen from): test_set_gen() and audit_paths(). The
+# constants below are gen 1's, kept as module globals so a test can point
+# them elsewhere.
+import fn_audit as _fa  # noqa: E402 -- stdlib-only; owns the audit's paths
 
-AUDIT_DIR = os.path.join(REPO, 'data', 'leash_audit')
-AUDIT_FULL = os.path.join(AUDIT_DIR, 'full')
-AUDIT_POOL = os.path.join(AUDIT_DIR, 'pool.parquet')
+AUDIT_DIR = _fa.paths('leash', gen=1)['out']
+AUDIT_FULL = _fa.paths('leash', gen=1)['full']
+AUDIT_POOL = _fa.paths('leash', gen=1)['pool']
 CORRECTIONS = os.path.join(REPO, 'data', 'box_corrections', 'boxes.jsonl')
 THRESHOLD = 0.5          # gate_store labels p >= 0.5 as the positive class
 REDRAW_LOW_IOU = 0.5     # below this the redraw is a different crop
@@ -299,6 +309,34 @@ def load_test_set(path, full_dir=AUDIT_FULL):
     return doc, items
 
 
+def test_set_gen(doc):
+    """The detector generation a test-set doc's keys are boxes of: its `gen`,
+    absent = 1 (every set frozen before the field existed was frozen from
+    the gen-1 audit). A value that names no generation is refused."""
+    g = doc.get(_fa.GEN_FIELD)
+    got = _fa.gen_of(g)
+    if got is None or got < 1:
+        raise SystemExit(f'test set names no detector generation '
+                         f'({_fa.GEN_FIELD} {g!r})')
+    return got
+
+
+def audit_paths(gen):
+    """(full/ dir, pool.parquet) a set of generation `gen` is scored from:
+    the module globals for gen 1 (so a test can point them elsewhere), the
+    gen-N leash audit's own for any other -- whose pool must vouch for itself
+    (fn_audit.pool_meta), or there is nothing to score against."""
+    if gen == 1:
+        return AUDIT_FULL, AUDIT_POOL
+    try:
+        _fa.pool_meta('leash', gen)
+    except _fa.PoolIdentityError as e:
+        raise SystemExit(f'REFUSED: the gen-{gen} test set has no gen-{gen} '
+                         f'leash audit to be scored from: {e}')
+    P = _fa.paths('leash', gen=gen)
+    return P['full'], P['pool']
+
+
 def _pool_boxes(pool_path, items):
     """{(image_id, det_idx): (x1, y1, x2, y2, cell)} from the audit pool.
 
@@ -317,13 +355,16 @@ def _pool_boxes(pool_path, items):
     return out
 
 
-def annotate_items(items, pool_path=AUDIT_POOL, corrections_path=CORRECTIONS):
+def annotate_items(items, pool_path=AUDIT_POOL, corrections_path=CORRECTIONS,
+                   gen=1):
     """Add short_side, region, redrawn and redraw_iou to each item, in place.
 
     Computed here from the crop file, the audit pool and the corrections
     ledger -- never written into the frozen doc. A value that cannot be
     derived is None and the item lands in no slice of that kind; the count
-    of those is returned so the report can say so.
+    of those is returned so the report can say so. `gen` is the set's
+    generation (test_set_gen): the pool and the redraws are that
+    generation's, never the live audit's.
     """
     from PIL import Image
     from crop_sources import iou, read_audit_corrections
@@ -340,7 +381,7 @@ def annotate_items(items, pool_path=AUDIT_POOL, corrections_path=CORRECTIONS):
     # and boxes.jsonl is gitignored: on a fresh clone every item would read
     # as 'no audit redraw' and the 71 redraws would vanish from the report
     if os.path.isfile(corrections_path):
-        redraws = read_audit_corrections('leash', corrections_path)
+        redraws = read_audit_corrections('leash', corrections_path, gen=gen)
     else:
         print(f'WARNING: no corrections ledger at {corrections_path} -- '
               f'redraws unknown, no redraw slices')
@@ -650,10 +691,15 @@ def test_set_main(args):
     Everything a number could silently depend on is checked BEFORE a model is
     loaded, so a refused set costs seconds, not a model load.
     """
-    # module globals passed explicitly, so a test can point them elsewhere
-    doc, items = load_test_set(args.test_set, AUDIT_FULL)
-    unknown = annotate_items(items, AUDIT_POOL, CORRECTIONS)
-    print(f'test set: {args.test_set}  ({len(items)} items, sha256 verified)')
+    # module globals passed explicitly, so a test can point them elsewhere;
+    # the set's own generation decides which audit's crops and pool those are
+    with open(args.test_set) as fh:
+        gen = test_set_gen(json.load(fh))
+    full, pool = audit_paths(gen)
+    doc, items = load_test_set(args.test_set, full)
+    unknown = annotate_items(items, pool, CORRECTIONS, gen=gen)
+    print(f'test set: {args.test_set}  ({len(items)} items, sha256 verified, '
+          f'gen-{gen} boxes)')
     if unknown['region']:
         print(f"  {unknown['region']} item(s) have no region (not in the "
               f'audit pool) -- in no region or prior slice')
